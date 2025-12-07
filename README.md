@@ -38,6 +38,11 @@ We believe technology should serve society — SoMAp is built with that philosop
 ---
 
 ## ⚡ Setup & Installation
+
 1. Clone this repo or download the ZIP:
+
+   ```bash
+   git clone https://github.com/SoMApHQ/somapappv1.git
+
    ```bash
    git clone https://github.com/MNYOREJ/somapappv1.git
