@@ -75,24 +75,25 @@
     const [settings, setSettings] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [formOpen, setFormOpen] = useState(false);
-    const [editingId, setEditingId] = useState(null);
-    const [formData, setFormData] = useState({
-      childFirstName: '',
-      childMiddleName: '',
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [formData, setFormData] = useState({
+    childFirstName: '',
+    childMiddleName: '',
       childLastName: '',
       gender: '',
       dateOfBirth: '',
       classLevel: '',
       parentFullName: '',
-      parentPhone: '',
-      parentEmail: '',
-      residentialAddress: '',
-      source: 'ONSITE',
-      paymentChannel: 'mpesaLipa',
-      paymentReference: '',
-      paymentReceiverName: '',
-    });
+    parentPhone: '',
+    parentEmail: '',
+    residentialAddress: '',
+    source: 'ONSITE',
+    paymentChannel: 'mpesaLipa',
+    paymentReference: '',
+    paymentReceiverName: '',
+    joiningFeeAmount: '',
+  });
     const db = window.db || (window.firebase && window.firebase.database ? window.firebase.database() : null);
 
     useEffect(() => {
@@ -124,6 +125,12 @@
       });
       return stop;
     }, [year, schoolId]);
+
+    useEffect(() => {
+      if (settings && !editingId && !formData.joiningFeeAmount) {
+        setFormData((prev) => ({ ...prev, joiningFeeAmount: settings.joiningFeeAmount || '' }));
+      }
+    }, [settings]);
 
     const filtered = useMemo(() => apps.filter((a) => {
       if (a.paymentVerificationStatus !== 'verified') return false;
@@ -199,7 +206,7 @@
 
     async function createApplication() {
       if (!window.JoiningService) return;
-      const required = ['childFirstName', 'childLastName', 'classLevel', 'parentFullName', 'parentPhone', 'paymentReference'];
+      const required = ['childFirstName', 'childLastName', 'classLevel', 'parentFullName', 'parentPhone', 'paymentReference', 'joiningFeeAmount'];
       const missing = required.filter((k) => !String(formData[k] || '').trim());
       if (missing.length) {
         alert('Fill all required fields: ' + missing.join(', '));
@@ -211,7 +218,7 @@
         const templateUrl = settings?.joiningFormTemplateUrl || '';
         await window.JoiningService.createJoiningApplication(year, {
           ...formData,
-          joiningFeeAmount: feeAmount,
+          joiningFeeAmount: formData.joiningFeeAmount ? Number(formData.joiningFeeAmount) : feeAmount,
           joiningFeeCurrency: feeCurrency,
           joiningFormTemplateUrl: templateUrl,
           paymentRecordedAt: Date.now(),
@@ -238,6 +245,7 @@
           paymentChannel: 'mpesaLipa',
           paymentReference: '',
           paymentReceiverName: '',
+          joiningFeeAmount: '',
         });
         alert('Application recorded. Awaiting payment verification.');
       } catch (err) {
@@ -263,6 +271,7 @@
         paymentChannel: app.paymentChannel || 'mpesaLipa',
         paymentReference: app.paymentReference || '',
         paymentReceiverName: app.paymentReceiverName || '',
+        joiningFeeAmount: app.joiningFeeAmount || settings?.joiningFeeAmount || '',
       });
       setFormOpen(true);
     }
@@ -275,7 +284,11 @@
         return;
       }
       try {
-        await window.JoiningService.updateJoiningApplication(year, editingId, { ...formData, lastUpdatedAt: Date.now() });
+        await window.JoiningService.updateJoiningApplication(year, editingId, {
+          ...formData,
+          joiningFeeAmount: formData.joiningFeeAmount ? Number(formData.joiningFeeAmount) : formData.joiningFeeAmount,
+          lastUpdatedAt: Date.now(),
+        });
         setFormOpen(false);
         setEditingId(null);
       } catch (err) {
@@ -448,14 +461,6 @@
                       className: 'px-3 py-1 rounded-lg bg-rose-600/30 text-rose-50 text-xs border border-rose-400/40 hover:bg-rose-600/40',
                       onClick: () => deleteApplication(app),
                     }, 'Delete'),
-                    h('button', {
-                      className: 'px-3 py-1 rounded-lg bg-slate-700/40 text-slate-200 text-xs border border-slate-500/40 hover:bg-slate-600/60',
-                      onClick: () => startEdit(app),
-                    }, 'Edit'),
-                    h('button', {
-                      className: 'px-3 py-1 rounded-lg bg-rose-600/30 text-rose-50 text-xs border border-rose-400/40 hover:bg-rose-600/40',
-                      onClick: () => deleteApplication(app),
-                    }, 'Delete'),
                   ])),
                 ])
               )),
@@ -556,6 +561,7 @@
           }),
           h(Input, { label: 'Payment reference', required: true, value: formData.paymentReference, onChange: (v) => onChange('paymentReference', v), placeholder: 'MPesa ref / receipt no' }),
           h(Input, { label: 'Payment received by', value: formData.paymentReceiverName, onChange: (v) => onChange('paymentReceiverName', v), placeholder: 'Staff name' }),
+          h(Input, { label: 'Amount paid (TZS)', type: 'number', required: true, value: formData.joiningFeeAmount, onChange: (v) => onChange('joiningFeeAmount', v), placeholder: settings?.joiningFeeAmount || '7000' }),
         ]),
         h('div', { className: 'mt-4 flex flex-wrap items-center justify-between gap-3' }, [
           h('div', { className: 'text-xs text-slate-400 flex items-center gap-2' }, [

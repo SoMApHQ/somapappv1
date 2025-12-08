@@ -65,6 +65,40 @@
     };
   }
 
+  // Create an approvalsPending entry for joining payments
+  async function queueJoiningApproval(year, applicationId, appData) {
+    if (!firebaseDb) throw new Error('Database not available');
+    const pendingRef = firebaseDb.ref('approvalsPending').push();
+    const timestamp = nowTs();
+    const fullName = [appData.childFirstName, appData.childMiddleName, appData.childLastName].filter(Boolean).join(' ').trim() || 'Joining applicant';
+    const record = {
+      approvalId: pendingRef.key,
+      sourceModule: 'joining',
+      joiningApplicationId: applicationId,
+      schoolId: appData.schoolId,
+      forYear: Number(year),
+      studentName: fullName,
+      className: appData.classLevel || '',
+      parentContact: appData.parentPhone || '',
+      amountPaidNow: Number(appData.joiningFeeAmount || 0),
+      paymentMethod: appData.paymentChannel || 'mpesaLipa',
+      paymentReferenceCode: appData.paymentReference || '',
+      datePaid: appData.paymentRecordedAt || timestamp,
+      recordedBy: appData.paymentReceiverName || appData.createdByUserId || 'system',
+      status: 'pending',
+      notes: `Joining form fee (${year})`,
+      createdAt: firebase.database?.ServerValue?.TIMESTAMP || timestamp,
+      modulePayload: {
+        joiningApplicationId: applicationId,
+        schoolId: appData.schoolId,
+        year: Number(year),
+        fee: Number(appData.joiningFeeAmount || 0),
+      },
+    };
+    await pendingRef.set(record);
+    return record;
+  }
+
   async function createJoiningApplication(year, payload) {
     if (!firebaseDb) throw new Error('Database not available');
     const y = String(year || '').trim();
@@ -72,6 +106,11 @@
     const ref = firebaseDb.ref(withSchoolPath(`joiningApplications/${y}`)).push();
     const data = buildApplicationDefaults(y, payload || {});
     await ref.set(data);
+    try {
+      await queueJoiningApproval(y, ref.key, data);
+    } catch (err) {
+      console.warn('Failed to queue joining approval', err);
+    }
     return { id: ref.key, data };
   }
 

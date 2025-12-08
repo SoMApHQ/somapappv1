@@ -14,6 +14,7 @@
     prefonefinance: 'Preform One',
     graduation: 'Graduation',
     fridaymoney: 'Friday Money',
+    joining: 'Joining Applications',
   };
 
   if (!window.firebase || !window.db) {
@@ -72,6 +73,12 @@
         balance: document.getElementById('friday-balance'),
         pending: document.getElementById('friday-pending-count'),
       },
+      joining: {
+        required: null,
+        approved: document.getElementById('joining-approved'),
+        balance: document.getElementById('joining-balance'),
+        pending: document.getElementById('joining-pending-count'),
+      },
     },
   };
 
@@ -95,6 +102,7 @@
       prefonefinance: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       graduation: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       fridaymoney: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
+      joining: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
     },
     unsubPending: null,
     historyMonthOptions: [],
@@ -113,6 +121,16 @@
     const date = new Date(Number(value));
     if (Number.isNaN(date.getTime())) return '--';
     return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+
+  function resolveSchoolId() {
+    if (window.currentSchoolId) return window.currentSchoolId;
+    const params = new URLSearchParams(window.location.search || '');
+    const q = params.get('school') || params.get('schoolId');
+    const stored = (typeof localStorage !== 'undefined') ? localStorage.getItem('somap_school') : '';
+    const id = (q || stored || 'socrates').trim();
+    window.currentSchoolId = id;
+    return id;
   }
 
   function normalizeYearValue(value) {
@@ -658,6 +676,9 @@
           case 'fridaymoney':
             await commitFridayPayment(record);
             break;
+          case 'joining':
+            await commitJoiningPayment(record);
+            break;
           default:
             throw new Error(`Unknown module ${record.sourceModule}`);
         }
@@ -668,6 +689,21 @@
     } finally {
       showLoader(false);
     }
+  }
+
+  async function commitJoiningPayment(record) {
+    if (record.sourceModule !== 'joining') return;
+    const appId = record.modulePayload?.joiningApplicationId || record.joiningApplicationId;
+    const schoolId = record.modulePayload?.schoolId || resolveSchoolId();
+    const year = record.modulePayload?.year || state.selectedYear || getContextYear();
+    if (!appId || !schoolId) throw new Error('Missing joining application reference.');
+    const updates = {};
+    const basePath = `schools/${schoolId}/joiningApplications/${year}/${appId}`;
+    updates[`${basePath}/paymentVerificationStatus`] = 'verified';
+    updates[`${basePath}/paymentVerifiedAt`] = record.approvedAt || Date.now();
+    updates[`${basePath}/paymentVerifiedByUserId`] = record.approvedBy || state.user?.email || ADMIN_EMAIL;
+    updates[`${basePath}/status`] = 'paid_form_issued';
+    await db.ref().update(updates);
   }
 
   async function commitFinancePayment(record, targetYear) {
@@ -977,6 +1013,7 @@
       prefonefinance: { count: 0, amount: 0 },
       graduation: { count: 0, amount: 0 },
       fridaymoney: { count: 0, amount: 0 },
+      joining: { count: 0, amount: 0 },
     };
 
     state.pendingList.forEach((row) => {
@@ -1003,6 +1040,7 @@
       computePrefoneSummary(),
       computeGraduationSummary(),
       computeFridaySummary(),
+      computeJoiningSummary(),
     ]);
   }
 
@@ -1151,6 +1189,22 @@
     const pendingFromModule = Math.max(0, expected - approved);
     const pendingTotal = state.summary.fridaymoney.pendingAmount + pendingFromModule;
     updateSummaryCard('fridaymoney', { required: collected, approved, balance: pendingTotal });
+  }
+
+  async function computeJoiningSummary() {
+    const schoolId = resolveSchoolId();
+    const year = state.selectedYear || getContextYear();
+    const snap = await db.ref(`schools/${schoolId}/joiningApplications/${year}`).once('value');
+    const data = snap.val() || {};
+    let approved = 0;
+    Object.values(data).forEach((app) => {
+      if (!app) return;
+      if (app.paymentVerificationStatus === 'verified') {
+        approved += Number(app.joiningFeeAmount || 0);
+      }
+    });
+    const balance = Math.max(0, state.summary.joining.pendingAmount);
+    updateSummaryCard('joining', { required: 0, approved, balance });
   }
 
   function updateSummaryCard(module, { required, approved, balance }) {
