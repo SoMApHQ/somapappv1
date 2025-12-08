@@ -14,6 +14,8 @@
   const currency = new Intl.NumberFormat('en-US', { minimumFractionDigits: 0 });
   const L = (v) => String(v || '').trim().toLowerCase();
   const h = React.createElement;
+  const CLASS_OPTIONS = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
+  const GENDER_OPTIONS = ['Male','Female','Other'];
 
   function resolveYearOptions() {
     const base = Number(new Date().getFullYear());
@@ -159,18 +161,6 @@
       } catch (err) {
         console.error(err);
         alert('Failed to confirm payment: ' + (err.message || err));
-      }
-    }
-
-    async function markNoShow(app) {
-      if (!window.JoiningService) return;
-      const ok = confirm(`Mark ${app.childFirstName || 'applicant'} as no show?`);
-      if (!ok) return;
-      try {
-        await window.JoiningService.updateJoiningApplication(year, app.id, { status: 'no_show' });
-      } catch (err) {
-        console.error(err);
-        alert('Failed to mark no show: ' + (err.message || err));
       }
     }
 
@@ -419,10 +409,6 @@
                         className: 'px-3 py-1 rounded-lg bg-sky-500/20 text-sky-100 text-xs border border-sky-400/40 hover:bg-sky-500/30',
                         onClick: () => importToAdmission(app),
                       }, 'Import'),
-                      h('button', {
-                        className: 'px-3 py-1 rounded-lg bg-slate-700/40 text-slate-200 text-xs border border-slate-500/40 hover:bg-slate-600/60',
-                        onClick: () => markNoShow(app),
-                      }, 'No show'),
                     ])),
                   ]);
                 })),
@@ -464,13 +450,18 @@
                       onClick: () => deleteApplication(app),
                     }, 'Delete'),
                     h('button', {
-                      className: 'px-3 py-1 rounded-lg bg-emerald-500/20 text-emerald-100 text-xs border border-emerald-400/40 hover:bg-emerald-500/30',
-                      onClick: () => confirmPayment(app),
-                    }, 'Confirm payment'),
-                    h('button', {
                       className: 'px-3 py-1 rounded-lg bg-slate-700/40 text-slate-200 text-xs border border-slate-500/40 hover:bg-slate-600/60',
-                      onClick: () => markNoShow(app),
-                    }, 'Reject / No show'),
+                      onClick: () => startEdit(app),
+                    }, 'Edit'),
+                    h('button', {
+                      className: 'px-3 py-1 rounded-lg bg-rose-600/30 text-rose-50 text-xs border border-rose-400/40 hover:bg-rose-600/40',
+                      onClick: () => deleteApplication(app),
+                    }, 'Delete'),
+                    h('a', {
+                      className: 'px-3 py-1 rounded-lg bg-sky-500/20 text-sky-100 text-xs border border-sky-400/40 hover:bg-sky-500/30 no-underline',
+                      href: '../Todashboardhtml/approvals.html',
+                      target: '_blank',
+                    }, 'Open approvals'),
                   ])),
                 ])
               )),
@@ -532,9 +523,20 @@
           h(Input, { label: 'First name', required: true, value: formData.childFirstName, onChange: (v) => onChange('childFirstName', v) }),
           h(Input, { label: 'Middle name', value: formData.childMiddleName, onChange: (v) => onChange('childMiddleName', v) }),
           h(Input, { label: 'Last name', required: true, value: formData.childLastName, onChange: (v) => onChange('childLastName', v) }),
-          h(Input, { label: 'Gender', value: formData.gender, onChange: (v) => onChange('gender', v) }),
+          h(Select, {
+            label: 'Gender',
+            value: formData.gender,
+            onChange: (v) => onChange('gender', v),
+            options: GENDER_OPTIONS.map((g) => ({ value: g, label: g })),
+          }),
           h(Input, { label: 'Date of birth', type: 'date', value: formData.dateOfBirth, onChange: (v) => onChange('dateOfBirth', v) }),
-          h(Input, { label: 'Class level', required: true, value: formData.classLevel, onChange: (v) => onChange('classLevel', v), placeholder: 'e.g., Class 1' }),
+          h(Select, {
+            label: 'Class level',
+            required: true,
+            value: formData.classLevel,
+            onChange: (v) => onChange('classLevel', v),
+            options: CLASS_OPTIONS.map((c) => ({ value: c, label: c })),
+          }),
           h(Input, { label: 'Parent full name', required: true, value: formData.parentFullName, onChange: (v) => onChange('parentFullName', v) }),
           h(Input, { label: 'Parent phone', required: true, value: formData.parentPhone, onChange: (v) => onChange('parentPhone', v), placeholder: '+2557...' }),
           h(Input, { label: 'Parent email', value: formData.parentEmail, onChange: (v) => onChange('parentEmail', v) }),
@@ -561,9 +563,15 @@
           h(Input, { label: 'Payment reference', required: true, value: formData.paymentReference, onChange: (v) => onChange('paymentReference', v), placeholder: 'MPesa ref / receipt no' }),
           h(Input, { label: 'Payment received by', value: formData.paymentReceiverName, onChange: (v) => onChange('paymentReceiverName', v), placeholder: 'Staff name' }),
         ]),
-        h('div', { className: 'mt-4 flex justify-end gap-2' }, [
-          h('button', { className: 'px-4 py-2 rounded-lg border border-slate-600 text-slate-200 hover:bg-slate-700/40', onClick: onClose }, 'Cancel'),
-          h('button', { className: 'px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold hover:bg-emerald-400', onClick: onSave }, editing ? 'Save changes' : 'Save application'),
+        h('div', { className: 'mt-4 flex flex-wrap items-center justify-between gap-3' }, [
+          h('div', { className: 'text-xs text-slate-400 flex items-center gap-2' }, [
+            h('i', { className: 'fas fa-circle-info text-slate-300' }),
+            h('span', null, 'Scroll to see all fields. Delete is available on each card row.'),
+          ]),
+          h('div', { className: 'flex justify-end gap-2' }, [
+            h('button', { className: 'px-4 py-2 rounded-lg border border-slate-600 text-slate-200 hover:bg-slate-700/40', onClick: onClose }, 'Cancel'),
+            h('button', { className: 'px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold hover:bg-emerald-400', onClick: onSave }, editing ? 'Save changes' : 'Save application'),
+          ]),
         ]),
       ]),
     ]);
