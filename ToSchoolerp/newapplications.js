@@ -134,7 +134,17 @@
       const awaiting = verified.filter((a) => ['paid_form_issued', 'awaiting_admission'].includes(a.status));
       const admitted = verified.filter((a) => a.status === 'admitted');
       const totalFees = verified.reduce((sum, a) => sum + Number(a.joiningFeeAmount || 0), 0);
-      return { total: apps.length, verified: verified.length, awaiting: awaiting.length, admitted: admitted.length, totalFees };
+      const pendingList = apps.filter((a) => a.paymentVerificationStatus !== 'verified' && !['rejected', 'no_show'].includes(a.status));
+      const pendingAmount = pendingList.reduce((sum, a) => sum + Number(a.joiningFeeAmount || 0), 0);
+      return {
+        total: apps.length,
+        verified: verified.length,
+        awaiting: awaiting.length,
+        admitted: admitted.length,
+        totalFees,
+        pendingAmount,
+        pendingCount: pendingList.length,
+      };
     }, [apps]);
 
     async function confirmPayment(app) {
@@ -330,6 +340,28 @@
             setFormOpen(true);
           },
         }, 'Record new application'),
+      ]),
+
+      h('div', { key: 'finance-pulse', className: 'grid gap-4 md:grid-cols-2' }, [
+        h('div', { className: 'glass p-4 border border-slate-700/60 rounded-xl' }, [
+          h('div', { className: 'flex items-center justify-between' }, [
+            h('div', null, [
+              h('p', { className: 'text-xs uppercase tracking-[0.14em] text-slate-400' }, 'Joining Form Collection'),
+              h('p', { className: 'text-2xl font-semibold text-white mt-1' }, formatCurrency(metrics.totalFees)),
+              h('p', { className: 'text-xs text-slate-400 mt-1' }, 'Approved / Verified'),
+            ]),
+            h('div', { className: 'text-right' }, [
+              h('p', { className: 'text-xs text-slate-400' }, 'Pending to approve'),
+              h('p', { className: 'text-lg font-semibold text-amber-200' }, `${metrics.pendingCount} pending`),
+              h('p', { className: 'text-sm text-amber-200/80' }, formatCurrency(metrics.pendingAmount)),
+            ]),
+          ]),
+          h('div', { className: 'mt-3 text-xs text-slate-400 flex items-center gap-2' }, [
+            h('i', { className: 'fas fa-shield-halved text-sky-300' }),
+            h('span', null, 'Approvals protect your books. Pending items should be reviewed in approvals.'),
+            h('a', { href: '../Todashboardhtml/approvals.html', className: 'text-sky-300 underline' }, 'Open approvals'),
+          ]),
+        ]),
       ]),
 
       h('div', { key: 'metrics', className: 'grid gap-4 md:grid-cols-2 xl:grid-cols-4' }, [
