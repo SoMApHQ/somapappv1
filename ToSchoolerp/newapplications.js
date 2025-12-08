@@ -475,6 +475,7 @@
         onClose: () => { setFormOpen(false); setEditingId(null); },
         onSave: () => (editingId ? saveEdit() : createApplication()),
         onChange: updateForm,
+        feePlaceholder: settings?.joiningFeeAmount,
       }) : null,
     ]);
   }
@@ -513,7 +514,7 @@
     return h('td', { className: 'px-3 py-3 align-top text-slate-100/90 text-sm ' + (props.className || '') }, props.children);
   }
 
-  function FormModal({ formData, onClose, onSave, onChange, editing }) {
+  function FormModal({ formData, onClose, onSave, onChange, editing, feePlaceholder }) {
     return h('div', { className: 'fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center px-3' }, [
       h('div', { className: 'glass w-full max-w-3xl p-5 relative max-h-[85vh] overflow-y-auto' }, [
         h('button', { className: 'absolute top-3 right-3 text-slate-400 hover:text-white', onClick: onClose }, h('i', { className: 'fas fa-times' })),
@@ -562,7 +563,7 @@
           }),
           h(Input, { label: 'Payment reference', required: true, value: formData.paymentReference, onChange: (v) => onChange('paymentReference', v), placeholder: 'MPesa ref / receipt no' }),
           h(Input, { label: 'Payment received by', value: formData.paymentReceiverName, onChange: (v) => onChange('paymentReceiverName', v), placeholder: 'Staff name' }),
-          h(Input, { label: 'Amount paid (TZS)', type: 'number', required: true, value: formData.joiningFeeAmount, onChange: (v) => onChange('joiningFeeAmount', v), placeholder: settings?.joiningFeeAmount || '7000' }),
+          h(Input, { label: 'Amount paid (TZS)', type: 'number', required: true, value: formData.joiningFeeAmount, onChange: (v) => onChange('joiningFeeAmount', v), placeholder: feePlaceholder || '7000' }),
         ]),
         h('div', { className: 'mt-4 flex flex-wrap items-center justify-between gap-3' }, [
           h('div', { className: 'text-xs text-slate-400 flex items-center gap-2' }, [
