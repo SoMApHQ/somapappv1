@@ -102,8 +102,8 @@
         <h3 class="font-medium text-gray-800">New Applications</h3>
         <p class="text-sm text-gray-500 mb-3">Review and process new student applications.</p>
         <div class="flex justify-between">
-          <span class="text-sm font-medium text-green-600">12 new applications</span>
-          <a href="javascript:void(0)" class="text-sm text-indigo-600 hover:underline">View all</a>
+          <span class="text-sm font-medium text-green-600">New applications (joining forms)</span>
+          <a href="./newapplications.html" class="text-sm text-indigo-600 hover:underline">View all</a>
         </div>
       </div>
 
@@ -437,6 +437,20 @@
   }
 
   const getWorkingYear = () => window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR;
+  const resolveSchoolId = () => {
+    if (window.currentSchoolId) return window.currentSchoolId;
+    const params = new URLSearchParams(window.location.search || '');
+    const fromQuery = params.get('school') || params.get('schoolId');
+    const stored = (typeof localStorage !== 'undefined') ? localStorage.getItem('somap_school') : '';
+    const normalized = (fromQuery || stored || '').trim();
+    if (normalized) window.currentSchoolId = normalized;
+    return normalized || 'socrates';
+  };
+  const withSchool = (path) => {
+    const trimmed = String(path || '').replace(/^\/+/, '');
+    const schoolId = resolveSchoolId();
+    return schoolId ? `schools/${schoolId}/${trimmed}` : trimmed;
+  };
 
   let cachedStudents = [];
   const cachedStudentsById = new Map();
@@ -637,6 +651,13 @@
 
       try {
         if (!db) throw new Error('Database not available');
+
+        const joiningGate = await checkJoiningApplicationGate(studentData);
+        if (joiningGate) {
+          alert("This child already has a verified joining form for this class and year. Go to 'New Applications' and import instead of direct admission.");
+          if (registerBtn) registerBtn.disabled = false;
+          return;
+        }
 
         // Duplicate check: Look for existing student with same parent contact + name + dob + class + admission number
         let duplicate = false;
@@ -1016,6 +1037,29 @@
       }
     } catch (err) {
       console.error('Cleanup error:', err);
+    }
+  }
+
+  // ---- Joining form gate: block direct admission if a verified joining application exists ----
+  async function checkJoiningApplicationGate(studentData) {
+    try {
+      const year = getWorkingYear();
+      const snap = await db.ref(withSchool(`joiningApplications/${year}`)).get();
+      const entries = snap.val() || {};
+      const normalizedPhone = String(studentData.primaryParentContact || '').replace(/\s+/g, '');
+      for (const [id, app] of Object.entries(entries)) {
+        if (!app) continue;
+        const statusOk = ['paid_form_issued', 'awaiting_admission', 'admitted'].includes(app.status);
+        const phoneMatch = String(app.parentPhone || '').replace(/\s+/g, '') === normalizedPhone;
+        const classMatch = L(app.classLevel) === L(studentData.classLevel);
+        if (app.paymentVerificationStatus === 'verified' && statusOk && phoneMatch && classMatch) {
+          return { id, app };
+        }
+      }
+      return null;
+    } catch (err) {
+      console.warn('Joining form gate check failed', err);
+      return null;
     }
   }
 
