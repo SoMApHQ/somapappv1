@@ -2,6 +2,14 @@
 (function () {
   'use strict';
 
+  if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
+    const msg = 'React not loaded. Check CDN connectivity.';
+    console.error(msg);
+    const fallback = document.getElementById('newApplicationsRoot');
+    if (fallback) fallback.textContent = msg;
+    return;
+  }
+
   const { useState, useEffect, useMemo } = React;
   const currency = new Intl.NumberFormat('en-US', { minimumFractionDigits: 0 });
   const L = (v) => String(v || '').trim().toLowerCase();
@@ -36,6 +44,7 @@
     useEffect(() => {
       const label = document.getElementById('schoolLabel');
       if (label) label.textContent = schoolId;
+      if (!window.currentSchoolId) window.currentSchoolId = schoolId;
     }, [schoolId]);
     return schoolId;
   }
