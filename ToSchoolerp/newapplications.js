@@ -277,7 +277,7 @@
     }
 
     async function saveEdit() {
-      const required = ['childFirstName', 'childLastName', 'classLevel', 'parentFullName', 'parentPhone', 'paymentReference'];
+      const required = ['childFirstName', 'childLastName', 'classLevel', 'parentFullName', 'parentPhone', 'paymentReference', 'joiningFeeAmount'];
       const missing = required.filter((k) => !String(formData[k] || '').trim());
       if (missing.length) {
         alert('Fill all required fields: ' + missing.join(', '));
@@ -339,6 +339,7 @@
               paymentChannel: 'mpesaLipa',
               paymentReference: '',
               paymentReceiverName: '',
+              joiningFeeAmount: settings?.joiningFeeAmount || '',
             });
             setFormOpen(true);
           },

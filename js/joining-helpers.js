@@ -68,6 +68,7 @@
   // Create an approvalsPending entry for joining payments
   async function queueJoiningApproval(year, applicationId, appData) {
     if (!firebaseDb) throw new Error('Database not available');
+    const schoolId = resolveSchoolId();
     const pendingRef = firebaseDb.ref('approvalsPending').push();
     const timestamp = nowTs();
     const fullName = [appData.childFirstName, appData.childMiddleName, appData.childLastName].filter(Boolean).join(' ').trim() || 'Joining applicant';
@@ -75,7 +76,7 @@
       approvalId: pendingRef.key,
       sourceModule: 'joining',
       joiningApplicationId: applicationId,
-      schoolId: appData.schoolId,
+      schoolId: schoolId,
       forYear: Number(year),
       studentName: fullName,
       className: appData.classLevel || '',
@@ -90,7 +91,7 @@
       createdAt: firebase.database?.ServerValue?.TIMESTAMP || timestamp,
       modulePayload: {
         joiningApplicationId: applicationId,
-        schoolId: appData.schoolId,
+        schoolId: schoolId,
         year: Number(year),
         fee: Number(appData.joiningFeeAmount || 0),
       },
