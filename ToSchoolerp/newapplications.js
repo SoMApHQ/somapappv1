@@ -348,8 +348,7 @@
           ]),
           h('div', { className: 'mt-3 text-xs text-slate-400 flex items-center gap-2' }, [
             h('i', { className: 'fas fa-shield-halved text-sky-300' }),
-            h('span', null, 'Approvals protect your books. Pending items should be reviewed in approvals.'),
-            h('a', { href: '../Todashboardhtml/approvals.html', className: 'text-sky-300 underline' }, 'Open approvals'),
+            h('span', null, 'Approvals protect your books. Pending items are verified in the approvals center.'),
           ]),
         ]),
       ]),
@@ -457,11 +456,6 @@
                       className: 'px-3 py-1 rounded-lg bg-rose-600/30 text-rose-50 text-xs border border-rose-400/40 hover:bg-rose-600/40',
                       onClick: () => deleteApplication(app),
                     }, 'Delete'),
-                    h('a', {
-                      className: 'px-3 py-1 rounded-lg bg-sky-500/20 text-sky-100 text-xs border border-sky-400/40 hover:bg-sky-500/30 no-underline',
-                      href: '../Todashboardhtml/approvals.html',
-                      target: '_blank',
-                    }, 'Open approvals'),
                   ])),
                 ])
               )),
