@@ -114,6 +114,14 @@
     return { id: ref.key, data };
   }
 
+  async function deleteJoiningApplication(year, applicationId) {
+    if (!firebaseDb) throw new Error('Database not available');
+    const y = String(year || '').trim();
+    if (!y || !applicationId) throw new Error('Year and applicationId are required to delete');
+    await firebaseDb.ref(withSchoolPath(`joiningApplications/${y}/${applicationId}`)).remove();
+    return true;
+  }
+
   window.JoiningService = {
     resolveSchoolId,
     withSchoolPath,
@@ -123,5 +131,6 @@
     updateJoiningApplication,
     listenJoiningApplications,
     logJoiningDownload,
+    deleteJoiningApplication,
   };
 })();

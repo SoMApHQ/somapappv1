@@ -74,6 +74,7 @@
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [formOpen, setFormOpen] = useState(false);
+    const [editingId, setEditingId] = useState(null);
     const [formData, setFormData] = useState({
       childFirstName: '',
       childMiddleName: '',
@@ -221,6 +222,7 @@
           status: 'payment_pending_approval',
         });
         setFormOpen(false);
+        setEditingId(null);
         setFormData({
           childFirstName: '',
           childMiddleName: '',
@@ -244,6 +246,56 @@
       }
     }
 
+    function startEdit(app) {
+      setEditingId(app.id);
+      setFormData({
+        childFirstName: app.childFirstName || '',
+        childMiddleName: app.childMiddleName || '',
+        childLastName: app.childLastName || '',
+        gender: app.gender || '',
+        dateOfBirth: app.dateOfBirth || '',
+        classLevel: app.classLevel || '',
+        parentFullName: app.parentFullName || '',
+        parentPhone: app.parentPhone || '',
+        parentEmail: app.parentEmail || '',
+        residentialAddress: app.residentialAddress || '',
+        source: app.source || 'ONSITE',
+        paymentChannel: app.paymentChannel || 'mpesaLipa',
+        paymentReference: app.paymentReference || '',
+        paymentReceiverName: app.paymentReceiverName || '',
+      });
+      setFormOpen(true);
+    }
+
+    async function saveEdit() {
+      const required = ['childFirstName', 'childLastName', 'classLevel', 'parentFullName', 'parentPhone', 'paymentReference'];
+      const missing = required.filter((k) => !String(formData[k] || '').trim());
+      if (missing.length) {
+        alert('Fill all required fields: ' + missing.join(', '));
+        return;
+      }
+      try {
+        await window.JoiningService.updateJoiningApplication(year, editingId, { ...formData, lastUpdatedAt: Date.now() });
+        setFormOpen(false);
+        setEditingId(null);
+      } catch (err) {
+        console.error(err);
+        alert('Failed to update: ' + (err.message || err));
+      }
+    }
+
+    async function deleteApplication(app) {
+      if (!window.JoiningService) return;
+      const ok = confirm('Delete this application permanently?');
+      if (!ok) return;
+      try {
+        await window.JoiningService.deleteJoiningApplication(year, app.id);
+      } catch (err) {
+        console.error(err);
+        alert('Failed to delete: ' + (err.message || err));
+      }
+    }
+
     function updateForm(key, value) {
       setFormData((prev) => ({ ...prev, [key]: value }));
     }
@@ -257,7 +309,26 @@
         ]),
         h('button', {
           className: 'px-4 py-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-500 text-slate-900 font-semibold shadow-lg hover:shadow-sky-500/30',
-          onClick: () => setFormOpen(true),
+          onClick: () => {
+            setEditingId(null);
+            setFormData({
+              childFirstName: '',
+              childMiddleName: '',
+              childLastName: '',
+              gender: '',
+              dateOfBirth: '',
+              classLevel: '',
+              parentFullName: '',
+              parentPhone: '',
+              parentEmail: '',
+              residentialAddress: '',
+              source: 'ONSITE',
+              paymentChannel: 'mpesaLipa',
+              paymentReference: '',
+              paymentReceiverName: '',
+            });
+            setFormOpen(true);
+          },
         }, 'Record new application'),
       ]),
 
@@ -305,6 +376,14 @@
                     h(Td, null, app.downloadCount || 0),
                     h(Td, null, h('div', { className: 'flex flex-wrap gap-2' }, [
                       h('button', {
+                        className: 'px-3 py-1 rounded-lg bg-slate-700/40 text-slate-200 text-xs border border-slate-500/40 hover:bg-slate-600/60',
+                        onClick: () => startEdit(app),
+                      }, 'Edit'),
+                      h('button', {
+                        className: 'px-3 py-1 rounded-lg bg-rose-600/30 text-rose-50 text-xs border border-rose-400/40 hover:bg-rose-600/40',
+                        onClick: () => deleteApplication(app),
+                      }, 'Delete'),
+                      h('button', {
                         className: 'px-3 py-1 rounded-lg bg-sky-500/20 text-sky-100 text-xs border border-sky-400/40 hover:bg-sky-500/30',
                         onClick: () => importToAdmission(app),
                       }, 'Import'),
@@ -345,6 +424,14 @@
                   h(Td, { className: 'font-mono text-xs' }, app.paymentReference || '—'),
                   h(Td, null, h('div', { className: 'flex flex-wrap gap-2' }, [
                     h('button', {
+                      className: 'px-3 py-1 rounded-lg bg-slate-700/40 text-slate-200 text-xs border border-slate-500/40 hover:bg-slate-600/60',
+                      onClick: () => startEdit(app),
+                    }, 'Edit'),
+                    h('button', {
+                      className: 'px-3 py-1 rounded-lg bg-rose-600/30 text-rose-50 text-xs border border-rose-400/40 hover:bg-rose-600/40',
+                      onClick: () => deleteApplication(app),
+                    }, 'Delete'),
+                    h('button', {
                       className: 'px-3 py-1 rounded-lg bg-emerald-500/20 text-emerald-100 text-xs border border-emerald-400/40 hover:bg-emerald-500/30',
                       onClick: () => confirmPayment(app),
                     }, 'Confirm payment'),
@@ -361,8 +448,9 @@
 
       formOpen ? h(FormModal, {
         formData,
-        onClose: () => setFormOpen(false),
-        onSave: createApplication,
+        editing: editingId,
+        onClose: () => { setFormOpen(false); setEditingId(null); },
+        onSave: () => (editingId ? saveEdit() : createApplication()),
         onChange: updateForm,
       }) : null,
     ]);
@@ -402,11 +490,11 @@
     return h('td', { className: 'px-3 py-3 align-top text-slate-100/90 text-sm ' + (props.className || '') }, props.children);
   }
 
-  function FormModal({ formData, onClose, onSave, onChange }) {
+  function FormModal({ formData, onClose, onSave, onChange, editing }) {
     return h('div', { className: 'fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center px-3' }, [
-      h('div', { className: 'glass w-full max-w-3xl p-5 relative' }, [
+      h('div', { className: 'glass w-full max-w-3xl p-5 relative max-h-[85vh] overflow-y-auto' }, [
         h('button', { className: 'absolute top-3 right-3 text-slate-400 hover:text-white', onClick: onClose }, h('i', { className: 'fas fa-times' })),
-        h('h3', { className: 'text-xl font-semibold text-white mb-1' }, 'Record joining application'),
+        h('h3', { className: 'text-xl font-semibold text-white mb-1' }, editing ? 'Edit application' : 'Record joining application'),
         h('p', { className: 'text-sm text-slate-400 mb-4' }, 'Onsite / recommendation / online intake with payment reference.'),
         h('div', { className: 'grid grid-cols-1 md:grid-cols-2 gap-3' }, [
           h(Input, { label: 'First name', required: true, value: formData.childFirstName, onChange: (v) => onChange('childFirstName', v) }),
@@ -443,7 +531,7 @@
         ]),
         h('div', { className: 'mt-4 flex justify-end gap-2' }, [
           h('button', { className: 'px-4 py-2 rounded-lg border border-slate-600 text-slate-200 hover:bg-slate-700/40', onClick: onClose }, 'Cancel'),
-          h('button', { className: 'px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold hover:bg-emerald-400', onClick: onSave }, 'Save application'),
+          h('button', { className: 'px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold hover:bg-emerald-400', onClick: onSave }, editing ? 'Save changes' : 'Save application'),
         ]),
       ]),
     ]);
