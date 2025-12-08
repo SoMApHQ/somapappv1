@@ -59,8 +59,26 @@ function NewApplicationsDashboard() {
   const defaultYear = (window.somapYearContext?.getSelectedYear?.() || String(new Date().getFullYear()));
   const [year, setYear] = useState(String(defaultYear));
   const [apps, setApps] = useState([]);
+  const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [formOpen, setFormOpen] = useState(false);
+  const [formData, setFormData] = useState({
+    childFirstName: '',
+    childMiddleName: '',
+    childLastName: '',
+    gender: '',
+    dateOfBirth: '',
+    classLevel: '',
+    parentFullName: '',
+    parentPhone: '',
+    parentEmail: '',
+    residentialAddress: '',
+    source: 'ONSITE',
+    paymentChannel: 'mpesaLipa',
+    paymentReference: '',
+    paymentReceiverName: '',
+  });
   const db = window.db || (window.firebase && window.firebase.database ? window.firebase.database() : null);
 
   // Sync dropdown + year context
@@ -82,6 +100,13 @@ function NewApplicationsDashboard() {
       return undefined;
     }
     setLoading(true);
+    // Load settings for fee and template defaults
+    window.JoiningService.getJoiningSettings(year)
+      .then((cfg) => setSettings(cfg || null))
+      .catch((err) => {
+        console.warn('Joining settings load failed', err);
+        setSettings(null);
+      });
     const stop = window.JoiningService.listenJoiningApplications(year, (list) => {
       setApps(list);
       setLoading(false);
@@ -171,8 +196,74 @@ function NewApplicationsDashboard() {
 
   const pending = apps.filter((a) => a.paymentVerificationStatus !== 'verified' && !['rejected', 'no_show'].includes(a.status));
 
+  async function createApplication() {
+    if (!window.JoiningService) return;
+    const required = ['childFirstName', 'childLastName', 'classLevel', 'parentFullName', 'parentPhone', 'paymentReference'];
+    const missing = required.filter((k) => !String(formData[k] || '').trim());
+    if (missing.length) {
+      alert('Fill all required fields: ' + missing.join(', '));
+      return;
+    }
+    try {
+      const feeAmount = settings?.joiningFeeAmount || 0;
+      const feeCurrency = settings?.joiningFeeCurrency || 'TZS';
+      const templateUrl = settings?.joiningFormTemplateUrl || '';
+      await window.JoiningService.createJoiningApplication(year, {
+        ...formData,
+        joiningFeeAmount: feeAmount,
+        joiningFeeCurrency: feeCurrency,
+        joiningFormTemplateUrl: templateUrl,
+        paymentRecordedAt: Date.now(),
+        paymentReceiverUserId: 'system',
+        createdByUserId: 'system',
+        source: formData.source || 'ONSITE',
+        paymentVerificationStatus: 'pending',
+        status: 'payment_pending_approval',
+      });
+      setFormOpen(false);
+      setFormData({
+        childFirstName: '',
+        childMiddleName: '',
+        childLastName: '',
+        gender: '',
+        dateOfBirth: '',
+        classLevel: '',
+        parentFullName: '',
+        parentPhone: '',
+        parentEmail: '',
+        residentialAddress: '',
+        source: 'ONSITE',
+        paymentChannel: 'mpesaLipa',
+        paymentReference: '',
+        paymentReceiverName: '',
+      });
+      alert('Application recorded. Awaiting payment verification.');
+    } catch (err) {
+      console.error(err);
+      alert('Failed to create application: ' + (err.message || err));
+    }
+  }
+
+  function updateForm(key, value) {
+    setFormData((prev) => ({ ...prev, [key]: value }));
+  }
+
   return (
     <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="glass px-4 py-3 border border-slate-700/60 rounded-xl">
+          <p className="text-xs text-slate-400">Joining fee ({year})</p>
+          <p className="text-lg font-semibold text-white">{settings ? formatCurrency(settings.joiningFeeAmount || 0) : '—'}</p>
+          <p className="text-[11px] text-slate-500">Mpesa Lipa Namba: {settings?.mpesaLipaNumber || '13768688'}</p>
+        </div>
+        <button
+          className="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-500 text-slate-900 font-semibold shadow-lg hover:shadow-sky-500/30"
+          onClick={() => setFormOpen(true)}
+        >
+          Record new application
+        </button>
+      </div>
+
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Total applications" value={metrics.total} hint={`All sources, ${year}`} />
         <MetricCard label="Verified (paid)" value={metrics.verified} hint="paymentVerificationStatus = verified" />
@@ -279,6 +370,55 @@ function NewApplicationsDashboard() {
           </div>
         )}
       </Section>
+
+      {formOpen && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center px-3">
+          <div className="glass w-full max-w-3xl p-5 relative">
+            <button className="absolute top-3 right-3 text-slate-400 hover:text-white" onClick={() => setFormOpen(false)}>
+              <i className="fas fa-times"></i>
+            </button>
+            <h3 className="text-xl font-semibold text-white mb-1">Record joining application</h3>
+            <p className="text-sm text-slate-400 mb-4">Onsite / recommendation / online intake with payment reference.</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Input label="First name" required value={formData.childFirstName} onChange={(v) => updateForm('childFirstName', v)} />
+              <Input label="Middle name" value={formData.childMiddleName} onChange={(v) => updateForm('childMiddleName', v)} />
+              <Input label="Last name" required value={formData.childLastName} onChange={(v) => updateForm('childLastName', v)} />
+              <Input label="Gender" value={formData.gender} onChange={(v) => updateForm('gender', v)} />
+              <Input label="Date of birth" type="date" value={formData.dateOfBirth} onChange={(v) => updateForm('dateOfBirth', v)} />
+              <Input label="Class level" required value={formData.classLevel} onChange={(v) => updateForm('classLevel', v)} placeholder="e.g., Class 1" />
+              <Input label="Parent full name" required value={formData.parentFullName} onChange={(v) => updateForm('parentFullName', v)} />
+              <Input label="Parent phone" required value={formData.parentPhone} onChange={(v) => updateForm('parentPhone', v)} placeholder="+2557..." />
+              <Input label="Parent email" value={formData.parentEmail} onChange={(v) => updateForm('parentEmail', v)} />
+              <Input label="Residential address" value={formData.residentialAddress} onChange={(v) => updateForm('residentialAddress', v)} />
+              <Select
+                label="Source"
+                value={formData.source}
+                onChange={(v) => updateForm('source', v)}
+                options={[
+                  { value: 'ONSITE', label: 'ONSITE' },
+                  { value: 'ONLINE', label: 'ONLINE' },
+                  { value: 'RECOMMENDATION', label: 'RECOMMENDATION' },
+                ]}
+              />
+              <Select
+                label="Payment channel"
+                value={formData.paymentChannel}
+                onChange={(v) => updateForm('paymentChannel', v)}
+                options={[
+                  { value: 'mpesaLipa', label: 'M-Pesa Lipa' },
+                  { value: 'cash', label: 'Cash' },
+                ]}
+              />
+              <Input label="Payment reference" required value={formData.paymentReference} onChange={(v) => updateForm('paymentReference', v)} placeholder="MPesa ref / receipt no" />
+              <Input label="Payment received by" value={formData.paymentReceiverName} onChange={(v) => updateForm('paymentReceiverName', v)} placeholder="Staff name" />
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button className="px-4 py-2 rounded-lg border border-slate-600 text-slate-200 hover:bg-slate-700/40" onClick={() => setFormOpen(false)}>Cancel</button>
+              <button className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold hover:bg-emerald-400" onClick={createApplication}>Save application</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -316,6 +456,38 @@ function Th({ children }) {
 }
 function Td({ children }) {
   return <td className="px-3 py-3 align-top text-slate-100/90 text-sm">{children}</td>;
+}
+
+function Input({ label, value, onChange, type = 'text', required = false, placeholder = '' }) {
+  return (
+    <label className="text-sm text-slate-300 flex flex-col gap-1">
+      <span>{label}{required && <span className="text-rose-400"> *</span>}</span>
+      <input
+        type={type}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full bg-slate-900/50 border border-slate-700/60 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500"
+      />
+    </label>
+  );
+}
+
+function Select({ label, value, onChange, options }) {
+  return (
+    <label className="text-sm text-slate-300 flex flex-col gap-1">
+      <span>{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full bg-slate-900/50 border border-slate-700/60 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500"
+      >
+        {options.map((opt) => (
+          <option key={opt.value} value={opt.value}>{opt.label}</option>
+        ))}
+      </select>
+    </label>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById('newApplicationsRoot')).render(<NewApplicationsDashboard />);
