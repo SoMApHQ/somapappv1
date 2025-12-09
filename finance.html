@@ -87,6 +87,13 @@
         <h3 class="text-sm text-gray-500">Net Balance (Collected - Expenses)</h3>
         <div id="netBalance" class="text-xl font-semibold mt-2">--</div>
       </div>
+      <a href="Tofinancehtml/financialstatements/fs_dashboard.html" class="bg-gradient-to-br from-indigo-600 to-emerald-500 p-4 rounded shadow text-white flex flex-col justify-between">
+        <div>
+          <h3 class="text-sm font-semibold">Financial Statements</h3>
+          <p class="text-xs text-indigo-50 mt-1">Prepare TRA-ready P&L, Balance Sheet, Cash Flow.</p>
+        </div>
+        <span class="mt-3 inline-flex items-center text-sm font-semibold">Open module <i class="fa fa-arrow-right ml-2"></i></span>
+      </a>
     </div>
 
     <!-- Filters + actions -->
@@ -281,6 +288,17 @@
     return CLASS_ORDER[j];
   }
 
+  function resolveFinanceSchoolId() {
+    if (window.currentSchoolId) return window.currentSchoolId;
+    const params = new URLSearchParams(location.search || '');
+    const candidate = params.get('school') || params.get('schoolId') || (function () {
+      try { return localStorage.getItem('somap_school'); } catch (_) { return ''; }
+    })() || 'socrates';
+    const normalized = String(candidate || '').trim() || 'socrates';
+    window.currentSchoolId = normalized;
+    return normalized;
+  }
+
   const db = window.db || null;
   const yearContext = window.somapYearContext || null;
   const yearSelectEl = document.querySelector('[data-somap-year-select]');
@@ -291,6 +309,7 @@
     || SOMAP_DEFAULT_YEAR;
   financeYear = String(financeYear);
   let activeYear = financeYear;
+  const activeSchoolId = resolveFinanceSchoolId();
   try { sessionStorage.setItem('somap_selected_year', financeYear); } catch (_) {}
   if (yearContext?.setSelectedYear) {
     yearContext.setSelectedYear(financeYear, { manual: false });
@@ -352,6 +371,7 @@
   const reloadBtn = document.getElementById('reloadBtn');
 
   let cachedStudents = {};
+  let financeAggregateSnapshot = { totalStudents: 0, totalDue: 0, totalCollected: 0, totalOutstanding: 0, totalExpenses: 0 };
   function lookupStudentByAdmission(adm) {
     const normalized = String(adm || '').trim();
     if (!normalized) return null;
@@ -1240,6 +1260,50 @@ function buildFinanceStudents(
       console.warn('finance:tableRendered dispatch failed', eventErr);
     }
     // NOTE: no per-row expander listeners added here (we use a single global delegated listener below)
+
+    updateFinanceAggregates();
+  }
+
+  function computeAggregateTotals() {
+    const totals = { totalStudents: 0, totalDue: 0, totalCollected: 0, totalOutstanding: 0, totalExpenses: 0 };
+    if (!cachedStudents || !Object.keys(cachedStudents).length) return totals;
+    Object.values(cachedStudents).forEach((student) => {
+      if (!parentCtx.enabled && student.isGraduated) return;
+      let fin = computeStudentFinancials(student);
+      if (!student.hasYearData || student.isGraduated) {
+        const effectiveFee = student.isGraduated ? 0 : Number(student.feePerYear) || 0;
+        fin = {
+          feePerYear: effectiveFee,
+          paidAmount: 0,
+        };
+      }
+      totals.totalStudents += 1;
+      totals.totalDue += Number(fin.feePerYear) || 0;
+      totals.totalCollected += Number(fin.paidAmount) || 0;
+    });
+    totals.totalOutstanding = totals.totalDue - totals.totalCollected;
+    const totalExpensesEl = document.getElementById('totalExpenses');
+    totals.totalExpenses = Number(totalExpensesEl?.dataset.amount || 0);
+    return totals;
+  }
+
+  async function updateFinanceAggregates() {
+    if (parentCtx.enabled) return;
+    financeAggregateSnapshot = computeAggregateTotals();
+    if (!activeSchoolId || !db) return;
+    try {
+      const summaryRef = db.ref(`schools/${activeSchoolId}/financials/${financeYear}/financeAggregates`);
+      await summaryRef.update({
+        totalStudents: financeAggregateSnapshot.totalStudents,
+        totalFeesExpected: financeAggregateSnapshot.totalDue,
+        totalFeesCollected: financeAggregateSnapshot.totalCollected,
+        totalFeesBalance: financeAggregateSnapshot.totalOutstanding,
+        totalExpenses: financeAggregateSnapshot.totalExpenses,
+        updatedAt: Date.now()
+      });
+    } catch (err) {
+      console.warn('Failed to sync financeAggregates', err);
+    }
   }
 
   // ====== SPEED FIX: lazy-load a single iframe when clicked, and close others ======
@@ -1343,6 +1407,7 @@ function buildFinanceStudents(
         netEl.textContent = fmt(net);
         netEl.dataset.amount = String(net);
       }
+      updateFinanceAggregates();
     } catch (err) {
       console.error('Error loading expenses:', err);
       alert('Error loading expenses: ' + err.message);
