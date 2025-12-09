@@ -343,6 +343,8 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="../firebase.js"></script> <!-- Adjusted path to firebase.js in root -->
+  <script src="../js/joining-helpers.js"></script>
+  <script src="./pushtoadmission.js"></script>
   <!-- Cloudinary Upload Library -->
   <script src="https://widget.cloudinary.com/v2.0/global/all.js"></script>
 
@@ -701,6 +703,22 @@
           studentData.medicalDocsUrl = await uploadMaybe("medicalDocsUpload", "medicalDocs", newKey, null);
           await newRef.set({ createdAt: firebase.database.ServerValue.TIMESTAMP, ...studentData });
           await syncFinanceAfterUpsert(newKey, studentData);
+          // Bridge: if this student came from a joining application, mark it admitted and drop from queue
+          if (window.JoiningService && window.currentJoiningAppToAdmit) {
+            const { applicationId, year } = window.currentJoiningAppToAdmit;
+            try {
+              await window.JoiningService.updateJoiningApplication(year, applicationId, {
+                status: 'admitted',
+                studentId: newKey,
+                lastUpdatedAt: Date.now(),
+              });
+              const queuePath = window.JoiningService.withSchoolPath(`joiningAdmissionsQueue/${year}/${applicationId}`);
+              await db.ref(queuePath).remove();
+            } catch (queueErr) {
+              console.warn('Failed to update joining admission queue', queueErr);
+            }
+            window.currentJoiningAppToAdmit = null;
+          }
           alert('✅ Student registered successfully!');
           closeRegistrationModal();
         } else {

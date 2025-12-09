@@ -162,6 +162,47 @@
     return true;
   }
 
+  // ---- Admission queue (bridge between joining and admissions) ----
+  async function pushToAdmissionQueue(year, applicationId, appData) {
+    if (!firebaseDb) throw new Error('Database not available');
+    const y = String(year || '').trim();
+    if (!y || !applicationId) throw new Error('Year and applicationId are required for admission queue');
+    const schoolId = resolveSchoolId();
+    const payload = {
+      applicationId,
+      year: Number(y),
+      schoolId,
+      childFirstName: appData.childFirstName || '',
+      childMiddleName: appData.childMiddleName || '',
+      childLastName: appData.childLastName || '',
+      gender: appData.gender || '',
+      dateOfBirth: appData.dateOfBirth || '',
+      classLevel: appData.classLevel || '',
+      parentFullName: appData.parentFullName || '',
+      parentPhone: appData.parentPhone || '',
+      parentEmail: appData.parentEmail || '',
+      createdAt: appData.createdAt || nowTs(),
+      pushedByUserId: appData.createdByUserId || 'system',
+    };
+    await firebaseDb.ref(withSchoolPath(`joiningAdmissionsQueue/${y}/${applicationId}`)).set(payload);
+    return payload;
+  }
+
+  // Listen to admission queue for a year
+  function listenAdmissionQueue(year, handler) {
+    if (!firebaseDb) throw new Error('Database not available');
+    const y = String(year || '').trim();
+    if (!y) throw new Error('Year is required to listen to admission queue');
+    const ref = firebaseDb.ref(withSchoolPath(`joiningAdmissionsQueue/${y}`));
+    const cb = (snap) => {
+      const raw = snap.val() || {};
+      const list = Object.entries(raw).map(([id, item]) => ({ id, ...(item || {}) }));
+      handler(list);
+    };
+    ref.on('value', cb);
+    return () => ref.off('value', cb);
+  }
+
   window.JoiningService = {
     resolveSchoolId,
     withSchoolPath,
@@ -172,5 +213,7 @@
     listenJoiningApplications,
     logJoiningDownload,
     deleteJoiningApplication,
+    pushToAdmissionQueue,
+    listenAdmissionQueue,
   };
 })();

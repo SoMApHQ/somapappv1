@@ -134,7 +134,7 @@
 
     const filtered = useMemo(() => apps.filter((a) => {
       if (a.paymentVerificationStatus !== 'verified') return false;
-      if (['rejected', 'no_show'].includes(a.status)) return false;
+      if (['rejected', 'no_show', 'admitted'].includes(a.status)) return false;
       return true;
     }), [apps]);
 
@@ -171,34 +171,28 @@
       }
     }
 
-    async function importToAdmission(app) {
-      if (!db) return;
-      const studentId = `AUTO-${Date.now()}`;
-      const path = window.JoiningService.withSchoolPath(`students/${year}/${studentId}`);
-      const record = {
-        admissionNumber: studentId,
-        firstName: app.childFirstName || '',
-        middleName: app.childMiddleName || '',
-        lastName: app.childLastName || '',
-        gender: app.gender || '',
-        dob: app.dateOfBirth || '',
-        classLevel: app.classLevel || '',
-        primaryParentName: app.parentFullName || '',
-        primaryParentContact: app.parentPhone || '',
-        parentEmail: app.parentEmail || '',
-        residentialAddress: app.residentialAddress || '',
-        academicYear: year,
-        source: app.source || 'ONLINE',
-        joinedFrom: 'joiningApplications',
-        createdAt: Date.now(),
-      };
+    async function pushToAdmission(app) {
+      if (!window.JoiningService) return;
+      if (app.paymentVerificationStatus !== 'verified') {
+        alert('Only verified payments can be pushed to admission.');
+        return;
+      }
+      if (['admitted', 'no_show', 'rejected'].includes(app.status)) {
+        alert('This application cannot be pushed (finalized status).');
+        return;
+      }
+      const ok = window.confirm('Push this student to admission queue?');
+      if (!ok) return;
       try {
-        await db.ref(path).set(record);
-        await window.JoiningService.updateJoiningApplication(year, app.id, { status: 'admitted', studentId });
-        alert('Imported to admission.');
+        await window.JoiningService.pushToAdmissionQueue(year, app.id, app);
+        await window.JoiningService.updateJoiningApplication(year, app.id, {
+          status: 'awaiting_admission',
+          lastUpdatedAt: Date.now(),
+        });
+        alert('Pushed to admission queue.');
       } catch (err) {
         console.error(err);
-        alert('Failed to import: ' + (err.message || err));
+        alert('Failed to push: ' + (err.message || err));
       }
     }
 
@@ -420,8 +414,8 @@
                       }, 'Delete'),
                       h('button', {
                         className: 'px-3 py-1 rounded-lg bg-sky-500/20 text-sky-100 text-xs border border-sky-400/40 hover:bg-sky-500/30',
-                        onClick: () => importToAdmission(app),
-                      }, 'Import'),
+                        onClick: () => pushToAdmission(app),
+                      }, 'Push to admission'),
                     ])),
                   ]);
                 })),
