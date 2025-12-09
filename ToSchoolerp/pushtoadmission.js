@@ -31,13 +31,19 @@
     function attachCard(node) {
       const quickHeader = Array.from(document.querySelectorAll('h3')).find((el) => (el.textContent || '').trim() === 'Quick Admission');
       const quickSection = quickHeader ? quickHeader.parentElement : null;
+      const modalBtn = document.getElementById('openRegistrationModal');
+      const btnSection = modalBtn ? modalBtn.parentElement : null;
+      if (btnSection && btnSection.parentElement) {
+        btnSection.parentElement.insertBefore(node, btnSection.nextSibling);
+        return;
+      }
       if (quickSection && quickSection.parentElement) {
         quickSection.parentElement.insertBefore(node, quickSection.nextSibling);
-      } else {
-        const container = document.querySelector('.space-y-4');
-        if (container) container.insertBefore(node, container.firstChild);
-        else document.body.insertBefore(node, document.body.firstChild);
+        return;
       }
+      const container = document.querySelector('.space-y-4');
+      if (container) container.insertBefore(node, container.firstChild);
+      else document.body.insertBefore(node, document.body.firstChild);
     }
 
     function buildCard() {
