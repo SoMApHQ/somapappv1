@@ -18,6 +18,8 @@
   const YEARS = [];
   for (let year = YEAR_START; year <= YEAR_END; year += 1) YEARS.push(year);
 
+  const GRAD_EDIT_PASSWORD = 'REHEMam!';
+
   // ---------- STATE ----------
   const state = {
     page: 'dashboard',
@@ -61,6 +63,10 @@
 
   function toStr(value) { return value == null ? '' : String(value); }
   function sanitizeKey(raw) { return toStr(raw).replace(/[.#$/[\]]/g, '_'); }
+
+  function checkGradPassword(candidate) {
+    return String(candidate) === GRAD_EDIT_PASSWORD;
+  }
 
   function toNumberSafe(value) {
     if (value == null || value === '') return 0;
@@ -170,6 +176,14 @@
     const shell = $('#appShell');
     if (gate) gate.style.display = allowed ? 'none' : 'flex';
     if (shell) shell.style.display = allowed ? 'block' : 'none';
+  }
+
+  function getSelectedYear() {
+    return String(window.somapYearContext?.getSelectedYear?.() || state.currentYear || new Date().getFullYear());
+  }
+
+  function getSchoolPrefix() {
+    return window.currentSchoolId ? `schools/${window.currentSchoolId}/` : '';
   }
 
   // ---------- PUBLIC API ----------
@@ -698,6 +712,7 @@
       const status = computeStatus(student);
       const expected = getExpectedFee(student);
       const paid = getPaidTotal(student);
+      const id = sanitizeKey(student.admissionNo);
       const debtTag = status === 'debt' ? '<span class="debt-pill">DEBT</span>' : '';
       const badge = status === 'paid'
         ? 'status-badge paid'
@@ -721,19 +736,25 @@
             </div>
           </td>
           <td>${toStr(student.class) || '--'}</td>
-          <td class="text-right">${formatCurrency(expected)}</td>
-          <td class="text-right ${paid >= expected ? 'text-emerald-600 font-semibold' : ''}">
-            ${formatCurrency(paid)}
+          <td class="text-right">
+            <span data-col="expected" data-id="${id}" data-val="${expected}">${formatCurrency(expected)}</span>
+            <button class="btn-xs ml-2" data-edit="expected" data-id="${id}">Edit</button>
           </td>
-          <td class="text-right">${formatCurrency(balance)}</td>
-          <td><span class="${badge}">${status.toUpperCase()}</span> ${debtTag}</td>
+          <td class="text-right ${paid >= expected ? 'text-emerald-600 font-semibold' : ''}">
+            <span data-col="paid" data-id="${id}" data-val="${paid}">${formatCurrency(paid)}</span>
+            <button class="btn-xs ml-2" data-edit="paid" data-id="${id}">Edit</button>
+          </td>
+          <td class="text-right">
+            <span data-col="balance" data-id="${id}" data-val="${balance}">${formatCurrency(balance)}</span>
+          </td>
+          <td><span class="${badge}" data-col="status" data-id="${id}">${status.toUpperCase()}</span> ${debtTag}</td>
           <td>
             <div class="text-sm text-slate-700">${toStr(student.parentPhone) || '--'}</div>
             <div class="text-xs text-slate-400">${toStr(student.parentName) || ''}</div>
           </td>
           <td class="text-right">
-            <button class="action-btn" data-action="pay" data-adm="${sanitizeKey(student.admissionNo)}">Record Payment</button>
-            <button class="action-btn secondary" data-action="note" data-adm="${sanitizeKey(student.admissionNo)}">Note</button>
+            <button class="action-btn" data-action="pay" data-adm="${id}">Record Payment</button>
+            <button class="action-btn secondary" data-action="note" data-adm="${id}">Note</button>
           </td>
         </tr>`;
     }).join('');
@@ -907,6 +928,171 @@
           <p class="meta">${new Date(Number(photo.uploadedAt || Date.now())).toLocaleDateString('en-GB')}  -  ${toStr(photo.uploadedBy || '').split('@')[0]}</p>
         </div>
       </article>`).join('');
+  }
+
+  // ---------- SECURE EDIT MODAL ----------
+  const gradEditModal = typeof document !== 'undefined' ? document.getElementById('gradEditModal') : null;
+  if (gradEditModal) {
+    const hideModal = () => gradEditModal.classList.add('hidden');
+    const refreshStatusDom = (id) => {
+      const badge = document.querySelector(`[data-col="status"][data-id="${id}"]`);
+      const student = state.students?.[id];
+      if (!badge || !student) return;
+      const status = computeStatus(student);
+      const className = status === 'paid'
+        ? 'status-badge paid'
+        : status === 'partial'
+          ? 'status-badge partial'
+          : status === 'debt'
+            ? 'status-badge debt'
+            : 'status-badge unpaid';
+      badge.className = className;
+      badge.textContent = status.toUpperCase();
+      const debtChip = badge.parentElement?.querySelector('.debt-pill');
+      if (debtChip) debtChip.style.display = status === 'debt' ? '' : 'none';
+    };
+
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-edit]');
+      if (!btn) return;
+      const field = btn.getAttribute('data-edit');
+      const id = btn.getAttribute('data-id');
+      const span = document.querySelector(`[data-col="${field}"][data-id="${id}"]`);
+      const current = Number(span?.getAttribute('data-val') || 0);
+
+      $('#gradEditTitle').textContent = field === 'expected' ? 'Edit Expected' : 'Edit Paid (creates adjustment)';
+      $('#gradEditAmount').value = String(current || '');
+      $('#gradEditNote').value = '';
+      $('#gradEditPass').value = '';
+      $('#gradEditTargetId').value = id;
+      $('#gradEditField').value = field;
+
+      gradEditModal.classList.remove('hidden');
+    });
+
+    const cancelBtn = document.getElementById('gradEditCancel');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', () => hideModal());
+    }
+
+    const saveBtn = document.getElementById('gradEditSave');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        const amount = Number(document.getElementById('gradEditAmount').value || 0);
+        const note = String(document.getElementById('gradEditNote').value || '').trim();
+        const pass = document.getElementById('gradEditPass').value;
+        const id = document.getElementById('gradEditTargetId').value;
+        const field = document.getElementById('gradEditField').value;
+
+        if (!checkGradPassword(pass)) { alert('Wrong password'); return; }
+        if (!(amount >= 0)) { alert('Amount must be >= 0'); return; }
+        if (!id || !field) { alert('Missing target'); return; }
+
+        const YEAR = getSelectedYear();
+        const SCHOOL = getSchoolPrefix();
+        const dbref = (path) => db().ref(path);
+        const now = Date.now();
+        const byEmail = auth()?.currentUser?.email || 'unknown';
+
+        try {
+          if (field === 'expected') {
+            const path = `${SCHOOL}graduation/${YEAR}/students/${id}/expectedFee`;
+            const beforeSnap = await dbref(path).once('value');
+            const before = toNumberSafe(beforeSnap.val() ?? state.students?.[id]?.expectedFee);
+            await dbref(path).set(amount);
+            if (state.students?.[id]) {
+              state.students[id].expectedFee = amount;
+              state.students[id].balance = Math.max(0, amount - getPaidTotal(state.students[id]));
+            }
+
+            const span = document.querySelector(`[data-col="expected"][data-id="${id}"]`);
+            if (span) {
+              span.textContent = formatCurrency(amount);
+              span.setAttribute('data-val', String(amount));
+            }
+            const paidVal = toNumberSafe(document.querySelector(`[data-col="paid"][data-id="${id}"]`)?.getAttribute('data-val') || state.paymentTotals?.[id] || state.students?.[id]?.paid || 0);
+            const bal = Math.max(0, amount - paidVal);
+            const balCell = document.querySelector(`[data-col="balance"][data-id="${id}"]`);
+            if (balCell) {
+              balCell.textContent = formatCurrency(bal);
+              balCell.setAttribute('data-val', String(bal));
+            }
+
+            await dbref(`${SCHOOL}graduation/${YEAR}/audits`).push({
+              actor: byEmail,
+              action: 'expected:edit',
+              refType: 'student',
+              refId: id,
+              kind: 'expected_edit',
+              before,
+              after: amount,
+              note,
+              by: byEmail,
+              at: now,
+            });
+          } else if (field === 'paid') {
+            const paidPath = `${SCHOOL}graduation/${YEAR}/students/${id}/paid`;
+            const beforeSnap = await dbref(paidPath).once('value');
+            const beforePaid = toNumberSafe(beforeSnap.val() ?? state.students?.[id]?.paid ?? 0);
+            const delta = amount - beforePaid;
+
+            if (delta !== 0) {
+              await dbref(`${SCHOOL}graduation/${YEAR}/payments`).push({
+                admissionNo: id,
+                amount: delta,
+                method: 'ADJUSTMENT',
+                type: 'ADJUSTMENT',
+                note: note || 'Manual correction',
+                recordedBy: byEmail,
+                createdAt: now,
+                timestamp: now,
+              });
+            }
+            await dbref(paidPath).set(amount);
+            if (!state.paymentTotals) state.paymentTotals = {};
+            state.paymentTotals[id] = amount;
+            if (state.students?.[id]) {
+              state.students[id].paid = amount;
+              state.students[id].balance = Math.max(0, getExpectedFee(state.students[id]) - amount);
+            }
+
+            const span = document.querySelector(`[data-col="paid"][data-id="${id}"]`);
+            if (span) {
+              span.textContent = formatCurrency(amount);
+              span.setAttribute('data-val', String(amount));
+            }
+            const expectedVal = toNumberSafe(document.querySelector(`[data-col="expected"][data-id="${id}"]`)?.getAttribute('data-val') || state.students?.[id]?.expectedFee || 0);
+            const bal = Math.max(0, expectedVal - amount);
+            const balCell = document.querySelector(`[data-col="balance"][data-id="${id}"]`);
+            if (balCell) {
+              balCell.textContent = formatCurrency(bal);
+              balCell.setAttribute('data-val', String(bal));
+            }
+
+            await dbref(`${SCHOOL}graduation/${YEAR}/audits`).push({
+              actor: byEmail,
+              action: 'paid:adjust',
+              refType: 'student',
+              refId: id,
+              kind: 'paid_adjust',
+              before: beforePaid,
+              after: amount,
+              delta,
+              note,
+              by: byEmail,
+              at: now,
+            });
+          }
+
+          refreshStatusDom(id);
+          hideModal();
+          renderDashboardSummary();
+        } catch (err) {
+          console.error(err);
+          alert('Failed to save. Check network and try again.');
+        }
+      });
+    }
   }
 
   // ---------- FORMS: PAYMENTS / EXPENSES / GALLERY ----------
@@ -1280,6 +1466,287 @@
   }
 
   // ---------- EXPORTS ----------
+  async function loadGradExpenses(year) {
+    const SCHOOL = getSchoolPrefix();
+    const snap = await db().ref(`${SCHOOL}graduation/${year}/expenses`).once('value');
+    let raw = snap.val() || {};
+    if (!Object.keys(raw).length && SCHOOL) {
+      const fallbackSnap = await db().ref(`graduation/${year}/expenses`).once('value');
+      raw = fallbackSnap.val() || {};
+    }
+    return Object.entries(raw).map(([id, e]) => ({
+      id,
+      item: e.item || '-',
+      amount: toNumberSafe(e.total || e.amount || (Number(e.priceEach || 0) * Number(e.quantity || 0))),
+      paidTo: e.seller || e.paidTo || '-',
+      contact: e.sellerPhone || e.contact || '-',
+      date: e.createdAt ? new Date(Number(e.createdAt)).toLocaleDateString('en-GB') : toStr(e.date || ''),
+      ref: e.reference || e.ref || e.proofUrl || '-',
+      note: e.note || '',
+    }));
+  }
+
+  function downloadCSV(name, rows) {
+    if (!rows || !rows.length) return;
+    const header = Object.keys(rows[0] || {});
+    const lines = [header.join(',')].concat(
+      rows.map((row) => header.map((key) => JSON.stringify(row[key] ?? '')).join(','))
+    );
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${name}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  async function loadGradLedger(year) {
+    const SCHOOL = getSchoolPrefix();
+    const [studentsSnap, paymentsSnap] = await Promise.all([
+      db().ref(`${SCHOOL}graduation/${year}/students`).once('value'),
+      db().ref(`${SCHOOL}graduation/${year}/payments`).once('value'),
+    ]);
+    let studentsRaw = studentsSnap.val() || {};
+    let paymentsRaw = paymentsSnap.val() || {};
+
+    if (!Object.keys(studentsRaw).length && SCHOOL) {
+      const [fallbackStudents, fallbackPayments] = await Promise.all([
+        db().ref(`graduation/${year}/students`).once('value'),
+        db().ref(`graduation/${year}/payments`).once('value'),
+      ]);
+      studentsRaw = fallbackStudents.val() || {};
+      paymentsRaw = fallbackPayments.val() || {};
+    }
+
+    const paymentTotals = buildPaymentTotals(paymentsRaw || {});
+
+    return Object.entries(studentsRaw).map(([id, s]) => {
+      const expected = toNumberSafe(s.expectedFee ?? s.expected ?? computeExpectedFee(s.class));
+      const paid = Math.max(toNumberSafe(s.paid || 0), toNumberSafe(paymentTotals[id] || 0));
+      const parent = s.parentPhone || s.primaryParentContact || s.guardianPhone || s.contact || s.parentContact || '-';
+      return {
+        id,
+        admission: s.admissionNo || id,
+        name: s.name || s.fullName || '-',
+        className: s.class || s.className || '-',
+        expected,
+        paid,
+        parent,
+      };
+    });
+  }
+
+  function partitionStudents(list) {
+    const paid = [];
+    const partial = [];
+    const unpaid = [];
+    list.forEach((s) => {
+      if (s.paid >= s.expected && s.expected > 0) paid.push(s);
+      else if (s.paid > 0 && s.paid < s.expected) partial.push(s);
+      else unpaid.push(s);
+    });
+    return { paid, partial, unpaid };
+  }
+
+  async function exportExpensesCSV(event) {
+    if (event) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+    const y = getSelectedYear();
+    const list = await loadGradExpenses(y);
+    if (!list.length) { alert('No expenses found.'); return; }
+    downloadCSV(`graduation_expenses_${y}`, list);
+  }
+
+  async function exportExpensesPDF(event) {
+    if (event) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+    const y = getSelectedYear();
+    const list = await loadGradExpenses(y);
+    if (!list.length) { alert('No expenses found.'); return; }
+    const { jsPDF } = window.jspdf || {};
+    if (!jsPDF) { alert('PDF library missing'); return; }
+
+    const doc = new jsPDF({ orientation: 'p', unit: 'pt', format: 'a4' });
+    if (!doc.autoTable) { alert('PDF table plugin missing'); return; }
+    doc.setFontSize(16);
+    doc.text(`Socrates School — Graduation Expenses (${y})`, 40, 50);
+    const total = list.reduce((a, b) => a + (Number(b.amount || 0)), 0);
+    doc.setFontSize(11);
+    doc.text(`Total spent: TSh ${total.toLocaleString()}`, 40, 70);
+
+    const rows = list.map((e) => [
+      e.item,
+      `TSh ${Number(e.amount || 0).toLocaleString()}`,
+      e.paidTo,
+      e.contact,
+      e.date,
+      e.ref,
+      e.note,
+    ]);
+    doc.autoTable({
+      startY: 90,
+      head: [['Item', 'Amount', 'Paid To', 'Contact', 'Date', 'Ref', 'Note']],
+      body: rows,
+      styles: { fontSize: 9, cellPadding: 4 },
+      headStyles: { fillColor: [33, 37, 41], textColor: 255 },
+    });
+
+    doc.save(`graduation_expenses_${y}.pdf`);
+  }
+
+  async function exportAuditCSV(event) {
+    if (event) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+    const y = getSelectedYear();
+    const [students, expenses] = await Promise.all([loadGradLedger(y), loadGradExpenses(y)]);
+    const { paid, partial, unpaid } = partitionStudents(students);
+
+    const totalExpected = students.reduce((a, b) => a + b.expected, 0);
+    const totalPaid = students.reduce((a, b) => a + b.paid, 0);
+    const totalUncol = totalExpected - totalPaid;
+    const totalExp = expenses.reduce((a, b) => a + (Number(b.amount) || 0), 0);
+    const netBalance = totalPaid - totalExp;
+
+    const lines = [];
+    const push = (arr) => lines.push(...arr);
+
+    push([`"Socrates School - Graduation Audit ${y}"`, '']);
+    push([`"Students total",${students.length}`]);
+    push([`"Paid count",${paid.length}`]);
+    push([`"Partial count",${partial.length}`]);
+    push([`"Unpaid count",${unpaid.length}`]);
+    push([`"Total expected",${totalExpected}`]);
+    push([`"Total collected",${totalPaid}`]);
+    push([`"Uncollected",${totalUncol}`]);
+    push([`"Expenses total",${totalExp}`]);
+    push([`"Net (collected - expenses)",${netBalance}`]);
+    push(['', '']);
+
+    push(['"PAID"']); push(['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Parent']);
+    paid.forEach((s) => push([s.admission, s.name, s.className, s.expected, s.paid, s.parent]));
+    push(['', '']);
+
+    push(['"PARTIAL"']); push(['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Parent']);
+    partial.forEach((s) => push([s.admission, s.name, s.className, s.expected, s.paid, s.parent]));
+    push(['', '']);
+
+    push(['"UNPAID"']); push(['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Parent']);
+    unpaid.forEach((s) => push([s.admission, s.name, s.className, s.expected, s.paid, s.parent]));
+    push(['', '']);
+
+    push(['"EXPENSES"']); push(['Item', 'Amount', 'Paid To', 'Contact', 'Date', 'Ref', 'Note']);
+    expenses.forEach((e) => push([e.item, e.amount, e.paidTo, e.contact, e.date, e.ref, e.note]));
+
+    const blob = new Blob([lines.map((r) => Array.isArray(r) ? r.join(',') : r).join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `graduation_audit_${y}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  async function exportAuditPDF(event) {
+    if (event) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+    const y = getSelectedYear();
+    const [students, expenses] = await Promise.all([loadGradLedger(y), loadGradExpenses(y)]);
+    const { paid, partial, unpaid } = partitionStudents(students);
+    const totalExpected = students.reduce((a, b) => a + b.expected, 0);
+    const totalPaid = students.reduce((a, b) => a + b.paid, 0);
+    const totalUncol = totalExpected - totalPaid;
+    const totalExp = expenses.reduce((a, b) => a + (Number(b.amount) || 0), 0);
+    const netBalance = totalPaid - totalExp;
+
+    const { jsPDF } = window.jspdf || {};
+    if (!jsPDF) { alert('PDF library missing'); return; }
+    const doc = new jsPDF({ orientation: 'p', unit: 'pt', format: 'a4' });
+    if (!doc.autoTable) { alert('PDF table plugin missing'); return; }
+
+    doc.setFontSize(16);
+    doc.text(`Socrates School — Graduation Audit Report (${y})`, 40, 50);
+    doc.setFontSize(10);
+    doc.text(`Report covers collections, pending balances, and expenses for ${students.length} students.`, 40, 64);
+    doc.setFontSize(11);
+    doc.text('Summary', 40, 78);
+
+    doc.autoTable({
+      startY: 88,
+      head: [['Metric', 'Value']],
+      body: [
+        ['Students total', students.length],
+        ['Paid count', paid.length],
+        ['Partial count', partial.length],
+        ['Unpaid count', unpaid.length],
+        ['Total expected', `TSh ${totalExpected.toLocaleString()}`],
+        ['Total collected', `TSh ${totalPaid.toLocaleString()}`],
+        ['Uncollected', `TSh ${totalUncol.toLocaleString()}`],
+        ['Expenses total', `TSh ${totalExp.toLocaleString()}`],
+        ['Net (collected - expenses)', `TSh ${netBalance.toLocaleString()}`],
+      ],
+      styles: { fontSize: 9, cellPadding: 4 },
+      headStyles: { fillColor: [33, 37, 41], textColor: 255 },
+    });
+
+    doc.text('Paid Students', 40, doc.lastAutoTable.finalY + 24);
+    doc.autoTable({
+      startY: doc.lastAutoTable.finalY + 34,
+      head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
+      body: paid.map((s) => [s.admission, s.name, s.className, `TSh ${s.expected.toLocaleString()}`, `TSh ${s.paid.toLocaleString()}`, s.parent]),
+      styles: { fontSize: 9, cellPadding: 3 },
+      headStyles: { fillColor: [22, 163, 74], textColor: 255 },
+    });
+
+    doc.text('Partial Payments', 40, doc.lastAutoTable.finalY + 24);
+    doc.autoTable({
+      startY: doc.lastAutoTable.finalY + 34,
+      head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
+      body: partial.map((s) => [s.admission, s.name, s.className, `TSh ${s.expected.toLocaleString()}`, `TSh ${s.paid.toLocaleString()}`, s.parent]),
+      styles: { fontSize: 9, cellPadding: 3 },
+      headStyles: { fillColor: [245, 158, 11], textColor: 0 },
+    });
+
+    doc.text('Unpaid', 40, doc.lastAutoTable.finalY + 24);
+    doc.autoTable({
+      startY: doc.lastAutoTable.finalY + 34,
+      head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
+      body: unpaid.map((s) => [s.admission, s.name, s.className, `TSh ${s.expected.toLocaleString()}`, `TSh ${s.paid.toLocaleString()}`, s.parent]),
+      styles: { fontSize: 9, cellPadding: 3 },
+      headStyles: { fillColor: [239, 68, 68], textColor: 255 },
+    });
+
+    doc.text('Expenses', 40, doc.lastAutoTable.finalY + 24);
+    doc.autoTable({
+      startY: doc.lastAutoTable.finalY + 34,
+      head: [['Item', 'Amount', 'Paid To', 'Contact', 'Date', 'Ref', 'Note']],
+      body: expenses.map((e) => [e.item, `TSh ${Number(e.amount || 0).toLocaleString()}`, e.paidTo, e.contact, e.date, e.ref, e.note]),
+      styles: { fontSize: 9, cellPadding: 3 },
+      headStyles: { fillColor: [30, 64, 175], textColor: 255 },
+    });
+
+    doc.save(`graduation_audit_${y}.pdf`);
+  }
+
+  // Override exports for expenses & audit with secure handlers
+  const expenseCsvButtons = document.querySelectorAll('#btnExpCSV, button[data-export="expenses"][data-format="csv"]');
+  expenseCsvButtons.forEach((btn) => btn.addEventListener('click', exportExpensesCSV));
+
+  const expensePdfButtons = document.querySelectorAll('#btnExpPDF, button[data-export="expenses"][data-format="pdf"]');
+  expensePdfButtons.forEach((btn) => btn.addEventListener('click', exportExpensesPDF));
+
+  const auditCsvButtons = document.querySelectorAll('#btnAuditCSV, button[data-export="audit"][data-format="csv"]');
+  auditCsvButtons.forEach((btn) => btn.addEventListener('click', exportAuditCSV));
+
+  const auditPdfButtons = document.querySelectorAll('#btnAuditPDF, button[data-export="audit"][data-format="pdf"]');
+  auditPdfButtons.forEach((btn) => btn.addEventListener('click', exportAuditPDF));
+
   function handleExport(type, format) {
     if (format === 'csv') {
       downloadCsv(type);
