@@ -1474,16 +1474,26 @@
       const fallbackSnap = await db().ref(`graduation/${year}/expenses`).once('value');
       raw = fallbackSnap.val() || {};
     }
-    return Object.entries(raw).map(([id, e]) => ({
-      id,
-      item: e.item || '-',
-      amount: toNumberSafe(e.total || e.amount || (Number(e.priceEach || 0) * Number(e.quantity || 0))),
-      paidTo: e.seller || e.paidTo || '-',
-      contact: e.sellerPhone || e.contact || '-',
-      date: e.createdAt ? new Date(Number(e.createdAt)).toLocaleDateString('en-GB') : toStr(e.date || ''),
-      ref: e.reference || e.ref || e.proofUrl || '-',
-      note: e.note || '',
-    }));
+    return Object.entries(raw).map(([id, e]) => {
+      const qty = Number(e.quantity || 0);
+      const priceEach = toNumberSafe(e.priceEach || 0);
+      const total = toNumberSafe(e.total || (priceEach * qty));
+      const createdAt = e.createdAt ? new Date(Number(e.createdAt)) : null;
+      return {
+        id,
+        item: e.item || '-',
+        seller: e.seller || e.paidTo || '-',
+        contact: e.sellerPhone || e.contact || '-',
+        quantity: qty,
+        priceEach,
+        total,
+        recordedAt: createdAt ? createdAt.toLocaleString('en-GB') : (e.date || ''),
+        recordedBy: e.recordedBy || e.by || '-',
+        proof: e.proofUrl ? 'Yes' : 'No',
+        proofUrl: e.proofUrl || '',
+        note: e.note || '',
+      };
+    });
   }
 
   function downloadCSV(name, rows) {
@@ -1502,6 +1512,20 @@
 
   async function loadGradLedger(year) {
     const SCHOOL = getSchoolPrefix();
+    const yearStr = String(year);
+    const useStateStudents = state.currentYear === Number(yearStr) ? state.students : null;
+    if (useStateStudents && Object.keys(useStateStudents || {}).length) {
+      return Object.entries(useStateStudents).map(([id, s]) => ({
+        id,
+        admission: s.admissionNo || id,
+        name: s.name || s.fullName || '-',
+        className: s.class || s.className || '-',
+        expected: getExpectedFee(s),
+        paid: getPaidTotal(s),
+        parent: s.parentPhone || s.primaryParentContact || s.guardianPhone || s.contact || s.parentContact || '-',
+      }));
+    }
+
     const [studentsSnap, paymentsSnap] = await Promise.all([
       db().ref(`${SCHOOL}graduation/${year}/students`).once('value'),
       db().ref(`${SCHOOL}graduation/${year}/payments`).once('value'),
@@ -1519,21 +1543,25 @@
     }
 
     const paymentTotals = buildPaymentTotals(paymentsRaw || {});
+    const seen = new Set();
 
     return Object.entries(studentsRaw).map(([id, s]) => {
+      const adm = sanitizeKey(s.admissionNo || id);
+      if (adm && seen.has(adm)) return null;
+      if (adm) seen.add(adm);
       const expected = toNumberSafe(s.expectedFee ?? s.expected ?? computeExpectedFee(s.class));
-      const paid = Math.max(toNumberSafe(s.paid || 0), toNumberSafe(paymentTotals[id] || 0));
+      const paid = Math.max(toNumberSafe(s.paid || 0), toNumberSafe(paymentTotals[id] || paymentTotals[adm] || 0));
       const parent = s.parentPhone || s.primaryParentContact || s.guardianPhone || s.contact || s.parentContact || '-';
       return {
-        id,
-        admission: s.admissionNo || id,
+        id: adm || id,
+        admission: s.admissionNo || adm || id,
         name: s.name || s.fullName || '-',
         className: s.class || s.className || '-',
         expected,
         paid,
         parent,
       };
-    });
+    }).filter(Boolean);
   }
 
   function partitionStudents(list) {
@@ -1556,7 +1584,18 @@
     const y = getSelectedYear();
     const list = await loadGradExpenses(y);
     if (!list.length) { alert('No expenses found.'); return; }
-    downloadCSV(`graduation_expenses_${y}`, list);
+    const rows = list.map((e) => ({
+      item: e.item,
+      seller: e.seller,
+      contact: e.contact,
+      quantity: e.quantity,
+      priceEach: e.priceEach,
+      total: e.total,
+      recordedAt: e.recordedAt,
+      recordedBy: e.recordedBy,
+      proof: e.proof,
+    }));
+    downloadCSV(`graduation_expenses_${y}`, rows);
   }
 
   async function exportExpensesPDF(event) {
@@ -1580,16 +1619,18 @@
 
     const rows = list.map((e) => [
       e.item,
-      `TSh ${Number(e.amount || 0).toLocaleString()}`,
-      e.paidTo,
+      e.seller,
       e.contact,
-      e.date,
-      e.ref,
-      e.note,
+      e.quantity,
+      `TSh ${Number(e.priceEach || 0).toLocaleString()}`,
+      `TSh ${Number(e.total || 0).toLocaleString()}`,
+      e.recordedAt,
+      e.recordedBy,
+      e.proof,
     ]);
     doc.autoTable({
       startY: 90,
-      head: [['Item', 'Amount', 'Paid To', 'Contact', 'Date', 'Ref', 'Note']],
+      head: [['Item', 'Seller', 'Contact', 'Qty', 'Price Each', 'Total', 'Recorded', 'By', 'Proof']],
       body: rows,
       styles: { fontSize: 9, cellPadding: 4 },
       headStyles: { fillColor: [33, 37, 41], textColor: 255 },
@@ -1640,8 +1681,8 @@
     unpaid.forEach((s) => push([s.admission, s.name, s.className, s.expected, s.paid, s.parent]));
     push(['', '']);
 
-    push(['"EXPENSES"']); push(['Item', 'Amount', 'Paid To', 'Contact', 'Date', 'Ref', 'Note']);
-    expenses.forEach((e) => push([e.item, e.amount, e.paidTo, e.contact, e.date, e.ref, e.note]));
+    push(['"EXPENSES"']); push(['Item', 'Seller', 'Contact', 'Qty', 'Price Each', 'Total', 'Recorded', 'By', 'Proof']);
+    expenses.forEach((e) => push([e.item, e.seller, e.contact, e.quantity, e.priceEach, e.total, e.recordedAt, e.recordedBy, e.proof]));
 
     const blob = new Blob([lines.map((r) => Array.isArray(r) ? r.join(',') : r).join('\n')], { type: 'text/csv;charset=utf-8;' });
     const a = document.createElement('a');
@@ -1725,8 +1766,18 @@
     doc.text('Expenses', 40, doc.lastAutoTable.finalY + 24);
     doc.autoTable({
       startY: doc.lastAutoTable.finalY + 34,
-      head: [['Item', 'Amount', 'Paid To', 'Contact', 'Date', 'Ref', 'Note']],
-      body: expenses.map((e) => [e.item, `TSh ${Number(e.amount || 0).toLocaleString()}`, e.paidTo, e.contact, e.date, e.ref, e.note]),
+      head: [['Item', 'Seller', 'Contact', 'Qty', 'Price Each', 'Total', 'Recorded', 'By', 'Proof']],
+      body: expenses.map((e) => [
+        e.item,
+        e.seller,
+        e.contact,
+        e.quantity,
+        `TSh ${Number(e.priceEach || 0).toLocaleString()}`,
+        `TSh ${Number(e.total || 0).toLocaleString()}`,
+        e.recordedAt,
+        e.recordedBy,
+        e.proof,
+      ]),
       styles: { fontSize: 9, cellPadding: 3 },
       headStyles: { fillColor: [30, 64, 175], textColor: 255 },
     });
