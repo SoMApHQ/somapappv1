@@ -362,9 +362,10 @@
   function handleAuthChange(user) {
     state.user = user;
     const allowed = isAuthorized(user?.email || '');
-    const allowGalleryRead = allowed || state.page === 'galleries';
-    showAuthGate(allowGalleryRead);
-    if (!allowGalleryRead) return;
+    const allowRead = allowed || state.page === 'dashboard' || state.page === 'galleries';
+    state.readOnly = !allowed;
+    showAuthGate(allowRead);
+    if (!allowRead) return;
 
     ensureYearReady(state.currentYear)
       .then(() => {
