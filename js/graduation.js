@@ -1733,6 +1733,39 @@
     });
   }
 
+  async function loadGradDonations(year) {
+    const SCHOOL = getSchoolPrefix();
+    const yr = String(year);
+    const paths = [
+      `${SCHOOL}graduations/${yr}/donations`,
+      `${SCHOOL}graduation/${yr}/donations`,
+      `graduations/${yr}/donations`,
+      `graduation/${yr}/donations`,
+    ];
+    let raw = null;
+    for (const path of paths) {
+      const snap = await db().ref(path).once('value');
+      if (snap.exists()) { raw = snap.val(); break; }
+    }
+    const list = Object.entries(raw || {}).map(([id, d]) => {
+      const amount = toNumberSafe(d.amount);
+      const donorName = d.donorName || '-';
+      const donorContact = d.donorContact || '-';
+      const proofNote = d.proofNote || '';
+      const ts = d.donationDateTs || Date.parse(d.donationDate || '') || Number(d.createdAt) || null;
+      const recordedAt = ts ? new Date(ts).toLocaleString('en-GB') : '';
+      const recordedBy = (d.recordedBy && (d.recordedBy.email || d.recordedBy.uid)) || '-';
+      return { id, amount, donorName, donorContact, proofNote, recordedAt, recordedBy, ts };
+    });
+    const total = list.reduce((sum, d) => sum + (toNumberSafe(d.amount) || 0), 0);
+    const latestTs = list.reduce((acc, d) => {
+      const t = Number(d.ts);
+      if (!t || Number.isNaN(t)) return acc;
+      return acc == null ? t : Math.max(acc, t);
+    }, null);
+    return { list, total, latestTs };
+  }
+
   function downloadCSV(name, rows) {
     if (!rows || !rows.length) return;
     const header = Object.keys(rows[0] || {});
@@ -1885,14 +1918,16 @@
       event.stopImmediatePropagation();
     }
     const y = getSelectedYear();
-    const [students, expenses] = await Promise.all([loadGradLedger(y), loadGradExpenses(y)]);
+    const [students, expenses, donations] = await Promise.all([loadGradLedger(y), loadGradExpenses(y), loadGradDonations(y)]);
     const { paid, partial, unpaid } = partitionStudents(students);
 
     const totalExpected = students.reduce((a, b) => a + b.expected, 0);
     const totalPaid = students.reduce((a, b) => a + b.paid, 0);
-    const totalUncol = totalExpected - totalPaid;
+    const donationTotal = donations.total || 0;
+    const totalCollected = totalPaid + donationTotal;
+    const totalUncol = Math.max(0, totalExpected - totalCollected);
     const totalExp = expenses.reduce((a, b) => a + (Number(b.amount) || 0), 0);
-    const netBalance = totalPaid - totalExp;
+    const netBalance = totalCollected - totalExp;
 
     const lines = [];
     const push = (arr) => lines.push(...arr);
@@ -1903,10 +1938,12 @@
     push([`"Partial count",${partial.length}`]);
     push([`"Unpaid count",${unpaid.length}`]);
     push([`"Total expected",${totalExpected}`]);
-    push([`"Total collected",${totalPaid}`]);
-    push([`"Uncollected",${totalUncol}`]);
+    push([`"Total collected (payments)",${totalPaid}`]);
+    push([`"Donations total",${donationTotal}`]);
+    push([`"Total collected (incl donations)",${totalCollected}`]);
+    push([`"Uncollected after donations",${totalUncol}`]);
     push([`"Expenses total",${totalExp}`]);
-    push([`"Net (collected - expenses)",${netBalance}`]);
+    push([`"Net (collected incl donations - expenses)",${netBalance}`]);
     push(['', '']);
 
     push(['"PAID"']); push(['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Parent']);
@@ -1919,6 +1956,10 @@
 
     push(['"UNPAID"']); push(['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Parent']);
     unpaid.forEach((s) => push([s.admission, s.name, s.className, s.expected, s.paid, s.parent]));
+    push(['', '']);
+
+    push(['"DONATIONS"']); push(['Donor', 'Contact', 'Amount', 'Date', 'Proof note', 'Recorded by']);
+    donations.list.forEach((d) => push([d.donorName, d.donorContact, d.amount, d.recordedAt, d.proofNote, d.recordedBy]));
     push(['', '']);
 
     push(['"EXPENSES"']); push(['Item', 'Seller', 'Contact', 'Qty', 'Price Each', 'Total', 'Recorded', 'By', 'Proof']);
@@ -1966,15 +2007,17 @@
     const year = getSelectedYear();
     
     // Load Data
-    const [students, expenses] = await Promise.all([loadGradLedger(year), loadGradExpenses(year)]);
+    const [students, expenses, donations] = await Promise.all([loadGradLedger(year), loadGradExpenses(year), loadGradDonations(year)]);
     const { paid, partial, unpaid } = partitionStudents(students);
     
     // Calculate Metrics
     const totalExpected = students.reduce((a, b) => a + toNumberSafe(b.expected), 0);
     const totalPaid = students.reduce((a, b) => a + toNumberSafe(b.paid), 0);
-    const totalUncol = Math.max(0, totalExpected - totalPaid);
+    const donationTotal = donations.total || 0;
+    const totalCollected = totalPaid + donationTotal;
+    const totalUncol = Math.max(0, totalExpected - totalCollected);
     const totalExp = expenses.reduce((a, b) => a + (Number(b.total) || Number(b.amount) || 0), 0);
-    const netBalance = totalPaid - totalExp;
+    const netBalance = totalCollected - totalExp;
 
     const left = 40;
     let top = 40;
@@ -2027,10 +2070,12 @@
       ['Partial count', partial.length],
       ['Unpaid count', unpaid.length],
       ['Total expected', `TSh ${totalExpected.toLocaleString()}`],
-      ['Total collected', `TSh ${totalPaid.toLocaleString()}`],
-      ['Uncollected', `TSh ${totalUncol.toLocaleString()}`],
+      ['Total collected (payments)', `TSh ${totalPaid.toLocaleString()}`],
+      ['Donations total', `TSh ${donationTotal.toLocaleString()}`],
+      ['Total collected (incl donations)', `TSh ${totalCollected.toLocaleString()}`],
+      ['Uncollected after donations', `TSh ${totalUncol.toLocaleString()}`],
       ['Expenses total', `TSh ${totalExp.toLocaleString()}`],
-      ['Net (collected - expenses)', `TSh ${netBalance.toLocaleString()}`],
+      ['Net (collected incl donations - expenses)', `TSh ${netBalance.toLocaleString()}`],
     ];
 
     doc.autoTable({
@@ -2044,6 +2089,39 @@
     });
     
     top = doc.lastAutoTable.finalY + 24;
+
+    // --- DONATIONS ---
+    if (donations.list && donations.list.length) {
+      if (top > 750) { doc.addPage(); top = 40; }
+      doc.setFontSize(12);
+      doc.setFont('times', 'bold');
+      doc.text('Donations', left, top);
+      top += 10;
+      doc.autoTable({
+        startY: top,
+        head: [['Donor', 'Contact', 'Amount', 'Date', 'Proof note', 'Recorded by']],
+        body: donations.list.map((d) => [
+          d.donorName,
+          d.donorContact,
+          `TSh ${toNumberSafe(d.amount).toLocaleString()}`,
+          d.recordedAt || '',
+          d.proofNote || '',
+          d.recordedBy || '',
+        ]),
+        styles: { fontSize: 9, cellPadding: 3 },
+        headStyles: { fillColor: [59, 130, 246], textColor: 255 },
+        foot: [[
+          'TOTAL', '', `TSh ${toNumberSafe(donations.total).toLocaleString()}`, '', '', ''
+        ]],
+        footStyles: { fillColor: [219, 234, 254], textColor: [30, 64, 175], fontStyle: 'bold' },
+      });
+      top = doc.lastAutoTable.finalY + 24;
+    } else {
+      doc.setFont('times', 'italic');
+      doc.setFontSize(10);
+      doc.text('No donations recorded for this year.', left, top);
+      top += 20;
+    }
 
     // Helper for section totals
     const calcSectionTotals = (list) => {
