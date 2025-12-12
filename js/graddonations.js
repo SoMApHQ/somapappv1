@@ -127,9 +127,6 @@
     const proofNote = el('textarea', 'w-full glass-border rounded-xl px-3 py-2', []);
     proofNote.rows = 2; proofNote.placeholder = 'Proof note (optional)';
 
-    const proofUrl = el('input', 'w-full glass-border rounded-xl px-3 py-2', []);
-    proofUrl.type = 'url'; proofUrl.placeholder = 'Proof URL (optional, e.g., receipt image)';
-
     const err = el('div', 'text-xs text-red-600 min-h-4', '');
 
     const actions = el('div', 'flex gap-2 pt-2', []);
@@ -145,7 +142,6 @@
     form.appendChild(row('Donor contact', donorContact));
     form.appendChild(row('Donation date', donationDate, 'required'));
     form.appendChild(row('Proof note', proofNote, 'optional'));
-    form.appendChild(row('Proof URL', proofUrl, 'optional'));
     form.appendChild(err);
     form.appendChild(actions);
 
@@ -177,7 +173,6 @@
         donationDate: donationDate.value,
         donationDateTs: parsedDate,
         proofNote: (proofNote.value || '').trim() || null,
-        proofUrl: (proofUrl.value || '').trim() || null,
         clientRecordedAt: new Date().toISOString(),
         createdAt: hasFirebase ? firebase.database.ServerValue.TIMESTAMP : Date.now(),
         recordedBy: {
