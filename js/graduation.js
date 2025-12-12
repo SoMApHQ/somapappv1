@@ -20,6 +20,73 @@
 
   const GRAD_EDIT_PASSWORD = 'REHEMam!';
 
+  // ==== DELETE/AUDIT AUTH GUARD ====
+  const DELETE_PASSWORD = 'REHEMam!';
+  const DELETE_MODE_MINUTES = 15;
+  const MAX_FAILS = 5;
+  const LOCKOUT_MS = 2 * 60 * 1000;
+
+  const AUTH_UNTIL_KEY = 'gradDeleteAuthUntil';
+  const FAILS_KEY = 'gradDeleteFailCount';
+  const LOCK_UNTIL_KEY = 'gradDeleteLockUntil';
+
+  const safeSession = {
+    get(key) { try { return sessionStorage.getItem(key); } catch (_) { return null; } },
+    set(key, value) { try { sessionStorage.setItem(key, value); } catch (_) {} },
+    remove(key) { try { sessionStorage.removeItem(key); } catch (_) {} },
+  };
+
+  function nowMs() { return Date.now(); }
+
+  function isDeleteModeActive() {
+    const until = Number(safeSession.get(AUTH_UNTIL_KEY) || 0);
+    return nowMs() < until;
+  }
+
+  function clearDeleteMode() {
+    safeSession.remove(AUTH_UNTIL_KEY);
+    safeSession.remove(FAILS_KEY);
+    safeSession.remove(LOCK_UNTIL_KEY);
+    alert('Delete mode cleared.');
+  }
+
+  function remainingLockMs() {
+    const lockUntil = Number(safeSession.get(LOCK_UNTIL_KEY) || 0);
+    return Math.max(lockUntil - nowMs(), 0);
+  }
+
+  async function requireDeleteAuth() {
+    if (isDeleteModeActive()) return true;
+
+    const rem = remainingLockMs();
+    if (rem > 0) {
+      const secs = Math.ceil(rem / 1000);
+      alert(`Too many wrong attempts. Try again in ${secs} seconds.`);
+      return false;
+    }
+
+    const input = prompt('Enter delete password to proceed:', '');
+    if (input == null) return false;
+
+    if (input === DELETE_PASSWORD) {
+      const until = nowMs() + DELETE_MODE_MINUTES * 60 * 1000;
+      safeSession.set(AUTH_UNTIL_KEY, String(until));
+      safeSession.remove(FAILS_KEY);
+      safeSession.remove(LOCK_UNTIL_KEY);
+      return true;
+    }
+
+    const fails = 1 + Number(safeSession.get(FAILS_KEY) || 0);
+    safeSession.set(FAILS_KEY, String(fails));
+    if (fails >= MAX_FAILS) {
+      safeSession.set(LOCK_UNTIL_KEY, String(nowMs() + LOCKOUT_MS));
+      alert('Wrong password too many times. You are locked out for 2 minutes.');
+    } else {
+      alert(`Wrong password. Attempts: ${fails}/${MAX_FAILS}.`);
+    }
+    return false;
+  }
+
   // ---------- STATE ----------
   const state = {
     page: 'dashboard',
@@ -194,6 +261,8 @@
     generateCertificate,
     generateAllCertificates,
   };
+  window.cleanGhosts = cleanGhosts;
+  window.clearDeleteMode = clearDeleteMode;
 
   // ---------- INIT ----------
   function init(options = {}) {
@@ -374,7 +443,7 @@
       ensure('parentEmail', student.parentEmail, true);
       ensure('photoUrl', student.photoUrl || '', true);
 
-      if (!upsert.expectedFee) {
+      if (upsert.expectedFee === undefined || upsert.expectedFee === null) {
         upsert.expectedFee = computeExpectedFee(upsert.class);
         changed = true;
       }
@@ -426,6 +495,11 @@
       entry.photoUrl = entry.photoUrl || entry.passportPhotoUrl || entry.photo || '';
       entry.isGraduand = isGraduand(entry.classLevel);
       return entry;
+    }).filter((entry) => {
+      const hasName = toStr(entry.fullName).trim() && toStr(entry.fullName).trim().toLowerCase() !== 'student';
+      const hasClass = toStr(entry.classLevel).trim();
+      const hasParent = toStr(entry.parentPhone || entry.parentName).trim();
+      return entry.admissionNumber && hasName && hasClass && hasParent;
     });
     list.sort((a, b) => a.fullName.localeCompare(b.fullName, 'en'));
     state.masterStudents = list;
@@ -587,6 +661,7 @@
     const updates = {};
     const year = state.currentYear;
     Object.entries(state.students || {}).forEach(([key, student]) => {
+      if (isGhostStudent(student)) return;
       const paid = getPaidTotal(student);
       const expected = getExpectedFee(student);
       const balance = Math.max(0, expected - paid);
@@ -610,8 +685,8 @@
 
   function renderDashboardSummary() {
     if (state.page !== 'dashboard') return;
-    const students = Object.values(state.students || {});
-    const totalStudents = state.masterStudents ? state.masterStudents.length : students.length;
+    const students = getValidStudents();
+    const totalStudents = students.length;
     const graduands = students.filter((student) => student.isGraduand);
     const expected = students.reduce((sum, student) => sum + getExpectedFee(student), 0);
     const collected = students.reduce((sum, student) => sum + getPaidTotal(student), 0);
@@ -640,6 +715,7 @@
     const explicitStatus = toStr(student.status).toLowerCase();
     const cutoff = new Date(state.meta?.debtCutoffISO || `${state.currentYear}-11-07`);
     const now = new Date();
+    if (expected <= 0) return 'paid';
     if (paid >= expected && expected > 0) return 'paid';
     if (explicitStatus === 'paid') return 'paid'; // trust manual override when amounts are hidden to some viewers
     if (now > cutoff && paid < expected) return 'debt';
@@ -658,10 +734,32 @@
     return getBalance(student) > 0;
   }
 
+  function isGhostStudent(student) {
+    if (!student) return true;
+    const name = toStr(student.name).trim();
+    const cls = toStr(student.class).trim();
+    const parent = toStr(student.parentPhone || student.parentName).trim();
+    const hasAdmission = toStr(student.admissionNo).trim();
+    if (!hasAdmission) return true;
+    if (!name || name.toLowerCase() === 'student') return true;
+    if (!cls || cls === '--') return true;
+    if (!parent || parent === '--') return true;
+    return false;
+  }
+
+  function getValidStudents() {
+    return Object.values(state.students || {}).filter((s) => !isGhostStudent(s));
+  }
+
   function getExpectedFee(student) {
     const fallback = computeExpectedFee(student?.class, state.meta);
-    const expected = toNumberSafe(student?.expectedFee ?? fallback ?? 0);
-    return expected > 0 ? expected : toNumberSafe(fallback);
+    if (student && student.expectedOverride !== undefined && student.expectedOverride !== null) {
+      return toNumberSafe(student.expectedOverride);
+    }
+    if (student && student.expectedFee !== undefined && student.expectedFee !== null) {
+      return toNumberSafe(student.expectedFee);
+    }
+    return toNumberSafe(fallback);
   }
 
   function buildPaymentTotals(payments) {
@@ -713,6 +811,7 @@
       const expected = getExpectedFee(student);
       const paid = getPaidTotal(student);
       const id = sanitizeKey(student.admissionNo);
+       const isGhost = isGhostStudent(student);
       const debtTag = status === 'debt' ? '<span class="debt-pill">DEBT</span>' : '';
       const badge = status === 'paid'
         ? 'status-badge paid'
@@ -723,14 +822,14 @@
             : 'status-badge unpaid';
       const balance = getBalance(student);
       return `
-        <tr class="${status === 'debt' ? 'row-debt' : ''}">
+        <tr class="${status === 'debt' ? 'row-debt' : ''} ${isGhost ? 'bg-amber-50' : ''}">
           <td>
             <div class="flex items-center gap-3">
               ${student.photoUrl
                 ? `<img src="${student.photoUrl}" class="w-10 h-10 rounded-full object-cover border border-white/10" alt="${toStr(student.name)}">`
                 : '<div class="w-10 h-10 rounded-full bg-sky-200 flex items-center justify-center text-sky-700 font-semibold">GR</div>'}
               <div>
-                <div class="font-semibold text-slate-900">${toStr(student.name)}</div>
+                <div class="font-semibold text-slate-900">${toStr(student.name)}${isGhost ? ' <span class="text-xs text-amber-600 font-semibold">(ghost)</span>' : ''}</div>
                 <div class="text-xs text-slate-500">${toStr(student.admissionNo)}</div>
               </div>
             </div>
@@ -755,6 +854,7 @@
           <td class="text-right">
             <button class="action-btn" data-action="pay" data-adm="${id}">Record Payment</button>
             <button class="action-btn secondary" data-action="note" data-adm="${id}">Note</button>
+            <button class="action-btn danger" data-action="delete" data-adm="${id}">Delete</button>
           </td>
         </tr>`;
     }).join('');
@@ -763,7 +863,7 @@
   function populateStudentSelect() {
     const select = $('#paymentStudent');
     if (!select) return;
-    const rows = Object.values(state.students || {});
+    const rows = getValidStudents();
     select.innerHTML = `<option value="">Select student</option>${
       rows.map((student) =>
         `<option value="${sanitizeKey(student.admissionNo)}">${toStr(student.name)}  -  ${toStr(student.class)}  -  ${toStr(student.admissionNo)}</option>`
@@ -996,12 +1096,22 @@
 
         try {
           if (field === 'expected') {
-            const path = `${SCHOOL}graduation/${YEAR}/students/${id}/expectedFee`;
-            const beforeSnap = await dbref(path).once('value');
+            const studentPath = `${SCHOOL}graduation/${YEAR}/students/${id}`;
+            const beforeSnap = await dbref(`${studentPath}/expectedFee`).once('value');
             const before = toNumberSafe(beforeSnap.val() ?? state.students?.[id]?.expectedFee);
-            await dbref(path).set(amount);
+            const paidVal = toNumberSafe(document.querySelector(`[data-col="paid"][data-id="${id}"]`)?.getAttribute('data-val') || state.paymentTotals?.[id] || state.students?.[id]?.paid || 0);
+            const bal = Math.max(0, amount - paidVal);
+            const status = bal === 0 && amount >= 0 ? 'paid' : (paidVal > 0 ? 'partial' : 'debt');
+
+            await dbref(studentPath).update({
+              expectedFee: amount,
+              expectedOverride: amount,
+              balance: bal,
+              status,
+            });
             if (state.students?.[id]) {
               state.students[id].expectedFee = amount;
+              state.students[id].expectedOverride = amount;
               state.students[id].balance = Math.max(0, amount - getPaidTotal(state.students[id]));
             }
 
@@ -1093,6 +1203,63 @@
         }
       });
     }
+  }
+
+  // ---------- DELETE & GHOST CLEANER ----------
+  async function confirmDeleteFlow(adm, name) {
+    const ok = await requireDeleteAuth();
+    if (!ok) return;
+    const scope = confirm(`Futa ${name} (${adm}) KILA MAHALI?\n\nOK = Kila mahali\nCancel = Graduation tu`);
+
+    const YEAR = getSelectedYear();
+    const SCHOOL = getSchoolPrefix();
+    const updates = {};
+
+    updates[`${SCHOOL}graduation/${YEAR}/students/${adm}`] = null;
+    updates[`${SCHOOL}graduation/${YEAR}/certificates/${adm}`] = null;
+
+    Object.entries(state.payments || {}).forEach(([key, payment]) => {
+      const pid = sanitizeKey(payment?.admissionNo || payment?.admission || payment?.admNo || payment?.studentAdm);
+      if (pid === adm) {
+        updates[`${SCHOOL}graduation/${YEAR}/payments/${key}`] = null;
+      }
+    });
+
+    if (scope) {
+      updates[`students/${adm}`] = null;
+    }
+
+    await db().ref().update(updates);
+    showToast('Record deleted.', 'warn');
+  }
+
+  async function cleanGhosts() {
+    const ok = await requireDeleteAuth();
+    if (!ok) return;
+
+    const YEAR = getSelectedYear();
+    const SCHOOL = getSchoolPrefix();
+    const updates = {};
+    let count = 0;
+
+    Object.entries(state.students || {}).forEach(([adm, student]) => {
+      if (!isGhostStudent(student)) return;
+      updates[`${SCHOOL}graduation/${YEAR}/students/${adm}`] = null;
+      updates[`${SCHOOL}graduation/${YEAR}/certificates/${adm}`] = null;
+
+      Object.entries(state.payments || {}).forEach(([key, payment]) => {
+        const pid = sanitizeKey(payment?.admissionNo || payment?.admission || payment?.admNo || payment?.studentAdm);
+        if (pid === adm) {
+          updates[`${SCHOOL}graduation/${YEAR}/payments/${key}`] = null;
+        }
+      });
+      count += 1;
+    });
+
+    if (!count) { alert('Hakuna ghost rows.'); return; }
+    if (!confirm(`Utafuta ghost ${count} rows?`)) return;
+    await db().ref().update(updates);
+    showToast(`Ghost ${count} ${count === 1 ? 'row' : 'rows'} removed.`, 'warn');
   }
 
   // ---------- FORMS: PAYMENTS / EXPENSES / GALLERY ----------
@@ -1549,14 +1716,17 @@
       const adm = sanitizeKey(s.admissionNo || id);
       if (adm && seen.has(adm)) return null;
       if (adm) seen.add(adm);
-      const expected = toNumberSafe(s.expectedFee ?? s.expected ?? computeExpectedFee(s.class));
+      const expected = toNumberSafe(s.expectedOverride ?? s.expectedFee ?? s.expected ?? computeExpectedFee(s.class));
       const paid = Math.max(toNumberSafe(s.paid || 0), toNumberSafe(paymentTotals[id] || paymentTotals[adm] || 0));
       const parent = s.parentPhone || s.primaryParentContact || s.guardianPhone || s.contact || s.parentContact || '-';
+      const name = s.name || s.fullName || '-';
+      const cls = s.class || s.className || '-';
+      if (!adm || !name || name.toLowerCase() === 'student' || !cls || cls === '-' || !parent || parent === '-') return null;
       return {
         id: adm || id,
         admission: s.admissionNo || adm || id,
-        name: s.name || s.fullName || '-',
-        className: s.class || s.className || '-',
+        name,
+        className: cls,
         expected,
         paid,
         parent,
@@ -1569,7 +1739,7 @@
     const partial = [];
     const unpaid = [];
     list.forEach((s) => {
-      if (s.paid >= s.expected && s.expected > 0) paid.push(s);
+      if (s.expected <= 0 || s.paid >= s.expected) paid.push(s);
       else if (s.paid > 0 && s.paid < s.expected) partial.push(s);
       else unpaid.push(s);
     });
@@ -1697,92 +1867,131 @@
       event.preventDefault();
       event.stopImmediatePropagation();
     }
-    const y = getSelectedYear();
-    const [students, expenses] = await Promise.all([loadGradLedger(y), loadGradExpenses(y)]);
+    await generateAuditPDF();
+  }
+
+  // Fancy Audit PDF with logo, Swahili intro, and signatories
+  function imgToDataURL(url) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = function () {
+        const c = document.createElement('canvas');
+        c.width = img.width; c.height = img.height;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        resolve(c.toDataURL('image/png'));
+      };
+      img.onerror = reject;
+      img.src = url;
+    });
+  }
+
+  async function generateAuditPDF(options = {}) {
+    const { jsPDF } = window.jspdf || {};
+    if (!jsPDF) { alert('PDF library missing'); return; }
+    const doc = new jsPDF('p', 'pt', 'a4');
+    if (!doc.autoTable) { alert('PDF table plugin missing'); return; }
+
+    const year = getSelectedYear();
+    const schoolName = options.schoolName || 'Socrates School';
+    const schoolLogoUrl = options.schoolLogoUrl || '../images/somap-logo.png.jpg';
+    const schoolContacts = options.schoolContacts || 'P.O. Box 123, Arusha • +255 763 000 000 • info@socrates.ac.tz';
+
+    const [students, expenses] = await Promise.all([loadGradLedger(year), loadGradExpenses(year)]);
     const { paid, partial, unpaid } = partitionStudents(students);
-    const totalExpected = students.reduce((a, b) => a + b.expected, 0);
-    const totalPaid = students.reduce((a, b) => a + b.paid, 0);
-    const totalUncol = totalExpected - totalPaid;
+    const totalExpected = students.reduce((a, b) => a + toNumberSafe(b.expected), 0);
+    const totalPaid = students.reduce((a, b) => a + toNumberSafe(b.paid), 0);
+    const totalUncol = Math.max(0, totalExpected - totalPaid);
     const totalExp = expenses.reduce((a, b) => a + (Number(b.amount) || 0), 0);
     const netBalance = totalPaid - totalExp;
 
-    const { jsPDF } = window.jspdf || {};
-    if (!jsPDF) { alert('PDF library missing'); return; }
-    const doc = new jsPDF({ orientation: 'p', unit: 'pt', format: 'a4' });
-    if (!doc.autoTable) { alert('PDF table plugin missing'); return; }
+    const left = 48; const top = 48; const lineH = 18;
 
+    try {
+      if (schoolLogoUrl) {
+        const dataURL = await imgToDataURL(schoolLogoUrl);
+        doc.addImage(dataURL, 'PNG', left, top, 64, 64);
+      }
+    } catch (err) {
+      console.warn('Logo load skipped', err?.message || err);
+    }
+
+    doc.setFont('Times', 'Bold');
     doc.setFontSize(16);
-    doc.text(`Socrates School — Graduation Audit Report (${y})`, 40, 50);
+    doc.text(`${schoolName} — Ripoti ya Ukaguzi wa Graduation (${year})`, left + 80, top + 24);
+
+    doc.setFont('Times', 'Normal');
     doc.setFontSize(10);
-    doc.text(`Report covers collections, pending balances, and expenses for ${students.length} students.`, 40, 64);
+    doc.text(schoolContacts, left + 80, top + 24 + lineH);
+
     doc.setFontSize(11);
-    doc.text('Summary', 40, 78);
+    const intro = [
+      'Kwenye ripoti hii, tunawasilisha tathmini ya makusanyo yote ya ada za graduation kwa mwaka huu.',
+      'Ripoti imeainisha kiasi kilichotarajiwa, kiasi kilicholipwa, na salio linalodaiwa na kila mwanafunzi.',
+      'Takwimu zimechambuliwa kulingana na madarasa na hadhi ya malipo ili kuwezesha ufuatiliaji sahihi.',
+      'Tunalenga kusaidia kamati ya shule kupanga maamuzi thabiti kuhusu ukamilishaji wa malipo.',
+      'Ripoti pia inaangazia tofauti za makadirio na malipo halisi kwa uwazi mkubwa.',
+      'Vyanzo vya data ni sajili za wanafunzi, leja ya graduation, na stakabadhi zinazohusiana.',
+      'Uongozi wa shule umetumia tahadhari kuhakikisha usahihi na uadilifu wa taarifa zote zilizowasilishwa.',
+      'Mwisho, ripoti ina mapendekezo ya hatua za uboreshaji wa ukusanyaji wa ada zijazo.'
+    ].join(' ');
+    doc.text(doc.splitTextToSize(intro, 520), left, top + 64 + lineH * 2 + 8);
+
+    const rows = students.map((s) => [
+      s.name,
+      s.className,
+      `TSh ${toNumberSafe(s.expected).toLocaleString()}`,
+      `TSh ${toNumberSafe(s.paid).toLocaleString()}`,
+      `TSh ${Math.max(0, toNumberSafe(s.expected) - toNumberSafe(s.paid)).toLocaleString()}`,
+      Math.max(0, toNumberSafe(s.expected) - toNumberSafe(s.paid)) === 0 ? 'PAID' : 'DEBT',
+      s.parent,
+    ]);
 
     doc.autoTable({
-      startY: 88,
-      head: [['Metric', 'Value']],
-      body: [
-        ['Students total', students.length],
-        ['Paid count', paid.length],
-        ['Partial count', partial.length],
-        ['Unpaid count', unpaid.length],
-        ['Total expected', `TSh ${totalExpected.toLocaleString()}`],
-        ['Total collected', `TSh ${totalPaid.toLocaleString()}`],
-        ['Uncollected', `TSh ${totalUncol.toLocaleString()}`],
-        ['Expenses total', `TSh ${totalExp.toLocaleString()}`],
-        ['Net (collected - expenses)', `TSh ${netBalance.toLocaleString()}`],
-      ],
+      startY: top + 64 + lineH * 2 + 8 + 100,
+      head: [['Student', 'Class', 'Expected', 'Paid', 'Balance', 'Status', 'Parent']],
+      body: rows,
       styles: { fontSize: 9, cellPadding: 4 },
-      headStyles: { fillColor: [33, 37, 41], textColor: 255 },
+      headStyles: { fillColor: [230, 230, 230] },
     });
 
-    doc.text('Paid Students', 40, doc.lastAutoTable.finalY + 24);
-    doc.autoTable({
-      startY: doc.lastAutoTable.finalY + 34,
-      head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
-      body: paid.map((s) => [s.admission, s.name, s.className, `TSh ${s.expected.toLocaleString()}`, `TSh ${s.paid.toLocaleString()}`, s.parent]),
-      styles: { fontSize: 9, cellPadding: 3 },
-      headStyles: { fillColor: [22, 163, 74], textColor: 255 },
-    });
+    const summaryY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 24 : top + 320;
+    doc.setFont('Times', 'Bold'); doc.setFontSize(12);
+    doc.text('Muhtasari wa Takwimu', left, summaryY);
+    doc.setFont('Times', 'Normal'); doc.setFontSize(11);
+    doc.text([
+      `Wote (halali): ${students.length}`,
+      `WalioLipa Kikamilifu: ${paid.length} (TSh ${totalPaid.toLocaleString()})`,
+      `Wenye Madeni/Salio: ${unpaid.length + partial.length} (TSh ${totalUncol.toLocaleString()})`,
+      `Jumla Matumizi: TSh ${totalExp.toLocaleString()}`,
+      `Mlinganyo wa mwisho (makusanyo - matumizi): TSh ${netBalance.toLocaleString()}`,
+    ], left, summaryY + lineH);
 
-    doc.text('Partial Payments', 40, doc.lastAutoTable.finalY + 24);
-    doc.autoTable({
-      startY: doc.lastAutoTable.finalY + 34,
-      head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
-      body: partial.map((s) => [s.admission, s.name, s.className, `TSh ${s.expected.toLocaleString()}`, `TSh ${s.paid.toLocaleString()}`, s.parent]),
-      styles: { fontSize: 9, cellPadding: 3 },
-      headStyles: { fillColor: [245, 158, 11], textColor: 0 },
-    });
+    const sigY = summaryY + lineH * 6;
+    doc.setFont('Times', 'Bold'); doc.setFontSize(12);
+    doc.text('Saini za Uidhinishaji', left, sigY);
+    doc.setFont('Times', 'Normal');
+    const signLines = [
+      'Mkuu wa Shule: ____________________________  Tarehe: __________',
+      'Mwalimu wa Taaluma: _______________________  Tarehe: __________',
+      'Kiongozi wa Bajeti ya Graduation: __________  Tarehe: __________',
+      'Mwenyekiti wa Kamati: ______________________  Tarehe: __________',
+      'Mjumbe wa Kamati 1: _______________________  Tarehe: __________',
+      'Mjumbe wa Kamati 2: _______________________  Tarehe: __________',
+      'Mjumbe wa Kamati 3: _______________________  Tarehe: __________',
+    ];
+    doc.text(signLines, left, sigY + lineH);
 
-    doc.text('Unpaid', 40, doc.lastAutoTable.finalY + 24);
-    doc.autoTable({
-      startY: doc.lastAutoTable.finalY + 34,
-      head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
-      body: unpaid.map((s) => [s.admission, s.name, s.className, `TSh ${s.expected.toLocaleString()}`, `TSh ${s.paid.toLocaleString()}`, s.parent]),
-      styles: { fontSize: 9, cellPadding: 3 },
-      headStyles: { fillColor: [239, 68, 68], textColor: 255 },
-    });
+    const pageCount = doc.internal.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i += 1) {
+      doc.setPage(i);
+      doc.setFontSize(9);
+      doc.text(`Imetayarishwa na Uongozi wa Shule ya Socrates • ${year}`, left, 820);
+      doc.text(`Ukurasa ${i} / ${pageCount}`, 500, 820);
+    }
 
-    doc.text('Expenses', 40, doc.lastAutoTable.finalY + 24);
-    doc.autoTable({
-      startY: doc.lastAutoTable.finalY + 34,
-      head: [['Item', 'Seller', 'Contact', 'Qty', 'Price Each', 'Total', 'Recorded', 'By', 'Proof']],
-      body: expenses.map((e) => [
-        e.item,
-        e.seller,
-        e.contact,
-        e.quantity,
-        `TSh ${Number(e.priceEach || 0).toLocaleString()}`,
-        `TSh ${Number(e.total || 0).toLocaleString()}`,
-        e.recordedAt,
-        e.recordedBy,
-        e.proof,
-      ]),
-      styles: { fontSize: 9, cellPadding: 3 },
-      headStyles: { fillColor: [30, 64, 175], textColor: 255 },
-    });
-
-    doc.save(`graduation_audit_${y}.pdf`);
+    doc.save(`Socrates_Graduation_Audit_${year}.pdf`);
   }
 
   // Override exports for expenses & audit with secure handlers
@@ -1813,7 +2022,7 @@
     let rows = [];
     if (type === 'students') {
       headers = ['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Balance', 'Status', 'Parent Phone'];
-      rows = Object.values(state.students || {}).map((student) => {
+      rows = getValidStudents().map((student) => {
         const expected = getExpectedFee(student);
         const paid = getPaidTotal(student);
         const balance = getBalance(student);
@@ -1840,7 +2049,7 @@
       ]);
     } else if (type === 'unpaid') {
       headers = ['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Balance', 'Status', 'Parent Phone'];
-      const allStudents = Object.values(state.students || {});
+      const allStudents = getValidStudents();
       // Fix: If a student appears twice (once paid, once unpaid/debt), exclude the debt record.
       const paidNames = new Set(allStudents.filter(s => !hasOutstanding(s)).map(s => toStr(s.name).trim().toLowerCase()));
       
@@ -1912,6 +2121,13 @@
       showToast('jsPDF library required for PDF export.', 'error');
       return;
     }
+    if (type === 'audit') {
+      generateAuditPDF().catch((err) => {
+        console.error(err);
+        showToast(err?.message || 'PDF export failed', 'error');
+      });
+      return;
+    }
     const doc = new window.jspdf.jsPDF('landscape');
     doc.setFontSize(16);
     doc.text(`Graduation ${state.currentYear}  -  ${type.toUpperCase()}`, 14, 16);
@@ -1922,7 +2138,7 @@
     let body = [];
     if (type === 'students') {
       headers = ['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Balance', 'Status'];
-      body = Object.values(state.students || {}).map((student) => {
+      body = getValidStudents().map((student) => {
         const expected = getExpectedFee(student);
         const paid = getPaidTotal(student);
         const balance = getBalance(student);
@@ -1948,7 +2164,7 @@
       ]);
     } else if (type === 'unpaid') {
       headers = ['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Balance', 'Status'];
-      const allStudents = Object.values(state.students || {});
+      const allStudents = getValidStudents();
       // Fix: If a student appears twice (once paid, once unpaid/debt), exclude the debt record.
       const paidNames = new Set(allStudents.filter(s => !hasOutstanding(s)).map(s => toStr(s.name).trim().toLowerCase()));
 
@@ -2312,6 +2528,9 @@
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
       showToast('Student selected in payment form.', 'warn', 2200);
+    } else if (action === 'delete') {
+      const student = state.students?.[admission];
+      confirmDeleteFlow(admission, student?.name || admission);
     } else if (action === 'note') {
       const ref = db().ref(`graduation/${state.currentYear}/students/${admission}`);
       const student = state.students?.[admission];
