@@ -665,7 +665,7 @@
     detachWatchers();
 
     if (typeof window.fetchStudentsCanonical === 'function') {
-      window.fetchStudentsCanonical().then((res) => {
+      window.fetchStudentsCanonical(year).then((res) => {
         state.canonicalKeys = res.keys;
         renderDashboardSummary();
         renderStudentTable();
@@ -876,7 +876,7 @@
 
     const search = toStr(state.filters.search).toLowerCase();
     const classFilter = state.filters.classLevel;
-    const rows = Object.values(state.students || {});
+    const rows = getValidStudents(); // Use filtered canonical list
     const filtered = rows.filter((student) => {
       const haystack = `${toStr(student.name)} ${toStr(student.admissionNo)} ${toStr(student.parentPhone)}`.toLowerCase();
       const matchesSearch = !search || haystack.includes(search);
