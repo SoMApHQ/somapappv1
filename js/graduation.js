@@ -266,6 +266,7 @@
 
   // ---------- INIT ----------
   function init(options = {}) {
+    console.log('GraduationSuite.init called', options);
     state.page = options.page || document.body.dataset.page || 'dashboard';
     state.currentYear = normalizeYear(options.year || new Date().getFullYear());
     buildYearSelector();
@@ -362,6 +363,7 @@
 
   // ---------- AUTH & YEAR BOOTSTRAP ----------
   function handleAuthChange(user) {
+    console.log('handleAuthChange:', user ? user.email : 'No user');
     state.user = user;
     const allowed = isAuthorized(user?.email || '');
     const allowGalleries = state.page === 'galleries';
@@ -374,11 +376,18 @@
       return;
     }
 
+    showToast('Loading graduation data...', 'info');
+
     ensureYearReady(state.currentYear)
       .then(() => {
         attachYearListeners(state.currentYear);
-        renderAll();
+        try {
+          renderAll();
+        } catch (e) {
+           console.error('Render failed', e);
+        }
         refreshTodayAttendance();
+        showToast('Graduation data loaded.', 'success');
       })
       .catch((err) => {
         console.error(err);
@@ -524,8 +533,26 @@
 
   async function fetchMasterStudents(force = false) {
     if (state.masterStudents && !force) return state.masterStudents;
-    const snapshot = await db().ref('students').once('value');
-    const obj = snapshot.val() || {};
+    
+    // Attempt fetch with timeout/fallback
+    let obj = {};
+    try {
+      const ref = db().ref('students');
+      // 10s timeout promise race
+      const snap = await Promise.race([
+        ref.once('value'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Students fetch timeout')), 10000))
+      ]);
+      obj = snap.val() || {};
+    } catch (err) {
+      console.warn('Master student fetch failed/timed out:', err);
+      showToast('Could not sync latest student roster (network/timeout). Using local cache if available.', 'warn');
+      // If we fail, return empty list so we don't crash the whole app.
+      // Ideally we would rely on what we already have in graduation/year/students
+      if (state.masterStudents) return state.masterStudents;
+      return []; 
+    }
+
     const list = Object.entries(obj).map(([key, val]) => {
       const entry = val || {};
       entry.__key = key;
@@ -543,8 +570,11 @@
       const hasClass = toStr(entry.classLevel).trim();
       return entry.admissionNumber && hasName && hasClass;
     });
-    list.sort((a, b) => a.fullName.localeCompare(b.fullName, 'en'));
-    state.masterStudents = list;
+    
+    if (list.length) {
+      list.sort((a, b) => a.fullName.localeCompare(b.fullName, 'en'));
+      state.masterStudents = list;
+    }
     return list;
   }
 
@@ -1159,12 +1189,13 @@
               span.textContent = formatCurrency(amount);
               span.setAttribute('data-val', String(amount));
             }
-            const paidVal = toNumberSafe(document.querySelector(`[data-col="paid"][data-id="${id}"]`)?.getAttribute('data-val') || state.paymentTotals?.[id] || state.students?.[id]?.paid || 0);
-            const bal = Math.max(0, amount - paidVal);
+            // Reuse variables, don't redeclare
+            const currentPaid = toNumberSafe(document.querySelector(`[data-col="paid"][data-id="${id}"]`)?.getAttribute('data-val') || state.paymentTotals?.[id] || state.students?.[id]?.paid || 0);
+            const currentBal = Math.max(0, amount - currentPaid);
             const balCell = document.querySelector(`[data-col="balance"][data-id="${id}"]`);
             if (balCell) {
-              balCell.textContent = formatCurrency(bal);
-              balCell.setAttribute('data-val', String(bal));
+              balCell.textContent = formatCurrency(currentBal);
+              balCell.setAttribute('data-val', String(currentBal));
             }
 
             await dbref(`${SCHOOL}graduation/${YEAR}/audits`).push({
