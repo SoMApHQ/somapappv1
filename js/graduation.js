@@ -663,6 +663,15 @@
   // ---------- REALTIME LISTENERS PER YEAR ----------
   function attachYearListeners(year) {
     detachWatchers();
+
+    if (typeof window.fetchStudentsCanonical === 'function') {
+      window.fetchStudentsCanonical().then((res) => {
+        state.canonicalKeys = res.keys;
+        renderDashboardSummary();
+        renderStudentTable();
+      }).catch(console.warn);
+    }
+
     listen(`graduation/${year}/meta`, (meta) => {
       state.meta = meta;
       renderDashboardSummary();
@@ -817,7 +826,18 @@
   }
 
   function getValidStudents() {
-    return Object.values(state.students || {});
+    const raw = Object.values(state.students || {});
+    if (state.canonicalKeys && typeof window.makeKey === 'function') {
+      return raw.filter((s) => {
+        const key = window.makeKey(
+          s.fullName || s.name || s.studentName || s.student,
+          s.class || s.className || s.level,
+          s.parentPhone || s.phone || s.contact || s.parentContact
+        );
+        return state.canonicalKeys.has(key);
+      });
+    }
+    return raw;
   }
 
   function getExpectedFee(student) {
