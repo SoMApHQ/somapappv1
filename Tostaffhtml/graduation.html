@@ -539,11 +539,40 @@
       const db = firebase.database();
       const auth = firebase.auth ? firebase.auth() : null;
       const schoolId = window.currentSchoolId || '';
-      const academicYear = window.currentAcademicYear || '';
-      const PRIMARY_STUDENTS_PATH = schoolId && academicYear ? `/schools/${schoolId}/years/${academicYear}/students` : null;
-      const LEDGER_PATH = schoolId && academicYear ? `/schools/${schoolId}/years/${academicYear}/graduationLedger` : null;
+      const academicYear = window.currentAcademicYear || '2025';
+      
+      const PRIMARY_STUDENTS_PATH = schoolId ? `/schools/${schoolId}/years/${academicYear}/students` : null;
+      const LEDGER_PATH = schoolId ? `/schools/${schoolId}/years/${academicYear}/graduationLedger` : null;
       const LEGACY_STUDENTS_PATH = '/students';
+      const ENROLLMENTS_PATH = `enrollments/${academicYear}`;
+      const ANCHOR_ENROLLMENTS_PATH = `enrollments/2025`;
       const ADMIN_HASH_PATH = schoolId ? `/schools/${schoolId}/adminSettings/gradCleanPasswordHash` : null;
+
+      // Class Logic mirroring studentlist.html
+      const SOMAP_DEFAULT_YEAR = 2025;
+      const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
+      const L = s => String(s||'').trim().toLowerCase();
+
+      function shiftClass(baseClass, deltaYears){
+        const i = CLASS_ORDER.findIndex(c => L(c)===L(baseClass));
+        if (i<0) return baseClass||'';
+        const j = i + Number(deltaYears||0);
+        if (j < 0) return 'PRE-ADMISSION';
+        if (j >= CLASS_ORDER.length) return 'GRADUATED';
+        return CLASS_ORDER[j];
+      }
+
+      function resolveClassForYear(studentId, fallbackClass, year, anchorEnrollments, yearEnrollments) {
+        const override = yearEnrollments[studentId] || {};
+        if (override && (override.className || override.classLevel)) {
+          return override.className || override.classLevel;
+        }
+        const anchor = anchorEnrollments[studentId] || {};
+        const baseClass = anchor.className || anchor.classLevel || fallbackClass || '';
+        const delta = Number(year) - SOMAP_DEFAULT_YEAR;
+        return shiftClass(baseClass, delta);
+      }
+
       let latestLedgerAnalysis = null;
 
       function normalizeName(str) {
@@ -603,6 +632,7 @@
           data?.guardianPhone ||
           data?.fatherPhone ||
           data?.motherPhone ||
+          data?.primaryParentContact ||
           ''
         );
       }
@@ -660,29 +690,37 @@
 
       async function fetchStudentsCanonical() {
         const canonicalKeys = new Set();
-        const addFromSnapshot = (snap, label) => {
-          const val = snap?.val?.() || snap?.val || null;
-          const obj = typeof val === 'function' ? val.call(snap) : val;
-          if (!obj) return;
-          Object.values(obj).forEach((student, idx) => {
-            const key = makeKey(extractName(student), extractClass(student), extractPhone(student));
+        const year = String(academicYear || SOMAP_DEFAULT_YEAR);
+        
+        // Fetch all necessary data: Students, Enrollments (Year + Anchor)
+        const [legacySnap, yearEnrollSnap, anchorEnrollSnap] = await Promise.all([
+          db.ref(LEGACY_STUDENTS_PATH).once('value').catch(e => null),
+          db.ref(`enrollments/${year}`).once('value').catch(e => null),
+          db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value').catch(e => null)
+        ]);
+
+        const studentsMap = legacySnap ? (legacySnap.val() || {}) : {};
+        const yearEnrollments = yearEnrollSnap ? (yearEnrollSnap.val() || {}) : {};
+        const anchorEnrollments = anchorEnrollSnap ? (anchorEnrollSnap.val() || {}) : {};
+
+        Object.entries(studentsMap).forEach(([studentId, student]) => {
+            if (!student) return;
+            
+            const fallbackClass = extractClass(student);
+            const resolvedClass = resolveClassForYear(studentId, fallbackClass, year, anchorEnrollments, yearEnrollments);
+
+            // Filter out Graduated students, similar to studentlist.html
+            if (resolvedClass === 'GRADUATED') return;
+
+            // Generate key using the RESOLVED Class, not the static one
+            const key = makeKey(extractName(student), resolvedClass, extractPhone(student));
+            
             if (key === '||') {
-              console.warn(`Canonical student missing triad fields (${label})`, student, idx);
+              console.warn(`Canonical student missing triad fields`, student);
               return;
             }
             canonicalKeys.add(key);
-          });
-        };
-
-        const primaryPromise = PRIMARY_STUDENTS_PATH ? db.ref(PRIMARY_STUDENTS_PATH).once('value') : Promise.resolve(null);
-        const legacyPromise = db.ref(LEGACY_STUDENTS_PATH).once('value').catch((err) => {
-          console.warn('Legacy students fetch failed', err);
-          return null;
         });
-
-        const [primarySnap, legacySnap] = await Promise.all([primaryPromise, legacyPromise]);
-        addFromSnapshot(primarySnap, 'primary');
-        addFromSnapshot(legacySnap, 'legacy');
 
         if (!canonicalKeys.size) {
           console.warn('Canonical student set is empty; ledger alignment will treat all rows as ghosts.');
@@ -815,10 +853,15 @@
 
           try {
             const analysis = await analyzeLedger();
+            // Provide feedback if ghost elements exist
             setText('ghostCount', analysis.orphans.length);
             setText('dupCount', analysis.duplicates.length);
             markRows(analysis.orphans, 'row-ghost');
             markRows(analysis.duplicates, 'row-dup');
+            
+            // Log for debugging
+            console.log(`Alignment Check: ${analysis.canonCount} canonical, ${analysis.ledgerCount} ledger. ${analysis.orphans.length} ghosts, ${analysis.duplicates.length} duplicates.`);
+            
           } catch (err) {
             console.warn('Ledger alignment failed', err);
           }
