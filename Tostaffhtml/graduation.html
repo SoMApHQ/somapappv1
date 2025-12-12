@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SoMAp â€¢ Graduation Control Center</title>
+  <title>SoMAp • Graduation Control Center</title>
 
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
@@ -281,7 +281,7 @@
           <a href="topstudents.html" class="quick-link-card ql-awd">
             <div>
               <div>Other Best Students</div>
-              <div class="quick-link-sub">Per year Â· Create awards & certificates</div>
+              <div class="quick-link-sub">Per year · Create awards & certificates</div>
             </div>
             <i class="fas fa-star text-amber-500"></i>
           </a>
@@ -345,7 +345,7 @@
           </div>
         </div>
         <div class="flex flex-wrap items-center gap-3 mb-3">
-          <button id="btnCleanGhosts" class="action-btn tertiary" type="button">🧹 Clean Ghosts</button>
+          <button class="action-btn tertiary" type="button" onclick="cleanGhosts()">🧹 Clean Ghosts</button>
           <button class="btn-xs" type="button" onclick="clearDeleteMode()" title="Clear the 15-minute delete window">Exit delete mode</button>
           <span class="text-xs text-slate-500">Protected deletes require the admin password.</span>
         </div>
@@ -495,7 +495,7 @@
       </div>
     </div>
   </div>
-  <template id="certificateTemplate" class="hidden">
+<template id="certificateTemplate" class="hidden">
     <div style="width:1120px;height:794px;padding:48px;background:#f8fafc;border:8px solid #1e3a8a;border-radius:24px;position:relative;font-family:'Georgia',serif;color:#0f172a;">
       <div style="position:absolute;inset:30px;opacity:0.06;background:url('../images/somap-logo.png.jpg') center/contain no-repeat;"></div>
       <div style="position:relative;z-index:2;height:100%;display:flex;flex-direction:column;justify-content:space-between;">
@@ -507,7 +507,7 @@
           <p style="font-size:18px;margin-bottom:12px;">This certifies that</p>
           <h2 data-cert="studentName" style="font-size:52px;font-weight:700;margin-bottom:12px;text-transform:uppercase;"></h2>
           <p style="font-size:20px;margin-bottom:20px;">has successfully completed <span data-cert="classLevel"></span></p>
-          <p style="font-size:16px;color:#475569;">Issued on <span data-cert="issuedDate"></span> â€¢ Admission <span data-cert="admission"></span></p>
+          <p style="font-size:16px;color:#475569;">Issued on <span data-cert="issuedDate"></span> • Admission <span data-cert="admission"></span></p>
         </main>
         <footer style="display:flex;justify-content:space-between;padding:0 60px 20px;">
           <div style="text-align:center;">
@@ -524,387 +524,6 @@
     </div>
   </template>
 
-  <style>
-    .row-ghost { outline: 2px dashed #b00020; background: rgba(176, 0, 32, 0.08); }
-    .row-dup { outline: 2px dashed #aa6b00; background: rgba(170, 107, 0, 0.08); }
-  </style>
-
-  <script>
-    (function () {
-      if (!window.firebase || !firebase.database) {
-        console.warn('Graduation ledger alignment: Firebase SDK missing.');
-        return;
-      }
-
-      const db = firebase.database();
-      const auth = firebase.auth ? firebase.auth() : null;
-      const schoolId = window.currentSchoolId || '';
-      const academicYear = window.currentAcademicYear || '2025';
-      
-      const PRIMARY_STUDENTS_PATH = schoolId ? `/schools/${schoolId}/years/${academicYear}/students` : null;
-      // Target the active ledger used by the app (legacy root path) to ensure visible cleanup
-      const LEDGER_PATH = `graduation/${academicYear}/students`;
-      const LEGACY_STUDENTS_PATH = '/students';
-      const ENROLLMENTS_PATH = `enrollments/${academicYear}`;
-      const ANCHOR_ENROLLMENTS_PATH = `enrollments/2025`;
-      const ADMIN_HASH_PATH = schoolId ? `/schools/${schoolId}/adminSettings/gradCleanPasswordHash` : null;
-
-      // Class Logic mirroring studentlist.html
-      const SOMAP_DEFAULT_YEAR = 2025;
-      const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
-      const L = s => String(s||'').trim().toLowerCase();
-
-      function shiftClass(baseClass, deltaYears){
-        const i = CLASS_ORDER.findIndex(c => L(c)===L(baseClass));
-        if (i<0) return baseClass||'';
-        const j = i + Number(deltaYears||0);
-        if (j < 0) return 'PRE-ADMISSION';
-        if (j >= CLASS_ORDER.length) return 'GRADUATED';
-        return CLASS_ORDER[j];
-      }
-
-      function resolveClassForYear(studentId, fallbackClass, year, anchorEnrollments, yearEnrollments) {
-        const override = yearEnrollments[studentId] || {};
-        if (override && (override.className || override.classLevel)) {
-          return override.className || override.classLevel;
-        }
-        const anchor = anchorEnrollments[studentId] || {};
-        const baseClass = anchor.className || anchor.classLevel || fallbackClass || '';
-        const delta = Number(year) - SOMAP_DEFAULT_YEAR;
-        return shiftClass(baseClass, delta);
-      }
-
-      let latestLedgerAnalysis = null;
-
-      function normalizeName(str) {
-        if (!str) return '';
-        return String(str)
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/\./g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .toUpperCase();
-      }
-      function normalizeClass(str) {
-        if (!str) return '';
-        return String(str).trim().toUpperCase();
-      }
-      function normalizePhone(str) {
-        if (!str && str !== 0) return '';
-        const digits = String(str).replace(/\D+/g, '');
-        return digits.slice(-12);
-      }
-      function makeKey(name, cls, phone) {
-        return `${normalizeName(name)}|${normalizeClass(cls)}|${normalizePhone(phone)}`;
-      }
-
-      // Ensure key generation helpers are available globally for js/graduation.js
-      window.makeKey = makeKey;
-      window.normalizeName = normalizeName;
-      window.normalizeClass = normalizeClass;
-      window.normalizePhone = normalizePhone;
-
-      function setText(id, text) {
-        const el = document.getElementById(id);
-        if (el) el.textContent = text;
-      }
-
-      function cssEscape(value) {
-        if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
-        return String(value).replace(/["\\]/g, '\\$&');
-      }
-
-      function markRows(rows, cssClass) {
-        if (!Array.isArray(rows) || !cssClass) return;
-        rows.forEach((id) => {
-          const selector = `[data-id="${cssEscape(id)}"]`;
-          const node = document.querySelector(selector);
-          if (node) node.classList.add(cssClass);
-        });
-      }
-
-      function extractName(data) {
-        return data?.fullName || data?.name || data?.studentName || data?.student || '';
-      }
-      function extractClass(data) {
-        return data?.class || data?.className || data?.level || data?.grade || data?.studentClass || '';
-      }
-      function extractPhone(data) {
-        return (
-          data?.parentPhone ||
-          data?.parentContact ||
-          data?.phone ||
-          data?.contact ||
-          data?.guardianPhone ||
-          data?.fatherPhone ||
-          data?.motherPhone ||
-          data?.primaryParentContact ||
-          ''
-        );
-      }
-
-      async function currentUserIsAdmin() {
-        if (!auth || !auth.currentUser) return false;
-        try {
-          const snap = await db.ref(`/users/${auth.currentUser.uid}/role`).once('value');
-          return snap.val() === 'admin';
-        } catch (err) {
-          console.warn('Admin role check failed', err);
-          return false;
-        }
-      }
-
-      async function sha256Hex(text) {
-        if (!window.crypto || !window.crypto.subtle) throw new Error('Secure crypto unavailable in this browser.');
-        const encoder = new TextEncoder();
-        const data = encoder.encode(String(text));
-        const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-      }
-
-      async function requireAdminGuard() {
-        try {
-          const isAdmin = await currentUserIsAdmin();
-          if (isAdmin) return true;
-          const password = window.prompt('Admin password required to clean ghosts/duplicates:');
-          if (!password) return false;
-          if (!ADMIN_HASH_PATH) {
-            alert('Missing admin password configuration for this school.');
-            return false;
-          }
-          const [hashSnap, enteredHash] = await Promise.all([
-            db.ref(ADMIN_HASH_PATH).once('value'),
-            sha256Hex(password),
-          ]);
-          const expected = hashSnap.val();
-          if (!expected) {
-            alert('No admin password set for this school. Ask an admin to configure it.');
-            return false;
-          }
-          if (enteredHash !== expected) {
-            alert('Incorrect admin password.');
-            return false;
-          }
-          return true;
-        } catch (err) {
-          console.error('Admin guard failed', err);
-          alert(err?.message || 'Unable to verify admin privileges.');
-          return false;
-        }
-      }
-
-      async function fetchStudentsCanonical(inputYear) {
-        const canonicalKeys = new Set();
-        // Use inputYear if provided, otherwise check global or default
-        const year = String(inputYear || academicYear || window.currentAcademicYear || SOMAP_DEFAULT_YEAR);
-        
-        // Fetch all necessary data: Students, Enrollments (Year + Anchor)
-        const [legacySnap, yearEnrollSnap, anchorEnrollSnap] = await Promise.all([
-          db.ref(LEGACY_STUDENTS_PATH).once('value').catch(e => null),
-          db.ref(`enrollments/${year}`).once('value').catch(e => null),
-          db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value').catch(e => null)
-        ]);
-
-        const studentsMap = legacySnap ? (legacySnap.val() || {}) : {};
-        const yearEnrollments = yearEnrollSnap ? (yearEnrollSnap.val() || {}) : {};
-        const anchorEnrollments = anchorEnrollSnap ? (anchorEnrollSnap.val() || {}) : {};
-
-        Object.entries(studentsMap).forEach(([studentId, student]) => {
-            if (!student) return;
-            
-            const fallbackClass = extractClass(student);
-            const resolvedClass = resolveClassForYear(studentId, fallbackClass, year, anchorEnrollments, yearEnrollments);
-
-            // Filter out Graduated students, similar to studentlist.html
-            if (resolvedClass === 'GRADUATED') return;
-
-            // Generate key using the RESOLVED Class, not the static one
-            const key = makeKey(extractName(student), resolvedClass, extractPhone(student));
-            
-            if (key === '||') {
-              console.warn(`Canonical student missing triad fields`, student);
-              return;
-            }
-            canonicalKeys.add(key);
-        });
-
-        if (!canonicalKeys.size) {
-          console.warn('Canonical student set is empty; ledger alignment will treat all rows as ghosts.');
-        }
-
-        return { keys: canonicalKeys, canonCount: canonicalKeys.size };
-      }
-
-      async function fetchLedger() {
-        if (!LEDGER_PATH) {
-          console.warn('Ledger path missing; skipping ledger fetch.');
-          return { entries: [], ledgerCount: 0 };
-        }
-        const snap = await db.ref(LEDGER_PATH).once('value');
-        const obj = snap.val() || {};
-        const entries = Object.entries(obj).map(([id, data]) => ({ id, data: data || {} }));
-        return { entries, ledgerCount: entries.length };
-      }
-
-      function getPaidValue(data) {
-        const candidates = [data?.paid, data?.paidAmount, data?.amountPaid, data?.totalPaid];
-        const val = candidates.find((v) => v !== undefined && v !== null && v !== '');
-        const num = Number(val);
-        return Number.isFinite(num) ? num : 0;
-      }
-
-      function getUpdatedAtValue(data) {
-        const candidates = [data?.updatedAt, data?.timestamp, data?.updated_on, data?.updated_on_ts];
-        const val = candidates.find((v) => v !== undefined && v !== null && v !== '');
-        const num = Number(val);
-        return Number.isFinite(num) ? num : 0;
-      }
-
-      function compareEntries(a, b) {
-        const paidDiff = getPaidValue(b.data) - getPaidValue(a.data);
-        if (paidDiff !== 0) return paidDiff;
-        const updatedDiff = getUpdatedAtValue(b.data) - getUpdatedAtValue(a.data);
-        if (updatedDiff !== 0) return updatedDiff;
-        return String(a.id).localeCompare(String(b.id));
-      }
-
-      async function analyzeLedger() {
-        const [canon, ledger] = await Promise.all([fetchStudentsCanonical(), fetchLedger()]);
-        const canonicalKeys = canon?.keys || new Set();
-        const buckets = new Map();
-        const orphans = [];
-        const duplicates = [];
-        const keepers = new Set();
-
-        ledger.entries.forEach((entry) => {
-          const key = makeKey(extractName(entry.data), extractClass(entry.data), extractPhone(entry.data));
-          if (!key || key === '||' || !canonicalKeys.has(key)) {
-            orphans.push(entry.id);
-            return;
-          }
-          const list = buckets.get(key) || [];
-          list.push(entry);
-          buckets.set(key, list);
-        });
-
-        buckets.forEach((list) => {
-          if (!list.length) return;
-          list.sort(compareEntries);
-          keepers.add(list[0].id);
-          list.slice(1).forEach((entry) => duplicates.push(entry.id));
-        });
-
-        latestLedgerAnalysis = {
-          canonCount: canon?.canonCount || canonicalKeys.size,
-          ledgerCount: ledger?.ledgerCount || 0,
-          orphans,
-          duplicates,
-          keepers: Array.from(keepers),
-        };
-        return latestLedgerAnalysis;
-      }
-
-      async function cleanGhostsAndDuplicates() {
-        let analysis;
-        try {
-          analysis = await analyzeLedger();
-        } catch (err) {
-          console.error('Ledger analysis failed', err);
-          alert(err?.message || 'Could not analyze the ledger.');
-          return;
-        }
-
-        const ghosts = analysis?.orphans || [];
-        const dups = analysis?.duplicates || [];
-        const total = ghosts.length + dups.length;
-
-        if (!total) {
-          alert('Great! No ghosts or duplicates found.');
-          return;
-        }
-
-        const allowed = await requireAdminGuard();
-        if (!allowed) return;
-
-        if (!LEDGER_PATH) {
-          alert('Ledger path is missing; cannot delete.');
-          return;
-        }
-
-        const proceed = window.confirm(
-          `Delete ${total} ledger record${total === 1 ? '' : 's'} (${ghosts.length} ghosts + ${dups.length} duplicates)?`
-        );
-        if (!proceed) return;
-
-        const updates = {};
-        ghosts.forEach((id) => { updates[`${LEDGER_PATH}/${id}`] = null; });
-        dups.forEach((id) => { updates[`${LEDGER_PATH}/${id}`] = null; });
-
-        if (!Object.keys(updates).length) return;
-
-        try {
-          await db.ref().update(updates);
-          alert('Cleanup complete. Reloading...');
-          window.location.reload();
-        } catch (err) {
-          console.error('Bulk cleanup failed', err);
-          alert(err?.message || 'Cleanup failed.');
-        }
-      }
-
-      function initGraduationAlignment() {
-        document.addEventListener('DOMContentLoaded', async () => {
-          const btn = document.getElementById('btnCleanGhosts');
-          if (btn) btn.addEventListener('click', cleanGhostsAndDuplicates);
-
-          try {
-            const analysis = await analyzeLedger();
-            // Provide feedback if ghost elements exist
-            setText('ghostCount', analysis.orphans.length);
-            setText('dupCount', analysis.duplicates.length);
-            markRows(analysis.orphans, 'row-ghost');
-            markRows(analysis.duplicates, 'row-dup');
-            
-            // Log for debugging
-            console.log(`Alignment Check: ${analysis.canonCount} canonical, ${analysis.ledgerCount} ledger. ${analysis.orphans.length} ghosts, ${analysis.duplicates.length} duplicates.`);
-            
-          } catch (err) {
-            console.warn('Ledger alignment failed', err);
-          }
-        });
-      }
-
-      // Expose helpers globally
-      window.normalizeName = normalizeName;
-      window.normalizeClass = normalizeClass;
-      window.normalizePhone = normalizePhone;
-      window.makeKey = makeKey;
-      window.setText = setText;
-      window.markRows = markRows;
-      window.currentUserIsAdmin = currentUserIsAdmin;
-      window.sha256Hex = sha256Hex;
-      window.requireAdminGuard = requireAdminGuard;
-      window.fetchStudentsCanonical = fetchStudentsCanonical;
-      window.fetchLedger = fetchLedger;
-      window.analyzeLedger = analyzeLedger;
-      window.cleanGhostsAndDuplicates = cleanGhostsAndDuplicates;
-      window.initGraduationAlignment = initGraduationAlignment;
-
-      initGraduationAlignment();
-
-      // RTDB rule hint:
-      // Match ledger rows only when a stored studentAdmission exists in canonical students:
-      // "schools/{schoolId}/years/{year}/graduationLedger/{ledgerId}/studentAdmission" is the key,
-      // and rules should validate that "schools/{schoolId}/years/{year}/students/{studentAdmission}" exists.
-      //
-      // Migration sketch (idempotent, no deletes):
-      // For each node under /students, copy into /schools/{schoolId}/years/{year}/students/{id}
-      // with the same payload; skip overwriting if the target already exists.
-    }());
-  </script>
-
   <script src="../js/graduation.js"></script>
   <script>
     document.addEventListener('DOMContentLoaded', () => {
@@ -915,3 +534,4 @@
   </script>
 </body>
 </html>
+

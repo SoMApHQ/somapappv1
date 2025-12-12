@@ -663,15 +663,6 @@
   // ---------- REALTIME LISTENERS PER YEAR ----------
   function attachYearListeners(year) {
     detachWatchers();
-
-    if (typeof window.fetchStudentsCanonical === 'function') {
-      window.fetchStudentsCanonical(year).then((res) => {
-        state.canonicalKeys = res.keys;
-        renderDashboardSummary();
-        renderStudentTable();
-      }).catch(console.warn);
-    }
-
     listen(`graduation/${year}/meta`, (meta) => {
       state.meta = meta;
       renderDashboardSummary();
@@ -826,18 +817,7 @@
   }
 
   function getValidStudents() {
-    const raw = Object.values(state.students || {});
-    if (state.canonicalKeys && typeof window.makeKey === 'function') {
-      return raw.filter((s) => {
-        const key = window.makeKey(
-          s.fullName || s.name || s.studentName || s.student,
-          s.class || s.className || s.level,
-          s.parentPhone || s.phone || s.contact || s.parentContact
-        );
-        return state.canonicalKeys.has(key);
-      });
-    }
-    return raw;
+    return Object.values(state.students || {});
   }
 
   function getExpectedFee(student) {
@@ -876,7 +856,7 @@
 
     const search = toStr(state.filters.search).toLowerCase();
     const classFilter = state.filters.classLevel;
-    const rows = getValidStudents(); // Use filtered canonical list
+    const rows = Object.values(state.students || {});
     const filtered = rows.filter((student) => {
       const haystack = `${toStr(student.name)} ${toStr(student.admissionNo)} ${toStr(student.parentPhone)}`.toLowerCase();
       const matchesSearch = !search || haystack.includes(search);
