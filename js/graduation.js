@@ -365,6 +365,10 @@
     const allowRead = allowed || state.page === 'dashboard' || state.page === 'galleries';
     state.readOnly = !allowed;
     showAuthGate(allowRead);
+    if (!user) {
+      auth().signInAnonymously().catch((err) => console.warn('Anon sign-in failed', err?.message || err));
+      return;
+    }
     if (!allowRead) return;
 
     ensureYearReady(state.currentYear)
@@ -661,7 +665,6 @@
     const updates = {};
     const year = state.currentYear;
     Object.entries(state.students || {}).forEach(([key, student]) => {
-      if (isGhostStudent(student)) return;
       const paid = getPaidTotal(student);
       const expected = getExpectedFee(student);
       const balance = Math.max(0, expected - paid);
@@ -738,24 +741,15 @@
     if (!student) return true;
     const name = toStr(student.name || student.fullName).trim();
     const cls = toStr(student.class || student.className).trim();
-    const parent = toStr(
-      student.parentPhone ||
-      student.parentContact ||
-      student.guardianPhone ||
-      student.contact ||
-      student.parent ||
-      student.parentName
-    ).trim();
     const hasAdmission = toStr(student.admissionNo || student.admissionNumber || student.id).trim();
     if (!hasAdmission) return true;
     if (!name || name.toLowerCase() === 'student') return true;
     if (!cls || cls === '--' || cls === '-') return true;
-    if (!parent || parent === '--' || parent === '-') return true;
     return false;
   }
 
   function getValidStudents() {
-    return Object.values(state.students || {}).filter((s) => !isGhostStudent(s));
+    return Object.values(state.students || {});
   }
 
   function getExpectedFee(student) {
