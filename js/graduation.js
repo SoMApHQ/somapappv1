@@ -1964,7 +1964,6 @@
     if (!doc.autoTable) { alert('PDF table plugin missing'); return; }
 
     const year = getSelectedYear();
-    const schoolName = options.schoolName || 'Socrates School';
     
     // Load Data
     const [students, expenses] = await Promise.all([loadGradLedger(year), loadGradExpenses(year)]);
@@ -1974,28 +1973,53 @@
     const totalExpected = students.reduce((a, b) => a + toNumberSafe(b.expected), 0);
     const totalPaid = students.reduce((a, b) => a + toNumberSafe(b.paid), 0);
     const totalUncol = Math.max(0, totalExpected - totalPaid);
-    const totalExp = expenses.reduce((a, b) => a + (Number(b.total) || Number(b.amount) || 0), 0); // Handle total vs amount
+    const totalExp = expenses.reduce((a, b) => a + (Number(b.total) || Number(b.amount) || 0), 0);
     const netBalance = totalPaid - totalExp;
 
     const left = 40;
     let top = 40;
     
-    // --- TITLE ---
+    // --- LOGO (Attempt to load) ---
+    try {
+      const logoUrl = options.schoolLogoUrl || '../images/somap-logo.png.jpg';
+      const logoData = await imgToDataURL(logoUrl);
+      doc.addImage(logoData, 'PNG', left, top, 50, 50);
+    } catch (err) {
+      console.warn('Logo load skipped', err);
+    }
+
+    // --- TITLE & ADDRESS ---
     doc.setFont('times', 'bold');
-    doc.setFontSize(18);
-    doc.text(`${schoolName} — Graduation Audit Report (${year})`, left, top);
-    top += 20;
+    doc.setFontSize(16);
+    doc.text(`Socrates School — Ripoti ya Ukaguzi wa Graduation (${year})`, left + 60, top + 20);
     
     doc.setFont('times', 'normal');
     doc.setFontSize(10);
-    doc.text(`Report covers collections, pending balances, and expenses for ${students.length} students.`, left, top);
-    top += 24;
+    doc.text('P.O. Box 14256 Arusha, Arusha • +255 686828732 • info@socrates.ac.tz', left + 60, top + 36);
+    
+    top += 60;
+
+    // --- INTRO (SWAHILI) ---
+    doc.setFontSize(10);
+    const intro = [
+      'Kwenye ripoti hii, tunawasilisha tathmini ya makusanyo yote ya ada za graduation kwa mwaka huu.',
+      'Ripoti imeainisha kiasi kilichotarajiwa, kiasi kilicholipwa, na salio linalodaiwa na kila mwanafunzi.',
+      'Takwimu zimechambuliwa kulingana na madarasa na hadhi ya malipo ili kuwezesha ufuatiliaji sahihi.',
+      'Tunalenga kusaidia kamati ya shule kupanga maamuzi thabiti kuhusu ukamilishaji wa malipo.',
+      'Ripoti pia inaangazia tofauti za makadirio na malipo halisi kwa uwazi mkubwa.',
+      'Vyanzo vya data ni sajili za wanafunzi, leja ya graduation, na stakabadhi zinazohusiana.',
+      'Uongozi wa shule umetumia tahadhari kuhakikisha usahihi na uadilifu wa taarifa zote zilizowasilishwa.',
+      'Mwisho, ripoti ina mapendekezo ya hatua za uboreshaji wa ukusanyaji wa ada zijazo.'
+    ].join(' ');
+    const splitIntro = doc.splitTextToSize(intro, 515);
+    doc.text(splitIntro, left, top);
+    top += splitIntro.length * 12 + 10;
 
     // --- SUMMARY TABLE ---
     doc.setFont('times', 'bold');
     doc.setFontSize(12);
     doc.text('Summary', left, top);
-    top += 10;
+    top += 12;
 
     const summaryData = [
       ['Students total', students.length],
@@ -2021,12 +2045,22 @@
     
     top = doc.lastAutoTable.finalY + 24;
 
+    // Helper for section totals
+    const calcSectionTotals = (list) => {
+      const exp = list.reduce((a, b) => a + toNumberSafe(b.expected), 0);
+      const pd = list.reduce((a, b) => a + toNumberSafe(b.paid), 0);
+      return { count: list.length, exp, pd };
+    };
+
     // --- PAID STUDENTS ---
     if (paid.length > 0) {
+      if (top > 750) { doc.addPage(); top = 40; }
       doc.setFontSize(12);
       doc.setFont('times', 'bold');
       doc.text('Paid Students', left, top);
       top += 10;
+      
+      const pT = calcSectionTotals(paid);
       doc.autoTable({
         startY: top,
         head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
@@ -2038,21 +2072,30 @@
             `TSh ${toNumberSafe(s.paid).toLocaleString()}`, 
             s.parent
         ]),
+        foot: [[
+          'TOTAL', 
+          `${pT.count} Students`, 
+          '-', 
+          `TSh ${pT.exp.toLocaleString()}`, 
+          `TSh ${pT.pd.toLocaleString()}`, 
+          '-'
+        ]],
         styles: { fontSize: 9, cellPadding: 3 },
         headStyles: { fillColor: [22, 163, 74], textColor: 255 }, // Green
+        footStyles: { fillColor: [220, 252, 231], textColor: [20, 83, 45], fontStyle: 'bold' },
       });
       top = doc.lastAutoTable.finalY + 24;
     }
 
     // --- PARTIAL PAYMENTS ---
     if (partial.length > 0) {
-      // Check for page break
       if (top > 750) { doc.addPage(); top = 40; }
-      
       doc.setFontSize(12);
       doc.setFont('times', 'bold');
       doc.text('Partial Payments', left, top);
       top += 10;
+      
+      const pT = calcSectionTotals(partial);
       doc.autoTable({
         startY: top,
         head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
@@ -2064,8 +2107,17 @@
             `TSh ${toNumberSafe(s.paid).toLocaleString()}`, 
             s.parent
         ]),
+        foot: [[
+          'TOTAL', 
+          `${pT.count} Students`, 
+          '-', 
+          `TSh ${pT.exp.toLocaleString()}`, 
+          `TSh ${pT.pd.toLocaleString()}`, 
+          '-'
+        ]],
         styles: { fontSize: 9, cellPadding: 3 },
         headStyles: { fillColor: [245, 158, 11], textColor: 0 }, // Orange
+        footStyles: { fillColor: [254, 243, 199], textColor: [146, 64, 14], fontStyle: 'bold' },
       });
       top = doc.lastAutoTable.finalY + 24;
     }
@@ -2073,11 +2125,12 @@
     // --- UNPAID ---
     if (unpaid.length > 0) {
       if (top > 750) { doc.addPage(); top = 40; }
-      
       doc.setFontSize(12);
       doc.setFont('times', 'bold');
       doc.text('Unpaid', left, top);
       top += 10;
+      
+      const pT = calcSectionTotals(unpaid);
       doc.autoTable({
         startY: top,
         head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
@@ -2089,8 +2142,17 @@
             `TSh ${toNumberSafe(s.paid).toLocaleString()}`, 
             s.parent
         ]),
+        foot: [[
+          'TOTAL', 
+          `${pT.count} Students`, 
+          '-', 
+          `TSh ${pT.exp.toLocaleString()}`, 
+          `TSh ${pT.pd.toLocaleString()}`, 
+          '-'
+        ]],
         styles: { fontSize: 9, cellPadding: 3 },
         headStyles: { fillColor: [239, 68, 68], textColor: 255 }, // Red
+        footStyles: { fillColor: [254, 226, 226], textColor: [153, 27, 27], fontStyle: 'bold' },
       });
       top = doc.lastAutoTable.finalY + 24;
     }
@@ -2117,10 +2179,59 @@
             e.recordedAt, 
             e.proof
         ]),
+        foot: [[
+          'TOTAL EXPENSES', '', '', '', '', 
+          `TSh ${totalExp.toLocaleString()}`, 
+          '', ''
+        ]],
         styles: { fontSize: 8, cellPadding: 3 },
         headStyles: { fillColor: [30, 64, 175], textColor: 255 }, // Blue
+        footStyles: { fillColor: [219, 234, 254], textColor: [30, 58, 138], fontStyle: 'bold' },
       });
+      top = doc.lastAutoTable.finalY + 24;
     }
+
+    // --- FINAL SUMMARY & SIGNATURES ---
+    if (top > 650) { doc.addPage(); top = 40; }
+    
+    doc.setFont('times', 'bold'); 
+    doc.setFontSize(14);
+    doc.text('Muhtasari wa Takwimu', left, top);
+    top += 20;
+    
+    doc.setFontSize(11);
+    doc.setFont('times', 'normal');
+    doc.text([
+      `Wote (halali): ${students.length}`,
+      `WalioLipa Kikamilifu: ${paid.length} (TSh ${totalPaid.toLocaleString()})`,
+      `Wenye Madeni/Salio: ${unpaid.length + partial.length} (TSh ${totalUncol.toLocaleString()})`,
+      `Jumla Matumizi: TSh ${totalExp.toLocaleString()}`,
+      `Mlinganyo wa mwisho (makusanyo - matumizi): TSh ${netBalance.toLocaleString()}`,
+    ], left, top);
+    
+    top += 100;
+    
+    doc.setFont('times', 'bold'); 
+    doc.setFontSize(14);
+    doc.text('Saini za Uidhinishaji', left, top);
+    top += 20;
+    
+    doc.setFontSize(11);
+    doc.setFont('times', 'normal');
+    const signLines = [
+      'Mkuu wa Shule: ____________________________  Tarehe: __________',
+      'Mwalimu wa Taaluma: _______________________  Tarehe: __________',
+      'Kiongozi wa Bajeti ya Graduation: __________  Tarehe: __________',
+      'Mwenyekiti wa Kamati: ______________________  Tarehe: __________',
+      'Mjumbe wa Kamati 1: _______________________  Tarehe: __________',
+      'Mjumbe wa Kamati 2: _______________________  Tarehe: __________',
+      'Mjumbe wa Kamati 3: _______________________  Tarehe: __________',
+    ];
+    // Increase spacing for signatures
+    signLines.forEach(line => {
+      doc.text(line, left, top);
+      top += 30; 
+    });
 
     // --- FOOTER / PAGE NUMBERS ---
     const pageCount = doc.internal.getNumberOfPages();
