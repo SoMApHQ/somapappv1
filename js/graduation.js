@@ -299,6 +299,8 @@
 
   // ---------- BASE LISTENERS ----------
   function attachBaseListeners() {
+    wireAuthForm();
+
     const searchBox = $('#studentSearch');
     if (searchBox) {
       searchBox.addEventListener('input', (event) => {
@@ -362,14 +364,15 @@
   function handleAuthChange(user) {
     state.user = user;
     const allowed = isAuthorized(user?.email || '');
-    const allowRead = allowed || state.page === 'dashboard' || state.page === 'galleries';
+    const allowGalleries = state.page === 'galleries';
+    const allowRead = allowed || allowGalleries;
     state.readOnly = !allowed;
     showAuthGate(allowRead);
-    if (!user) {
-      auth().signInAnonymously().catch((err) => console.warn('Anon sign-in failed', err?.message || err));
+    if (!user) return;
+    if (!allowRead) {
+      showToast('Sign in with an authorised staff email to load graduation data.', 'error');
       return;
     }
-    if (!allowRead) return;
 
     ensureYearReady(state.currentYear)
       .then(() => {
@@ -381,6 +384,41 @@
         console.error(err);
         showToast(err?.message || 'Failed to load graduation data', 'error');
       });
+  }
+
+  function wireAuthForm() {
+    const form = $('#gradLoginForm');
+    if (!form) return;
+    const emailInput = $('#gradLoginEmail');
+    const passInput = $('#gradLoginPass');
+    const errorBox = $('#gradLoginError');
+    const savedEmail = localStorage.getItem('gradAuthEmail');
+    if (savedEmail && emailInput && !emailInput.value) emailInput.value = savedEmail;
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (errorBox) errorBox.textContent = '';
+      const email = toStr(emailInput?.value || '').trim();
+      const pass = toStr(passInput?.value || '');
+      if (!email || !pass) {
+        if (errorBox) errorBox.textContent = 'Email and password are required.';
+        showToast('Enter email and password to sign in.', 'warn');
+        return;
+      }
+      setBusy('#gradLoginSubmit', true);
+      try {
+        await auth().signInWithEmailAndPassword(email, pass);
+        localStorage.setItem('gradAuthEmail', email);
+        showToast('Signed in. Loading graduation data...');
+      } catch (err) {
+        const message = err?.message || 'Sign-in failed';
+        console.error('GraduationSuite sign-in error', err);
+        if (errorBox) errorBox.textContent = message;
+        showToast(message, 'error');
+      } finally {
+        setBusy('#gradLoginSubmit', false);
+      }
+    });
   }
 
   async function ensureYearReady(year) {
