@@ -121,6 +121,9 @@
     const donorContact = el('input', 'w-full glass-border rounded-xl px-3 py-2', []);
     donorContact.type = 'text'; donorContact.placeholder = 'Phone or email'; donorContact.required = true;
 
+    const donationDate = el('input', 'w-full glass-border rounded-xl px-3 py-2', []);
+    donationDate.type = 'date'; donationDate.required = true; donationDate.placeholder = 'Select donation date';
+
     const proofNote = el('textarea', 'w-full glass-border rounded-xl px-3 py-2', []);
     proofNote.rows = 2; proofNote.placeholder = 'Proof note (optional)';
 
@@ -140,6 +143,7 @@
     form.appendChild(row('Amount', amount));
     form.appendChild(row('Donor name', donorName));
     form.appendChild(row('Donor contact', donorContact));
+    form.appendChild(row('Donation date', donationDate, 'required'));
     form.appendChild(row('Proof note', proofNote, 'optional'));
     form.appendChild(row('Proof URL', proofUrl, 'optional'));
     form.appendChild(err);
@@ -162,13 +166,19 @@
       if (!amt || amt < 1) { err.textContent = 'Enter a valid amount (>= 1).'; return; }
       if (!donorName.value || donorName.value.trim().length < 3) { err.textContent = 'Donor name is too short.'; return; }
       if (!donorContact.value || donorContact.value.trim().length < 3) { err.textContent = 'Provide donor contact.'; return; }
+      if (!donationDate.value) { err.textContent = 'Select the donation date.'; return; }
+      const parsedDate = Date.parse(donationDate.value);
+      if (Number.isNaN(parsedDate)) { err.textContent = 'Enter a valid donation date.'; return; }
 
       const payload = {
         amount: Math.round(amt),
         donorName: donorName.value.trim(),
         donorContact: donorContact.value.trim(),
+        donationDate: donationDate.value,
+        donationDateTs: parsedDate,
         proofNote: (proofNote.value || '').trim() || null,
         proofUrl: (proofUrl.value || '').trim() || null,
+        clientRecordedAt: new Date().toISOString(),
         createdAt: hasFirebase ? firebase.database.ServerValue.TIMESTAMP : Date.now(),
         recordedBy: {
           uid: (window.authUser && window.authUser.uid) || null,
@@ -286,8 +296,16 @@
           const v = child.val();
           const amt = Number((v && v.amount) || 0);
           total += amt > 0 ? amt : 0;
-          if (v && v.createdAt) {
-            const ts = typeof v.createdAt === 'number' ? v.createdAt : Date.now();
+          let ts = null;
+          if (v && v.donationDateTs) {
+            ts = Number(v.donationDateTs);
+          } else if (v && v.donationDate) {
+            const parsed = Date.parse(v.donationDate);
+            ts = Number.isNaN(parsed) ? null : parsed;
+          } else if (v && v.createdAt) {
+            ts = typeof v.createdAt === 'number' ? v.createdAt : Date.now();
+          }
+          if (ts) {
             if (!latestTs || ts > latestTs) latestTs = ts;
           }
         });
