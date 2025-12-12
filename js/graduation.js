@@ -499,8 +499,7 @@
     }).filter((entry) => {
       const hasName = toStr(entry.fullName).trim() && toStr(entry.fullName).trim().toLowerCase() !== 'student';
       const hasClass = toStr(entry.classLevel).trim();
-      const hasParent = toStr(entry.parentPhone || entry.parentName).trim();
-      return entry.admissionNumber && hasName && hasClass && hasParent;
+      return entry.admissionNumber && hasName && hasClass;
     });
     list.sort((a, b) => a.fullName.localeCompare(b.fullName, 'en'));
     state.masterStudents = list;
@@ -737,14 +736,21 @@
 
   function isGhostStudent(student) {
     if (!student) return true;
-    const name = toStr(student.name).trim();
-    const cls = toStr(student.class).trim();
-    const parent = toStr(student.parentPhone || student.parentName).trim();
-    const hasAdmission = toStr(student.admissionNo).trim();
+    const name = toStr(student.name || student.fullName).trim();
+    const cls = toStr(student.class || student.className).trim();
+    const parent = toStr(
+      student.parentPhone ||
+      student.parentContact ||
+      student.guardianPhone ||
+      student.contact ||
+      student.parent ||
+      student.parentName
+    ).trim();
+    const hasAdmission = toStr(student.admissionNo || student.admissionNumber || student.id).trim();
     if (!hasAdmission) return true;
     if (!name || name.toLowerCase() === 'student') return true;
-    if (!cls || cls === '--') return true;
-    if (!parent || parent === '--') return true;
+    if (!cls || cls === '--' || cls === '-') return true;
+    if (!parent || parent === '--' || parent === '-') return true;
     return false;
   }
 
