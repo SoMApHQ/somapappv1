@@ -1,11 +1,3 @@
-/* =========================================================
-   SoMAp Service Worker — SAFE MODE
-   Purpose:
-   - Cache static assets (HTML, JS, CSS)
-   - Cache Cloudinary PDFs AFTER first online access
-   - NEVER cache Firebase writes or auth calls
-   - Network-first for data, Cache-first for PDFs
-   ========================================================= */
 
 const CACHE_NAME = 'somap-cache-v1';
 
@@ -38,15 +30,15 @@ self.addEventListener('activate', event => {
   self.clients.claim();
 });
 
-// Fetch strategy
+// Fetching strategy
 self.addEventListener('fetch', event => {
   const req = event.request;
   const url = new URL(req.url);
 
-  // Ignore non-GET
+  // Ignore the non-GET
   if (req.method !== 'GET') return;
 
-  // 🚫 NEVER cache Firebase or auth calls
+  // NEVER cache Firebase or auth calls
   if (
     url.hostname.includes('firebaseio.com') ||
     url.hostname.includes('googleapis.com') ||
@@ -66,7 +58,7 @@ self.addEventListener('fetch', event => {
   event.respondWith(networkFirst(req));
 });
 
-/* ---------------- Strategies ---------------- */
+/* ------- Strategies --------- */
 
 async function cacheFirst(req) {
   const cache = await caches.open(CACHE_NAME);
