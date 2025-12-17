@@ -170,8 +170,17 @@
     const btn = e.target.closest('button[data-school]');
     if (!btn) return;
     const schoolId = btn.getAttribute('data-school');
+    
+    // Safety check for SOMAP
+    if (!SOMAP) {
+      console.error('SOMAP context is undefined. Check context.js loading.');
+      chooseStatus.textContent = 'Error: System context not loaded. Refresh page.';
+      return;
+    }
+
     SOMAP.setSchoolId(schoolId);
     chooseStatus.textContent = `School selected: ${schoolId}. Redirecting to login...`;
+    
     setTimeout(() => {
       window.location.href = '../index.html?login=1';
     }, 900);
@@ -187,10 +196,13 @@
     schoolList?.addEventListener('click', handleSchoolClick);
 
     // If a school is already chosen, default to CHAGUA view
-    const existing = SOMAP.getSchoolId();
-    if (existing) {
-      showChoose();
-      chooseStatus.textContent = `Current school: ${existing}`;
+    // Check if SOMAP is available
+    if (typeof SOMAP !== 'undefined') {
+      const existing = SOMAP.getSchoolId();
+      if (existing) {
+        showChoose();
+        chooseStatus.textContent = `Current school: ${existing}`;
+      }
     }
   }
 
