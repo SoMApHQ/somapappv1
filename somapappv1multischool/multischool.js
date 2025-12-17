@@ -171,7 +171,7 @@
     SOMAP.setSchoolId(schoolId);
     chooseStatus.textContent = `School selected: ${schoolId}. Redirecting to login...`;
     setTimeout(() => {
-      window.location.href = '../index.html?login=1';
+      window.location.href = '../index.html#login';
     }, 600);
   }
 
