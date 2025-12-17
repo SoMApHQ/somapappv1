@@ -1,5 +1,6 @@
 (function () {
   const db = window.db || firebase.database();
+  const SOCRATES_SCHOOL_ID = 'socrates-school';
 
   const hubCards = document.getElementById('hubCards');
   const registerSection = document.getElementById('registerSection');
@@ -33,15 +34,47 @@
     loadSchools();
   }
 
+  async function ensureSocratesSchoolExists() {
+    const metaRef = db.ref(`schools/${SOCRATES_SCHOOL_ID}/meta`);
+    const metaSnap = await metaRef.once('value');
+    if (metaSnap.exists()) return;
+
+    const updates = {};
+    updates[`schools/${SOCRATES_SCHOOL_ID}/meta`] = {
+      name: 'Socrates School',
+      registrationNo: 'Socrates-Default',
+      email: 'socratesschool2020@gmail.com',
+      phone: '+255...',
+      country: 'Tanzania',
+      ownership: 'Private',
+      levels: ['Primary'],
+      location: 'Uswahilini, Arusha',
+      status: 'active',
+      createdAt: Date.now()
+    };
+    updates[`schools/${SOCRATES_SCHOOL_ID}/status`] = 'active';
+    await db.ref().update(updates);
+  }
+
   async function loadSchools() {
     chooseStatus.textContent = 'Loading schools...';
     schoolList.innerHTML = '';
     try {
+      await ensureSocratesSchoolExists();
       const snap = await db.ref('schools').once('value');
       const data = snap.val() || {};
       const active = Object.entries(data)
-        .map(([id, obj]) => ({ id, meta: obj?.meta || {} }))
-        .filter(s => (s.meta.status || '').toLowerCase() === 'active');
+        .map(([id, obj]) => ({
+          id,
+          meta: obj?.meta || {},
+          rootStatus: obj?.status
+        }))
+        .filter(s => {
+          const status = (s.meta.status || s.rootStatus || '').toLowerCase();
+          const hasName = Boolean(s.meta.name);
+          if (status) return status === 'active';
+          return hasName;
+        });
 
       renderSchools(active);
       chooseStatus.textContent = active.length ? '' : 'No active schools yet.';
