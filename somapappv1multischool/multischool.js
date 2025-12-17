@@ -1,5 +1,7 @@
 (function () {
   const db = window.db || firebase.database();
+  // Use global SOMAP context defined in context.js
+  const SOMAP = window.SOMAP;
   const SOCRATES_SCHOOL_ID = 'socrates-school';
 
   const hubCards = document.getElementById('hubCards');
@@ -171,8 +173,8 @@
     SOMAP.setSchoolId(schoolId);
     chooseStatus.textContent = `School selected: ${schoolId}. Redirecting to login...`;
     setTimeout(() => {
-      window.location.href = '../index.html#login';
-    }, 600);
+      window.location.href = '../index.html?login=1';
+    }, 900);
   }
 
   function init() {
