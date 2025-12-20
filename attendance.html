@@ -210,6 +210,7 @@
   let db = null;
   let shiftReports = {};
   let shiftRef = null;
+  const DB_BASE_URL = 'https://somaptestt-default-rtdb.firebaseio.com';
 
   // ---------- HELPERS ----------
   const el = id => document.getElementById(id);
@@ -289,8 +290,51 @@
     }
   }
 
+  // Fallback fetch helper when firebase SDK is not available
+  async function fetchDbJson(path) {
+    const url = `${DB_BASE_URL}/${path}.json`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Request failed ${res.status}`);
+    return res.json();
+  }
+
   async function loadStudentsFromDb() {
-    if (!db) return [];
+    if (!db) {
+      try {
+        const data = await fetchDbJson('students');
+        if (!data) return [];
+        return Object.keys(data).map(k => {
+          const s = data[k] || {};
+          const name = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || (s.fullName || '');
+          const gender = s.gender || s.Gender || s.sex || s.Sex || s.genderType || '';
+          const className = s.className || s.classLevel || s.class || s.grade || 'Unknown';
+          const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || 0);
+          const feePaid = Number(s.feesPaid || s.feePaid || s.paidAmount || 0);
+          const balance = Number(s.balance || (feeDue - feePaid) || 0);
+          const status = String(s.status || '').toLowerCase();
+          if (status === 'shifted') return null;
+          const parentName = s.primaryParentName || s.parentName || s.guardianName || '';
+          const parentContact = s.primaryParentContact || s.parentPhone || s.parentContact || s.guardianContact || '';
+          return {
+            id: k,
+            admissionNo: s.admissionNumber || s.admNo || s.admissionNo || '',
+            name,
+            class: className,
+            className,
+            gender,
+            feeDue,
+            feePaid,
+            balance,
+            parentName,
+            parentContact,
+            status: status || 'active'
+          };
+        }).filter(Boolean);
+      } catch (err) {
+        console.warn('Fallback fetch students failed:', err.message);
+        return [];
+      }
+    }
     const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List'];
     for (const p of tryPaths) {
       try {
@@ -512,7 +556,31 @@
   }
 
   async function computeYellowAlertsCount(classNames, monthKeyValue) {
-    if (!db) return 0;
+    if (!db) {
+      // REST fallback
+      const alertSet = new Set();
+      for (const cls of classNames) {
+        try {
+          const monthData = await fetchDbJson(`attendance/${cls}/${monthKeyValue}`);
+          const counts = {};
+          Object.keys(monthData || {}).forEach(dateKey => {
+            const dayRecs = monthData[dateKey] || {};
+            Object.keys(dayRecs).forEach(stuId => {
+              const rec = dayRecs[stuId] || {};
+              const status = String(rec.status || rec.daily || '').toUpperCase();
+              const isAbsent = status === 'A' || status === 'ABSENT' || (String(rec.daily || '').toUpperCase().includes('A'));
+              if (isAbsent) counts[stuId] = (counts[stuId] || 0) + 1;
+            });
+          });
+          Object.keys(counts).forEach(stuId => {
+            if (counts[stuId] >= 10) alertSet.add(`${cls}::${stuId}`);
+          });
+        } catch (e) {
+          console.warn('Failed to compute yellow alerts (REST)', cls, e.message);
+        }
+      }
+      return alertSet.size;
+    }
     const alertSet = new Set();
     for (const cls of classNames) {
       try {
@@ -542,7 +610,6 @@
     const todayIso = new Date().toISOString().slice(0, 10);
     const targetDate = (dateStr || todayIso).slice(0, 10);
     const monthKeyLocal = toMonthKey(targetDate);
-    if (!db) return { date: targetDate, classNames: [], perClass: {}, schoolTotals: initialCounts(), schoolAvgPct: 0, yellowAlertsCount: 0, absenteesByClass: {} };
 
     const studentData = (students && students.length) ? students : await loadStudentsFromDb();
     const studentIndex = {};
@@ -559,11 +626,16 @@
       classNamesSet.add(className);
     });
 
-    if (!classNamesSet.size && db) {
+    if (!classNamesSet.size && (db || DB_BASE_URL)) {
       try {
-        const attRoot = await db.ref('attendance').limitToFirst(20).get();
-        const attObj = attRoot.exists() ? attRoot.val() : {};
-        Object.keys(attObj || {}).forEach(cls => classNamesSet.add(cls));
+        if (db) {
+          const attRoot = await db.ref('attendance').limitToFirst(20).get();
+          const attObj = attRoot.exists() ? attRoot.val() : {};
+          Object.keys(attObj || {}).forEach(cls => classNamesSet.add(cls));
+        } else {
+          const attObj = await fetchDbJson('attendance');
+          Object.keys(attObj || {}).slice(0, 20).forEach(cls => classNamesSet.add(cls));
+        }
       } catch (e) {
       console.warn('No classes inferred from attendance:', e.message);
     }
@@ -587,8 +659,13 @@
 
     for (const cls of classNames) {
       try {
-        const snap = await db.ref('attendance').child(cls).child(monthKeyLocal).child(targetDate).get();
-        const records = snap.exists() ? snap.val() : {};
+        let records = {};
+        if (db) {
+          const snap = await db.ref('attendance').child(cls).child(monthKeyLocal).child(targetDate).get();
+          records = snap.exists() ? snap.val() : {};
+        } else {
+          records = await fetchDbJson(`attendance/${cls}/${monthKeyLocal}/${targetDate}`) || {};
+        }
         Object.keys(records || {}).forEach(stuId => {
           const record = records[stuId] || {};
           const info = studentIndex[stuId] || { name: stuId, gender: null, className: cls };
@@ -695,7 +772,7 @@
 
   // ---------- Archive load range ----------
   async function loadRangeBetween(from, to, cls) {
-    if (!db || !cls) return alert('Pick class and ensure connection');
+    if (!cls) return alert('Pick class and ensure connection');
     const start = new Date(from + 'T00:00:00');
     const end = new Date(to + 'T00:00:00');
     const days = [];
@@ -707,8 +784,13 @@
     for (const day of days) {
       const mon = toMonthKey(day);
       try {
-        const snap = await db.ref(`attendance/${cls}/${mon}/${day}`).get();
-        const d = snap.exists() ? snap.val() : {};
+        let d = {};
+        if (db) {
+          const snap = await db.ref(`attendance/${cls}/${mon}/${day}`).get();
+          d = snap.exists() ? snap.val() : {};
+        } else {
+          d = await fetchDbJson(`attendance/${cls}/${mon}/${day}`) || {};
+        }
         let present = 0, absent = 0;
         Object.keys(d || {}).forEach(k => {
           const rec = d[k];
@@ -811,8 +893,13 @@
         currentClass = classes[0] || '';
       }
     } else {
-      console.warn('DB not connected; rendering empty register.');
-      el('rtState').textContent = 'Offline';
+      console.warn('DB not connected; using REST fallback (read-only).');
+      el('rtState').textContent = 'Offline mode';
+      students = await loadStudentsFromDb();
+      filtered = students.slice();
+      if (!students.length) {
+        el('rtState').textContent = 'No students found';
+      }
     }
     el('rtState').textContent = el('rtState').textContent || 'Ready';
     wireUI();
@@ -823,7 +910,7 @@
   }
 
   await init();
-  el('rtState').textContent = db ? 'Connected' : 'No DB';
+  el('rtState').textContent = db ? 'Connected' : 'REST mode';
 })();
 </script>
 </body>
