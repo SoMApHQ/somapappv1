@@ -210,37 +210,67 @@
   let db = null;
   let shiftReports = {};
   let shiftRef = null;
-  const DB_BASE_URL = 'https://somaptestt-default-rtdb.firebaseio.com';
 
   // ---------- HELPERS ----------
   const el = id => document.getElementById(id);
   const shiftListBody = el('shiftListBody');
   const shiftAlertsCount = el('shiftAlertsCount');
-  function fmtDate(d){ const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; }
+
+  function fmtDate(d){
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,'0');
+    const day = String(d.getDate()).padStart(2,'0');
+    return `${y}-${m}-${day}`;
+  }
+
   function toMonthKey(dStr){
     const d = new Date(dStr + 'T00:00:00');
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
   }
+
   function formatMonthLabel(dStr){
     const d = new Date(dStr + 'T00:00:00');
     const fmt = d.toLocaleString('en-US', { month:'long', year:'numeric' });
     return fmt || dStr;
   }
-  function isWeekend(d){ const day = d.getDay(); return day===0 || day===6; }
-  function isHoliday(d){ const fixed = String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); const iso = fmtDate(d); return HOLIDAYS.includes(fixed) || MOVABLE.includes(iso); }
+
+  function isWeekend(d){
+    const day = d.getDay();
+    return day===0 || day===6;
+  }
+
+  function isHoliday(d){
+    const fixed = String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    const iso = fmtDate(d);
+    return HOLIDAYS.includes(fixed) || MOVABLE.includes(iso);
+  }
+
   function monthWorkingDays(dateStr){
-    const d = new Date(dateStr + 'T00:00:00'); const y=d.getFullYear(), m=d.getMonth();
-    let count=0;
-    for(let day=1; day<=31; day++){
-      const dt = new Date(y,m,day); if(dt.getMonth()!==m) break;
-      if(isWeekend(dt) || isHoliday(dt)) continue; count++;
+    const d = new Date(dateStr + 'T00:00:00');
+    const y = d.getFullYear();
+    const m = d.getMonth();
+    let count = 0;
+    for (let day=1; day<=31; day++){
+      const dt = new Date(y,m,day);
+      if (dt.getMonth()!==m) break;
+      if (isWeekend(dt) || isHoliday(dt)) continue;
+      count++;
     }
     return count;
   }
+
   function setStatusElem(elm, val){
     if(!elm) return;
     elm.textContent = val || '-';
-    elm.className = 'status-pill ' + (val==='P' ? 'bg-green-100 text-green-800' : (val||'').includes('A') ? 'bg-red-100 text-red-700' : (val||'').includes('S') ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-700');
+    elm.className = 'status-pill ' + (
+      val==='P'
+        ? 'bg-green-100 text-green-800'
+        : (val||'').includes('A')
+          ? 'bg-red-100 text-red-700'
+          : (val||'').includes('S')
+            ? 'bg-amber-100 text-amber-800'
+            : 'bg-slate-100 text-slate-700'
+    );
   }
 
   function normalizeGender(g){
@@ -262,79 +292,38 @@
     return 1000 + n.charCodeAt(0);
   }
 
+  function escapeHtml(s) {
+    if (!s) return '';
+    return String(s).replace(/[&<>"']/g, m => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[m]));
+  }
+
   // ---------- FIREBASE: initialize and load students ----------
   async function initializeFirebase() {
     try {
-      if (!window.firebase || !window.firebase.apps.length) {
-        await new Promise((resolve) => {
-          const script = document.createElement('script');
-          script.src = 'firebase.js';
-          script.onload = resolve;
-          script.onerror = () => {
-            console.error('Failed to load firebase.js');
-            el('rtState').textContent = 'Failed to load firebase.js';
-            alert('Error: firebase.js not found. Please check the file path.');
-          };
-          document.head.appendChild(script);
-        });
-      }
-      db = window.db || (window.firebase && firebase.database ? firebase.database() : null);
+      // We rely on firebase.js having already run and created window.db
+      db = window.db || (window.firebase && window.firebase.database ? window.firebase.database() : null);
+
       if (!db) {
-        throw new Error('Firebase database not initialized');
+        throw new Error('Firebase database not initialized. Check firebase.js and Firebase libs order.');
       }
-      el('rtState').textContent = 'Connected to Firebase';
+
+      const stateEl = el('rtState');
+      if (stateEl) stateEl.textContent = 'Connected to Firebase';
     } catch (e) {
       console.error('Firebase initialization error:', e.message);
-      el('rtState').textContent = 'Firebase error: ' + e.message;
-      alert('Firebase initialization failed: ' + e.message + '. Please check firebase.js and database rules.');
+      const stateEl = el('rtState');
+      if (stateEl) stateEl.textContent = 'Firebase error: ' + e.message;
     }
-  }
-
-  // Fallback fetch helper when firebase SDK is not available
-  async function fetchDbJson(path) {
-    const url = `${DB_BASE_URL}/${path}.json`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Request failed ${res.status}`);
-    return res.json();
   }
 
   async function loadStudentsFromDb() {
-    if (!db) {
-      try {
-        const data = await fetchDbJson('students');
-        if (!data) return [];
-        return Object.keys(data).map(k => {
-          const s = data[k] || {};
-          const name = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || (s.fullName || '');
-          const gender = s.gender || s.Gender || s.sex || s.Sex || s.genderType || '';
-          const className = s.className || s.classLevel || s.class || s.grade || 'Unknown';
-          const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || 0);
-          const feePaid = Number(s.feesPaid || s.feePaid || s.paidAmount || 0);
-          const balance = Number(s.balance || (feeDue - feePaid) || 0);
-          const status = String(s.status || '').toLowerCase();
-          if (status === 'shifted') return null;
-          const parentName = s.primaryParentName || s.parentName || s.guardianName || '';
-          const parentContact = s.primaryParentContact || s.parentPhone || s.parentContact || s.guardianContact || '';
-          return {
-            id: k,
-            admissionNo: s.admissionNumber || s.admNo || s.admissionNo || '',
-            name,
-            class: className,
-            className,
-            gender,
-            feeDue,
-            feePaid,
-            balance,
-            parentName,
-            parentContact,
-            status: status || 'active'
-          };
-        }).filter(Boolean);
-      } catch (err) {
-        console.warn('Fallback fetch students failed:', err.message);
-        return [];
-      }
-    }
+    if (!db) return [];
     const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List'];
     for (const p of tryPaths) {
       try {
@@ -343,7 +332,9 @@
           const data = snap.val();
           return Object.keys(data).map(k => {
             const s = data[k] || {};
-            const name = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || (s.fullName || '');
+            const name = [s.firstName, s.middleName, s.lastName]
+              .filter(Boolean).join(' ').trim()
+              || s.name || (s.fullName || '');
             const gender = s.gender || s.Gender || s.sex || s.Sex || s.genderType || '';
             const className = s.className || s.classLevel || s.class || s.grade || 'Unknown';
             const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || 0);
@@ -377,24 +368,7 @@
     return [];
   }
 
-  // ---------- Attendance CRUD ----------
-  async function loadMonthAttendance(cls, yymm) {
-    monthAttendance = {};
-    if (!db || !cls) return;
-    try {
-      const snap = await db.ref(`attendance/${cls}/${yymm}`).get();
-      const d = snap.exists() ? snap.val() : {};
-      Object.keys(d).forEach(dateKey => {
-        const byStu = d[dateKey] || {};
-        Object.keys(byStu).forEach(stuId => {
-          monthAttendance[stuId] = monthAttendance[stuId] || {};
-          monthAttendance[stuId][dateKey] = byStu[stuId];
-        });
-      });
-    } catch (e) {
-      console.warn('Failed to load month attendance:', e.message);
-    }
-  }
+  // ---------- Shift reports ----------
   function subscribeShiftReports() {
     if (!db) return;
     if (shiftRef) shiftRef.off();
@@ -404,10 +378,12 @@
       renderShiftList();
     });
   }
+
   function getShiftEntries() {
     const data = shiftReports || {};
     return Object.keys(data).map(key => ({ key, ...(data[key] || {}) }));
   }
+
   function updateShiftAlertsBadge(pendingCount, totalCount) {
     if (!shiftAlertsCount) return;
     const descriptor = totalCount ? `${pendingCount} pending / ${totalCount}` : `${pendingCount} pending`;
@@ -417,12 +393,18 @@
     else if (totalCount > 0) shiftAlertsCount.classList.add('shifted');
     else shiftAlertsCount.classList.add('review');
   }
+
   function renderShiftList() {
     if (!shiftListBody) return;
     const entries = getShiftEntries();
     const pendingCount = entries.filter(e => (e.status || 'pending') !== 'shifted').length;
     if (!entries.length) {
-      shiftListBody.innerHTML = `<tr><td colspan="8" class="text-center text-slate-500 py-4">No shift alerts yet. Teachers will flag students here.</td></tr>`;
+      shiftListBody.innerHTML = `
+        <tr>
+          <td colspan="8" class="text-center text-slate-500 py-4">
+            No shift alerts yet. Teachers will flag students here.
+          </td>
+        </tr>`;
       updateShiftAlertsBadge(0, 0);
       return;
     }
@@ -440,7 +422,9 @@
       const debtStatus = entry.debtStatus || ((Number(entry.balance || 0) > 0) ? 'not cleared' : 'cleared');
       const statusText = status === 'shifted'
         ? `Shifted - Debt: ${debtStatus.replace(/\b\w/g, c => c.toUpperCase())}`
-        : `Pending - Debt: ${debtStatus.replace(/\b\w/g, c => c.toUpperCase())}${entry.shiftChoice ? ` - Teacher: ${String(entry.shiftChoice).toUpperCase()}` : ''}`;
+        : `Pending - Debt: ${debtStatus.replace(/\b\w/g, c => c.toUpperCase())}${
+            entry.shiftChoice ? ` - Teacher: ${String(entry.shiftChoice).toUpperCase()}` : ''
+          }`;
       const parentParts = [entry.parentName, entry.parentContact].filter(Boolean);
       const parentCell = parentParts.length ? parentParts.join(' | ') : '-';
       return `
@@ -459,7 +443,7 @@
     updateShiftAlertsBadge(pendingCount, entries.length);
   }
 
-  // ---------- Daily register + analytics helpers ----------
+  // ---------- Daily register + analytics ----------
   function initialCounts() {
     return {
       registered: { boys: 0, girls: 0, total: 0 },
@@ -479,11 +463,17 @@
     if (!classNames.length) {
       table.innerHTML = `
         <thead>
-          <tr><th class="px-3 py-2 border text-left text-xs font-semibold text-slate-700">Daily Register</th></tr>
+          <tr>
+            <th class="px-3 py-2 border text-left text-xs font-semibold text-slate-700">
+              Daily Register
+            </th>
+          </tr>
         </thead>
         <tbody>
           <tr class="bg-white">
-            <td class="px-3 py-3 border text-sm text-slate-600">No register data yet for ${escapeHtml(stats.date || '')}. Check connection or student records.</td>
+            <td class="px-3 py-3 border text-sm text-slate-600">
+              No register data yet for ${escapeHtml(stats.date || '')}. Check connection or student records.
+            </td>
           </tr>
         </tbody>`;
       return;
@@ -493,7 +483,10 @@
     const thead = `
       <thead class="bg-slate-50">
         <tr>
-          ${headerCells.map((h, idx) => `<th class="px-3 py-2 border text-xs font-semibold text-slate-700 ${idx > 0 ? 'text-right' : 'text-left'}">${escapeHtml(h || '')}</th>`).join('')}
+          ${headerCells.map((h, idx) => `
+            <th class="px-3 py-2 border text-xs font-semibold text-slate-700 ${idx > 0 ? 'text-right' : 'text-left'}">
+              ${escapeHtml(h || '')}
+            </th>`).join('')}
         </tr>
       </thead>
     `;
@@ -520,15 +513,27 @@
         return `<td class="px-3 py-2 border text-right">${display === '' ? '—' : display}</td>`;
       });
       const totalCell = row.forceDash ? '—' : rowTotal;
-      const shiftedTotal = row.showShift ? classNames.reduce((sum, c) => sum + (perClass[c]?.shifted || 0), 0) : '—';
-      const newcomersTotal = row.showNew ? classNames.reduce((sum, c) => sum + (perClass[c]?.newcomers || 0), 0) : '—';
+      const shiftedTotal = row.showShift
+        ? classNames.reduce((sum, c) => sum + (perClass[c]?.shifted || 0), 0)
+        : '—';
+      const newcomersTotal = row.showNew
+        ? classNames.reduce((sum, c) => sum + (perClass[c]?.newcomers || 0), 0)
+        : '—';
       return `
         <tr class="odd:bg-white even:bg-slate-50">
-          <th class="px-3 py-2 border text-left font-semibold text-slate-700">${escapeHtml(row.label)}</th>
+          <th class="px-3 py-2 border text-left font-semibold text-slate-700">
+            ${escapeHtml(row.label)}
+          </th>
           ${classCells.join('')}
-          <td class="px-3 py-2 border text-right font-semibold">${row.forceDash ? '—' : totalCell}</td>
-          <td class="px-3 py-2 border text-right">${row.showShift ? shiftedTotal : '—'}</td>
-          <td class="px-3 py-2 border text-right">${row.showNew ? newcomersTotal : '—'}</td>
+          <td class="px-3 py-2 border text-right font-semibold">
+            ${row.forceDash ? '—' : totalCell}
+          </td>
+          <td class="px-3 py-2 border text-right">
+            ${row.showShift ? shiftedTotal : '—'}
+          </td>
+          <td class="px-3 py-2 border text-right">
+            ${row.showNew ? newcomersTotal : '—'}
+          </td>
         </tr>
       `;
     }).join('');
@@ -539,16 +544,22 @@
   function renderAbsenteesPanel(stats) {
     const panel = el('absentees-panel');
     if (!panel) return;
-    const entries = Object.entries(stats.absenteesByClass || {}).filter(([, list]) => (list || []).length);
+    const entries = Object.entries(stats.absenteesByClass || {})
+      .filter(([, list]) => (list || []).length);
     if (!entries.length) {
-      panel.innerHTML = `<div class="border border-green-100 bg-green-50 text-green-700 text-sm rounded-lg p-3">No absentees recorded for ${escapeHtml(stats.date || '')}.</div>`;
+      panel.innerHTML = `
+        <div class="border border-green-100 bg-green-50 text-green-700 text-sm rounded-lg p-3">
+          No absentees recorded for ${escapeHtml(stats.date || '')}.
+        </div>`;
       return;
     }
     const cards = entries.map(([cls, list]) => `
       <div class="border rounded-lg p-3 bg-rose-50">
         <h3 class="font-semibold text-sm text-rose-800">${escapeHtml(cls)}</h3>
         <ul class="mt-2 space-y-1 text-sm text-rose-900">
-          ${list.map(item => `<li>${escapeHtml(item.name || '')}${item.reason ? ' — ' + escapeHtml(item.reason) : ''}</li>`).join('')}
+          ${list.map(item => `
+            <li>${escapeHtml(item.name || '')}${item.reason ? ' — ' + escapeHtml(item.reason) : ''}</li>
+          `).join('')}
         </ul>
       </div>
     `).join('');
@@ -556,31 +567,7 @@
   }
 
   async function computeYellowAlertsCount(classNames, monthKeyValue) {
-    if (!db) {
-      // REST fallback
-      const alertSet = new Set();
-      for (const cls of classNames) {
-        try {
-          const monthData = await fetchDbJson(`attendance/${cls}/${monthKeyValue}`);
-          const counts = {};
-          Object.keys(monthData || {}).forEach(dateKey => {
-            const dayRecs = monthData[dateKey] || {};
-            Object.keys(dayRecs).forEach(stuId => {
-              const rec = dayRecs[stuId] || {};
-              const status = String(rec.status || rec.daily || '').toUpperCase();
-              const isAbsent = status === 'A' || status === 'ABSENT' || (String(rec.daily || '').toUpperCase().includes('A'));
-              if (isAbsent) counts[stuId] = (counts[stuId] || 0) + 1;
-            });
-          });
-          Object.keys(counts).forEach(stuId => {
-            if (counts[stuId] >= 10) alertSet.add(`${cls}::${stuId}`);
-          });
-        } catch (e) {
-          console.warn('Failed to compute yellow alerts (REST)', cls, e.message);
-        }
-      }
-      return alertSet.size;
-    }
+    if (!db) return 0;
     const alertSet = new Set();
     for (const cls of classNames) {
       try {
@@ -592,7 +579,8 @@
           Object.keys(dayRecs).forEach(stuId => {
             const rec = dayRecs[stuId] || {};
             const status = String(rec.status || rec.daily || '').toUpperCase();
-            const isAbsent = status === 'A' || status === 'ABSENT' || (String(rec.daily || '').toUpperCase().includes('A'));
+            const isAbsent = status === 'A' || status === 'ABSENT' ||
+              (String(rec.daily || '').toUpperCase().includes('A'));
             if (isAbsent) counts[stuId] = (counts[stuId] || 0) + 1;
           });
         });
@@ -611,6 +599,18 @@
     const targetDate = (dateStr || todayIso).slice(0, 10);
     const monthKeyLocal = toMonthKey(targetDate);
 
+    if (!db) {
+      return {
+        date: targetDate,
+        classNames: [],
+        perClass: {},
+        schoolTotals: initialCounts(),
+        schoolAvgPct: 0,
+        yellowAlertsCount: 0,
+        absenteesByClass: {}
+      };
+    }
+
     const studentData = (students && students.length) ? students : await loadStudentsFromDb();
     const studentIndex = {};
     const classNamesSet = new Set();
@@ -620,68 +620,92 @@
       if (!className) return;
       const gender = normalizeGender(s.gender || s.sex || s.genderType);
       const studentId = s.id || s.studentId || s.studentID || s.admissionNo || s.admissionNumber || s.admission || '';
-      const fullName = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || s.fullName || studentId || 'Unknown';
+      const fullName = [s.firstName, s.middleName, s.lastName]
+        .filter(Boolean).join(' ').trim()
+        || s.name || s.fullName || studentId || 'Unknown';
       const key = studentId || fullName;
       studentIndex[key] = { name: fullName, gender, className };
       classNamesSet.add(className);
     });
 
-    if (!classNamesSet.size && (db || DB_BASE_URL)) {
+    if (!classNamesSet.size && db) {
       try {
-        if (db) {
-          const attRoot = await db.ref('attendance').limitToFirst(20).get();
-          const attObj = attRoot.exists() ? attRoot.val() : {};
-          Object.keys(attObj || {}).forEach(cls => classNamesSet.add(cls));
-        } else {
-          const attObj = await fetchDbJson('attendance');
-          Object.keys(attObj || {}).slice(0, 20).forEach(cls => classNamesSet.add(cls));
-        }
+        const attRoot = await db.ref('attendance').limitToFirst(20).get();
+        const attObj = attRoot.exists() ? attRoot.val() : {};
+        Object.keys(attObj || {}).forEach(cls => classNamesSet.add(cls));
       } catch (e) {
-      console.warn('No classes inferred from attendance:', e.message);
+        console.warn('No classes inferred from attendance:', e.message);
+      }
     }
-  }
 
     const classNames = Array.from(classNamesSet).sort((a, b) => classOrderKey(a) - classOrderKey(b));
     const perClass = {};
     classNames.forEach(cls => { perClass[cls] = initialCounts(); });
+
     const absenteesByClass = {};
     classNames.forEach(cls => { absenteesByClass[cls] = []; });
+
     const schoolTotals = initialCounts();
 
+    // Registered counts
     Object.entries(studentIndex).forEach(([, info]) => {
       const cls = info.className;
       if (!perClass[cls]) perClass[cls] = initialCounts();
       perClass[cls].registered.total += 1;
       schoolTotals.registered.total += 1;
-      if (info.gender === 'boys') { perClass[cls].registered.boys += 1; schoolTotals.registered.boys += 1; }
-      if (info.gender === 'girls') { perClass[cls].registered.girls += 1; schoolTotals.registered.girls += 1; }
+      if (info.gender === 'boys') {
+        perClass[cls].registered.boys += 1;
+        schoolTotals.registered.boys += 1;
+      }
+      if (info.gender === 'girls') {
+        perClass[cls].registered.girls += 1;
+        schoolTotals.registered.girls += 1;
+      }
     });
 
+    // Present/Absent
     for (const cls of classNames) {
       try {
-        let records = {};
-        if (db) {
-          const snap = await db.ref('attendance').child(cls).child(monthKeyLocal).child(targetDate).get();
-          records = snap.exists() ? snap.val() : {};
-        } else {
-          records = await fetchDbJson(`attendance/${cls}/${monthKeyLocal}/${targetDate}`) || {};
-        }
+        const snap = await db
+          .ref('attendance')
+          .child(cls)
+          .child(monthKeyLocal)
+          .child(targetDate)
+          .get();
+        const records = snap.exists() ? snap.val() : {};
         Object.keys(records || {}).forEach(stuId => {
           const record = records[stuId] || {};
           const info = studentIndex[stuId] || { name: stuId, gender: null, className: cls };
           const statusRaw = String(record.status || record.daily || '').toUpperCase();
           const isPresent = statusRaw === 'P' || statusRaw === 'PRESENT' || statusRaw === 'PR';
+
           if (isPresent) {
             perClass[cls].present.total += 1;
             schoolTotals.present.total += 1;
-            if (info.gender === 'boys') { perClass[cls].present.boys += 1; schoolTotals.present.boys += 1; }
-            if (info.gender === 'girls') { perClass[cls].present.girls += 1; schoolTotals.present.girls += 1; }
+            if (info.gender === 'boys') {
+              perClass[cls].present.boys += 1;
+              schoolTotals.present.boys += 1;
+            }
+            if (info.gender === 'girls') {
+              perClass[cls].present.girls += 1;
+              schoolTotals.present.girls += 1;
+            }
           } else {
             perClass[cls].absent.total += 1;
             schoolTotals.absent.total += 1;
-            if (info.gender === 'boys') { perClass[cls].absent.boys += 1; schoolTotals.absent.boys += 1; }
-            if (info.gender === 'girls') { perClass[cls].absent.girls += 1; schoolTotals.absent.girls += 1; }
-            absenteesByClass[cls].push({ name: info.name, gender: info.gender, reason: record.reason || record.comment || record.note || '' });
+            if (info.gender === 'boys') {
+              perClass[cls].absent.boys += 1;
+              schoolTotals.absent.boys += 1;
+            }
+            if (info.gender === 'girls') {
+              perClass[cls].absent.girls += 1;
+              schoolTotals.absent.girls += 1;
+            }
+            absenteesByClass[cls].push({
+              name: info.name,
+              gender: info.gender,
+              reason: record.reason || record.comment || record.note || ''
+            });
           }
 
           if (record.shifted === true || record.dateShifted) {
@@ -697,21 +721,33 @@
         console.warn('Failed to load attendance for class', cls, e.message);
       }
 
-      perClass[cls].absent.total = Math.max(0, perClass[cls].registered.total - perClass[cls].present.total);
-      perClass[cls].absent.boys = Math.max(0, perClass[cls].registered.boys - perClass[cls].present.boys);
-      perClass[cls].absent.girls = Math.max(0, perClass[cls].registered.girls - perClass[cls].present.girls);
+      perClass[cls].absent.total = Math.max(
+        0,
+        perClass[cls].registered.total - perClass[cls].present.total
+      );
+      perClass[cls].absent.boys = Math.max(
+        0,
+        perClass[cls].registered.boys - perClass[cls].present.boys
+      );
+      perClass[cls].absent.girls = Math.max(
+        0,
+        perClass[cls].registered.girls - perClass[cls].present.girls
+      );
     }
 
+    // Recompute school totals for absent (safer)
     schoolTotals.absent = { boys: 0, girls: 0, total: 0 };
     schoolTotals.present = schoolTotals.present || { boys: 0, girls: 0, total: 0 };
     schoolTotals.registered = schoolTotals.registered || { boys: 0, girls: 0, total: 0 };
+
     classNames.forEach(cls => {
       ['boys', 'girls', 'total'].forEach(key => {
         schoolTotals.absent[key] += perClass[cls].absent[key] || 0;
       });
     });
 
-    let sumPct = 0, classesWithData = 0;
+    let sumPct = 0;
+    let classesWithData = 0;
     classNames.forEach(cls => {
       const reg = perClass[cls].registered.total;
       const pres = perClass[cls].present.total;
@@ -724,7 +760,15 @@
 
     const yellowAlertsCount = await computeYellowAlertsCount(classNames, monthKeyLocal);
 
-    return { date: targetDate, classNames, perClass, schoolTotals, schoolAvgPct, yellowAlertsCount, absenteesByClass };
+    return {
+      date: targetDate,
+      classNames,
+      perClass,
+      schoolTotals,
+      schoolAvgPct,
+      yellowAlertsCount,
+      absenteesByClass
+    };
   }
 
   async function refreshDailyRegisterUI(dateStr) {
@@ -735,63 +779,86 @@
     const workdays = monthWorkingDays(targetDate);
     const monthLabel = formatMonthLabel(targetDate);
 
-    el('monthLabel').textContent = monthLabel;
-    el('classDays').textContent = workdays || '-';
-    el('classPctPresent').textContent = `${Math.round(stats.schoolAvgPct || 0)}%`;
-    el('yellowCount').textContent = typeof stats.yellowAlertsCount === 'number' ? stats.yellowAlertsCount : '-';
-    el('rtState').textContent = db ? 'Connected' : el('rtState').textContent;
+    const monthLabelEl = el('monthLabel');
+    if (monthLabelEl) monthLabelEl.textContent = monthLabel;
+
+    const classDaysEl = el('classDays');
+    if (classDaysEl) classDaysEl.textContent = workdays || '-';
+
+    const pctEl = el('classPctPresent');
+    if (pctEl) pctEl.textContent = `${Math.round(stats.schoolAvgPct || 0)}%`;
+
+    const yellowEl = el('yellowCount');
+    if (yellowEl) yellowEl.textContent = typeof stats.yellowAlertsCount === 'number'
+      ? stats.yellowAlertsCount
+      : '-';
+
+    const stateEl = el('rtState');
+    if (stateEl && db) stateEl.textContent = 'Connected';
 
     const reg = stats.schoolTotals.registered || {};
     const pres = stats.schoolTotals.present || {};
     const abs = stats.schoolTotals.absent || {};
-    const setCard = (id, value) => { const node = el(id); if (node) node.textContent = value; };
-    setCard('schoolRegisteredTotal', (reg.total ?? 0).toString());
-    setCard('schoolPresentTotal', (pres.total ?? 0).toString());
-    setCard('schoolAbsentTotal', (abs.total ?? 0).toString());
-    setCard('schoolClassCount', (stats.classNames?.length ?? 0).toString());
 
-    const breakdown = (boys, girls) => `Boys ${boys ?? 0} \u00b7 Girls ${girls ?? 0}`;
+    const setCard = (id, value) => {
+      const node = el(id);
+      if (node) node.textContent = value;
+    };
+    setCard('schoolRegisteredTotal', String(reg.total ?? 0));
+    setCard('schoolPresentTotal', String(pres.total ?? 0));
+    setCard('schoolAbsentTotal', String(abs.total ?? 0));
+    setCard('schoolClassCount', String(stats.classNames?.length ?? 0));
+
+    const breakdown = (boys, girls) => `Boys ${boys ?? 0} · Girls ${girls ?? 0}`;
     const setBreakdown = (id, boys, girls, fallback) => {
       const node = el(id);
-      if (node) node.textContent = fallback || breakdown(boys, girls);
+      if (!node) return;
+      node.textContent = fallback || breakdown(boys, girls);
     };
     setBreakdown('schoolRegisteredBreakdown', reg.boys, reg.girls);
     setBreakdown('schoolPresentBreakdown', pres.boys, pres.girls);
     setBreakdown('schoolAbsentBreakdown', abs.boys, abs.girls);
-    const classLabel = stats.classNames && stats.classNames.length ? `${stats.classNames.length} active class(es)` : 'Active classes —';
+    const classLabel = stats.classNames && stats.classNames.length
+      ? `${stats.classNames.length} active class(es)`
+      : 'Active classes —';
     setBreakdown('schoolClassBreakdown', '', '', classLabel);
 
     buildRegisterTable(stats);
     renderAbsenteesPanel(stats);
   }
 
-  // ---------- Analytics compute ----------
   async function computeAnalytics(dateStr) {
     return refreshDailyRegisterUI(dateStr || currentDateStr || fmtDate(new Date()));
   }
 
   // ---------- Archive load range ----------
   async function loadRangeBetween(from, to, cls) {
-    if (!cls) return alert('Pick class and ensure connection');
+    if (!db || !cls) {
+      alert('Pick a class and ensure connection before loading an archive range.');
+      return;
+    }
+    if (!from || !to) {
+      alert('Please choose FROM and TO dates first.');
+      return;
+    }
+
     const start = new Date(from + 'T00:00:00');
     const end = new Date(to + 'T00:00:00');
     const days = [];
+
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
       if (isWeekend(d) || isHoliday(d)) continue;
       days.push(fmtDate(new Date(d)));
     }
+
     const results = {};
     for (const day of days) {
       const mon = toMonthKey(day);
       try {
-        let d = {};
-        if (db) {
-          const snap = await db.ref(`attendance/${cls}/${mon}/${day}`).get();
-          d = snap.exists() ? snap.val() : {};
-        } else {
-          d = await fetchDbJson(`attendance/${cls}/${mon}/${day}`) || {};
-        }
-        let present = 0, absent = 0;
+        const snap = await db.ref(`attendance/${cls}/${mon}/${day}`).get();
+        const d = snap.exists() ? snap.val() : {};
+        let present = 0;
+        let absent = 0;
         Object.keys(d || {}).forEach(k => {
           const rec = d[k];
           if (rec && rec.daily === 'P') present++;
@@ -802,18 +869,47 @@
         console.warn(`Failed to load attendance for ${day}:`, e.message);
       }
     }
+
     let text = `Attendance summary for ${cls} from ${from} to ${to}:\n`;
-    Object.keys(results).forEach(k => text += `${k}: P=${results[k].present} A=${results[k].absent}\n`);
+    Object.keys(results).forEach(k => {
+      text += `${k}: P=${results[k].present} A=${results[k].absent}\n`;
+    });
     alert(text);
   }
 
   // ---------- UI wiring ----------
   function wireUI() {
-    el('btnRangeLoad').addEventListener('click', () => loadRangeBetween(el('fromDate').value, el('toDate').value, currentClass));
-    el('btnFullscreen').addEventListener('click', () => {
-      if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
-      else document.exitFullscreen().catch(() => {});
-    });
+    const btnRange = el('btnRangeLoad');
+    if (btnRange) {
+      btnRange.addEventListener('click', () => {
+        const fromEl = el('fromDate');
+        const toEl = el('toDate');
+        const fromVal = fromEl && fromEl.value ? fromEl.value : '';
+        const toVal = toEl && toEl.value ? toEl.value : '';
+        if (!fromVal || !toVal) {
+          alert('Please choose both FROM and TO dates first.');
+          return;
+        }
+        if (!currentClass) {
+          alert('No current class selected. Attendance by range needs a class.');
+          return;
+        }
+        loadRangeBetween(fromVal, toVal, currentClass);
+      });
+    }
+
+    const btnFullscreen = el('btnFullscreen');
+    if (btnFullscreen) {
+      btnFullscreen.addEventListener('click', () => {
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        } else {
+          document.exitFullscreen().catch(() => {});
+        }
+      });
+    }
+
+    // Periodic check for 3PM alert (safe even if attendanceCache is empty)
     setInterval(check3pmAlert, 60 * 1000);
   }
 
@@ -821,15 +917,20 @@
     const dateInput = el('registerDate');
     const btnLoad = el('btnLoadRegister');
     const todayIso = fmtDate(new Date());
+
     if (dateInput && !dateInput.value) {
       dateInput.value = todayIso;
     }
+
     const reload = async () => {
       const val = (dateInput && dateInput.value) ? dateInput.value : todayIso;
       await refreshDailyRegisterUI(val);
     };
+
     if (btnLoad) btnLoad.addEventListener('click', reload);
     if (dateInput) dateInput.addEventListener('change', reload);
+
+    // initial load
     return reload();
   }
 
@@ -839,8 +940,10 @@
     const cut = new Date(now);
     cut.setHours(SCHOOL_DAY_CUTOFF_HOUR, 0, 0, 0);
     const box = el('todayAlert');
+    if (!box) return;
+
     if (now > cut) {
-      const need = filtered.some(s => {
+      const need = (filtered || []).some(s => {
         const rec = attendanceCache[s.id] || {};
         return !(rec.am && rec.pm);
       });
@@ -855,28 +958,29 @@
     }
   }
 
-  // ---------- Utilities ----------
-  function escapeHtml(s) {
-    if (!s) return '';
-    return String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m]);
-  }
-
   // ---------- Start ----------
   async function init() {
     const now = new Date();
     currentDateStr = fmtDate(now);
     monthKey = toMonthKey(currentDateStr);
-    el('fromDate').value = currentDateStr;
-    el('toDate').value = currentDateStr;
+
+    const fromInput = el('fromDate');
+    const toInput = el('toDate');
+    if (fromInput) fromInput.value = currentDateStr;
+    if (toInput) toInput.value = currentDateStr;
+
     const dateInput = el('registerDate');
     const todayIso = fmtDate(now);
-    if (dateInput) dateInput.value = todayIso;
+    if (dateInput && !dateInput.value) dateInput.value = todayIso;
 
-    el('rtState').textContent = 'Connecting...';
+    const stateEl = el('rtState');
+    if (stateEl) stateEl.textContent = 'Connecting...';
+
     await initializeFirebase();
-    el('rtState').textContent = db ? 'Connected' : 'No DB';
-    el('rtState').textContent = 'Loading students...';
+    if (stateEl) stateEl.textContent = db ? 'Connected' : 'No DB';
+
     if (db) {
+      if (stateEl) stateEl.textContent = 'Loading students...';
       for (let attempt = 1; attempt <= 3; attempt++) {
         students = await loadStudentsFromDb();
         if (students.length) break;
@@ -886,22 +990,21 @@
       filtered = students.slice();
       if (!students.length) {
         console.warn('No students found in database; rendering empty register.');
-        el('rtState').textContent = 'No students found';
+        if (stateEl) stateEl.textContent = 'No students found';
       }
       if (students.length && !currentClass) {
-        const classes = Array.from(new Set(students.map(s => s.class || s.classLevel || s.grade || s.className).filter(Boolean))).sort((a, b) => classOrderKey(a) - classOrderKey(b));
+        const classes = Array.from(new Set(
+          students.map(s => s.class || s.classLevel || s.grade || s.className).filter(Boolean)
+        )).sort((a, b) => classOrderKey(a) - classOrderKey(b));
         currentClass = classes[0] || '';
       }
     } else {
-      console.warn('DB not connected; using REST fallback (read-only).');
-      el('rtState').textContent = 'Offline mode';
-      students = await loadStudentsFromDb();
-      filtered = students.slice();
-      if (!students.length) {
-        el('rtState').textContent = 'No students found';
-      }
+      console.warn('DB not connected; rendering empty register.');
+      if (stateEl) stateEl.textContent = 'Offline';
     }
-    el('rtState').textContent = el('rtState').textContent || 'Ready';
+
+    if (stateEl && !stateEl.textContent) stateEl.textContent = 'Ready';
+
     wireUI();
     await setupDailyRegisterControls();
     subscribeShiftReports();
@@ -910,8 +1013,10 @@
   }
 
   await init();
-  el('rtState').textContent = db ? 'Connected' : 'REST mode';
+  const stateElFinal = el('rtState');
+  if (stateElFinal) stateElFinal.textContent = db ? 'Connected' : 'No DB';
 })();
 </script>
+
 </body>
 </html>
