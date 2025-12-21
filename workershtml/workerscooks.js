@@ -141,7 +141,12 @@ function App() {
         setSchoolId(resolvedSchoolId);
 
         // Load Policies
-        const loadedPolicies = await loadPolicies();
+        let loadedPolicies = {};
+        try {
+          loadedPolicies = await loadPolicies();
+        } catch (e) {
+          console.warn('Failed to load policies, using defaults:', e);
+        }
         setPolicies(loadedPolicies || {});
 
         // Load Data - Using direct firebase refs to avoid "admin-restricted" errors if helpers enforce auth
@@ -309,15 +314,26 @@ function App() {
   }
 
   async function loadStudents(resolvedSchoolId) {
-    let ref = firebase.database().ref('students');
     if (resolvedSchoolId) {
        // Try school specific path first
        const sRef = firebase.database().ref(`schools/${resolvedSchoolId}/students`);
        const snap = await sRef.once('value');
        if (snap.exists()) return normalizeStudents(snap.val());
     }
-    const snap = await ref.once('value');
-    return normalizeStudents(snap.val() || {});
+    
+    // Fallback to multiple root paths (case-sensitive DBs)
+    const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List'];
+    for (const p of tryPaths) {
+      try {
+        const snap = await firebase.database().ref(p).once('value');
+        if (snap.exists()) {
+           return normalizeStudents(snap.val());
+        }
+      } catch (e) {
+        console.warn('Failed to load path', p, e);
+      }
+    }
+    return {};
   }
 
   async function fetchSchoolName(resolvedSchoolId) {
@@ -334,6 +350,8 @@ function App() {
   function normalizeStudents(raw) {
     const result = {};
     Object.entries(raw || {}).forEach(([key, value]) => {
+      const status = String(value.status || '').toLowerCase();
+      if (status === 'shifted') return;
       const id = value.id || key;
       result[id] = { ...value, id };
     });
