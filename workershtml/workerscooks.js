@@ -82,6 +82,10 @@ function App() {
   const [reportStatus, setReportStatus] = useState('pending');
   const [saving, setSaving] = useState(false);
   const [fatalError, setFatalError] = useState('');
+  const [storeOpen, setStoreOpen] = useState(true);
+  const [logicOpen, setLogicOpen] = useState(false);
+  const [newItem, setNewItem] = useState({ name: '', unit: '', onHand: '' });
+  const [newRule, setNewRule] = useState({ itemId: '', perChild: '', unit: '', perMeal: 'both', rounding: 'round' });
 
   useEffect(() => {
     if (!workerSession.workerId) {
@@ -333,6 +337,18 @@ function App() {
     return h('span', { className: `status-badge status-${key}` }, statusLabels[key] || statusLabels.pending);
   }
 
+  function inventoryPath() {
+    return workerSession.schoolId
+      ? `schools/${workerSession.schoolId}/inventory/items`
+      : 'inventory/items';
+  }
+
+  function logicPath() {
+    return workerSession.schoolId
+      ? `schools/${workerSession.schoolId}/kitchen_logic/rules`
+      : 'kitchen_logic/rules';
+  }
+
   function scrollToSection(sectionId) {
     const el = document.getElementById(sectionId);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -340,15 +356,15 @@ function App() {
 
   function renderQuickCards() {
     return h('section', { className: 'quick-cards' }, [
-      h('div', { className: 'mini-card', onClick: () => scrollToSection('menu-section') }, [
+      h('div', { className: 'mini-card', onClick: () => { setStoreOpen(true); scrollToSection('store-panel'); } }, [
         h('p', { className: 'mini-card__label' }, 'Stoo'),
         h('p', { className: 'mini-card__value' }, `${inventoryItems.length} bidhaa`),
-        h('p', { className: 'mini-card__hint' }, 'Gusa kuchagua menyu kutoka stoo')
+        h('p', { className: 'mini-card__hint' }, 'Fungua, ongeza, chagua menyu')
       ]),
-      h('div', { className: 'mini-card', onClick: () => scrollToSection('logic-section') }, [
+      h('div', { className: 'mini-card', onClick: () => { setLogicOpen(true); scrollToSection('logic-panel'); } }, [
         h('p', { className: 'mini-card__label' }, 'Logic Food'),
         h('p', { className: 'mini-card__value' }, `${Object.keys(logicRules || {}).length} kanuni`),
-        h('p', { className: 'mini-card__hint' }, 'Gusa kuangalia matumizi yanayotarajiwa')
+        h('p', { className: 'mini-card__hint' }, 'Ongeza au hakiki kanuni za matumizi')
       ])
     ]);
   }
@@ -390,6 +406,107 @@ function App() {
   const expectedUsageText = useMemo(() => {
     return `Inatarajiwa: Sukari ${expectedPolicy.sugar_kg} kg - Mafuta ${expectedPolicy.oil_l} l`;
   }, [expectedPolicy]);
+
+  function renderStorePanel() {
+    return h('section', { className: `workers-card mini-panel${storeOpen ? ' open' : ''}`, id: 'store-panel' }, [
+      h('header', { className: 'workers-card__header mini-panel__header' }, [
+        h('h3', null, 'Stoo - Bidhaa'),
+        h('div', { className: 'mini-panel__actions' }, [
+          h('button', { className: 'workers-btn secondary', onClick: () => setStoreOpen(o => !o) }, storeOpen ? 'Funga' : 'Fungua'),
+          h('button', { className: 'workers-btn', onClick: () => scrollToSection('menu-section') }, 'Nenda Menyu')
+        ])
+      ]),
+      !storeOpen ? null : h('div', { className: 'mini-panel__body' }, [
+        h('div', { className: 'mini-form' }, [
+          h('label', null, [
+            'Jina la bidhaa',
+            h('input', { value: newItem.name, onChange: e => setNewItem({ ...newItem, name: e.target.value }) })
+          ]),
+          h('label', null, [
+            'Kipimo (kg, l, pcs...)',
+            h('input', { value: newItem.unit, onChange: e => setNewItem({ ...newItem, unit: e.target.value }) })
+          ]),
+          h('label', null, [
+            'Kiasi kilichopo',
+            h('input', { type: 'number', value: newItem.onHand, onChange: e => setNewItem({ ...newItem, onHand: e.target.value }) })
+          ]),
+          h('button', { className: 'workers-btn primary', onClick: addStoreItem }, 'Ongeza stoo')
+        ]),
+        h('div', { className: 'mini-list' },
+          inventoryItems.length
+            ? inventoryItems.map(item =>
+                h('div', { key: item.id, className: 'mini-list__item' }, [
+                  h('strong', null, item.name),
+                  h('span', { className: 'mini-list__meta' }, `${item.onHand} ${item.unit || ''}`)
+                ])
+              )
+            : h('p', { className: 'workers-card__subtitle' }, 'Hakuna bidhaa stoo.')
+        )
+      ])
+    ]);
+  }
+
+  function renderLogicPanel() {
+    return h('section', { className: `workers-card mini-panel${logicOpen ? ' open' : ''}`, id: 'logic-panel' }, [
+      h('header', { className: 'workers-card__header mini-panel__header' }, [
+        h('h3', null, 'Logic Food - Kanuni za Matumizi'),
+        h('div', { className: 'mini-panel__actions' }, [
+          h('button', { className: 'workers-btn secondary', onClick: () => setLogicOpen(o => !o) }, logicOpen ? 'Funga' : 'Fungua'),
+          h('button', { className: 'workers-btn', onClick: () => scrollToSection('logic-section') }, 'Nenda Matumizi')
+        ])
+      ]),
+      !logicOpen ? null : h('div', { className: 'mini-panel__body' }, [
+        h('div', { className: 'mini-form' }, [
+          h('label', null, [
+            'Chagua bidhaa',
+            h('select', {
+              value: newRule.itemId,
+              onChange: e => setNewRule({ ...newRule, itemId: e.target.value })
+            }, [
+              h('option', { value: '' }, '-- Chagua bidhaa --'),
+              inventoryItems.map(it => h('option', { key: it.id, value: it.id }, it.name))
+            ])
+          ]),
+          h('label', null, [
+            'Kiasi kwa mwanafunzi (perChild)',
+            h('input', { type: 'number', step: '0.001', value: newRule.perChild, onChange: e => setNewRule({ ...newRule, perChild: e.target.value }) })
+          ]),
+          h('label', null, [
+            'Kipimo (kg, l, pcs...)',
+            h('input', { value: newRule.unit, onChange: e => setNewRule({ ...newRule, unit: e.target.value }) })
+          ]),
+          h('label', null, [
+            'Mlo',
+            h('select', { value: newRule.perMeal, onChange: e => setNewRule({ ...newRule, perMeal: e.target.value }) }, [
+              h('option', { value: 'both' }, 'Breakfast & Lunch'),
+              h('option', { value: 'breakfast' }, 'Breakfast'),
+              h('option', { value: 'lunch' }, 'Lunch')
+            ])
+          ]),
+          h('label', null, [
+            'Rounding',
+            h('select', { value: newRule.rounding, onChange: e => setNewRule({ ...newRule, rounding: e.target.value }) }, [
+              h('option', { value: 'round' }, 'Round'),
+              h('option', { value: 'ceil' }, 'Ceil'),
+              h('option', { value: 'none' }, 'Floor')
+            ])
+          ]),
+          h('button', { className: 'workers-btn primary', onClick: addLogicRule }, 'Hifadhi kanuni')
+        ]),
+        h('div', { className: 'mini-list' },
+          Object.entries(logicRules || {}).length
+            ? Object.entries(logicRules).map(([itemId, rule]) => {
+                const label = inventoryItems.find(it => it.id === itemId)?.name || itemId;
+                return h('div', { key: itemId, className: 'mini-list__item' }, [
+                  h('strong', null, label),
+                  h('span', { className: 'mini-list__meta' }, `${rule.perChild || 0} ${rule.unit || ''} / mwanafunzi (${rule.perMeal || 'both'})`)
+                ]);
+              })
+            : h('p', { className: 'workers-card__subtitle' }, 'Hakuna kanuni bado. Ongeza ili kupata matumizi yanayotarajiwa.')
+        )
+      ])
+    ]);
+  }
 
   async function handleSave() {
     const breakfast = safeNumber(headcount.breakfast);
@@ -440,6 +557,52 @@ function App() {
     return 'ok';
   }
 
+  async function addStoreItem() {
+    if (!newItem.name) {
+      toast('Weka jina la bidhaa.', 'warning');
+      return;
+    }
+    try {
+      const ref = firebase.database().ref(inventoryPath()).push();
+      await ref.set({
+        name: newItem.name,
+        unit: newItem.unit || '',
+        onHand: safeNumber(newItem.onHand),
+        createdAt: Date.now()
+      });
+      toast('Imeongezwa stoo.', 'success');
+      setNewItem({ name: '', unit: '', onHand: '' });
+      const items = await fetchInventoryItems(workerSession.schoolId);
+      setInventoryItems(items);
+    } catch (err) {
+      console.error(err);
+      toast(err.message || 'Imeshindikana kuokoa bidhaa.', 'error');
+    }
+  }
+
+  async function addLogicRule() {
+    if (!newRule.itemId) {
+      toast('Chagua bidhaa ya kanuni.', 'warning');
+      return;
+    }
+    try {
+      const ref = firebase.database().ref(`${logicPath()}/${newRule.itemId}`);
+      await ref.set({
+        perChild: Number(newRule.perChild || 0),
+        unit: newRule.unit || '',
+        perMeal: newRule.perMeal || 'both',
+        rounding: newRule.rounding || 'round'
+      });
+      toast('Kanuni imehifadhiwa.', 'success');
+      setNewRule({ itemId: '', perChild: '', unit: '', perMeal: 'both', rounding: 'round' });
+      const rules = await loadLogicRules(workerSession.schoolId);
+      setLogicRules(rules);
+    } catch (err) {
+      console.error(err);
+      toast(err.message || 'Imeshindikana kuokoa kanuni.', 'error');
+    }
+  }
+
   if (fatalError) {
     return h('main', { className: 'workers-main' }, h('div', { className: 'workers-card workers-error' }, fatalError));
   }
@@ -454,6 +617,8 @@ function App() {
     ]),
 
     renderQuickCards(),
+    renderStorePanel(),
+    renderLogicPanel(),
 
     h('section', { className: 'workers-card' }, [
       h('header', { className: 'workers-card__header' }, [
@@ -524,7 +689,7 @@ function App() {
         ]),
 
         h('fieldset', { className: 'workers-fieldset' }, [
-          h('legend', { id: 'logic-section' }, 'Matumizi (kg/l)'),
+        h('legend', { id: 'logic-section' }, 'Matumizi (kg/l)'),
           h('div', { className: 'workers-grid' }, [
             h('label', null, [
               'Sugar Issued (kg)',
