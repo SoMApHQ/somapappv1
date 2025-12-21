@@ -3,198 +3,27 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Usafi | Cleaners Hub</title>
-  <link rel="stylesheet" href="../css/workers.css">
+  <title>Usafi Hub | SoMAp</title>
+  <link rel="stylesheet" href="./css/workers.css">
+  
+  <!-- Firebase Compat -->
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
-  <script src="../firebase/firebase-config.js"></script>
+  
+  <!-- Config -->
+  <script src="../firebase.js"></script>
+
+  <!-- React & ReactDOM (UMD) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- jsPDF + AutoTable -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
 </head>
 <body>
-  <main>
-    <header>
-      <h1>Usafi wa Shule</h1>
-      <p class="workers-card__subtitle">
-        Kila eneo lina orodha ya ukaguzi. Piga picha kabla na baada, rekodi matumizi ya sabuni/bleach. Ukizidisha kiwango, ripoti itakuwa FLagged.
-      </p>
-    </header>
-
-    <section class="workers-card">
-      <header class="workers-card__header">
-        <h2>Ukaguzi wa Leo</h2>
-        <p id="statusLabel" class="workers-card__subtitle"></p>
-      </header>
-      <div class="workers-card__content" id="checklistContainer"></div>
-      <div class="workers-card__content workers-form">
-        <label>Sabuni ya Choo (ml)
-          <input type="number" id="soapUsage" min="0">
-        </label>
-        <label>Bleach (ml)
-          <input type="number" id="bleachUsage" min="0">
-        </label>
-        <label>Maoni / Notes
-          <textarea id="cleanerNotes"></textarea>
-        </label>
-        <button id="saveCleaning" class="workers-btn">Hifadhi Ripoti</button>
-      </div>
-    </section>
-  </main>
-
-  <script type="module">
-    import {
-      ensureAnonymousAuth,
-      getLinkedWorkerId,
-      dbRefs,
-      todayYMD,
-      localTs,
-      toast
-    } from '../modules/workers_helpers.js';
-    import { uploadFileToStorage } from '../modules/workers_ui.js';
-    import { loadPolicies } from '../modules/workers_inventory.js';
-
-    const checklistContainer = document.getElementById('checklistContainer');
-    const soapUsageInput = document.getElementById('soapUsage');
-    const bleachUsageInput = document.getElementById('bleachUsage');
-    const notesInput = document.getElementById('cleanerNotes');
-    const saveBtn = document.getElementById('saveCleaning');
-    const statusLabel = document.getElementById('statusLabel');
-
-    let workerId = null;
-    let workerProfile = null;
-    let areas = [];
-    let policies = null;
-    let todayKey = todayYMD();
-    let existingRecord = null;
-
-    ensureAnonymousAuth()
-      .then(init)
-      .catch(err => {
-        toast(err.message || 'Error', 'error');
-        window.location.href = '../index.html';
-      });
-
-    async function init() {
-      workerId = await getLinkedWorkerId();
-      if (!workerId) {
-        toast('Ingia tena.', 'error');
-        window.location.href = '../index.html';
-        return;
-      }
-      const workerSnap = await dbRefs.worker(workerId).once('value');
-      workerProfile = workerSnap.val().profile;
-      if (workerProfile.role !== 'cleaner') {
-        const adminSnap = await firebase.database().ref(`admins/${firebase.auth().currentUser.uid}`).once('value');
-        if (!adminSnap.exists()) {
-          toast('Ukurasa huu ni kwa wasafi.', 'error');
-          window.location.href = '../index.html';
-          return;
-        }
-      }
-      policies = await loadPolicies();
-      areas = await fetchAreas();
-      renderChecklist();
-      await loadExisting();
-      saveBtn.addEventListener('click', saveCleaning);
-    }
-
-    async function fetchAreas() {
-      const snap = await firebase.database().ref('roles/cleaner/config/areas').once('value');
-      if (snap.exists()) return snap.val();
-      return [
-        { id: 'toilet-a', name: 'Toilet A' },
-        { id: 'toilet-b', name: 'Toilet B' },
-        { id: 'dining', name: 'Dining Hall' },
-        { id: 'classrooms', name: 'Classrooms' }
-      ];
-    }
-
-    function renderChecklist() {
-      checklistContainer.innerHTML = '';
-      areas.forEach(area => {
-        const card = document.createElement('div');
-        card.className = 'workers-fieldset';
-        card.innerHTML = `
-          <h3>${area.name}</h3>
-          <label><input type="checkbox" data-area="${area.id}" data-field="done"> Imesafishwa?</label>
-          <label>Picha Kabla<input type="file" accept="image/*" data-area="${area.id}" data-field="before"></label>
-          <label>Picha Baada<input type="file" accept="image/*" data-area="${area.id}" data-field="after"></label>
-        `;
-        checklistContainer.appendChild(card);
-      });
-    }
-
-    async function loadExisting() {
-      const snap = await dbRefs.rolesCleanerAreas(todayKey).child(workerId).once('value');
-      if (!snap.exists()) {
-        statusLabel.textContent = 'Bado hujarekodi usafi wa leo.';
-        return;
-      }
-      existingRecord = snap.val();
-      statusLabel.textContent = `Imerekodiwa ${new Date(existingRecord.updatedTs).toLocaleTimeString('sw-TZ')}`;
-      soapUsageInput.value = existingRecord.consumption?.toilet_soap_ml || 0;
-      bleachUsageInput.value = existingRecord.consumption?.bleach_ml || 0;
-      notesInput.value = existingRecord.notes || '';
-      checklistContainer.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-        const areaId = cb.dataset.area;
-        cb.checked = existingRecord.checklist?.find(item => item.area === areaId)?.done || false;
-      });
-    }
-
-    async function saveCleaning() {
-      const checklist = [];
-      for (const area of areas) {
-        const done = checklistContainer.querySelector(`input[data-area="${area.id}"][data-field="done"]`).checked;
-        const beforeFile = checklistContainer.querySelector(`input[data-area="${area.id}"][data-field="before"]`).files[0];
-        const afterFile = checklistContainer.querySelector(`input[data-area="${area.id}"][data-field="after"]`).files[0];
-        const entry = { area: area.id, done, ts: localTs() };
-        if (beforeFile) {
-          entry.photoBefore = await uploadFileToStorage(beforeFile, `cleaners/${workerId}/${todayKey}-${area.id}-before-${Date.now()}.jpg`);
-        } else if (existingRecord) {
-          entry.photoBefore = existingRecord.checklist?.find(item => item.area === area.id)?.photoBefore || '';
-        }
-        if (afterFile) {
-          entry.photoAfter = await uploadFileToStorage(afterFile, `cleaners/${workerId}/${todayKey}-${area.id}-after-${Date.now()}.jpg`);
-        } else if (existingRecord) {
-          entry.photoAfter = existingRecord.checklist?.find(item => item.area === area.id)?.photoAfter || '';
-        }
-        checklist.push(entry);
-      }
-
-      const consumption = {
-        toilet_soap_ml: Number(soapUsageInput.value || 0),
-        bleach_ml: Number(bleachUsageInput.value || 0)
-      };
-
-      const caps = policies.consumptionCaps?.cleaner || {};
-      const exceeded =
-        consumption.toilet_soap_ml > (caps.toilet_soap_ml_per_toilet || 120) * checklist.length ||
-        consumption.bleach_ml > (caps.bleach_ml_per_toilet || 150) * checklist.length;
-      const status = exceeded ? 'flagged' : 'approved';
-
-      await dbRefs.rolesCleanerAreas(todayKey).child(workerId).set({
-        checklist,
-        consumption,
-        status,
-        notes: notesInput.value.trim(),
-        updatedTs: localTs()
-      });
-      toast('Ripoti ya usafi imehifadhiwa.', exceeded ? 'warning' : 'success');
-      statusLabel.textContent = `Imerekodiwa ${new Date().toLocaleTimeString('sw-TZ')} (${status})`;
-
-      if (exceeded) {
-        await firebase.database().ref('approvals').push({
-          type: 'cleaning-overuse',
-          workerId,
-          dateKey: todayKey,
-          createdTs: localTs(),
-          status: 'pending',
-          note: `Matumizi ya sabuni ${consumption.toilet_soap_ml} ml, bleach ${consumption.bleach_ml} ml`
-        });
-      }
-    }
-  </script>
+  <div id="app"></div>
+  <script type="module" src="./workersmsafi.js"></script>
 </body>
 </html>
-
-

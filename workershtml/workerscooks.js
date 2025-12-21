@@ -1,677 +1,894 @@
-import {
-  ensureAnonymousAuth,
-  getLinkedWorkerId,
-  dbRefs,
-  todayYMD,
-  yyyymm,
-  toast
-} from './modules/workers_helpers.js';
-import {
-  computeCookProjection,
-  saveCookDailyReport,
-  flagInventoryMismatch,
-  loadPolicies
-} from './modules/workers_inventory.js';
-import { applyPenalty } from './modules/workers_penalties.js';
+import { todayYMD, toast } from './modules/workers_helpers.js';
+import { computeCookProjection } from './modules/workers_inventory.js';
+import { fetchInventoryItems } from './modules/store.js';
+import { loadLogicRules, computeExpectedList, aggregateExpected } from './modules/logicfood.js';
+import { 
+  ensureKitchenSeeded, 
+  listKitchenItems, 
+  upsertKitchenItem, 
+  archiveKitchenItem, 
+  buildDefaultDailyFromItems, 
+  mergeDailyWithItems, 
+  detectDailyChanges, 
+  resolveYearKey 
+} from './modules/vifaajikoni.js';
 
-const { createElement: h, useState, useEffect, useMemo } = React;
+const { createElement: h, useEffect, useMemo, useState } = React;
 
-const classOrder = [
-  'Baby Class',
-  'Middle Class',
-  'Pre Unit',
-  'Class 1',
-  'Class 2',
-  'Class 3',
-  'Class 4',
-  'Class 5',
-  'Class 6',
-  'Class 7'
-];
+const statusLabels = {
+  pending: 'Bado hujatoa ripoti leo.',
+  ok: 'Ripoti imehifadhiwa',
+  flagged: 'Ripoti imeangaziwa',
+  missing: 'Ripoti haijatumwa'
+};
 
-const utensilList = [
-  { key: 'plates', label: 'Plates / Sahani' },
-  { key: 'cups', label: 'Vikombe / Cups' },
-  { key: 'saucepan', label: 'Sufuria / Saucepan' },
-  { key: 'buckets', label: 'Ndoo / Buckets' },
-  { key: 'spoons', label: 'Vijiko / Spoons' },
-  { key: 'thermos', label: 'Thermos' },
-  { key: 'rolling', label: 'Mti wa kupikia / Rolling Spoon' },
-  { key: 'knives', label: 'Visu / Knives' },
-  { key: 'others', label: 'Vifaa vingine (andika)' }
-];
+function safeNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
 
-const todayKey = todayYMD();
-const dayKeyCompact = todayKey.replace(/-/g, '');
-const monthKey = yyyymm();
+function getWorkerSession() {
+  const workerId = localStorage.getItem('workerId') || sessionStorage.getItem('workerId') || '';
+  const workerRole = localStorage.getItem('workerRole') || sessionStorage.getItem('workerRole') || '';
+  const schoolId = localStorage.getItem('schoolId') || window.currentSchoolId || '';
+  return { workerId, workerRole, schoolId };
+}
 
-const defaultUtensils = () =>
-  utensilList.reduce((acc, item) => {
-    acc[item.key] = { available: '', destroyed: '', lost: '', location: '' };
-    return acc;
-  }, {});
+function normalizeStudent(id, data = {}) {
+  const gender = (data.gender || '').toString().toLowerCase();
+  const className = data.className || data.classLevel || data.class || data.grade || 'Unknown';
+  const fullName = [data.firstName, data.middleName, data.lastName, data.fullName, data.name]
+    .filter(Boolean)
+    .join(' ')
+    .trim() || id;
+  return {
+    id,
+    gender: gender.startsWith('m') || gender.startsWith('b') ? 'boys'
+      : gender.startsWith('f') || gender.startsWith('g') ? 'girls'
+      : 'unknown',
+    className,
+    fullName
+  };
+}
+
+function isPresent(rec = {}) {
+  const raw = (rec.status || rec.daily || rec.value || '').toString().toUpperCase();
+  return (
+    rec.present === true ||
+    rec.am === 'P' ||
+    rec.pm === 'P' ||
+    raw === 'P' ||
+    raw === 'PRESENT' ||
+    raw === 'PR'
+  );
+}
 
 function App() {
-  const [loading, setLoading] = useState(true);
-  const [workerId, setWorkerId] = useState('');
-  const [workerProfile, setWorkerProfile] = useState(null);
+  const today = todayYMD();
+  const [reportDate, setReportDate] = useState(today);
+  const [workerSession, setWorkerSession] = useState(getWorkerSession());
   const [students, setStudents] = useState({});
-  const [attendancePrimary, setAttendancePrimary] = useState(null);
-  const [attendanceFallback, setAttendanceFallback] = useState({});
-  const [workersCount, setWorkersCount] = useState(0);
-  const [existingReport, setExistingReport] = useState(null);
-  const [reportStatus, setReportStatus] = useState('');
+  const [registerStats, setRegisterStats] = useState({
+    classNames: [],
+    perClass: {},
+    totals: { registered: { boys: 0, girls: 0, total: 0 }, present: { boys: 0, girls: 0, total: 0 }, absent: { boys: 0, girls: 0, total: 0 } }
+  });
+  const [registerLoading, setRegisterLoading] = useState(true);
+  const [registerError, setRegisterError] = useState('');
+
+  const [inventoryItems, setInventoryItems] = useState([]);
+  const [logicRules, setLogicRules] = useState({});
+
   const [headcount, setHeadcount] = useState({ breakfast: '', lunch: '' });
+  const [headcountLocked, setHeadcountLocked] = useState(false);
+  const [menuSelections, setMenuSelections] = useState({ breakfast: [], lunch: [] });
   const [menuText, setMenuText] = useState({ breakfast: '', lunch: '' });
   const [issued, setIssued] = useState({ sugar_kg: '', oil_l: '' });
   const [used, setUsed] = useState({ sugar_kg: '', oil_l: '' });
-  const [expectedUsage, setExpectedUsage] = useState({ sugar_kg: 0, oil_l: 0 });
-  const [utensils, setUtensils] = useState(() => defaultUtensils());
-  const [yesterdayUtensils, setYesterdayUtensils] = useState({});
-  const [grievance, setGrievance] = useState('');
+  const [expectedPolicy, setExpectedPolicy] = useState({ sugar_kg: 0, oil_l: 0 });
+  const [expectedList, setExpectedList] = useState([]);
+
+  const [existingReport, setExistingReport] = useState(null);
+  const [reportStatus, setReportStatus] = useState('pending');
   const [saving, setSaving] = useState(false);
-  const [schoolId, setSchoolId] = useState(window.currentSchoolId || '');
-  const [schoolName, setSchoolName] = useState('');
-  const [academicYears, setAcademicYears] = useState([]);
-  const [academicYear, setAcademicYear] = useState('');
-  const [policies, setPolicies] = useState(null);
-  const [penaltyChecked, setPenaltyChecked] = useState(false);
+  const [fatalError, setFatalError] = useState('');
+  const [storeOpen, setStoreOpen] = useState(true);
+  const [logicOpen, setLogicOpen] = useState(false);
+  const [newItem, setNewItem] = useState({ name: '', unit: '', onHand: '' });
+  const [newRule, setNewRule] = useState({ itemId: '', perChild: '', unit: '', perMeal: 'both', rounding: 'round' });
+
+  const [kitchenItems, setKitchenItems] = useState([]);
+  const [kitchenDaily, setKitchenDaily] = useState({});
+  const [kitchenYesterday, setKitchenYesterday] = useState({});
+  const [kitchenMasterOpen, setKitchenMasterOpen] = useState(false);
+  const [editingKitchenItem, setEditingKitchenItem] = useState(null);
+  const [kitchenForm, setKitchenForm] = useState({ 
+    name: '', unit: 'pcs', category: 'utensil', 
+    qtyTotal: 0, sourceType: 'purchased', sourceName: '', 
+    unitPrice: 0, note: '', acquiredDate: '' 
+  });
 
   useEffect(() => {
-    let cancelled = false;
-    async function init() {
-      try {
-        await ensureAnonymousAuth();
-        const linked = await getLinkedWorkerId();
-        if (!linked) {
-          toast('Ingia tena ili kuendelea.', 'error');
-          return;
-        }
-        if (cancelled) return;
-        setWorkerId(linked);
-
-        const [workerSnap, loadedPolicies] = await Promise.all([
-          dbRefs.worker(linked).once('value'),
-          loadPolicies()
-        ]);
-        const profile = workerSnap.val()?.profile || {};
-        setWorkerProfile(profile);
-        const resolvedSchoolId = window.currentSchoolId || profile.schoolId || '';
-        setSchoolId(resolvedSchoolId || '');
-        setPolicies(loadedPolicies || {});
-
-        const [studentsMap, schoolLabel] = await Promise.all([
-          loadStudents(resolvedSchoolId),
-          fetchSchoolName(resolvedSchoolId)
-        ]);
-        if (cancelled) return;
-        setStudents(studentsMap);
-        setSchoolName(schoolLabel);
-        const derivedYears = deriveAcademicYears(studentsMap);
-        setAcademicYears(derivedYears);
-        setAcademicYear(derivedYears[0] || `${new Date().getFullYear()}`);
-
-        const primaryAttendance = await fetchAttendancePrimary();
-        const fallbackAttendance = primaryAttendance
-          ? {}
-          : await fetchAttendanceFallback(resolvedSchoolId);
-        const workersTotal = await fetchWorkersCount(resolvedSchoolId);
-        if (cancelled) return;
-        setAttendancePrimary(primaryAttendance);
-        setAttendanceFallback(fallbackAttendance);
-        setWorkersCount(workersTotal);
-
-        const reportSnap = await dbRefs.rolesCookDaily(todayKey).child(linked).once('value');
-        const reportVal = reportSnap.exists() ? reportSnap.val() : null;
-        if (reportVal) {
-          hydrateFromReport(reportVal);
-          setExistingReport(reportVal);
-          setReportStatus(
-            `Ripoti imehifadhiwa ${new Date(reportVal.updatedTs || Date.now()).toLocaleTimeString('sw-TZ')}`
-          );
-        } else {
-          setReportStatus('Bado hujatoa ripoti leo.');
-        }
-
-        const yesterday = await fetchYesterdayUtensils(linked);
-        if (!cancelled) {
-          setYesterdayUtensils(yesterday);
-        }
-      } catch (err) {
-        console.error(err);
-        toast(err.message || 'Hitilafu imejitokeza.', 'error');
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
+    if (!workerSession.workerId) {
+      toast('Hakuna taarifa za mtumiaji. Tafadhali ingia tena.', 'error');
+      window.location.href = '../index.html';
+      return;
     }
-    init();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    loadBootstrap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workerSession.workerId]);
 
   useEffect(() => {
-    const breakfast = Number(headcount.breakfast || 0);
-    const lunch = Number(headcount.lunch || 0);
+    if (!workerSession.workerId) return;
+    loadExistingReport(reportDate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportDate, workerSession.workerId, kitchenItems]);
+
+  useEffect(() => {
+    if (!reportDate) return;
+    if (!Object.keys(students || {}).length) return;
+    loadRegister(reportDate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportDate, students]);
+
+  useEffect(() => {
+    const breakfast = safeNumber(headcount.breakfast);
+    const lunch = safeNumber(headcount.lunch);
     computeCookProjection({ breakfastPax: breakfast, lunchPax: lunch })
-      .then(setExpectedUsage)
+      .then(setExpectedPolicy)
       .catch(err => console.error(err));
   }, [headcount.breakfast, headcount.lunch]);
 
   useEffect(() => {
-    if (loading || penaltyChecked) return;
-    if (!workerId || !workerProfile) return;
-    if (existingReport?.penaltyLogged) {
-      setPenaltyChecked(true);
-      return;
-    }
-    const hour = new Date().getHours();
-    if (hour < 18) return;
-    const hasReport = Boolean(existingReport && existingReport.headcount);
-    if (hasReport) {
-      setPenaltyChecked(true);
-      return;
-    }
-    (async () => {
-      try {
-        const percent = policies?.penalties?.taskMiss?.percent ?? 0.001;
-        await applyPenalty({
-          workerId,
-          kind: 'cook-daily-missing',
-          baseSalary: workerProfile.baseSalary,
-          refPath: `/roles/cook/daily/${todayKey}/${workerId}`,
-          rulePercent: percent,
-          forceCharge: false,
-          metadata: { dateKey: todayKey }
-        });
-        await dbRefs.rolesCookDaily(todayKey).child(workerId).update({
-          penaltyLogged: true,
-          status: 'missing'
-        });
-        toast('Onyo: hukujaza ripoti kwa wakati. Faini imewekwa.', 'warning');
-      } catch (err) {
-        console.error(err);
-      } finally {
-        setPenaltyChecked(true);
-      }
-    })();
-  }, [loading, penaltyChecked, workerId, workerProfile, existingReport, policies]);
+    const breakfast = safeNumber(headcount.breakfast);
+    const lunch = safeNumber(headcount.lunch);
+    const rules = logicRules || {};
+    const breakfastList = computeExpectedList({
+      pax: breakfast,
+      selections: menuSelections.breakfast,
+      rules,
+      meal: 'breakfast',
+      inventoryItems
+    });
+    const lunchList = computeExpectedList({
+      pax: lunch,
+      selections: menuSelections.lunch,
+      rules,
+      meal: 'lunch',
+      inventoryItems
+    });
+    setExpectedList(aggregateExpected([...breakfastList, ...lunchList]));
+  }, [headcount.breakfast, headcount.lunch, menuSelections, logicRules, inventoryItems]);
 
-  function hydrateFromReport(reportVal) {
-    setHeadcount({
-      breakfast: reportVal.headcount?.breakfast ?? '',
-      lunch: reportVal.headcount?.lunch ?? ''
-    });
-    setMenuText({
-      breakfast: (reportVal.menu?.breakfast || []).join(', '),
-      lunch: (reportVal.menu?.lunch || []).join(', ')
-    });
-    setIssued({
-      sugar_kg: reportVal.issued?.sugar_kg ?? '',
-      oil_l: reportVal.issued?.oil_l ?? ''
-    });
-    setUsed({
-      sugar_kg: reportVal.used?.sugar_kg ?? '',
-      oil_l: reportVal.used?.oil_l ?? ''
-    });
-    setUtensils(() => {
-      const base = defaultUtensils();
-      utensilList.forEach(item => {
-        const data = reportVal.utensils?.[item.key] || {};
-        base[item.key] = {
-          available: data.available ?? '',
-          destroyed: data.destroyed ?? '',
-          lost: data.lost ?? '',
-          location: data.location ?? ''
-        };
+  useEffect(() => {
+    if (!existingReport && registerStats.totals.present.total > 0 && !headcountLocked) {
+      setHeadcount({
+        breakfast: registerStats.totals.present.total,
+        lunch: registerStats.totals.present.total
       });
-      return base;
-    });
-    setGrievance(reportVal.grievance || '');
-  }
-
-  async function loadStudents(resolvedSchoolId) {
-    if (!resolvedSchoolId) {
-      const snap = await firebase.database().ref('students').once('value');
-      return normalizeStudents(snap.val() || {});
     }
-    const schoolSnap = await firebase.database().ref(`schools/${resolvedSchoolId}/students`).once('value');
-    if (schoolSnap.exists()) {
-      return normalizeStudents(schoolSnap.val() || {});
-    }
-    const snap = await firebase.database().ref('students').once('value');
-    return normalizeStudents(snap.val() || {});
-  }
+  }, [existingReport, registerStats, headcountLocked]);
 
-  async function fetchSchoolName(resolvedSchoolId) {
-    if (!resolvedSchoolId) return '';
+  async function loadBootstrap() {
     try {
-      const snap = await firebase.database().ref(`schools/${resolvedSchoolId}/profile/name`).once('value');
-      if (snap.exists()) return snap.val();
+      setRegisterLoading(true);
+      await ensureKitchenSeeded({ schoolId: workerSession.schoolId, yearLike: reportDate });
+
+      const [studentsMap, items, rules, kItems] = await Promise.all([
+        loadStudents(workerSession.schoolId),
+        fetchInventoryItems(workerSession.schoolId),
+        loadLogicRules(workerSession.schoolId),
+        listKitchenItems({ schoolId: workerSession.schoolId, yearLike: reportDate })
+      ]);
+      setStudents(studentsMap);
+      setInventoryItems(items);
+      setLogicRules(rules);
+      setKitchenItems(kItems);
+      
+      await loadRegister(reportDate, studentsMap);
     } catch (err) {
       console.error(err);
+      setFatalError(err.message || 'Hitilafu ya kuanzisha ukurasa.');
+    } finally {
+      setRegisterLoading(false);
     }
-    return resolvedSchoolId;
   }
 
-  function normalizeStudents(raw) {
-    const result = {};
-    Object.entries(raw || {}).forEach(([key, value]) => {
-      const id = value.id || key;
-      result[id] = { ...value, id };
-    });
-    return result;
-  }
-
-  function deriveAcademicYears(studentsMap) {
-    const years = new Set();
-    Object.values(studentsMap || {}).forEach(student => {
-      if (student.academicYear) years.add(String(student.academicYear));
-      if (student.year) years.add(String(student.year));
-    });
-    if (years.size === 0) {
-      const current = new Date().getFullYear();
-      years.add(`${current}/${current + 1}`);
+  async function loadStudents(schoolId) {
+    const paths = schoolId
+      ? [`schools/${schoolId}/students`, 'students', 'Students']
+      : ['students', 'Students'];
+    for (const path of paths) {
+      const snap = await firebase.database().ref(path).once('value').catch(() => null);
+      if (snap && snap.exists()) {
+        const raw = snap.val() || {};
+        const normalized = {};
+        Object.entries(raw).forEach(([id, data]) => {
+          normalized[id] = normalizeStudent(id, data);
+        });
+        return normalized;
+      }
     }
-    return Array.from(years);
+    return {};
   }
 
-  async function fetchAttendancePrimary() {
+  async function loadAttendance(dateKey, schoolId) {
+    const paths = schoolId
+      ? [`schools/${schoolId}/attendance_students/${dateKey}`, `attendance_students/${dateKey}`]
+      : [`attendance_students/${dateKey}`];
+    for (const path of paths) {
+      const snap = await firebase.database().ref(path).once('value').catch(() => null);
+      if (snap && snap.exists()) return snap.val() || {};
+    }
+    return {};
+  }
+
+  async function loadRegister(dateKey, studentMap = students) {
+    setRegisterLoading(true);
+    setRegisterError('');
     try {
-      const snap = await firebase.database().ref(`attendance_students/${dayKeyCompact}`).once('value');
-      return snap.exists() ? snap.val() : null;
+      const attendance = await loadAttendance(dateKey, workerSession.schoolId);
+      const stats = buildRegisterStats(studentMap, attendance);
+      setRegisterStats(stats);
     } catch (err) {
       console.error(err);
-      return null;
+      setRegisterError(err.message || 'Imeshindikana kupakia rejesta.');
+    } finally {
+      setRegisterLoading(false);
     }
   }
 
-  async function fetchAttendanceFallback(resolvedSchoolId) {
-    const fallback = {};
-    for (const className of classOrder) {
-      const schoolPath = resolvedSchoolId
-        ? `schools/${resolvedSchoolId}/attendance/${className}/${monthKey}/${todayKey}`
-        : '';
-      const globalPath = `attendance/${className}/${monthKey}/${todayKey}`;
-      try {
-        let snap = schoolPath ? await firebase.database().ref(schoolPath).once('value') : null;
-        if (snap && snap.exists()) {
-          fallback[className] = snap.val();
-          continue;
-        }
-        const globalSnap = await firebase.database().ref(globalPath).once('value');
-        if (globalSnap.exists()) {
-          fallback[className] = globalSnap.val();
-        }
-      } catch (err) {
-        console.error(err);
+  function buildRegisterStats(studentMap, attendanceMap) {
+    const perClass = { Unknown: makeBlankCounts() };
+    const classNamesSet = new Set(['Unknown']);
+    Object.values(studentMap || {}).forEach(student => {
+      const cls = student.className || 'Unknown';
+      classNamesSet.add(cls);
+      if (!perClass[cls]) perClass[cls] = makeBlankCounts();
+      perClass[cls].registered.total += 1;
+      if (student.gender === 'boys') perClass[cls].registered.boys += 1;
+      if (student.gender === 'girls') perClass[cls].registered.girls += 1;
+    });
+
+    const presentSet = new Set();
+    Object.entries(attendanceMap || {}).forEach(([id, rec]) => {
+      const student = studentMap[id] || normalizeStudent(id, rec);
+      const cls = student.className || 'Unknown';
+      if (!perClass[cls]) perClass[cls] = makeBlankCounts();
+      classNamesSet.add(cls);
+      if (isPresent(rec)) {
+        perClass[cls].present.total += 1;
+        if (student.gender === 'boys') perClass[cls].present.boys += 1;
+        if (student.gender === 'girls') perClass[cls].present.girls += 1;
+        presentSet.add(id);
       }
-    }
-    return fallback;
+    });
+
+    Object.entries(studentMap || {}).forEach(([id, student]) => {
+      const cls = student.className || 'Unknown';
+      if (!perClass[cls]) perClass[cls] = makeBlankCounts();
+      if (!presentSet.has(id)) {
+        perClass[cls].absent.total += 1;
+        if (student.gender === 'boys') perClass[cls].absent.boys += 1;
+        if (student.gender === 'girls') perClass[cls].absent.girls += 1;
+      }
+    });
+
+    const classNames = Array.from(classNamesSet).sort();
+    const totals = classNames.reduce(
+      (acc, cls) => {
+        acc.registered.boys += perClass[cls].registered.boys;
+        acc.registered.girls += perClass[cls].registered.girls;
+        acc.registered.total += perClass[cls].registered.total;
+        acc.present.boys += perClass[cls].present.boys;
+        acc.present.girls += perClass[cls].present.girls;
+        acc.present.total += perClass[cls].present.total;
+        acc.absent.boys += perClass[cls].absent.boys;
+        acc.absent.girls += perClass[cls].absent.girls;
+        acc.absent.total += perClass[cls].absent.total;
+        return acc;
+      },
+      makeBlankCounts()
+    );
+
+    return { classNames, perClass, totals };
   }
 
-  async function fetchWorkersCount(resolvedSchoolId) {
+  function makeBlankCounts() {
+    return {
+      registered: { boys: 0, girls: 0, total: 0 },
+      present: { boys: 0, girls: 0, total: 0 },
+      absent: { boys: 0, girls: 0, total: 0 }
+    };
+  }
+
+  async function loadExistingReport(dateKey) {
     try {
-      if (resolvedSchoolId) {
-        const snap = await firebase.database().ref(`schools/${resolvedSchoolId}/workers`).once('value');
-        if (snap.exists()) {
-          return Object.values(snap.val() || {}).filter(w => w.profile?.active !== false).length;
-        }
+      // Load yesterday
+      const yesterday = new Date(new Date(dateKey).getTime() - 86400000).toISOString().split('T')[0];
+      const prevRef = firebase.database().ref(`roles/cook/daily/${yesterday}/${workerSession.workerId}/kitchenInventory`);
+      const prevSnap = await prevRef.once('value').catch(() => null);
+      setKitchenYesterday(prevSnap?.val() || {});
+
+      const ref = firebase.database().ref(`roles/cook/daily/${dateKey}/${workerSession.workerId}`);
+      const snap = await ref.once('value');
+      if (snap.exists()) {
+        const data = snap.val();
+        setExistingReport(data);
+        setReportStatus(data.status || 'ok');
+        setHeadcount({
+          breakfast: data.headcount?.breakfast ?? '',
+          lunch: data.headcount?.lunch ?? ''
+        });
+        setHeadcountLocked(true);
+        setMenuSelections({
+          breakfast: data.menuIds?.breakfast || [],
+          lunch: data.menuIds?.lunch || []
+        });
+        setMenuText({
+          breakfast: data.menuText?.breakfast || (data.menu?.breakfast || []).join(', '),
+          lunch: data.menuText?.lunch || (data.menu?.lunch || []).join(', ')
+        });
+        setIssued({
+          sugar_kg: data.issued?.sugar_kg ?? '',
+          oil_l: data.issued?.oil_l ?? ''
+        });
+        setUsed({
+          sugar_kg: data.used?.sugar_kg ?? '',
+          oil_l: data.used?.oil_l ?? ''
+        });
+        setKitchenDaily(mergeDailyWithItems(data.kitchenInventory, kitchenItems));
+      } else {
+        setExistingReport(null);
+        setReportStatus('pending');
+        setHeadcountLocked(false);
+        setKitchenDaily(mergeDailyWithItems({}, kitchenItems));
       }
-      const snap = await firebase.database().ref('workers').once('value');
-      return Object.values(snap.val() || {}).filter(w => w.profile?.active !== false).length;
     } catch (err) {
       console.error(err);
-      return 0;
+      setExistingReport(null);
+      setReportStatus('pending');
+      setKitchenDaily(mergeDailyWithItems({}, kitchenItems));
     }
   }
 
-  async function fetchYesterdayUtensils(linked) {
-    const previous = new Date(todayKey);
-    previous.setDate(previous.getDate() - 1);
-    const yKey = previous.toISOString().slice(0, 10);
-    const snap = await dbRefs.rolesCookDaily(yKey).child(linked).child('utensils').once('value');
-    return snap.val() || {};
-  }
-
-  function presentFromPrimary(studentId, className) {
-    if (!attendancePrimary) return null;
-    const classNode = attendancePrimary[className];
-    const direct = attendancePrimary[studentId];
-    const record = (classNode && classNode[studentId]) || direct;
-    return record ? isPresentRecord(record) : null;
-  }
-
-  function presentFromFallback(studentId, className) {
-    const classNode = attendanceFallback[className];
-    if (!classNode) return null;
-    const record = classNode[studentId] || classNode?.records?.[studentId];
-    return record ? isPresentRecord(record) : null;
-  }
-
-  function isPresentRecord(record) {
-    if (!record) return false;
-    if (record.present === true) return true;
-    if (record.am === 'P' || record.pm === 'P') return true;
-    return false;
-  }
-
-  const stats = useMemo(() => {
-    const classes = classOrder.reduce((acc, name) => {
-      acc[name] = {
-        registered: { boys: 0, girls: 0, total: 0 },
-        present: { boys: 0, girls: 0, total: 0 },
-        newcomers: 0
-      };
-      return acc;
-    }, {});
-    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    Object.values(students || {}).forEach(student => {
-      const className = student.class || 'Unknown';
-      if (!classes[className]) {
-        classes[className] = {
-          registered: { boys: 0, girls: 0, total: 0 },
-          present: { boys: 0, girls: 0, total: 0 },
-          newcomers: 0
-        };
-      }
-      const node = classes[className];
-      node.registered.total += 1;
-      if (student.gender === 'M') node.registered.boys += 1;
-      if (student.gender === 'F') node.registered.girls += 1;
-      const createdTs = student.createdTs || student.createdAt || student.enrolledTs || 0;
-      if (createdTs && Number(createdTs) >= cutoff) {
-        node.newcomers += 1;
-      }
-      const presentPrimary = presentFromPrimary(student.id, className);
-      const presentFallback = presentFromFallback(student.id, className);
-      const isPresent = presentPrimary !== null ? presentPrimary : presentFallback || false;
-      if (isPresent) {
-        node.present.total += 1;
-        if (student.gender === 'M') node.present.boys += 1;
-        if (student.gender === 'F') node.present.girls += 1;
-      }
+  function toggleSelection(meal, itemId) {
+    setMenuSelections(prev => {
+      const current = new Set(prev[meal]);
+      if (current.has(itemId)) current.delete(itemId);
+      else current.add(itemId);
+      const nextArr = Array.from(current);
+      const itemNames = inventoryItems
+        .filter(it => nextArr.includes(it.id))
+        .map(it => it.name)
+        .join(', ');
+      setMenuText(v => ({ ...v, [meal]: itemNames }));
+      return { ...prev, [meal]: nextArr };
     });
-    return classes;
-  }, [students, attendancePrimary, attendanceFallback]);
+  }
 
-  const totals = useMemo(() => {
-    const base = { registered: 0, present: 0, absent: 0, newcomers: 0 };
-    Object.values(stats).forEach(stat => {
-      base.registered += stat.registered.total;
-      base.present += stat.present.total;
-      base.absent += stat.registered.total - stat.present.total;
-      base.newcomers += stat.newcomers;
-    });
-    return base;
-  }, [stats]);
+  function statusBadge(statusKey) {
+    const key = statusKey || 'pending';
+    return h('span', { className: `status-badge status-${key}` }, statusLabels[key] || statusLabels.pending);
+  }
+
+  function inventoryPath() {
+    return workerSession.schoolId
+      ? `schools/${workerSession.schoolId}/inventory/items`
+      : 'inventory/items';
+  }
+
+  function logicPath() {
+    return workerSession.schoolId
+      ? `schools/${workerSession.schoolId}/kitchen_logic/rules`
+      : 'kitchen_logic/rules';
+  }
+
+  function scrollToSection(sectionId) {
+    const el = document.getElementById(sectionId);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function renderQuickCards() {
+    return h('section', { className: 'quick-cards' }, [
+      h('div', { className: 'mini-card', onClick: () => { setStoreOpen(true); scrollToSection('store-panel'); } }, [
+        h('p', { className: 'mini-card__label' }, 'Stoo'),
+        h('p', { className: 'mini-card__value' }, `${inventoryItems.length} bidhaa`),
+        h('p', { className: 'mini-card__hint' }, 'Fungua, ongeza, chagua menyu')
+      ]),
+      h('div', { className: 'mini-card', onClick: () => { setLogicOpen(true); scrollToSection('logic-panel'); } }, [
+        h('p', { className: 'mini-card__label' }, 'Logic Food'),
+        h('p', { className: 'mini-card__value' }, `${Object.keys(logicRules || {}).length} kanuni`),
+        h('p', { className: 'mini-card__hint' }, 'Ongeza au hakiki kanuni za matumizi')
+      ])
+    ]);
+  }
+
+  function renderRegisterTable() {
+    const classNames = registerStats.classNames.length ? registerStats.classNames : ['Unknown'];
+    const headers = [...classNames, 'Total'];
+    const rows = [
+      { label: 'Registered Boys', getter: cls => registerStats.perClass[cls]?.registered?.boys || 0 },
+      { label: 'Registered Girls', getter: cls => registerStats.perClass[cls]?.registered?.girls || 0 },
+      { label: 'Registered Total', getter: cls => registerStats.perClass[cls]?.registered?.total || 0 },
+      { label: 'Present Boys', getter: cls => registerStats.perClass[cls]?.present?.boys || 0 },
+      { label: 'Present Girls', getter: cls => registerStats.perClass[cls]?.present?.girls || 0 },
+      { label: 'Present Total', getter: cls => registerStats.perClass[cls]?.present?.total || 0 },
+      { label: 'Absent Boys', getter: cls => registerStats.perClass[cls]?.absent?.boys || 0 },
+      { label: 'Absent Girls', getter: cls => registerStats.perClass[cls]?.absent?.girls || 0 },
+      { label: 'Absent Total', getter: cls => registerStats.perClass[cls]?.absent?.total || 0 }
+    ];
+
+    return h('div', { className: 'register-table-wrap' }, [
+      h('table', { className: 'workers-table register-table' }, [
+        h('thead', null, [
+          h('tr', null, [
+            h('th', null, ' '),
+            ...headers.map(head => h('th', { key: head }, head))
+          ])
+        ]),
+        h('tbody', null, rows.map(row => {
+          return h('tr', { key: row.label }, [
+            h('th', null, row.label),
+            ...classNames.map(cls => h('td', { key: `${row.label}-${cls}` }, row.getter(cls))),
+            h('td', { className: 'table-total' }, classNames.reduce((sum, cls) => sum + row.getter(cls), 0))
+          ]);
+        }))
+      ])
+    ]);
+  }
+
+  const expectedUsageText = useMemo(() => {
+    return `Inatarajiwa: Sukari ${expectedPolicy.sugar_kg} kg - Mafuta ${expectedPolicy.oil_l} l`;
+  }, [expectedPolicy]);
+
+  function renderStorePanel() {
+    return h('section', { className: `workers-card mini-panel${storeOpen ? ' open' : ''}`, id: 'store-panel' }, [
+      h('header', { className: 'workers-card__header mini-panel__header' }, [
+        h('h3', null, 'Stoo - Bidhaa'),
+        h('div', { className: 'mini-panel__actions' }, [
+          h('button', { className: 'workers-btn secondary', onClick: () => setStoreOpen(o => !o) }, storeOpen ? 'Funga' : 'Fungua'),
+          h('button', { className: 'workers-btn', onClick: () => scrollToSection('menu-section') }, 'Nenda Menyu')
+        ])
+      ]),
+      !storeOpen ? null : h('div', { className: 'mini-panel__body' }, [
+        h('div', { className: 'mini-form' }, [
+          h('label', null, [
+            'Jina la bidhaa',
+            h('input', { value: newItem.name, onChange: e => setNewItem({ ...newItem, name: e.target.value }) })
+          ]),
+          h('label', null, [
+            'Kipimo (kg, l, pcs...)',
+            h('input', { value: newItem.unit, onChange: e => setNewItem({ ...newItem, unit: e.target.value }) })
+          ]),
+          h('label', null, [
+            'Kiasi kilichopo',
+            h('input', { type: 'number', value: newItem.onHand, onChange: e => setNewItem({ ...newItem, onHand: e.target.value }) })
+          ]),
+          h('button', { className: 'workers-btn primary', onClick: addStoreItem }, 'Ongeza stoo')
+        ]),
+        h('div', { className: 'mini-list' },
+          inventoryItems.length
+            ? inventoryItems.map(item =>
+                h('div', { key: item.id, className: 'mini-list__item' }, [
+                  h('strong', null, item.name),
+                  h('span', { className: 'mini-list__meta' }, `${item.onHand} ${item.unit || ''}`)
+                ])
+              )
+            : h('p', { className: 'workers-card__subtitle' }, 'Hakuna bidhaa stoo.')
+        )
+      ])
+    ]);
+  }
+
+  function renderLogicPanel() {
+    return h('section', { className: `workers-card mini-panel${logicOpen ? ' open' : ''}`, id: 'logic-panel' }, [
+      h('header', { className: 'workers-card__header mini-panel__header' }, [
+        h('h3', null, 'Logic Food - Kanuni za Matumizi'),
+        h('div', { className: 'mini-panel__actions' }, [
+          h('button', { className: 'workers-btn secondary', onClick: () => setLogicOpen(o => !o) }, logicOpen ? 'Funga' : 'Fungua'),
+          h('button', { className: 'workers-btn', onClick: () => scrollToSection('logic-section') }, 'Nenda Matumizi')
+        ])
+      ]),
+      !logicOpen ? null : h('div', { className: 'mini-panel__body' }, [
+        h('div', { className: 'mini-form' }, [
+          h('label', null, [
+            'Chagua bidhaa',
+            h('select', {
+              value: newRule.itemId,
+              onChange: e => setNewRule({ ...newRule, itemId: e.target.value })
+            }, [
+              h('option', { value: '' }, '-- Chagua bidhaa --'),
+              inventoryItems.map(it => h('option', { key: it.id, value: it.id }, it.name))
+            ])
+          ]),
+          h('label', null, [
+            'Kiasi kwa mwanafunzi (perChild)',
+            h('input', { type: 'number', step: '0.001', value: newRule.perChild, onChange: e => setNewRule({ ...newRule, perChild: e.target.value }) })
+          ]),
+          h('label', null, [
+            'Kipimo (kg, l, pcs...)',
+            h('input', { value: newRule.unit, onChange: e => setNewRule({ ...newRule, unit: e.target.value }) })
+          ]),
+          h('label', null, [
+            'Mlo',
+            h('select', { value: newRule.perMeal, onChange: e => setNewRule({ ...newRule, perMeal: e.target.value }) }, [
+              h('option', { value: 'both' }, 'Breakfast & Lunch'),
+              h('option', { value: 'breakfast' }, 'Breakfast'),
+              h('option', { value: 'lunch' }, 'Lunch')
+            ])
+          ]),
+          h('label', null, [
+            'Rounding',
+            h('select', { value: newRule.rounding, onChange: e => setNewRule({ ...newRule, rounding: e.target.value }) }, [
+              h('option', { value: 'round' }, 'Round'),
+              h('option', { value: 'ceil' }, 'Ceil'),
+              h('option', { value: 'none' }, 'Floor')
+            ])
+          ]),
+          h('button', { className: 'workers-btn primary', onClick: addLogicRule }, 'Hifadhi kanuni')
+        ]),
+        h('div', { className: 'mini-list' },
+          Object.entries(logicRules || {}).length
+            ? Object.entries(logicRules).map(([itemId, rule]) => {
+                const label = inventoryItems.find(it => it.id === itemId)?.name || itemId;
+                return h('div', { key: itemId, className: 'mini-list__item' }, [
+                  h('strong', null, label),
+                  h('span', { className: 'mini-list__meta' }, `${rule.perChild || 0} ${rule.unit || ''} / mwanafunzi (${rule.perMeal || 'both'})`)
+                ]);
+              })
+            : h('p', { className: 'workers-card__subtitle' }, 'Hakuna kanuni bado. Ongeza ili kupata matumizi yanayotarajiwa.')
+        )
+      ])
+    ]);
+  }
 
   async function handleSave() {
-    const breakfast = Number(headcount.breakfast || 0);
-    const lunch = Number(headcount.lunch || 0);
+    const breakfast = safeNumber(headcount.breakfast);
+    const lunch = safeNumber(headcount.lunch);
     if (!breakfast && !lunch) {
-      toast('Weka walioshiriki angalau mlo mmoja.', 'warning');
+      toast('Weka idadi ya walioshiriki mlo.', 'warning');
       return;
     }
-    const menu = {
-      breakfast: menuText.breakfast
-        .split(',')
-        .map(x => x.trim())
-        .filter(Boolean),
-      lunch: menuText.lunch
-        .split(',')
-        .map(x => x.trim())
-        .filter(Boolean)
-    };
-    const issuedPayload = {
-      sugar_kg: Number(issued.sugar_kg || 0),
-      oil_l: Number(issued.oil_l || 0)
-    };
-    const usedPayload = {
-      sugar_kg: Number(used.sugar_kg || 0),
-      oil_l: Number(used.oil_l || 0)
-    };
-    const utensilsPayload = normalizeUtensilsForSave(utensils);
-    const changeCheck = detectUtensilChanges(utensilsPayload, yesterdayUtensils);
-    if (changeCheck.missingLocation) {
-      toast('Ongeza maelezo ya mahali vinahifadhiwa kwa vifaa vilivyobadilika leo.', 'warning');
+
+    // Kitchen validation
+    const { changedIds, missingLocationIds } = detectDailyChanges(kitchenDaily, kitchenYesterday);
+    if (changedIds.length > 0 && missingLocationIds.length > 0) {
+      const missingNames = missingLocationIds
+        .map(id => kitchenItems.find(it => it.id === id)?.name || id)
+        .join(', ');
+      toast(`Tafadhali weka mahali kwa vifaa vilivyobadilika: ${missingNames}`, 'warning');
       return;
     }
+
     setSaving(true);
     try {
-      const expected = await computeCookProjection({ breakfastPax: breakfast, lunchPax: lunch });
-      const varianceExpected = {
-        sugar: usedPayload.sugar_kg - expected.sugar_kg,
-        oil: usedPayload.oil_l - expected.oil_l
-      };
-      const varianceIssued = {
-        sugar: issuedPayload.sugar_kg - usedPayload.sugar_kg,
-        oil: issuedPayload.oil_l - usedPayload.oil_l
-      };
-      const flagged =
-        Math.abs(varianceExpected.sugar) > 0.5 ||
-        Math.abs(varianceExpected.oil) > 0.5 ||
-        Math.abs(varianceIssued.sugar) > 0.5 ||
-        Math.abs(varianceIssued.oil) > 0.5;
-
-      await saveCookDailyReport({
-        dateKey: todayKey,
-        workerId,
+      const payload = {
         headcount: { breakfast, lunch },
-        menu,
-        expected,
-        issued: issuedPayload,
-        used: usedPayload,
-        photos: [],
-        status: flagged ? 'flagged' : 'pending',
-        utensils: utensilsPayload,
-        grievance: grievance.trim(),
-        penaltyLogged: existingReport?.penaltyLogged || false
-      });
-
-      if (Math.abs(varianceExpected.sugar) > 0.5) {
-        await flagInventoryMismatch({
-          dateKey: todayKey,
-          item: 'sugar_kg',
-          previousCount: expected.sugar_kg,
-          newCount: usedPayload.sugar_kg,
-          explanation: 'Matumizi ya sukari hayalingani na matarajio.',
-          workerId
-        });
-      }
-      if (Math.abs(varianceExpected.oil) > 0.5) {
-        await flagInventoryMismatch({
-          dateKey: todayKey,
-          item: 'oil_l',
-          previousCount: expected.oil_l,
-          newCount: usedPayload.oil_l,
-          explanation: 'Matumizi ya mafuta hayalingani na matarajio.',
-          workerId
-        });
-      }
-      if (Math.abs(varianceIssued.sugar) > 0.5) {
-        await flagInventoryMismatch({
-          dateKey: todayKey,
-          item: 'sugar_issued_vs_used',
-          previousCount: issuedPayload.sugar_kg,
-          newCount: usedPayload.sugar_kg,
-          explanation: 'Tofauti kati ya sukari iliyotolewa na iliyotumika.',
-          workerId
-        });
-      }
-      if (Math.abs(varianceIssued.oil) > 0.5) {
-        await flagInventoryMismatch({
-          dateKey: todayKey,
-          item: 'oil_issued_vs_used',
-          previousCount: issuedPayload.oil_l,
-          newCount: usedPayload.oil_l,
-          explanation: 'Tofauti kati ya mafuta yaliyotolewa na yaliyotumika.',
-          workerId
-        });
-      }
-
-      setExistingReport(prev => ({
-        ...(prev || {}),
-        headcount: { breakfast, lunch },
-        menu,
-        expected,
-        issued: issuedPayload,
-        used: usedPayload,
-        utensils: utensilsPayload,
-        grievance: grievance.trim(),
-        updatedTs: Date.now()
-      }));
-      setReportStatus(`Ripoti imehifadhiwa ${new Date().toLocaleTimeString('sw-TZ')}`);
-      toast('Ripoti ya jikoni imehifadhiwa.', 'success');
+        menuIds: menuSelections,
+        menuText,
+        issued: { sugar_kg: safeNumber(issued.sugar_kg), oil_l: safeNumber(issued.oil_l) },
+        used: { sugar_kg: safeNumber(used.sugar_kg), oil_l: safeNumber(used.oil_l) },
+        expected: {
+          policy: expectedPolicy,
+          items: expectedList
+        },
+        kitchenInventory: kitchenDaily,
+        status: computeStatus(),
+        variance: {
+          sugar_kg: Number((safeNumber(used.sugar_kg) - safeNumber(expectedPolicy.sugar_kg)).toFixed(2)),
+          oil_l: Number((safeNumber(used.oil_l) - safeNumber(expectedPolicy.oil_l)).toFixed(2))
+        },
+        createdAt: existingReport?.createdAt || Date.now(),
+        updatedAt: Date.now(),
+        workerRole: workerSession.workerRole || 'cook',
+        workerId: workerSession.workerId
+      };
+      await firebase.database().ref(`roles/cook/daily/${reportDate}/${workerSession.workerId}`).set(payload);
+      setExistingReport(payload);
+      setReportStatus(payload.status);
+      setHeadcountLocked(true);
+      toast('Ripoti imehifadhiwa.', 'success');
     } catch (err) {
       console.error(err);
-      toast(err.message || 'Imeshindikana kuhifadhi.', 'error');
+      toast(err.message || 'Imeshindikana kuhifadhi ripoti.', 'error');
     } finally {
       setSaving(false);
     }
   }
 
-  function normalizeUtensilsForSave(current) {
-    const result = {};
-    utensilList.forEach(item => {
-      const node = current[item.key] || {};
-      result[item.key] = {
-        available: Number(node.available || 0),
-        destroyed: Number(node.destroyed || 0),
-        lost: Number(node.lost || 0),
-        location: node.location || ''
-      };
-    });
-    return result;
+  function computeStatus() {
+    const varSugar = Math.abs(safeNumber(used.sugar_kg) - safeNumber(expectedPolicy.sugar_kg));
+    const varOil = Math.abs(safeNumber(used.oil_l) - safeNumber(expectedPolicy.oil_l));
+    if (varSugar > 0.5 || varOil > 0.5) return 'flagged';
+    return 'ok';
   }
 
-  function detectUtensilChanges(current, previous) {
-    let missingLocation = false;
-    utensilList.forEach(item => {
-      const prev = previous?.[item.key] || {};
-      const curr = current?.[item.key] || {};
-      const changed =
-        Number(prev.available || 0) !== Number(curr.available || 0) ||
-        Number(prev.destroyed || 0) !== Number(curr.destroyed || 0) ||
-        Number(prev.lost || 0) !== Number(curr.lost || 0);
-      if (changed && !curr.location) {
-        missingLocation = true;
-      }
-    });
-    return { missingLocation };
+  async function addStoreItem() {
+    if (!newItem.name) {
+      toast('Weka jina la bidhaa.', 'warning');
+      return;
+    }
+    try {
+      const ref = firebase.database().ref(inventoryPath()).push();
+      await ref.set({
+        name: newItem.name,
+        unit: newItem.unit || '',
+        onHand: safeNumber(newItem.onHand),
+        createdAt: Date.now()
+      });
+      toast('Imeongezwa stoo.', 'success');
+      setNewItem({ name: '', unit: '', onHand: '' });
+      const items = await fetchInventoryItems(workerSession.schoolId);
+      setInventoryItems(items);
+    } catch (err) {
+      console.error(err);
+      toast(err.message || 'Imeshindikana kuokoa bidhaa.', 'error');
+    }
   }
 
-  if (loading) {
-    return h('div', { className: 'workers-card', style: { padding: '24px' } }, 'Inapakia...');
+  async function addLogicRule() {
+    if (!newRule.itemId) {
+      toast('Chagua bidhaa ya kanuni.', 'warning');
+      return;
+    }
+    try {
+      const ref = firebase.database().ref(`${logicPath()}/${newRule.itemId}`);
+      await ref.set({
+        perChild: Number(newRule.perChild || 0),
+        unit: newRule.unit || '',
+        perMeal: newRule.perMeal || 'both',
+        rounding: newRule.rounding || 'round'
+      });
+      toast('Kanuni imehifadhiwa.', 'success');
+      setNewRule({ itemId: '', perChild: '', unit: '', perMeal: 'both', rounding: 'round' });
+      const rules = await loadLogicRules(workerSession.schoolId);
+      setLogicRules(rules);
+    } catch (err) {
+      console.error(err);
+      toast(err.message || 'Imeshindikana kuokoa kanuni.', 'error');
+    }
   }
 
-  return h('main', { className: 'workers-main' }, [
-    h('header', { className: 'workers-page-header' }, [
-      h('h1', null, 'Jikoni - Kitchen Control'),
-      h(
-        'p',
-        { className: 'workers-card__subtitle' },
-        'Kila siku rekodi idadi ya wanafunzi, menyu, matumizi ya chakula, na hesabu ya vifaa. Ukikosa kujaza hadi saa 18:00 utapata onyo nyekundu na makato.'
-      )
-    ]),
-    renderStatsSection(),
-    renderReportSection()
-  ]);
+  async function saveKitchenItem() {
+    try {
+      await upsertKitchenItem({ schoolId: workerSession.schoolId, yearLike: reportDate, item: kitchenForm });
+      const items = await listKitchenItems({ schoolId: workerSession.schoolId, yearLike: reportDate });
+      setKitchenItems(items);
+      setKitchenMasterOpen(false);
+      openKitchenModal(null); // Reset form
+    } catch (err) {
+      console.error(err);
+      toast(err.message, 'error');
+    }
+  }
 
-  function renderStatsSection() {
-    return h('section', { className: 'workers-card' }, [
-      h('header', { className: 'workers-card__header' }, [
-        h('div', null, [
-          h('h2', null, 'Takwimu za Leo'),
-          h(
-            'p',
-            { className: 'workers-card__subtitle' },
-            'Wanafunzi, wavulana/wasichana kwa darasa, waliopo, waliokosa, wapya, wafanyakazi.'
-          )
-        ]),
-        h('div', { className: 'workers-card__toolbar' }, [
-          h(
-            'span',
-            { className: 'workers-chip' },
-            `Shule: ${schoolName || schoolId || 'Kuu'}`
-          ),
-          h('label', { className: 'workers-chip' }, [
-            'Academic Year ',
-            h(
-              'select',
-              {
-                value: academicYear,
-                onChange: e => setAcademicYear(e.target.value)
-              },
-              (academicYears.length ? academicYears : [academicYear || '']).map(option =>
-                h('option', { key: option, value: option }, option)
-              )
-            )
-          ])
+  function openKitchenModal(item = null) {
+    if (item) {
+      setEditingKitchenItem(item);
+      setKitchenForm(item);
+    } else {
+      setEditingKitchenItem(null);
+      setKitchenForm({ name: '', unit: 'pcs', category: 'utensil', qtyTotal: 0, sourceType: 'purchased', sourceName: '', unitPrice: 0, note: '', acquiredDate: '', active: true });
+    }
+    setKitchenMasterOpen(true);
+  }
+
+  async function archiveItem(itemId) {
+    if (!confirm('Je, una uhakika unataka ku-archive kifaa hiki?')) return;
+    await archiveKitchenItem({ schoolId: workerSession.schoolId, yearLike: reportDate, itemId });
+    const items = await listKitchenItems({ schoolId: workerSession.schoolId, yearLike: reportDate });
+    setKitchenItems(items);
+  }
+
+  function renderKitchenMasterPanel() {
+    if (!kitchenMasterOpen) {
+      return h('section', { className: 'workers-card mini-panel', onClick: () => setKitchenMasterOpen(true) }, [
+        h('header', { className: 'workers-card__header mini-panel__header' }, [
+          h('h3', null, `Mali za Jikoni (Master) - ${kitchenItems.length} items`),
+          h('button', { className: 'workers-btn secondary' }, 'Fungua')
         ])
+      ]);
+    }
+
+    return h('section', { className: 'workers-card mini-panel open' }, [
+      h('header', { className: 'workers-card__header mini-panel__header' }, [
+        h('h3', null, 'Mali za Jikoni (Master)'),
+        h('button', { className: 'workers-btn secondary', onClick: () => setKitchenMasterOpen(false) }, 'Funga')
       ]),
-      h('div', { className: 'workers-card__content' }, [
-        h(
-          'p',
-          { className: 'workers-card__subtitle' },
-          `Jumla: Wanafunzi ${totals.registered}, Waliopo ${totals.present}, Waliokosa ${totals.absent}, Wapya ${totals.newcomers}, Wafanyakazi ${workersCount}`
-        ),
-        h('table', { className: 'workers-table' }, [
-          h('thead', null, [
-            h('tr', null, [
-              h('th', null, 'Darasa'),
-              h('th', null, 'Waliosajiliwa (B/G/T)'),
-              h('th', null, 'Waliohudhuria (B/G/T)'),
-              h('th', null, 'Waliokosa'),
-              h('th', null, 'Wapya (7d)')
-            ])
+      h('div', { className: 'mini-panel__body' }, [
+        h('div', { className: 'mini-form kitchen-master-form' }, [
+          h('h4', null, editingKitchenItem ? 'Hariri Kifaa' : 'Ongeza Kifaa Kipya'),
+          h('div', { className: 'workers-grid' }, [
+            h('label', null, ['Jina', h('input', { value: kitchenForm.name, onChange: e => setKitchenForm({ ...kitchenForm, name: e.target.value }) })]),
+            h('label', null, ['Kipimo', h('input', { value: kitchenForm.unit, onChange: e => setKitchenForm({ ...kitchenForm, unit: e.target.value }) })]),
+            h('label', null, ['Kundi', h('select', { value: kitchenForm.category, onChange: e => setKitchenForm({ ...kitchenForm, category: e.target.value }) }, [
+              h('option', { value: 'utensil' }, 'Utensil'),
+              h('option', { value: 'cookware' }, 'Cookware'),
+              h('option', { value: 'equipment' }, 'Equipment'),
+              h('option', { value: 'furniture' }, 'Furniture'),
+              h('option', { value: 'other' }, 'Other')
+            ])]),
+            h('label', null, ['Idadi Jumla', h('input', { type: 'number', value: kitchenForm.qtyTotal, onChange: e => setKitchenForm({ ...kitchenForm, qtyTotal: e.target.value }) })]),
+            h('label', null, ['Chanzo', h('select', { value: kitchenForm.sourceType, onChange: e => setKitchenForm({ ...kitchenForm, sourceType: e.target.value }) }, [
+              h('option', { value: 'purchased' }, 'Purchased'),
+              h('option', { value: 'donated' }, 'Donated'),
+              h('option', { value: 'school' }, 'School Existing')
+            ])]),
+            h('label', null, ['Supplier / Mtoaji', h('input', { value: kitchenForm.sourceName, onChange: e => setKitchenForm({ ...kitchenForm, sourceName: e.target.value }) })]),
+            h('label', null, ['Bei (Unit)', h('input', { type: 'number', value: kitchenForm.unitPrice, onChange: e => setKitchenForm({ ...kitchenForm, unitPrice: e.target.value }) })]),
+            h('label', null, ['Tarehe', h('input', { type: 'date', value: kitchenForm.acquiredDate, onChange: e => setKitchenForm({ ...kitchenForm, acquiredDate: e.target.value }) })]),
           ]),
-          h(
-            'tbody',
-            null,
-            [...classOrder, ...Object.keys(stats).filter(name => !classOrder.includes(name))].map(name => {
-              const data = stats[name] || {
-                registered: { boys: 0, girls: 0, total: 0 },
-                present: { boys: 0, girls: 0, total: 0 },
-                newcomers: 0
-              };
-              const absent = data.registered.total - data.present.total;
-              return h('tr', { key: name }, [
-                h('td', null, name),
-                h(
-                  'td',
-                  null,
-                  `${data.registered.boys}/${data.registered.girls}/${data.registered.total}`
-                ),
-                h(
-                  'td',
-                  null,
-                  `${data.present.boys}/${data.present.girls}/${data.present.total}`
-                ),
-                h('td', null, absent),
-                h('td', null, data.newcomers)
-              ]);
-            })
-          )
+          h('label', null, ['Maelezo', h('textarea', { rows: 2, value: kitchenForm.note, onChange: e => setKitchenForm({ ...kitchenForm, note: e.target.value }) })]),
+          h('div', { className: 'workers-card__actions' }, [
+            h('button', { className: 'workers-btn primary', onClick: saveKitchenItem }, 'Hifadhi Kifaa'),
+            editingKitchenItem && h('button', { className: 'workers-btn', onClick: () => openKitchenModal(null) }, 'Cancel Edit')
+          ])
+        ]),
+        h('div', { className: 'kitchen-master-list' }, [
+          h('table', { className: 'workers-table' }, [
+            h('thead', null, h('tr', null, [
+              h('th', null, 'Item'),
+              h('th', null, 'Qty'),
+              h('th', null, 'Source'),
+              h('th', null, 'Status'),
+              h('th', null, 'Action')
+            ])),
+            h('tbody', null, kitchenItems.map(item =>
+              h('tr', { key: item.id, className: item.active ? '' : 'row-inactive' }, [
+                h('td', null, [
+                  h('div', { className: 'row-title' }, item.name),
+                  h('div', { className: 'row-subtitle' }, item.category)
+                ]),
+                h('td', null, `${item.qtyTotal} ${item.unit}`),
+                h('td', null, item.sourceType),
+                h('td', null, item.active ? 'Active' : 'Archived'),
+                h('td', null, [
+                  h('button', { className: 'workers-btn small', onClick: () => openKitchenModal(item) }, 'Edit'),
+                  ' ',
+                  item.active && h('button', { className: 'workers-btn small danger', onClick: () => archiveItem(item.id) }, 'Archive')
+                ])
+              ])
+            ))
+          ])
         ])
       ])
     ]);
   }
 
-  function renderReportSection() {
-    return h('section', { className: 'workers-card', style: { marginTop: '24px' } }, [
+  function updateDaily(itemId, field, value) {
+    setKitchenDaily(prev => ({
+      ...prev,
+      [itemId]: {
+        ...(prev[itemId] || {}),
+        [field]: value
+      }
+    }));
+  }
+
+  function copyYesterdayKitchen() {
+    if (!confirm('Copy data kutoka jana? Hii itafuta data ya leo.')) return;
+    const newDaily = {};
+    kitchenItems.forEach(item => {
+      const y = kitchenYesterday[item.id] || {};
+      newDaily[item.id] = {
+        available: y.available,
+        destroyed: y.destroyed,
+        lost: y.lost,
+        misplaced: y.misplaced,
+        location: y.location,
+        note: y.note
+      };
+    });
+    setKitchenDaily(newDaily);
+    toast('Imenakili kutoka jana.', 'info');
+  }
+
+  function renderKitchenDailyCheck() {
+    const activeItems = kitchenItems.filter(it => it.active);
+
+    return h('section', { className: 'workers-card', id: 'kitchen-daily' }, [
       h('header', { className: 'workers-card__header' }, [
         h('div', null, [
-          h('h2', null, 'Ripoti ya Chakula ya Leo'),
-          h('p', { className: 'workers-card__subtitle' }, reportStatus)
+          h('h2', null, 'Ukaguzi wa Jikoni (Daily Check)'),
+          h('p', { className: 'workers-card__subtitle' }, 'Jaza idadi ya vifaa vilivyopo, vilivyoharibika au kupotea.')
+        ]),
+        h('button', { className: 'workers-btn', onClick: copyYesterdayKitchen }, 'Copy Yesterday')
+      ]),
+      h('div', { className: 'workers-card__content' }, [
+        activeItems.length === 0
+          ? h('p', null, 'Hakuna vifaa vilivyosajiliwa. Nenda kwenye "Mali za Jikoni" kuongeza.')
+          : h('div', { className: 'kitchen-daily-list' },
+              activeItems.map(item => {
+                const daily = kitchenDaily[item.id] || {};
+                const yesterday = kitchenYesterday[item.id] || {};
+                const hasChanged = detectDailyChanges({ [item.id]: daily }, { [item.id]: yesterday }).changedIds.length > 0;
+
+                return h('div', { key: item.id, className: `kitchen-daily-row${hasChanged ? ' changed-row' : ''}` }, [
+                  h('div', { className: 'k-item-info' }, [
+                    h('strong', null, item.name),
+                    h('span', { className: 'sub' }, `Jumla: ${item.qtyTotal}`)
+                  ]),
+                  h('div', { className: 'k-inputs' }, [
+                    h('div', { className: 'k-field' }, ['Kipo', h('input', { type: 'number', className: 'short-input', value: daily.available, onChange: e => updateDaily(item.id, 'available', e.target.value) })]),
+                    h('div', { className: 'k-field' }, ['Bovu', h('input', { type: 'number', className: 'short-input', value: daily.destroyed, onChange: e => updateDaily(item.id, 'destroyed', e.target.value) })]),
+                    h('div', { className: 'k-field' }, ['Potea', h('input', { type: 'number', className: 'short-input', value: daily.lost, onChange: e => updateDaily(item.id, 'lost', e.target.value) })]),
+                    h('div', { className: 'k-field' }, ['Misplaced', h('input', { type: 'number', className: 'short-input', value: daily.misplaced, onChange: e => updateDaily(item.id, 'misplaced', e.target.value) })]),
+                  ]),
+                  h('div', { className: 'k-meta' }, [
+                    h('input', { placeholder: 'Mahali kinahifadhiwa...', value: daily.location, onChange: e => updateDaily(item.id, 'location', e.target.value) }),
+                    h('input', { placeholder: 'Maelezo...', value: daily.note, onChange: e => updateDaily(item.id, 'note', e.target.value) })
+                  ])
+                ]);
+              })
+            )
+      ])
+    ]);
+  }
+
+  if (fatalError) {
+    return h('main', { className: 'workers-main' }, h('div', { className: 'workers-card workers-error' }, fatalError));
+  }
+
+  return h('main', { className: 'workers-main' }, [
+    h('header', { className: 'workers-page-header' }, [
+      h('div', null, [
+        h('h1', null, 'Ripoti ya Chakula ya Leo'),
+        h('p', { className: 'workers-card__subtitle' }, 'Weka takwimu za rejesta, menyu, na matumizi ya jikoni. Idadi ya wanafunzi hujazwa kiotomatiki.'),
+      ]),
+      statusBadge(reportStatus)
+    ]),
+
+    renderQuickCards(),
+    renderStorePanel(),
+    renderLogicPanel(),
+    renderKitchenMasterPanel(),
+
+    h('section', { className: 'workers-card' }, [
+      h('header', { className: 'workers-card__header' }, [
+        h('div', null, [
+          h('h2', null, 'Daily Register'),
+          h('p', { className: 'workers-card__subtitle' }, 'Boys / girls per class. Mirrors the paper register.')
+        ]),
+        h('div', { className: 'workers-card__toolbar' }, [
+          h('label', { className: 'workers-chip' }, [
+            'Tarehe ',
+            h('input', {
+              type: 'date',
+              value: reportDate,
+              onChange: e => setReportDate(e.target.value || today)
+            })
+          ]),
+          h('button', {
+            className: 'workers-btn',
+            onClick: () => loadRegister(reportDate),
+            disabled: registerLoading
+          }, registerLoading ? 'Inapakia...' : 'Load Daily Register')
         ])
       ]),
-      h('div', { className: 'workers-card__content workers-form' }, [
+      registerError
+        ? h('p', { className: 'workers-error' }, registerError)
+        : registerLoading
+          ? h('p', { className: 'workers-card__subtitle' }, 'Inapakia rejesta...')
+          : h('div', { className: 'workers-card__content' }, [
+              h('div', { className: 'register-summary' }, [
+                h('span', null, `Waliosajiliwa ${registerStats.totals.registered.total}`),
+                h('span', null, `Waliopo ${registerStats.totals.present.total}`),
+                h('span', null, `Walikosa ${registerStats.totals.absent.total}`)
+              ]),
+              renderRegisterTable()
+            ])
+    ]),
+
+    h('section', { className: 'workers-card', id: 'menu-section' }, [
+      h('header', { className: 'workers-card__header' }, [
+        h('h2', null, 'Mlo wa Leo'),
+        h('p', { className: 'workers-card__subtitle' }, 'Waliohudhuria na menyu hutokana na rejesta na stoo.')
+      ]),
+      h('div', { className: 'workers-card__content' }, [
         h('div', { className: 'workers-grid' }, [
           h('label', null, [
-            'Waliohudhuria Breakfast (07:20-10:20)',
+            'Waliohudhuria Breakfast',
             h('input', {
               type: 'number',
               min: 0,
@@ -680,7 +897,7 @@ function App() {
             })
           ]),
           h('label', null, [
-            'Waliohudhuria Lunch (12:30-14:00)',
+            'Waliohudhuria Lunch',
             h('input', {
               type: 'number',
               min: 0,
@@ -689,179 +906,85 @@ function App() {
             })
           ])
         ]),
-        h('div', { className: 'workers-grid' }, [
-          h('label', null, [
-            'Menyu (Breakfast)',
-            h('textarea', {
-              placeholder: 'Uji, mandazi...',
-              value: menuText.breakfast,
-              onChange: e => setMenuText({ ...menuText, breakfast: e.target.value })
-            })
-          ]),
-          h('label', null, [
-            'Menyu (Lunch)',
-            h('textarea', {
-              placeholder: 'Wali, Maharage...',
-              value: menuText.lunch,
-              onChange: e => setMenuText({ ...menuText, lunch: e.target.value })
-            })
-          ])
+
+        h('div', { className: 'menu-grid' }, [
+          renderMenuColumn('breakfast', 'Menyu (Breakfast)', menuText.breakfast),
+          renderMenuColumn('lunch', 'Menyu (Lunch)', menuText.lunch)
         ]),
-        h(
-          'fieldset',
-          { className: 'workers-fieldset' },
-          [
-            h('legend', null, 'Matumizi ya Mahitaji (kg / l)'),
-            h('div', { className: 'workers-grid' }, [
-              h('div', null, [
-                h('label', null, [
-                  'Sugar Issued (kg)',
-                  h('input', {
-                    type: 'number',
-                    step: '0.01',
-                    value: issued.sugar_kg,
-                    onChange: e => setIssued({ ...issued, sugar_kg: e.target.value })
-                  })
-                ]),
-                h('label', null, [
-                  'Sugar Used (kg)',
-                  h('input', {
-                    type: 'number',
-                    step: '0.01',
-                    value: used.sugar_kg,
-                    onChange: e => setUsed({ ...used, sugar_kg: e.target.value })
-                  })
-                ])
-              ]),
-              h('div', null, [
-                h('label', null, [
-                  'Oil Issued (l)',
-                  h('input', {
-                    type: 'number',
-                    step: '0.01',
-                    value: issued.oil_l,
-                    onChange: e => setIssued({ ...issued, oil_l: e.target.value })
-                  })
-                ]),
-                h('label', null, [
-                  'Oil Used (l)',
-                  h('input', {
-                    type: 'number',
-                    step: '0.01',
-                    value: used.oil_l,
-                    onChange: e => setUsed({ ...used, oil_l: e.target.value })
-                  })
-                ])
-              ])
+
+        h('fieldset', { className: 'workers-fieldset' }, [
+        h('legend', { id: 'logic-section' }, 'Matumizi (kg/l)'),
+          h('div', { className: 'workers-grid' }, [
+            h('label', null, [
+              'Sugar Issued (kg)',
+              h('input', { type: 'number', step: '0.01', value: issued.sugar_kg, onChange: e => setIssued({ ...issued, sugar_kg: e.target.value }) })
             ]),
-            h(
-              'p',
-              { className: 'workers-card__subtitle' },
-              `Inatarajiwa: Sukari ${expectedUsage.sugar_kg} kg - Mafuta ${expectedUsage.oil_l} l`
-            )
-          ]
-        ),
-        h(
-          'fieldset',
-          { className: 'workers-fieldset' },
-          [
-            h('legend', null, 'Vifaa vya Jikoni (ingia idadi halisi leo)'),
-            h('div', { className: 'workers-card__content' }, [
-              h('table', { className: 'workers-table' }, [
-                h('thead', null, [
-                  h('tr', null, [
-                    h('th', null, 'Kifaa'),
-                    h('th', null, 'Kipo (leo)'),
-                    h('th', null, 'Kimeharibika'),
-                    h('th', null, 'Kimepotea'),
-                    h('th', null, 'Mahali Kinahifadhiwa')
-                  ])
-                ]),
-                h(
-                  'tbody',
-                  null,
-                  utensilList.map(item =>
-                    h('tr', { key: item.key }, [
-                      h('td', null, item.label),
-                      h('td', null,
-                        h('input', {
-                          type: 'number',
-                          min: 0,
-                          value: utensils[item.key]?.available ?? '',
-                          onChange: e =>
-                            setUtensils({
-                              ...utensils,
-                              [item.key]: { ...(utensils[item.key] || {}), available: e.target.value }
-                            })
-                        })
-                      ),
-                      h('td', null,
-                        h('input', {
-                          type: 'number',
-                          min: 0,
-                          value: utensils[item.key]?.destroyed ?? '',
-                          onChange: e =>
-                            setUtensils({
-                              ...utensils,
-                              [item.key]: { ...(utensils[item.key] || {}), destroyed: e.target.value }
-                            })
-                        })
-                      ),
-                      h('td', null,
-                        h('input', {
-                          type: 'number',
-                          min: 0,
-                          value: utensils[item.key]?.lost ?? '',
-                          onChange: e =>
-                            setUtensils({
-                              ...utensils,
-                              [item.key]: { ...(utensils[item.key] || {}), lost: e.target.value }
-                            })
-                        })
-                      ),
-                      h('td', null,
-                        h('input', {
-                          type: 'text',
-                          placeholder: 'Mahali vinahifadhiwa',
-                          value: utensils[item.key]?.location ?? '',
-                          onChange: e =>
-                            setUtensils({
-                              ...utensils,
-                              [item.key]: { ...(utensils[item.key] || {}), location: e.target.value }
-                            })
-                        })
-                      )
-                    ])
-                  )
-                )
-              ])
+            h('label', null, [
+              'Sugar Used (kg)',
+              h('input', { type: 'number', step: '0.01', value: used.sugar_kg, onChange: e => setUsed({ ...used, sugar_kg: e.target.value }) })
+            ]),
+            h('label', null, [
+              'Oil Issued (l)',
+              h('input', { type: 'number', step: '0.01', value: issued.oil_l, onChange: e => setIssued({ ...issued, oil_l: e.target.value }) })
+            ]),
+            h('label', null, [
+              'Oil Used (l)',
+              h('input', { type: 'number', step: '0.01', value: used.oil_l, onChange: e => setUsed({ ...used, oil_l: e.target.value }) })
             ])
-          ]
-        ),
-        h('label', null, [
-          'Malalamiko / Grievances',
-          h('textarea', {
-            placeholder: 'Eleza changamoto za leo jikoni...',
-            value: grievance,
-            onChange: e => setGrievance(e.target.value)
-          })
-        ]),
-        h(
-          'div',
-          { className: 'workers-card__actions' },
-          h(
-            'button',
-            {
-              className: 'workers-btn',
-              onClick: handleSave,
-              disabled: saving
-            },
-            saving ? 'Inaokoa...' : 'Hifadhi Ripoti'
+          ]),
+          h('p', { className: 'workers-card__subtitle expected-line' }, expectedUsageText),
+          h('div', { className: 'expected-list' },
+            expectedList.length
+              ? expectedList.map(item => h('div', { key: item.itemId, className: 'expected-chip' }, `Unatakiwa kutoa ${item.name} ${item.expectedQty} ${item.unit || ''}`))
+              : h('p', { className: 'workers-card__subtitle' }, 'Chagua bidhaa kutoka stoo ili kuona matumizi yanayotarajiwa.')
           )
-        )
+        ]),
+
+        renderKitchenDailyCheck(),
+
+        h('div', { className: 'workers-card__actions' }, [
+          h('button', {
+            className: 'workers-btn primary',
+            onClick: handleSave,
+            disabled: saving
+          }, saving ? 'Inaokoa...' : 'Hifadhi Ripoti')
+        ])
+      ])
+    ])
+  ]);
+
+  function renderMenuColumn(mealKey, title, textValue) {
+    return h('div', { className: 'menu-column' }, [
+      h('label', null, [
+        title,
+        h('textarea', {
+          rows: 3,
+          placeholder: mealKey === 'breakfast' ? 'Uji, chai...' : 'Wali, maharage...',
+          value: textValue,
+          onChange: e => setMenuText({ ...menuText, [mealKey]: e.target.value })
+        })
+      ]),
+      h('div', { className: 'store-checklist' }, [
+        h('div', { className: 'store-checklist__title' }, 'Chagua kutoka stoo'),
+        inventoryItems.length === 0
+          ? h('p', { className: 'workers-card__subtitle' }, 'Hakuna bidhaa stoo.')
+          : inventoryItems.map(item =>
+              h('label', { key: `${mealKey}-${item.id}`, className: 'store-checklist__item' }, [
+                h('input', {
+                  type: 'checkbox',
+                  checked: menuSelections[mealKey].includes(item.id),
+                  onChange: () => toggleSelection(mealKey, item.id)
+                }),
+                h('span', null, `${item.name}${item.onHand ? ` (${item.onHand} ${item.unit || ''})` : ''}`)
+              ])
+            )
       ])
     ]);
   }
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+const rootEl = document.getElementById('root');
+if (rootEl) {
+  const root = ReactDOM.createRoot(rootEl);
+  root.render(h(App));
+}

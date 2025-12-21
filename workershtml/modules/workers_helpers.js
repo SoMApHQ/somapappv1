@@ -72,8 +72,17 @@ export async function ensureAnonymousAuth() {
   if (current) {
     return current;
   }
-  await auth.signInAnonymously();
-  return auth.currentUser;
+  try {
+    await auth.signInAnonymously();
+    return auth.currentUser;
+  } catch (err) {
+    // If anonymous auth is disabled, allow the app to continue in read-only mode.
+    if (err?.code === 'auth/admin-restricted-operation' || err?.code === 'auth/operation-not-allowed') {
+      console.warn('Anonymous auth disabled; continuing without Firebase auth.', err);
+      return auth.currentUser || null;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -94,11 +103,12 @@ export async function linkDeviceToWorker(workerId) {
  */
 export async function getLinkedWorkerId() {
   const user = firebase.auth().currentUser;
-  if (!user) {
-    return null;
+  if (user) {
+    const snap = await firebase.database().ref(`devices/${user.uid}/workerId`).once('value');
+    if (snap.exists()) return snap.val();
   }
-  const snap = await firebase.database().ref(`devices/${user.uid}/workerId`).once('value');
-  return snap.exists() ? snap.val() : null;
+  const cached = localStorage.getItem('workerId') || sessionStorage.getItem('workerId');
+  return cached || null;
 }
 
 /**
