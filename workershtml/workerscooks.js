@@ -10,6 +10,8 @@ import {
 } from './modules/workers_inventory.js';
 import { applyPenalty } from './modules/workers_penalties.js';
 
+console.log('?? Workers Cooks Script Loaded (v2) - Syntax Check OK');
+
 const { createElement: h, useState, useEffect } = React;
 
 const classOrder = [
