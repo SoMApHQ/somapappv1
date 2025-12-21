@@ -14,7 +14,7 @@ import {
 } from './modules/workers_inventory.js';
 import { applyPenalty } from './modules/workers_penalties.js';
 
-const { createElement: h, useState, useEffect, useMemo } = React;
+const { createElement: h, useState, useEffect } = React;
 
 const classOrder = [
   'Baby Class',
@@ -42,8 +42,6 @@ const utensilList = [
 ];
 
 const todayKey = todayYMD();
-const dayKeyCompact = todayKey.replace(/-/g, '');
-const monthKey = yyyymm();
 
 const defaultUtensils = () =>
   utensilList.reduce((acc, item) => {
@@ -51,13 +49,40 @@ const defaultUtensils = () =>
     return acc;
   }, {});
 
+function initialRegisterCounts() {
+  return {
+    registered: { boys: 0, girls: 0, total: 0 },
+    present: { boys: 0, girls: 0, total: 0 },
+    absent: { boys: 0, girls: 0, total: 0 },
+    shifted: 0,
+    newcomers: 0
+  };
+}
+
+function normalizeGender(g) {
+  const val = String(g || '').trim().toLowerCase();
+  if (!val) return null;
+  if (val.startsWith('m') || val.startsWith('b')) return 'boys';
+  if (val.startsWith('f') || val.startsWith('g')) return 'girls';
+  return null;
+}
+
+function classOrderKey(name) {
+  const n = String(name || '').toLowerCase();
+  if (!n) return Number.MAX_SAFE_INTEGER;
+  if (n.includes('baby')) return 0;
+  if (n.includes('middle')) return 1;
+  if (n.includes('pre') || n.includes('nursery')) return 2;
+  const match = n.match(/(\d+)/);
+  if (match) return 10 + parseInt(match[1], 10);
+  return 1000 + n.charCodeAt(0);
+}
+
 function App() {
   const [loading, setLoading] = useState(true);
   const [workerId, setWorkerId] = useState('');
   const [workerProfile, setWorkerProfile] = useState(null);
   const [students, setStudents] = useState({});
-  const [attendancePrimary, setAttendancePrimary] = useState(null);
-  const [attendanceFallback, setAttendanceFallback] = useState({});
   const [workersCount, setWorkersCount] = useState(0);
   const [existingReport, setExistingReport] = useState(null);
   const [reportStatus, setReportStatus] = useState('');
@@ -76,6 +101,16 @@ function App() {
   const [academicYear, setAcademicYear] = useState('');
   const [policies, setPolicies] = useState(null);
   const [penaltyChecked, setPenaltyChecked] = useState(false);
+  const [registerDate, setRegisterDate] = useState(todayKey);
+  const [registerLoading, setRegisterLoading] = useState(true);
+  const [registerError, setRegisterError] = useState('');
+  const [registerStats, setRegisterStats] = useState({
+    date: todayKey,
+    classNames: [],
+    perClass: {},
+    absenteesByClass: {},
+    totals: { registered: { boys: 0, girls: 0, total: 0 }, present: { boys: 0, girls: 0, total: 0 }, absent: { boys: 0, girls: 0, total: 0 }, shifted: 0, newcomers: 0 }
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -85,6 +120,7 @@ function App() {
         const linked = await getLinkedWorkerId();
         if (!linked) {
           toast('Ingia tena ili kuendelea.', 'error');
+          setRegisterLoading(false);
           return;
         }
         if (cancelled) return;
@@ -111,14 +147,8 @@ function App() {
         setAcademicYears(derivedYears);
         setAcademicYear(derivedYears[0] || `${new Date().getFullYear()}`);
 
-        const primaryAttendance = await fetchAttendancePrimary();
-        const fallbackAttendance = primaryAttendance
-          ? {}
-          : await fetchAttendanceFallback(resolvedSchoolId);
         const workersTotal = await fetchWorkersCount(resolvedSchoolId);
         if (cancelled) return;
-        setAttendancePrimary(primaryAttendance);
-        setAttendanceFallback(fallbackAttendance);
         setWorkersCount(workersTotal);
 
         const reportSnap = await dbRefs.rolesCookDaily(todayKey).child(linked).once('value');
@@ -151,6 +181,11 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!workerId) return;
+    loadRegisterStats(registerDate);
+  }, [registerDate, students, schoolId, workerId]);
 
   useEffect(() => {
     const breakfast = Number(headcount.breakfast || 0);
@@ -278,40 +313,6 @@ function App() {
     return Array.from(years);
   }
 
-  async function fetchAttendancePrimary() {
-    try {
-      const snap = await firebase.database().ref(`attendance_students/${dayKeyCompact}`).once('value');
-      return snap.exists() ? snap.val() : null;
-    } catch (err) {
-      console.error(err);
-      return null;
-    }
-  }
-
-  async function fetchAttendanceFallback(resolvedSchoolId) {
-    const fallback = {};
-    for (const className of classOrder) {
-      const schoolPath = resolvedSchoolId
-        ? `schools/${resolvedSchoolId}/attendance/${className}/${monthKey}/${todayKey}`
-        : '';
-      const globalPath = `attendance/${className}/${monthKey}/${todayKey}`;
-      try {
-        let snap = schoolPath ? await firebase.database().ref(schoolPath).once('value') : null;
-        if (snap && snap.exists()) {
-          fallback[className] = snap.val();
-          continue;
-        }
-        const globalSnap = await firebase.database().ref(globalPath).once('value');
-        if (globalSnap.exists()) {
-          fallback[className] = globalSnap.val();
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    }
-    return fallback;
-  }
-
   async function fetchWorkersCount(resolvedSchoolId) {
     try {
       if (resolvedSchoolId) {
@@ -336,77 +337,134 @@ function App() {
     return snap.val() || {};
   }
 
-  function presentFromPrimary(studentId, className) {
-    if (!attendancePrimary) return null;
-    const classNode = attendancePrimary[className];
-    const direct = attendancePrimary[studentId];
-    const record = (classNode && classNode[studentId]) || direct;
-    return record ? isPresentRecord(record) : null;
+  async function loadRegisterStats(dateStr) {
+    const targetDate = (dateStr || todayKey).slice(0, 10);
+    setRegisterLoading(true);
+    setRegisterError('');
+    try {
+      const stats = await computeRegisterStats(targetDate);
+      setRegisterStats(stats);
+    } catch (err) {
+      console.error(err);
+      setRegisterError(err.message || 'Imeshindikana kupakia takwimu za mahudhurio.');
+    } finally {
+      setRegisterLoading(false);
+    }
   }
 
-  function presentFromFallback(studentId, className) {
-    const classNode = attendanceFallback[className];
-    if (!classNode) return null;
-    const record = classNode[studentId] || classNode?.records?.[studentId];
-    return record ? isPresentRecord(record) : null;
-  }
-
-  function isPresentRecord(record) {
-    if (!record) return false;
-    if (record.present === true) return true;
-    if (record.am === 'P' || record.pm === 'P') return true;
-    return false;
-  }
-
-  const stats = useMemo(() => {
-    const classes = classOrder.reduce((acc, name) => {
-      acc[name] = {
-        registered: { boys: 0, girls: 0, total: 0 },
-        present: { boys: 0, girls: 0, total: 0 },
-        newcomers: 0
-      };
-      return acc;
-    }, {});
+  async function computeRegisterStats(dateKey) {
+    const classNamesSet = new Set(classOrder);
+    const perClass = {};
+    const absenteesByClass = {};
+    const totals = initialRegisterCounts();
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
     Object.values(students || {}).forEach(student => {
-      const className = student.class || 'Unknown';
-      if (!classes[className]) {
-        classes[className] = {
-          registered: { boys: 0, girls: 0, total: 0 },
-          present: { boys: 0, girls: 0, total: 0 },
-          newcomers: 0
-        };
+      const cls = student.class || student.className || 'Unknown';
+      classNamesSet.add(cls);
+      if (!perClass[cls]) perClass[cls] = initialRegisterCounts();
+      if (!absenteesByClass[cls]) absenteesByClass[cls] = [];
+      const gender = normalizeGender(student.gender);
+      perClass[cls].registered.total += 1;
+      totals.registered.total += 1;
+      if (gender === 'boys') {
+        perClass[cls].registered.boys += 1;
+        totals.registered.boys += 1;
       }
-      const node = classes[className];
-      node.registered.total += 1;
-      if (student.gender === 'M') node.registered.boys += 1;
-      if (student.gender === 'F') node.registered.girls += 1;
+      if (gender === 'girls') {
+        perClass[cls].registered.girls += 1;
+        totals.registered.girls += 1;
+      }
       const createdTs = student.createdTs || student.createdAt || student.enrolledTs || 0;
       if (createdTs && Number(createdTs) >= cutoff) {
-        node.newcomers += 1;
-      }
-      const presentPrimary = presentFromPrimary(student.id, className);
-      const presentFallback = presentFromFallback(student.id, className);
-      const isPresent = presentPrimary !== null ? presentPrimary : presentFallback || false;
-      if (isPresent) {
-        node.present.total += 1;
-        if (student.gender === 'M') node.present.boys += 1;
-        if (student.gender === 'F') node.present.girls += 1;
+        perClass[cls].newcomers += 1;
+        totals.newcomers += 1;
       }
     });
-    return classes;
-  }, [students, attendancePrimary, attendanceFallback]);
 
-  const totals = useMemo(() => {
-    const base = { registered: 0, present: 0, absent: 0, newcomers: 0 };
-    Object.values(stats).forEach(stat => {
-      base.registered += stat.registered.total;
-      base.present += stat.present.total;
-      base.absent += stat.registered.total - stat.present.total;
-      base.newcomers += stat.newcomers;
-    });
-    return base;
-  }, [stats]);
+    const classNames = Array.from(classNamesSet).sort((a, b) => classOrderKey(a) - classOrderKey(b));
+    for (const cls of classNames) {
+      if (!perClass[cls]) perClass[cls] = initialRegisterCounts();
+      if (!absenteesByClass[cls]) absenteesByClass[cls] = [];
+      const monthKeyLocal = dateKey.slice(0, 7);
+      const schoolPath = schoolId
+        ? `schools/${schoolId}/attendance/${cls}/${monthKeyLocal}/${dateKey}`
+        : '';
+      let records = {};
+      try {
+        let snap = schoolPath ? await firebase.database().ref(schoolPath).once('value') : null;
+        if (!snap || !snap.exists()) {
+          snap = await firebase.database().ref(`attendance/${cls}/${monthKeyLocal}/${dateKey}`).once('value');
+        }
+        if (snap && snap.exists()) {
+          records = snap.val() || {};
+        }
+      } catch (err) {
+        console.warn('Imeshindikana kusoma mahudhurio ya', cls, err.message);
+      }
+      Object.keys(records || {}).forEach(studentId => {
+        const rec = records[studentId] || {};
+        const info = students[studentId] || { gender: normalizeGender(rec.gender), class: cls };
+        const gender = normalizeGender(info.gender);
+        const statusRaw = String(rec.status || rec.daily || '').toUpperCase();
+        const isPresent =
+          rec.present === true ||
+          rec.am === 'P' ||
+          rec.pm === 'P' ||
+          statusRaw === 'P' ||
+          statusRaw === 'PRESENT' ||
+          statusRaw === 'PR';
+        if (isPresent) {
+          perClass[cls].present.total += 1;
+          totals.present.total += 1;
+          if (gender === 'boys') {
+            perClass[cls].present.boys += 1;
+            totals.present.boys += 1;
+          }
+          if (gender === 'girls') {
+            perClass[cls].present.girls += 1;
+            totals.present.girls += 1;
+          }
+        } else {
+          absenteesByClass[cls].push({
+            name: info.fullName || info.name || studentId,
+            reason: rec.reason || rec.comment || rec.note || ''
+          });
+        }
+        if (rec.shifted === true || rec.dateShifted) {
+          perClass[cls].shifted += 1;
+          totals.shifted += 1;
+        }
+        if (rec.isNew === true || rec.newComer === true) {
+          perClass[cls].newcomers += 1;
+          totals.newcomers += 1;
+        }
+      });
+      perClass[cls].absent.total = Math.max(
+        0,
+        perClass[cls].registered.total - perClass[cls].present.total
+      );
+      perClass[cls].absent.boys = Math.max(
+        0,
+        perClass[cls].registered.boys - perClass[cls].present.boys
+      );
+      perClass[cls].absent.girls = Math.max(
+        0,
+        perClass[cls].registered.girls - perClass[cls].present.girls
+      );
+    }
+
+    totals.absent.total = Math.max(0, totals.registered.total - totals.present.total);
+    totals.absent.boys = Math.max(0, totals.registered.boys - totals.present.boys);
+    totals.absent.girls = Math.max(0, totals.registered.girls - totals.present.girls);
+
+    return {
+      date: dateKey,
+      classNames,
+      perClass,
+      absenteesByClass,
+      totals
+    };
+  }
 
   async function handleSave() {
     const breakfast = Number(headcount.breakfast || 0);
@@ -584,11 +642,11 @@ function App() {
     return h('section', { className: 'workers-card' }, [
       h('header', { className: 'workers-card__header' }, [
         h('div', null, [
-          h('h2', null, 'Takwimu za Leo'),
+          h('h2', null, 'Rejesta ya Mahudhurio (Daily Register)'),
           h(
             'p',
             { className: 'workers-card__subtitle' },
-            'Wanafunzi, wavulana/wasichana kwa darasa, waliopo, waliokosa, wapya, wafanyakazi.'
+            'Boys / girls per class for the selected day. Mirrors the paper register.'
           )
         ]),
         h('div', { className: 'workers-card__toolbar' }, [
@@ -609,55 +667,124 @@ function App() {
                 h('option', { key: option, value: option }, option)
               )
             )
+          ]),
+          h('label', { className: 'workers-chip' }, [
+            'Tarehe ',
+            h('input', {
+              type: 'date',
+              value: registerDate,
+              onChange: e => setRegisterDate(e.target.value || todayKey)
+            )
           ])
         ])
       ]),
       h('div', { className: 'workers-card__content' }, [
-        h(
-          'p',
-          { className: 'workers-card__subtitle' },
-          `Jumla: Wanafunzi ${totals.registered}, Waliopo ${totals.present}, Waliokosa ${totals.absent}, Wapya ${totals.newcomers}, Wafanyakazi ${workersCount}`
-        ),
-        h('table', { className: 'workers-table' }, [
-          h('thead', null, [
-            h('tr', null, [
-              h('th', null, 'Darasa'),
-              h('th', null, 'Waliosajiliwa (B/G/T)'),
-              h('th', null, 'Waliohudhuria (B/G/T)'),
-              h('th', null, 'Waliokosa'),
-              h('th', null, 'Wapya (7d)')
-            ])
-          ]),
-          h(
-            'tbody',
-            null,
-            [...classOrder, ...Object.keys(stats).filter(name => !classOrder.includes(name))].map(name => {
-              const data = stats[name] || {
-                registered: { boys: 0, girls: 0, total: 0 },
-                present: { boys: 0, girls: 0, total: 0 },
-                newcomers: 0
-              };
-              const absent = data.registered.total - data.present.total;
-              return h('tr', { key: name }, [
-                h('td', null, name),
+        registerLoading
+          ? h('p', { className: 'workers-card__subtitle' }, 'Inapakia rejesta ya leo...')
+          : registerError
+            ? h('p', { className: 'workers-error' }, registerError)
+            : [
                 h(
-                  'td',
-                  null,
-                  `${data.registered.boys}/${data.registered.girls}/${data.registered.total}`
+                  'p',
+                  { className: 'workers-card__subtitle' },
+                  `Jumla: Wanafunzi ${registerStats.totals.registered.total}, Waliopo ${registerStats.totals.present.total}, Waliokosa ${registerStats.totals.absent.total}, Wapya ${registerStats.totals.newcomers}, Wafanyakazi ${workersCount}`
                 ),
-                h(
-                  'td',
-                  null,
-                  `${data.present.boys}/${data.present.girls}/${data.present.total}`
-                ),
-                h('td', null, absent),
-                h('td', null, data.newcomers)
-              ]);
-            })
-          )
-        ])
+                renderRegisterTable(),
+                renderAbsenteesPanel()
+              ]
       ])
     ]);
+  }
+
+  function renderRegisterTable() {
+    const headers = [...registerStats.classNames, 'Total', 'Shifted', 'Newcomers'];
+    const rows = [
+      { label: 'Registered - Boys', getter: cls => registerStats.perClass[cls]?.registered?.boys ?? 0 },
+      { label: 'Registered - Girls', getter: cls => registerStats.perClass[cls]?.registered?.girls ?? 0 },
+      { label: 'Registered - Total', getter: cls => registerStats.perClass[cls]?.registered?.total ?? 0 },
+      { label: 'Present - Boys', getter: cls => registerStats.perClass[cls]?.present?.boys ?? 0 },
+      { label: 'Present - Girls', getter: cls => registerStats.perClass[cls]?.present?.girls ?? 0 },
+      { label: 'Present - Total', getter: cls => registerStats.perClass[cls]?.present?.total ?? 0, showShift: true, showNew: true },
+      { label: 'Absent - Boys', getter: cls => registerStats.perClass[cls]?.absent?.boys ?? 0 },
+      { label: 'Absent - Girls', getter: cls => registerStats.perClass[cls]?.absent?.girls ?? 0 },
+      { label: 'Absent - Total', getter: cls => registerStats.perClass[cls]?.absent?.total ?? 0 }
+    ];
+
+    return h('div', { className: 'workers-register' }, [
+      h('table', { className: 'workers-table' }, [
+        h('thead', null, [
+          h(
+            'tr',
+            null,
+            [h('th', { style: { textAlign: 'left' } }, '')].concat(
+              headers.map((title, idx) =>
+                h(
+                  'th',
+                  { key: title, style: { textAlign: idx === 0 ? 'left' : 'right' } },
+                  title
+                )
+              )
+            )
+          )
+        ]),
+        h(
+          'tbody',
+          null,
+          rows.map(row => {
+            const cells = registerStats.classNames.map(cls => row.getter(cls));
+            const totalCell = cells.reduce((sum, val) => (typeof val === 'number' ? sum + val : sum), 0);
+            const shiftedTotal = row.showShift
+              ? registerStats.classNames.reduce((sum, c) => sum + (registerStats.perClass[c]?.shifted || 0), 0)
+              : '—';
+            const newcomersTotal = row.showNew
+              ? registerStats.classNames.reduce((sum, c) => sum + (registerStats.perClass[c]?.newcomers || 0), 0)
+              : '—';
+            return h('tr', { key: row.label }, [
+              h('th', { style: { textAlign: 'left' } }, row.label),
+              ...cells.map((val, idx) =>
+                h('td', { key: `${row.label}-${idx}`, style: { textAlign: 'right' } }, val ?? '—')
+              ),
+              h('td', { style: { textAlign: 'right', fontWeight: 600 } }, totalCell || '0'),
+              h('td', { style: { textAlign: 'right' } }, row.showShift ? shiftedTotal : '—'),
+              h('td', { style: { textAlign: 'right' } }, row.showNew ? newcomersTotal : '—')
+            ]);
+          })
+        )
+      ])
+    ]);
+  }
+
+  function renderAbsenteesPanel() {
+    const entries = Object.entries(registerStats.absenteesByClass || {}).filter(
+      ([, list]) => (list || []).length
+    );
+    if (!entries.length) {
+      return h(
+        'div',
+        { className: 'workers-card__subtitle', style: { marginTop: '12px' } },
+        `No absentees recorded for ${registerStats.date}.`
+      );
+    }
+    return h(
+      'div',
+      { className: 'workers-absentees', style: { marginTop: '12px' } },
+      entries.map(([cls, list]) =>
+        h(
+          'div',
+          { key: cls, className: 'workers-card', style: { padding: '12px', background: '#fff6f6' } },
+          [
+            h('strong', null, cls),
+            h(
+              'ul',
+              null,
+              list.map((entry, idx) =>
+                h('li', { key: `${cls}-${idx}` }, `${entry.name || '-'}${entry.reason ? ' - ' + entry.reason : ''}`)
+              )
+            )
+          ]
+        )
+      )
+    );
   }
 
   function renderReportSection() {
