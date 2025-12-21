@@ -2,7 +2,8 @@
 // Entry point for MarketingHub card + app shell (React via CDN, no build step).
 
 const REACT_URL = "https://unpkg.com/react@18/umd/react.production.min.js";
-const REACT_DOM_URL = "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js";
+const REACT_DOM_URL =
+  "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js";
 
 const STYLE_URL = new URL("./marketing.css", import.meta.url).href;
 
@@ -63,7 +64,8 @@ const STRINGS = {
     cta: "Anza Sasa",
     buyer: "Mnunzi / Buyer",
     seller: "Muuzaji / Seller",
-    landingLead: "Karibu Soko Huru. Tengeneza biashara yako, au tafuta bidhaa papo hapo bila kusajili.",
+    landingLead:
+      "Karibu Soko Huru. Tengeneza biashara yako, au tafuta bidhaa papo hapo bila kusajili.",
     searchPlaceholder: "Tafuta bidhaa, eneo, au muuzaji…",
     filters: "Vichujio",
     delivery: "Uwasilishaji",
@@ -77,11 +79,13 @@ const STRINGS = {
     liked: "Umeweka Like",
     enterBuyer: "Ingia kama Mnunzi",
     enterSeller: "Anza kama Muuzaji",
-    sellerGate: "Ingiza akaunti yako ya kuuza (Phone/Email) ili tukuthibitishe.",
+    sellerGate:
+      "Ingiza akaunti yako ya kuuza (Phone/Email) ili tukuthibitishe.",
     kycTitle: "KYC ya Muuzaji",
     submitKyc: "Tuma KYC",
     notAuthed: "Tafadhali ingia ili uendelee kama muuzaji.",
-    quotaBlocked: "Umefika ukomo wa bure. Tuma malipo: TZ 2,000 kwa 255686828732 au KE 100 kwa 254704479105.",
+    quotaBlocked:
+      "Umefika ukomo wa bure. Tuma malipo: TZ 2,000 kwa 255686828732 au KE 100 kwa 254704479105.",
     uploadNote: "Pakia 1-3 picha; tutakagua kabla ya kuchapisha.",
     appTitle: "Soko Huru",
   },
@@ -91,7 +95,8 @@ const STRINGS = {
     cta: "Get Started",
     buyer: "Buyer",
     seller: "Seller",
-    landingLead: "Welcome to Soko Huru. Explore instantly; sellers are verified for safety.",
+    landingLead:
+      "Welcome to Soko Huru. Explore instantly; sellers are verified for safety.",
     searchPlaceholder: "Search products, location, or seller…",
     filters: "Filters",
     delivery: "Delivery",
@@ -105,11 +110,13 @@ const STRINGS = {
     liked: "Liked",
     enterBuyer: "Enter as Buyer",
     enterSeller: "Start as Seller",
-    sellerGate: "Sign in (phone/email) so we can verify you before listings go live.",
+    sellerGate:
+      "Sign in (phone/email) so we can verify you before listings go live.",
     kycTitle: "Seller KYC",
     submitKyc: "Submit KYC",
     notAuthed: "Please sign in to continue as seller.",
-    quotaBlocked: "Free upload quota reached. Pay: TZ 2,000 to 255686828732 or KE 100 to 254704479105.",
+    quotaBlocked:
+      "Free upload quota reached. Pay: TZ 2,000 to 255686828732 or KE 100 to 254704479105.",
     uploadNote: "Upload 1-3 photos; we review before publishing.",
     appTitle: "Soko Huru",
   },
@@ -150,24 +157,12 @@ function MarketingCard({ onClick, lang = "sw" }) {
           "div",
           { className: "mh-chip" },
           "MarketingHub",
-          React.createElement(
-            "span",
-            { className: "mh-pill" },
-            "Soko Huru"
-          )
+          React.createElement("span", { className: "mh-pill" }, "Soko Huru")
         ),
         React.createElement("div", { className: "mh-title" }, t.title),
-        React.createElement(
-          "p",
-          { className: "mh-sub" },
-          t.subtitle
-        )
+        React.createElement("p", { className: "mh-sub" }, t.subtitle)
       ),
-      React.createElement(
-        "button",
-        { className: "mh-cta", onClick },
-        t.cta
-      )
+      React.createElement("button", { className: "mh-cta", onClick }, t.cta)
     )
   );
 }
@@ -178,7 +173,9 @@ function ListingCard({ listing, onLike, onContact, liked, lang }) {
     "div",
     { className: "mh-listing" },
     React.createElement("img", {
-      src: listing.photos?.[0] || "https://images.pexels.com/photos/1666021/pexels-photo-1666021.jpeg?auto=compress&cs=tinysrgb&h=400",
+      src:
+        listing.photos?.[0] ||
+        "https://images.pexels.com/photos/1666021/pexels-photo-1666021.jpeg?auto=compress&cs=tinysrgb&h=400",
       alt: listing.title || "Listing",
     }),
     React.createElement(
@@ -203,29 +200,40 @@ function ListingCard({ listing, onLike, onContact, liked, lang }) {
         "div",
         { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
         listing.category
-          ? React.createElement("span", { className: "mh-tag" }, listing.category)
+          ? React.createElement(
+              "span",
+              { className: "mh-tag" },
+              listing.category
+            )
           : null,
         listing.delivery
           ? React.createElement("span", { className: "mh-tag" }, t.delivery)
           : null,
         listing.payOnDelivery
-          ? React.createElement("span", { className: "mh-tag" }, t.payOnDelivery)
+          ? React.createElement(
+              "span",
+              { className: "mh-tag" },
+              t.payOnDelivery
+            )
           : null
       ),
       React.createElement(
         "div",
         { style: { display: "flex", gap: 8, marginTop: 10 } },
         React.createElement(
-        "button",
-        {
-          className: "mh-btn secondary",
-          onClick: () => onLike && onLike(listing),
-        },
-        liked ? `${t.liked}` : `${t.like}`
+          "button",
+          {
+            className: "mh-btn secondary",
+            onClick: () => onLike && onLike(listing),
+          },
+          liked ? `${t.liked}` : `${t.like}`
         ),
         React.createElement(
           "button",
-          { className: "mh-btn", onClick: () => onContact && onContact(listing) },
+          {
+            className: "mh-btn",
+            onClick: () => onContact && onContact(listing),
+          },
           t.contact
         )
       )
@@ -243,7 +251,11 @@ function ContactModal({ listing, onClose }) {
     React.createElement(
       "div",
       { className: "mh-modal-card", onClick: (e) => e.stopPropagation() },
-      React.createElement("h3", { style: { margin: "0 0 8px 0" } }, listing.title || "Wasiliana"),
+      React.createElement(
+        "h3",
+        { style: { margin: "0 0 8px 0" } },
+        listing.title || "Wasiliana"
+      ),
       React.createElement(
         "p",
         { className: "mh-muted", style: { marginTop: 0 } },
@@ -283,7 +295,11 @@ function ContactModal({ listing, onClose }) {
       ),
       React.createElement(
         "button",
-        { className: "mh-btn secondary", style: { width: "100%", marginTop: 14 }, onClick: onClose },
+        {
+          className: "mh-btn secondary",
+          style: { width: "100%", marginTop: 14 },
+          onClick: onClose,
+        },
         "Close"
       )
     )
@@ -303,6 +319,7 @@ function MarketingHubAppShell({ lang = "sw" }) {
     location: "",
     delivery: "",
     payOnDelivery: "",
+    itemType: "",
     min: "",
     max: "",
   });
@@ -347,6 +364,7 @@ function MarketingHubAppShell({ lang = "sw" }) {
           price: 12000,
           category: "Chakula",
           location: "Kitengela",
+          itemType:"Samaki",
           delivery: true,
           payOnDelivery: true,
           photos: [
@@ -359,6 +377,7 @@ function MarketingHubAppShell({ lang = "sw" }) {
           title: "Uniformu za Shule",
           price: 25000,
           category: "Uniformu",
+          itemType:"t-shirt",
           location: "Dar es Salaam",
           delivery: true,
           payOnDelivery: false,
@@ -406,24 +425,33 @@ function MarketingHubAppShell({ lang = "sw" }) {
       (item.category || "").toLowerCase().includes(q);
     const matchesCat =
       !filters.category ||
-      (item.category || "").toLowerCase().includes(filters.category.toLowerCase());
+      (item.category || "")
+        .toLowerCase()
+        .includes(filters.category.toLowerCase());
     const matchesLoc =
       !filters.location ||
-      (item.location || "").toLowerCase().includes(filters.location.toLowerCase());
+      (item.location || "")
+        .toLowerCase()
+        .includes(filters.location.toLowerCase());
     const matchesDelivery =
-      filters.delivery === "" ||
-      String(item.delivery) === filters.delivery;
+      filters.delivery === "" || String(item.delivery) === filters.delivery;
     const matchesPOD =
       filters.payOnDelivery === "" ||
       String(item.payOnDelivery) === filters.payOnDelivery;
-    const minOk = !filters.min || Number(item.price || 0) >= Number(filters.min);
-    const maxOk = !filters.max || Number(item.price || 0) <= Number(filters.max);
+      const matchesType =
+  !filters.itemType || item.itemType === filters.itemType;
+
+    const minOk =
+      !filters.min || Number(item.price || 0) >= Number(filters.min);
+    const maxOk =
+      !filters.max || Number(item.price || 0) <= Number(filters.max);
     return (
       matchesQ &&
       matchesCat &&
       matchesLoc &&
       matchesDelivery &&
       matchesPOD &&
+       matchesType &&
       minOk &&
       maxOk
     );
@@ -483,7 +511,11 @@ function MarketingHubAppShell({ lang = "sw" }) {
     return React.createElement(
       "div",
       { className: "mh-app-card" },
-      React.createElement("div", { className: "mh-section-title" }, strings.seller),
+      React.createElement(
+        "div",
+        { className: "mh-section-title" },
+        strings.seller
+      ),
       React.createElement("p", { className: "mh-muted" }, strings.sellerGate),
       React.createElement(
         "div",
@@ -504,11 +536,19 @@ function MarketingHubAppShell({ lang = "sw" }) {
         }),
         React.createElement(
           "button",
-          { className: "mh-btn", onClick: signInSeller, style: { gridColumn: "span 2" } },
+          {
+            className: "mh-btn",
+            onClick: signInSeller,
+            style: { gridColumn: "span 2" },
+          },
           "Sign in / Create"
         )
       ),
-      React.createElement("div", { className: "mh-section-title", style: { marginTop: 18 } }, strings.kycTitle),
+      React.createElement(
+        "div",
+        { className: "mh-section-title", style: { marginTop: 18 } },
+        strings.kycTitle
+      ),
       React.createElement(
         "div",
         { className: "mh-grid two" },
@@ -566,17 +606,26 @@ function MarketingHubAppShell({ lang = "sw" }) {
           React.createElement("input", {
             type: "checkbox",
             checked: kyc.payOnDeliveryAllowed,
-            onChange: (e) => setKyc({ ...kyc, payOnDeliveryAllowed: e.target.checked }),
+            onChange: (e) =>
+              setKyc({ ...kyc, payOnDeliveryAllowed: e.target.checked }),
           }),
           strings.payOnDelivery
         ),
         React.createElement(
           "button",
-          { className: "mh-btn", onClick: submitKyc, style: { gridColumn: "span 2" } },
+          {
+            className: "mh-btn",
+            onClick: submitKyc,
+            style: { gridColumn: "span 2" },
+          },
           strings.submitKyc
         )
       ),
-      React.createElement("p", { className: "mh-muted", style: { marginTop: 10 } }, status)
+      React.createElement(
+        "p",
+        { className: "mh-muted", style: { marginTop: 10 } },
+        status
+      )
     );
   }
 
@@ -589,8 +638,19 @@ function MarketingHubAppShell({ lang = "sw" }) {
         { className: "mh-app-header" },
         React.createElement(
           "div",
-          { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 } },
-          React.createElement("h1", { style: { margin: 0, fontSize: "2rem", fontWeight: 800 } }, strings.appTitle),
+          {
+            style: {
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 12,
+            },
+          },
+          React.createElement(
+            "h1",
+            { style: { margin: 0, fontSize: "2rem", fontWeight: 800 } },
+            strings.appTitle
+          ),
           React.createElement(
             "div",
             { className: "mh-lang-toggle" },
@@ -607,10 +667,21 @@ function MarketingHubAppShell({ lang = "sw" }) {
             )
           )
         ),
-        React.createElement("p", { className: "mh-muted", style: { marginTop: 6 } }, strings.landingLead),
+        React.createElement(
+          "p",
+          { className: "mh-muted", style: { marginTop: 6 } },
+          strings.landingLead
+        ),
         React.createElement(
           "div",
-          { style: { display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" } },
+          {
+            style: {
+              display: "flex",
+              gap: 12,
+              marginTop: 16,
+              flexWrap: "wrap",
+            },
+          },
           React.createElement(
             "button",
             { className: "mh-btn", onClick: () => setMode("buyer") },
@@ -625,21 +696,43 @@ function MarketingHubAppShell({ lang = "sw" }) {
       ),
       React.createElement(
         "main",
-        { style: { maxWidth: "1100px", margin: "0 auto", padding: "0 20px 30px" } },
+        {
+          style: {
+            maxWidth: "1100px",
+            margin: "0 auto",
+            padding: "0 20px 30px",
+          },
+        },
         React.createElement(
           "div",
           { className: "mh-grid two" },
           React.createElement(
             "div",
             { className: "mh-app-card" },
-            React.createElement("div", { className: "mh-section-title" }, strings.buyer),
-            React.createElement("p", { className: "mh-muted" }, "Hakuna login. Browse, like, wasiliana moja kwa moja.")
+            React.createElement(
+              "div",
+              { className: "mh-section-title" },
+              strings.buyer
+            ),
+            React.createElement(
+              "p",
+              { className: "mh-muted" },
+              "Hakuna login. Browse, like, wasiliana moja kwa moja."
+            )
           ),
           React.createElement(
             "div",
             { className: "mh-app-card" },
-            React.createElement("div", { className: "mh-section-title" }, strings.seller),
-            React.createElement("p", { className: "mh-muted" }, "Muuzaji lazima athibitishwe (KYC, NIDA/ID, mawasiliano).")
+            React.createElement(
+              "div",
+              { className: "mh-section-title" },
+              strings.seller
+            ),
+            React.createElement(
+              "p",
+              { className: "mh-muted" },
+              "Muuzaji lazima athibitishwe (KYC, NIDA/ID, mawasiliano)."
+            )
           )
         )
       )
@@ -653,12 +746,26 @@ function MarketingHubAppShell({ lang = "sw" }) {
       React.createElement(
         "header",
         { className: "mh-app-header" },
-        React.createElement("h1", { style: { margin: 0, fontSize: "1.6rem", fontWeight: 800 } }, strings.seller),
-        React.createElement("p", { className: "mh-muted" }, "Usalama kwanza: KYC, mawasiliano, na ukomo wa upakiaji.")
+        React.createElement(
+          "h1",
+          { style: { margin: 0, fontSize: "1.6rem", fontWeight: 800 } },
+          strings.seller
+        ),
+        React.createElement(
+          "p",
+          { className: "mh-muted" },
+          "Usalama kwanza: KYC, mawasiliano, na ukomo wa upakiaji."
+        )
       ),
       React.createElement(
         "main",
-        { style: { maxWidth: "1100px", margin: "0 auto", padding: "0 20px 40px" } },
+        {
+          style: {
+            maxWidth: "1100px",
+            margin: "0 auto",
+            padding: "0 20px 40px",
+          },
+        },
         React.createElement(SellerPanel, null)
       )
     );
@@ -673,8 +780,19 @@ function MarketingHubAppShell({ lang = "sw" }) {
       { className: "mh-app-header" },
       React.createElement(
         "div",
-        { style: { display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" } },
-        React.createElement("h1", { style: { margin: 0, fontSize: "1.8rem", fontWeight: 800 } }, strings.buyer),
+        {
+          style: {
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 12,
+            alignItems: "center",
+          },
+        },
+        React.createElement(
+          "h1",
+          { style: { margin: 0, fontSize: "1.8rem", fontWeight: 800 } },
+          strings.buyer
+        ),
         React.createElement(
           "div",
           { className: "mh-lang-toggle" },
@@ -691,7 +809,11 @@ function MarketingHubAppShell({ lang = "sw" }) {
           )
         )
       ),
-      React.createElement("p", { className: "mh-muted" }, "Browse bila login ya manual. Tunatumia anonymous auth kurekodi likes na ripoti."),
+      React.createElement(
+        "p",
+        { className: "mh-muted" },
+        "Browse bila login ya manual. Tunatumia anonymous auth kurekodi likes na ripoti."
+      ),
       React.createElement(
         "div",
         { className: "mh-filters", style: { marginTop: 12 } },
@@ -732,7 +854,8 @@ function MarketingHubAppShell({ lang = "sw" }) {
           {
             className: "mh-select",
             value: filters.delivery,
-            onChange: (e) => setFilters({ ...filters, delivery: e.target.value }),
+            onChange: (e) =>
+              setFilters({ ...filters, delivery: e.target.value }),
           },
           React.createElement("option", { value: "" }, strings.delivery),
           React.createElement("option", { value: "true" }, "Yes"),
@@ -743,17 +866,33 @@ function MarketingHubAppShell({ lang = "sw" }) {
           {
             className: "mh-select",
             value: filters.payOnDelivery,
-            onChange: (e) => setFilters({ ...filters, payOnDelivery: e.target.value }),
+            onChange: (e) =>
+              setFilters({ ...filters, payOnDelivery: e.target.value }),
           },
           React.createElement("option", { value: "" }, strings.payOnDelivery),
           React.createElement("option", { value: "true" }, "Yes"),
           React.createElement("option", { value: "false" }, "No")
+        ),
+        React.createElement(
+          "select",
+          {
+            className: "mh-select",
+            value: filters.itemType,
+            onChange: (e) =>
+              setFilters({ ...filters, itemType: e.target.value }),
+          },
+          React.createElement("option", { value: "" }, "All Items"),
+          React.createElement("option", { value: "tshirt" }, "T-Shirt"),
+          React.createElement("option", { value: "shoes" }, "Shoes"),
+          React.createElement("option", { value: "tie" }, "Tie")
         )
       )
     ),
     React.createElement(
       "main",
-      { style: { maxWidth: "1100px", margin: "0 auto", padding: "0 20px 40px" } },
+      {
+        style: { maxWidth: "1100px", margin: "0 auto", padding: "0 20px 40px" },
+      },
       React.createElement(
         "div",
         { className: "mh-listings-grid" },
@@ -769,7 +908,10 @@ function MarketingHubAppShell({ lang = "sw" }) {
         )
       )
     ),
-    React.createElement(ContactModal, { listing: contactItem, onClose: () => setContactItem(null) })
+    React.createElement(ContactModal, {
+      listing: contactItem,
+      onClose: () => setContactItem(null),
+    })
   );
 }
 
