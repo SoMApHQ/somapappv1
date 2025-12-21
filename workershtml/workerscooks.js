@@ -333,6 +333,26 @@ function App() {
     return h('span', { className: `status-badge status-${key}` }, statusLabels[key] || statusLabels.pending);
   }
 
+  function scrollToSection(sectionId) {
+    const el = document.getElementById(sectionId);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function renderQuickCards() {
+    return h('section', { className: 'quick-cards' }, [
+      h('div', { className: 'mini-card', onClick: () => scrollToSection('menu-section') }, [
+        h('p', { className: 'mini-card__label' }, 'Stoo'),
+        h('p', { className: 'mini-card__value' }, `${inventoryItems.length} bidhaa`),
+        h('p', { className: 'mini-card__hint' }, 'Gusa kuchagua menyu kutoka stoo')
+      ]),
+      h('div', { className: 'mini-card', onClick: () => scrollToSection('logic-section') }, [
+        h('p', { className: 'mini-card__label' }, 'Logic Food'),
+        h('p', { className: 'mini-card__value' }, `${Object.keys(logicRules || {}).length} kanuni`),
+        h('p', { className: 'mini-card__hint' }, 'Gusa kuangalia matumizi yanayotarajiwa')
+      ])
+    ]);
+  }
+
   function renderRegisterTable() {
     const classNames = registerStats.classNames.length ? registerStats.classNames : ['Unknown'];
     const headers = [...classNames, 'Total'];
@@ -433,6 +453,8 @@ function App() {
       statusBadge(reportStatus)
     ]),
 
+    renderQuickCards(),
+
     h('section', { className: 'workers-card' }, [
       h('header', { className: 'workers-card__header' }, [
         h('div', null, [
@@ -469,7 +491,7 @@ function App() {
             ])
     ]),
 
-    h('section', { className: 'workers-card' }, [
+    h('section', { className: 'workers-card', id: 'menu-section' }, [
       h('header', { className: 'workers-card__header' }, [
         h('h2', null, 'Mlo wa Leo'),
         h('p', { className: 'workers-card__subtitle' }, 'Waliohudhuria na menyu hutokana na rejesta na stoo.')
@@ -502,7 +524,7 @@ function App() {
         ]),
 
         h('fieldset', { className: 'workers-fieldset' }, [
-          h('legend', null, 'Matumizi (kg/l)'),
+          h('legend', { id: 'logic-section' }, 'Matumizi (kg/l)'),
           h('div', { className: 'workers-grid' }, [
             h('label', null, [
               'Sugar Issued (kg)',
