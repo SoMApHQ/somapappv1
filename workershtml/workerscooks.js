@@ -462,9 +462,12 @@ function App() {
       // Improved class detection matching attendance.html
       const cls = student.className || student.classLevel || student.class || student.grade || 'Unknown';
       
-      classNamesSet.add(cls);
-      if (!perClass[cls]) perClass[cls] = initialRegisterCounts();
-      if (!absenteesByClass[cls]) absenteesByClass[cls] = [];
+      // If we encounter a class NOT in standard list, add it
+      if (!classNamesSet.has(cls)) {
+          classNamesSet.add(cls);
+          perClass[cls] = initialRegisterCounts();
+          absenteesByClass[cls] = [];
+      }
       
       const gender = normalizeGender(student.gender);
       perClass[cls].registered.total += 1;
@@ -790,6 +793,11 @@ function App() {
       { label: 'Absent - Girls', getter: cls => registerStats.perClass[cls]?.absent?.girls ?? 0 },
       { label: 'Absent - Total', getter: cls => registerStats.perClass[cls]?.absent?.total ?? 0 }
     ];
+
+    // Explicitly check for no data but allow rendering if classNames exist
+    if (!registerStats.classNames) {
+        return h('p', { className: 'workers-card__subtitle' }, 'No register data found.');
+    }
 
       // Table styling - make it compact
       h('div', { style: { overflowX: 'auto', WebkitOverflowScrolling: 'touch', border: '1px solid #e2e8f0', borderRadius: '8px' } }, [
