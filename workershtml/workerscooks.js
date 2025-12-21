@@ -17,7 +17,7 @@ const { createElement: h, useState, useEffect } = React;
 const classOrder = [
   'Baby Class',
   'Middle Class',
-  'Pre Unit',
+  'Pre Unit Class',
   'Class 1',
   'Class 2',
   'Class 3',
