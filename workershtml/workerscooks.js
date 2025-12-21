@@ -757,38 +757,40 @@ function App() {
     ];
 
     return h('div', { className: 'workers-register' }, [
-      h('table', { className: 'workers-table' }, [
-        h('thead', null, [
-          h('tr', null, 
-            [h('th', { style: { textAlign: 'left' } }, 'Class')].concat(
-              headers.map((title, idx) =>
-                h('th', { key: title, style: { textAlign: 'right' } }, title)
+      h('div', { style: { overflowX: 'auto', WebkitOverflowScrolling: 'touch', border: '1px solid #e2e8f0', borderRadius: '8px' } }, [
+        h('table', { className: 'workers-table', style: { minWidth: '800px', fontSize: '13px' } }, [
+          h('thead', { style: { background: '#f8fafc' } }, [
+            h('tr', null, 
+              [h('th', { style: { textAlign: 'left', padding: '10px', position: 'sticky', left: 0, background: '#f8fafc', zIndex: 10 } }, 'Class')].concat(
+                headers.map((title, idx) =>
+                  h('th', { key: title, style: { textAlign: 'right', padding: '10px', whiteSpace: 'nowrap' } }, title)
+                )
               )
             )
+          ]),
+          h('tbody', null,
+            rows.map(row => {
+              return h('tr', { key: row.label, style: { borderBottom: '1px solid #f1f5f9' } }, [
+                h('th', { style: { textAlign: 'left', padding: '10px', position: 'sticky', left: 0, background: 'white', zIndex: 5 } }, row.label),
+                ...registerStats.classNames.map((cls, idx) => 
+                  h('td', { key: `${row.label}-${cls}`, style: { textAlign: 'right', padding: '10px' } }, row.getter(cls))
+                ),
+                // Total Col
+                h('td', { style: { textAlign: 'right', fontWeight: 700, padding: '10px', background: '#f8fafc' } }, 
+                   registerStats.classNames.reduce((acc, cls) => acc + row.getter(cls), 0)
+                ),
+                // Shifted Col
+                h('td', { style: { textAlign: 'right', padding: '10px' } }, 
+                  row.showShift ? registerStats.classNames.reduce((acc, cls) => acc + (registerStats.perClass[cls]?.shifted||0), 0) : '—'
+                ),
+                // Newcomers Col
+                h('td', { style: { textAlign: 'right', padding: '10px' } }, 
+                  row.showNew ? registerStats.classNames.reduce((acc, cls) => acc + (registerStats.perClass[cls]?.newcomers||0), 0) : '—'
+                )
+              ]);
+            })
           )
-        ]),
-        h('tbody', null,
-          rows.map(row => {
-            return h('tr', { key: row.label }, [
-              h('th', { style: { textAlign: 'left' } }, row.label),
-              ...registerStats.classNames.map((cls, idx) => 
-                h('td', { key: `${row.label}-${cls}`, style: { textAlign: 'right' } }, row.getter(cls))
-              ),
-              // Total Col
-              h('td', { style: { textAlign: 'right', fontWeight: 600 } }, 
-                 registerStats.classNames.reduce((acc, cls) => acc + row.getter(cls), 0)
-              ),
-              // Shifted Col
-              h('td', { style: { textAlign: 'right' } }, 
-                row.showShift ? registerStats.classNames.reduce((acc, cls) => acc + (registerStats.perClass[cls]?.shifted||0), 0) : '—'
-              ),
-              // Newcomers Col
-              h('td', { style: { textAlign: 'right' } }, 
-                row.showNew ? registerStats.classNames.reduce((acc, cls) => acc + (registerStats.perClass[cls]?.newcomers||0), 0) : '—'
-              )
-            ]);
-          })
-        )
+        ])
       ])
     ]);
   }

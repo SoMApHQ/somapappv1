@@ -5,9 +5,21 @@ let cachedPolicies = null;
 
 async function loadPolicies() {
   if (cachedPolicies) return cachedPolicies;
-  const response = await fetch('../modules/policies.json');
-  if (!response.ok) {
-    throw new Error('Failed to load policies.json');
+  // Try multiple paths to be robust across different page locations
+  const paths = ['./modules/policies.json', '../modules/policies.json', 'modules/policies.json'];
+  let response;
+  for (const path of paths) {
+    try {
+      response = await fetch(path);
+      if (response.ok) break;
+    } catch (e) {
+      console.warn(`Failed to fetch policies from ${path}`, e);
+    }
+  }
+  
+  if (!response || !response.ok) {
+    console.warn('Could not load policies.json from any path. Using defaults.');
+    return {}; // Return empty object instead of crashing to allow app to continue
   }
   cachedPolicies = await response.json();
   return cachedPolicies;
