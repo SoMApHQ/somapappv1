@@ -111,6 +111,7 @@ function App() {
     absenteesByClass: {},
     totals: { registered: { boys: 0, girls: 0, total: 0 }, present: { boys: 0, girls: 0, total: 0 }, absent: { boys: 0, girls: 0, total: 0 }, shifted: 0, newcomers: 0 }
   });
+  const [fatalError, setFatalError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -179,6 +180,23 @@ function App() {
     init();
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    function handleWindowError(event) {
+      const msg = event?.error?.message || event?.message || 'Unknown runtime error';
+      setFatalError(msg);
+    }
+    function handleRejection(event) {
+      const msg = event?.reason?.message || String(event?.reason) || 'Unhandled promise rejection';
+      setFatalError(msg);
+    }
+    window.addEventListener('error', handleWindowError);
+    window.addEventListener('unhandledrejection', handleRejection);
+    return () => {
+      window.removeEventListener('error', handleWindowError);
+      window.removeEventListener('unhandledrejection', handleRejection);
     };
   }, []);
 
@@ -626,6 +644,23 @@ function App() {
   }
 
   return h('main', { className: 'workers-main' }, [
+    fatalError
+      ? h(
+          'div',
+          {
+            style: {
+              background: '#fef2f2',
+              border: '1px solid #fecaca',
+              color: '#991b1b',
+              padding: '12px',
+              borderRadius: '8px',
+              marginBottom: '12px',
+              fontWeight: 600
+            }
+          },
+          `Runtime error: ${fatalError}`
+        )
+      : null,
     h('header', { className: 'workers-page-header' }, [
       h('h1', null, 'Jikoni - Kitchen Control'),
       h(
