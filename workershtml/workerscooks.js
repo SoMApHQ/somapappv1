@@ -2,6 +2,16 @@ import { todayYMD, toast } from './modules/workers_helpers.js';
 import { computeCookProjection } from './modules/workers_inventory.js';
 import { fetchInventoryItems } from './modules/store.js';
 import { loadLogicRules, computeExpectedList, aggregateExpected } from './modules/logicfood.js';
+import { 
+  ensureKitchenSeeded, 
+  listKitchenItems, 
+  upsertKitchenItem, 
+  archiveKitchenItem, 
+  buildDefaultDailyFromItems, 
+  mergeDailyWithItems, 
+  detectDailyChanges, 
+  resolveYearKey 
+} from './modules/vifaajikoni.js';
 
 const { createElement: h, useEffect, useMemo, useState } = React;
 
@@ -87,6 +97,17 @@ function App() {
   const [newItem, setNewItem] = useState({ name: '', unit: '', onHand: '' });
   const [newRule, setNewRule] = useState({ itemId: '', perChild: '', unit: '', perMeal: 'both', rounding: 'round' });
 
+  const [kitchenItems, setKitchenItems] = useState([]);
+  const [kitchenDaily, setKitchenDaily] = useState({});
+  const [kitchenYesterday, setKitchenYesterday] = useState({});
+  const [kitchenMasterOpen, setKitchenMasterOpen] = useState(false);
+  const [editingKitchenItem, setEditingKitchenItem] = useState(null);
+  const [kitchenForm, setKitchenForm] = useState({ 
+    name: '', unit: 'pcs', category: 'utensil', 
+    qtyTotal: 0, sourceType: 'purchased', sourceName: '', 
+    unitPrice: 0, note: '', acquiredDate: '' 
+  });
+
   useEffect(() => {
     if (!workerSession.workerId) {
       toast('Hakuna taarifa za mtumiaji. Tafadhali ingia tena.', 'error');
@@ -101,7 +122,7 @@ function App() {
     if (!workerSession.workerId) return;
     loadExistingReport(reportDate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reportDate, workerSession.workerId]);
+  }, [reportDate, workerSession.workerId, kitchenItems]);
 
   useEffect(() => {
     if (!reportDate) return;
@@ -151,14 +172,19 @@ function App() {
   async function loadBootstrap() {
     try {
       setRegisterLoading(true);
-      const [studentsMap, items, rules] = await Promise.all([
+      await ensureKitchenSeeded({ schoolId: workerSession.schoolId, yearLike: reportDate });
+
+      const [studentsMap, items, rules, kItems] = await Promise.all([
         loadStudents(workerSession.schoolId),
         fetchInventoryItems(workerSession.schoolId),
-        loadLogicRules(workerSession.schoolId)
+        loadLogicRules(workerSession.schoolId),
+        listKitchenItems({ schoolId: workerSession.schoolId, yearLike: reportDate })
       ]);
       setStudents(studentsMap);
       setInventoryItems(items);
       setLogicRules(rules);
+      setKitchenItems(kItems);
+      
       await loadRegister(reportDate, studentsMap);
     } catch (err) {
       console.error(err);
@@ -278,6 +304,12 @@ function App() {
 
   async function loadExistingReport(dateKey) {
     try {
+      // Load yesterday
+      const yesterday = new Date(new Date(dateKey).getTime() - 86400000).toISOString().split('T')[0];
+      const prevRef = firebase.database().ref(`roles/cook/daily/${yesterday}/${workerSession.workerId}/kitchenInventory`);
+      const prevSnap = await prevRef.once('value').catch(() => null);
+      setKitchenYesterday(prevSnap?.val() || {});
+
       const ref = firebase.database().ref(`roles/cook/daily/${dateKey}/${workerSession.workerId}`);
       const snap = await ref.once('value');
       if (snap.exists()) {
@@ -305,15 +337,18 @@ function App() {
           sugar_kg: data.used?.sugar_kg ?? '',
           oil_l: data.used?.oil_l ?? ''
         });
+        setKitchenDaily(mergeDailyWithItems(data.kitchenInventory, kitchenItems));
       } else {
         setExistingReport(null);
         setReportStatus('pending');
         setHeadcountLocked(false);
+        setKitchenDaily(mergeDailyWithItems({}, kitchenItems));
       }
     } catch (err) {
       console.error(err);
       setExistingReport(null);
       setReportStatus('pending');
+      setKitchenDaily(mergeDailyWithItems({}, kitchenItems));
     }
   }
 
@@ -515,6 +550,17 @@ function App() {
       toast('Weka idadi ya walioshiriki mlo.', 'warning');
       return;
     }
+
+    // Kitchen validation
+    const { changedIds, missingLocationIds } = detectDailyChanges(kitchenDaily, kitchenYesterday);
+    if (changedIds.length > 0 && missingLocationIds.length > 0) {
+      const missingNames = missingLocationIds
+        .map(id => kitchenItems.find(it => it.id === id)?.name || id)
+        .join(', ');
+      toast(`Tafadhali weka mahali kwa vifaa vilivyobadilika: ${missingNames}`, 'warning');
+      return;
+    }
+
     setSaving(true);
     try {
       const payload = {
@@ -527,6 +573,7 @@ function App() {
           policy: expectedPolicy,
           items: expectedList
         },
+        kitchenInventory: kitchenDaily,
         status: computeStatus(),
         variance: {
           sugar_kg: Number((safeNumber(used.sugar_kg) - safeNumber(expectedPolicy.sugar_kg)).toFixed(2)),
@@ -603,6 +650,182 @@ function App() {
     }
   }
 
+  async function saveKitchenItem() {
+    try {
+      await upsertKitchenItem({ schoolId: workerSession.schoolId, yearLike: reportDate, item: kitchenForm });
+      const items = await listKitchenItems({ schoolId: workerSession.schoolId, yearLike: reportDate });
+      setKitchenItems(items);
+      setKitchenMasterOpen(false);
+      openKitchenModal(null); // Reset form
+    } catch (err) {
+      console.error(err);
+      toast(err.message, 'error');
+    }
+  }
+
+  function openKitchenModal(item = null) {
+    if (item) {
+      setEditingKitchenItem(item);
+      setKitchenForm(item);
+    } else {
+      setEditingKitchenItem(null);
+      setKitchenForm({ name: '', unit: 'pcs', category: 'utensil', qtyTotal: 0, sourceType: 'purchased', sourceName: '', unitPrice: 0, note: '', acquiredDate: '', active: true });
+    }
+    setKitchenMasterOpen(true);
+  }
+
+  async function archiveItem(itemId) {
+    if (!confirm('Je, una uhakika unataka ku-archive kifaa hiki?')) return;
+    await archiveKitchenItem({ schoolId: workerSession.schoolId, yearLike: reportDate, itemId });
+    const items = await listKitchenItems({ schoolId: workerSession.schoolId, yearLike: reportDate });
+    setKitchenItems(items);
+  }
+
+  function renderKitchenMasterPanel() {
+    if (!kitchenMasterOpen) {
+      return h('section', { className: 'workers-card mini-panel', onClick: () => setKitchenMasterOpen(true) }, [
+        h('header', { className: 'workers-card__header mini-panel__header' }, [
+          h('h3', null, `Mali za Jikoni (Master) - ${kitchenItems.length} items`),
+          h('button', { className: 'workers-btn secondary' }, 'Fungua')
+        ])
+      ]);
+    }
+
+    return h('section', { className: 'workers-card mini-panel open' }, [
+      h('header', { className: 'workers-card__header mini-panel__header' }, [
+        h('h3', null, 'Mali za Jikoni (Master)'),
+        h('button', { className: 'workers-btn secondary', onClick: () => setKitchenMasterOpen(false) }, 'Funga')
+      ]),
+      h('div', { className: 'mini-panel__body' }, [
+        h('div', { className: 'mini-form kitchen-master-form' }, [
+          h('h4', null, editingKitchenItem ? 'Hariri Kifaa' : 'Ongeza Kifaa Kipya'),
+          h('div', { className: 'workers-grid' }, [
+            h('label', null, ['Jina', h('input', { value: kitchenForm.name, onChange: e => setKitchenForm({ ...kitchenForm, name: e.target.value }) })]),
+            h('label', null, ['Kipimo', h('input', { value: kitchenForm.unit, onChange: e => setKitchenForm({ ...kitchenForm, unit: e.target.value }) })]),
+            h('label', null, ['Kundi', h('select', { value: kitchenForm.category, onChange: e => setKitchenForm({ ...kitchenForm, category: e.target.value }) }, [
+              h('option', { value: 'utensil' }, 'Utensil'),
+              h('option', { value: 'cookware' }, 'Cookware'),
+              h('option', { value: 'equipment' }, 'Equipment'),
+              h('option', { value: 'furniture' }, 'Furniture'),
+              h('option', { value: 'other' }, 'Other')
+            ])]),
+            h('label', null, ['Idadi Jumla', h('input', { type: 'number', value: kitchenForm.qtyTotal, onChange: e => setKitchenForm({ ...kitchenForm, qtyTotal: e.target.value }) })]),
+            h('label', null, ['Chanzo', h('select', { value: kitchenForm.sourceType, onChange: e => setKitchenForm({ ...kitchenForm, sourceType: e.target.value }) }, [
+              h('option', { value: 'purchased' }, 'Purchased'),
+              h('option', { value: 'donated' }, 'Donated'),
+              h('option', { value: 'school' }, 'School Existing')
+            ])]),
+            h('label', null, ['Supplier / Mtoaji', h('input', { value: kitchenForm.sourceName, onChange: e => setKitchenForm({ ...kitchenForm, sourceName: e.target.value }) })]),
+            h('label', null, ['Bei (Unit)', h('input', { type: 'number', value: kitchenForm.unitPrice, onChange: e => setKitchenForm({ ...kitchenForm, unitPrice: e.target.value }) })]),
+            h('label', null, ['Tarehe', h('input', { type: 'date', value: kitchenForm.acquiredDate, onChange: e => setKitchenForm({ ...kitchenForm, acquiredDate: e.target.value }) })]),
+          ]),
+          h('label', null, ['Maelezo', h('textarea', { rows: 2, value: kitchenForm.note, onChange: e => setKitchenForm({ ...kitchenForm, note: e.target.value }) })]),
+          h('div', { className: 'workers-card__actions' }, [
+            h('button', { className: 'workers-btn primary', onClick: saveKitchenItem }, 'Hifadhi Kifaa'),
+            editingKitchenItem && h('button', { className: 'workers-btn', onClick: () => openKitchenModal(null) }, 'Cancel Edit')
+          ])
+        ]),
+        h('div', { className: 'kitchen-master-list' }, [
+          h('table', { className: 'workers-table' }, [
+            h('thead', null, h('tr', null, [
+              h('th', null, 'Item'),
+              h('th', null, 'Qty'),
+              h('th', null, 'Source'),
+              h('th', null, 'Status'),
+              h('th', null, 'Action')
+            ])),
+            h('tbody', null, kitchenItems.map(item =>
+              h('tr', { key: item.id, className: item.active ? '' : 'row-inactive' }, [
+                h('td', null, [
+                  h('div', { className: 'row-title' }, item.name),
+                  h('div', { className: 'row-subtitle' }, item.category)
+                ]),
+                h('td', null, `${item.qtyTotal} ${item.unit}`),
+                h('td', null, item.sourceType),
+                h('td', null, item.active ? 'Active' : 'Archived'),
+                h('td', null, [
+                  h('button', { className: 'workers-btn small', onClick: () => openKitchenModal(item) }, 'Edit'),
+                  ' ',
+                  item.active && h('button', { className: 'workers-btn small danger', onClick: () => archiveItem(item.id) }, 'Archive')
+                ])
+              ])
+            ))
+          ])
+        ])
+      ])
+    ]);
+  }
+
+  function updateDaily(itemId, field, value) {
+    setKitchenDaily(prev => ({
+      ...prev,
+      [itemId]: {
+        ...(prev[itemId] || {}),
+        [field]: value
+      }
+    }));
+  }
+
+  function copyYesterdayKitchen() {
+    if (!confirm('Copy data kutoka jana? Hii itafuta data ya leo.')) return;
+    const newDaily = {};
+    kitchenItems.forEach(item => {
+      const y = kitchenYesterday[item.id] || {};
+      newDaily[item.id] = {
+        available: y.available,
+        destroyed: y.destroyed,
+        lost: y.lost,
+        misplaced: y.misplaced,
+        location: y.location,
+        note: y.note
+      };
+    });
+    setKitchenDaily(newDaily);
+    toast('Imenakili kutoka jana.', 'info');
+  }
+
+  function renderKitchenDailyCheck() {
+    const activeItems = kitchenItems.filter(it => it.active);
+
+    return h('section', { className: 'workers-card', id: 'kitchen-daily' }, [
+      h('header', { className: 'workers-card__header' }, [
+        h('div', null, [
+          h('h2', null, 'Ukaguzi wa Jikoni (Daily Check)'),
+          h('p', { className: 'workers-card__subtitle' }, 'Jaza idadi ya vifaa vilivyopo, vilivyoharibika au kupotea.')
+        ]),
+        h('button', { className: 'workers-btn', onClick: copyYesterdayKitchen }, 'Copy Yesterday')
+      ]),
+      h('div', { className: 'workers-card__content' }, [
+        activeItems.length === 0
+          ? h('p', null, 'Hakuna vifaa vilivyosajiliwa. Nenda kwenye "Mali za Jikoni" kuongeza.')
+          : h('div', { className: 'kitchen-daily-list' },
+              activeItems.map(item => {
+                const daily = kitchenDaily[item.id] || {};
+                const yesterday = kitchenYesterday[item.id] || {};
+                const hasChanged = detectDailyChanges({ [item.id]: daily }, { [item.id]: yesterday }).changedIds.length > 0;
+
+                return h('div', { key: item.id, className: `kitchen-daily-row${hasChanged ? ' changed-row' : ''}` }, [
+                  h('div', { className: 'k-item-info' }, [
+                    h('strong', null, item.name),
+                    h('span', { className: 'sub' }, `Jumla: ${item.qtyTotal}`)
+                  ]),
+                  h('div', { className: 'k-inputs' }, [
+                    h('div', { className: 'k-field' }, ['Kipo', h('input', { type: 'number', className: 'short-input', value: daily.available, onChange: e => updateDaily(item.id, 'available', e.target.value) })]),
+                    h('div', { className: 'k-field' }, ['Bovu', h('input', { type: 'number', className: 'short-input', value: daily.destroyed, onChange: e => updateDaily(item.id, 'destroyed', e.target.value) })]),
+                    h('div', { className: 'k-field' }, ['Potea', h('input', { type: 'number', className: 'short-input', value: daily.lost, onChange: e => updateDaily(item.id, 'lost', e.target.value) })]),
+                    h('div', { className: 'k-field' }, ['Misplaced', h('input', { type: 'number', className: 'short-input', value: daily.misplaced, onChange: e => updateDaily(item.id, 'misplaced', e.target.value) })]),
+                  ]),
+                  h('div', { className: 'k-meta' }, [
+                    h('input', { placeholder: 'Mahali kinahifadhiwa...', value: daily.location, onChange: e => updateDaily(item.id, 'location', e.target.value) }),
+                    h('input', { placeholder: 'Maelezo...', value: daily.note, onChange: e => updateDaily(item.id, 'note', e.target.value) })
+                  ])
+                ]);
+              })
+            )
+      ])
+    ]);
+  }
+
   if (fatalError) {
     return h('main', { className: 'workers-main' }, h('div', { className: 'workers-card workers-error' }, fatalError));
   }
@@ -619,6 +842,7 @@ function App() {
     renderQuickCards(),
     renderStorePanel(),
     renderLogicPanel(),
+    renderKitchenMasterPanel(),
 
     h('section', { className: 'workers-card' }, [
       h('header', { className: 'workers-card__header' }, [
@@ -715,6 +939,8 @@ function App() {
               : h('p', { className: 'workers-card__subtitle' }, 'Chagua bidhaa kutoka stoo ili kuona matumizi yanayotarajiwa.')
           )
         ]),
+
+        renderKitchenDailyCheck(),
 
         h('div', { className: 'workers-card__actions' }, [
           h('button', {
