@@ -353,7 +353,21 @@ function App() {
       const status = String(value.status || '').toLowerCase();
       if (status === 'shifted') return;
       const id = value.id || key;
-      result[id] = { ...value, id };
+      
+      // Standardize class name to match attendance.html logic
+      const className = value.className || value.classLevel || value.class || value.grade || 'Unknown';
+      
+      // Standardize name
+      const fullName = [value.firstName, value.middleName, value.lastName]
+        .filter(Boolean).join(' ').trim()
+        || value.name || value.fullName || id;
+
+      result[id] = { 
+        ...value, 
+        id,
+        className,
+        fullName
+      };
     });
     return result;
   }
@@ -430,21 +444,24 @@ function App() {
   }
 
   async function computeRegisterStats(dateKey) {
+    // Seed with standard classes to ensure consistent table columns
     const classNamesSet = new Set(classOrder);
     const perClass = {};
     const absenteesByClass = {};
     const totals = initialRegisterCounts();
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-    // Initialize map
+    // Initialize map for known classes
     classOrder.forEach(c => {
         perClass[c] = initialRegisterCounts();
         absenteesByClass[c] = [];
     });
-
+    
     // 1. Calculate Registered
     Object.values(students || {}).forEach(student => {
-      const cls = student.class || student.className || 'Unknown';
+      // Improved class detection matching attendance.html
+      const cls = student.className || student.classLevel || student.class || student.grade || 'Unknown';
+      
       classNamesSet.add(cls);
       if (!perClass[cls]) perClass[cls] = initialRegisterCounts();
       if (!absenteesByClass[cls]) absenteesByClass[cls] = [];
@@ -774,14 +791,14 @@ function App() {
       { label: 'Absent - Total', getter: cls => registerStats.perClass[cls]?.absent?.total ?? 0 }
     ];
 
-    return h('div', { className: 'workers-register' }, [
+      // Table styling - make it compact
       h('div', { style: { overflowX: 'auto', WebkitOverflowScrolling: 'touch', border: '1px solid #e2e8f0', borderRadius: '8px' } }, [
-        h('table', { className: 'workers-table', style: { minWidth: '800px', fontSize: '13px' } }, [
+        h('table', { className: 'workers-table', style: { minWidth: '100%', fontSize: '11px', borderCollapse: 'collapse' } }, [
           h('thead', { style: { background: '#f8fafc' } }, [
             h('tr', null, 
-              [h('th', { style: { textAlign: 'left', padding: '10px', position: 'sticky', left: 0, background: '#f8fafc', zIndex: 10 } }, 'Class')].concat(
+              [h('th', { style: { textAlign: 'left', padding: '6px', position: 'sticky', left: 0, background: '#f8fafc', zIndex: 10, borderBottom: '1px solid #e2e8f0' } }, 'Class')].concat(
                 headers.map((title, idx) =>
-                  h('th', { key: title, style: { textAlign: 'right', padding: '10px', whiteSpace: 'nowrap' } }, title)
+                  h('th', { key: title, style: { textAlign: 'right', padding: '6px', whiteSpace: 'nowrap', borderBottom: '1px solid #e2e8f0' } }, title)
                 )
               )
             )
@@ -789,20 +806,20 @@ function App() {
           h('tbody', null,
             rows.map(row => {
               return h('tr', { key: row.label, style: { borderBottom: '1px solid #f1f5f9' } }, [
-                h('th', { style: { textAlign: 'left', padding: '10px', position: 'sticky', left: 0, background: 'white', zIndex: 5 } }, row.label),
+                h('th', { style: { textAlign: 'left', padding: '6px', position: 'sticky', left: 0, background: 'white', zIndex: 5, borderRight: '1px solid #f1f5f9' } }, row.label),
                 ...registerStats.classNames.map((cls, idx) => 
-                  h('td', { key: `${row.label}-${cls}`, style: { textAlign: 'right', padding: '10px' } }, row.getter(cls))
+                  h('td', { key: `${row.label}-${cls}`, style: { textAlign: 'right', padding: '6px' } }, row.getter(cls))
                 ),
                 // Total Col
-                h('td', { style: { textAlign: 'right', fontWeight: 700, padding: '10px', background: '#f8fafc' } }, 
+                h('td', { style: { textAlign: 'right', fontWeight: 700, padding: '6px', background: '#f8fafc' } }, 
                    registerStats.classNames.reduce((acc, cls) => acc + row.getter(cls), 0)
                 ),
                 // Shifted Col
-                h('td', { style: { textAlign: 'right', padding: '10px' } }, 
+                h('td', { style: { textAlign: 'right', padding: '6px' } }, 
                   row.showShift ? registerStats.classNames.reduce((acc, cls) => acc + (registerStats.perClass[cls]?.shifted||0), 0) : '—'
                 ),
                 // Newcomers Col
-                h('td', { style: { textAlign: 'right', padding: '10px' } }, 
+                h('td', { style: { textAlign: 'right', padding: '6px' } }, 
                   row.showNew ? registerStats.classNames.reduce((acc, cls) => acc + (registerStats.perClass[cls]?.newcomers||0), 0) : '—'
                 )
               ]);
@@ -810,7 +827,6 @@ function App() {
           )
         ])
       ])
-    ]);
   }
 
   function renderAbsenteesPanel() {
