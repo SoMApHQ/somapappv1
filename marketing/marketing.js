@@ -364,7 +364,7 @@ function MarketingHubAppShell({ lang = "sw" }) {
           price: 12000,
           category: "Chakula",
           location: "Kitengela",
-          itemType:"Samaki",
+          itemType: "Samaki",
           delivery: true,
           payOnDelivery: true,
           photos: [
@@ -377,7 +377,7 @@ function MarketingHubAppShell({ lang = "sw" }) {
           title: "Uniformu za Shule",
           price: 25000,
           category: "Uniformu",
-          itemType:"t-shirt",
+          itemType: "t-shirt",
           location: "Dar es Salaam",
           delivery: true,
           payOnDelivery: false,
@@ -438,8 +438,7 @@ function MarketingHubAppShell({ lang = "sw" }) {
     const matchesPOD =
       filters.payOnDelivery === "" ||
       String(item.payOnDelivery) === filters.payOnDelivery;
-      const matchesType =
-  !filters.itemType || item.itemType === filters.itemType;
+    const matchesType = !filters.itemType || item.itemType === filters.itemType;
 
     const minOk =
       !filters.min || Number(item.price || 0) >= Number(filters.min);
@@ -451,176 +450,171 @@ function MarketingHubAppShell({ lang = "sw" }) {
       matchesLoc &&
       matchesDelivery &&
       matchesPOD &&
-       matchesType &&
+      matchesType &&
       minOk &&
       maxOk
     );
   });
 
   function SellerPanel() {
+    const { hasFb, db, auth } = useFirebase();
+
+    /* ---------- AUTH STATE ---------- */
     const [email, setEmail] = React.useState("");
     const [pass, setPass] = React.useState("");
-    const [kyc, setKyc] = React.useState({
-      fullName: "",
-      phone: "",
-      nidaOrNationalId: "",
-      location: "",
-      nextOfKinName: "",
-      nextOfKinPhone: "",
-      businessName: "",
-      deliveryOptions: "",
-      payOnDeliveryAllowed: false,
-    });
     const [status, setStatus] = React.useState("");
-    const user = auth ? auth.currentUser : null;
 
+    /* ---------- PRODUCT STATE ---------- */
+    const [product, setProduct] = React.useState({
+      title: "",
+      itemType: "",
+      category: "",
+      price: "",
+      available: true,
+    });
+
+    /* ---------- SIGN IN / REGISTER ---------- */
     function signInSeller() {
       if (!auth) return;
       setStatus("Signing in…");
+
       auth
         .signInWithEmailAndPassword(email, pass)
-        .then(() => setStatus("Signed in"))
+        .then(() => setStatus("Signed in successfully"))
         .catch(() =>
           auth
             .createUserWithEmailAndPassword(email, pass)
             .then(() => setStatus("Seller account created"))
-            .catch((err) => setStatus(err.message || "Error"))
+            .catch((err) => setStatus(err.message || "Authentication error"))
         );
     }
 
-    function submitKyc() {
+    /* ---------- ADD PRODUCT (SAFE MODE) ---------- */
+    async function submitProduct() {
       if (!hasFb || !db || !auth || !auth.currentUser) {
-        setStatus(strings.notAuthed);
+        setStatus("Please sign in as seller first.");
         return;
       }
-      const uid = auth.currentUser.uid;
-      const payload = {
-        ...kyc,
-        updatedAt: Date.now(),
-        verificationStatus: "pending",
-      };
-      db.ref(`marketinghub/private/sellersKyc/${uid}`).set(payload);
-      db.ref(`marketinghub/public/sellersPublic/${uid}`).update({
-        displayName: kyc.businessName || kyc.fullName,
-        location: kyc.location,
-        verifiedStatus: "pending",
-      });
-      setStatus("KYC submitted, awaiting verification.");
+
+      if (!product.title || !product.itemType || !product.price) {
+        setStatus("Title, item type, and price are required.");
+        return;
+      }
+
+      try {
+        const uid = auth.currentUser.uid;
+
+        const listingRef = db.ref("marketinghub/public/listings").push();
+
+        await listingRef.set({
+          title: product.title,
+          itemType: product.itemType,
+          category: product.category || "",
+          price: Number(product.price),
+          available: product.available,
+          sellerId: uid,
+          createdAt: Date.now(),
+          status: "pending", // safe default
+        });
+
+        setStatus("Product saved (images coming next).");
+        setProduct({
+          title: "",
+          itemType: "",
+          category: "",
+          price: "",
+          available: true,
+        });
+      } catch (err) {
+        setStatus(err.message || "Failed to save product.");
+      }
     }
 
+    /* ---------- UI ---------- */
     return React.createElement(
       "div",
       { className: "mh-app-card" },
+
+      /* --- SELLER LOGIN --- */
       React.createElement(
         "div",
         { className: "mh-section-title" },
-        strings.seller
+        "Seller Login"
       ),
-      React.createElement("p", { className: "mh-muted" }, strings.sellerGate),
+      React.createElement("input", {
+        className: "mh-input",
+        placeholder: "Email",
+        value: email,
+        onChange: (e) => setEmail(e.target.value),
+        type: "email",
+      }),
+      React.createElement("input", {
+        className: "mh-input",
+        placeholder: "Password",
+        value: pass,
+        onChange: (e) => setPass(e.target.value),
+        type: "password",
+      }),
+      React.createElement(
+        "button",
+        { className: "mh-btn", onClick: signInSeller },
+        "Sign in / Create Seller"
+      ),
+
+      /* --- ADD PRODUCT --- */
       React.createElement(
         "div",
-        { className: "mh-grid two", style: { marginTop: 12 } },
+        { className: "mh-section-title", style: { marginTop: 20 } },
+        "Add Product"
+      ),
+      React.createElement("input", {
+        className: "mh-input",
+        placeholder: "Product title",
+        value: product.title,
+        onChange: (e) => setProduct({ ...product, title: e.target.value }),
+      }),
+      React.createElement(
+        "select",
+        {
+          className: "mh-select",
+          value: product.itemType,
+          onChange: (e) => setProduct({ ...product, itemType: e.target.value }),
+        },
+        React.createElement("option", { value: "" }, "Select item type"),
+        React.createElement("option", { value: "tshirt" }, "T-Shirt"),
+        React.createElement("option", { value: "shoes" }, "Shoes"),
+        React.createElement("option", { value: "tie" }, "Tie")
+      ),
+      React.createElement("input", {
+        className: "mh-input",
+        placeholder: "Category (e.g. Uniform)",
+        value: product.category,
+        onChange: (e) => setProduct({ ...product, category: e.target.value }),
+      }),
+      React.createElement("input", {
+        className: "mh-input",
+        type: "number",
+        placeholder: "Price (TZS)",
+        value: product.price,
+        onChange: (e) => setProduct({ ...product, price: e.target.value }),
+      }),
+      React.createElement(
+        "label",
+        { style: { display: "flex", gap: 8 } },
         React.createElement("input", {
-          className: "mh-input",
-          placeholder: "Email",
-          value: email,
-          onChange: (e) => setEmail(e.target.value),
-          type: "email",
+          type: "checkbox",
+          checked: product.available,
+          onChange: (e) =>
+            setProduct({ ...product, available: e.target.checked }),
         }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: "Password",
-          value: pass,
-          onChange: (e) => setPass(e.target.value),
-          type: "password",
-        }),
-        React.createElement(
-          "button",
-          {
-            className: "mh-btn",
-            onClick: signInSeller,
-            style: { gridColumn: "span 2" },
-          },
-          "Sign in / Create"
-        )
+        "Available"
       ),
       React.createElement(
-        "div",
-        { className: "mh-section-title", style: { marginTop: 18 } },
-        strings.kycTitle
+        "button",
+        { className: "mh-btn", onClick: submitProduct },
+        "Save Product"
       ),
-      React.createElement(
-        "div",
-        { className: "mh-grid two" },
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: "Full Name",
-          value: kyc.fullName,
-          onChange: (e) => setKyc({ ...kyc, fullName: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: "Phone",
-          value: kyc.phone,
-          onChange: (e) => setKyc({ ...kyc, phone: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: "NIDA / National ID",
-          value: kyc.nidaOrNationalId,
-          onChange: (e) => setKyc({ ...kyc, nidaOrNationalId: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: "Location (County/Region, Area)",
-          value: kyc.location,
-          onChange: (e) => setKyc({ ...kyc, location: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: "Next of Kin Name",
-          value: kyc.nextOfKinName,
-          onChange: (e) => setKyc({ ...kyc, nextOfKinName: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: "Next of Kin Phone",
-          value: kyc.nextOfKinPhone,
-          onChange: (e) => setKyc({ ...kyc, nextOfKinPhone: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: "Business Name (optional)",
-          value: kyc.businessName,
-          onChange: (e) => setKyc({ ...kyc, businessName: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: "Delivery options",
-          value: kyc.deliveryOptions,
-          onChange: (e) => setKyc({ ...kyc, deliveryOptions: e.target.value }),
-        }),
-        React.createElement(
-          "label",
-          { style: { display: "flex", alignItems: "center", gap: 8 } },
-          React.createElement("input", {
-            type: "checkbox",
-            checked: kyc.payOnDeliveryAllowed,
-            onChange: (e) =>
-              setKyc({ ...kyc, payOnDeliveryAllowed: e.target.checked }),
-          }),
-          strings.payOnDelivery
-        ),
-        React.createElement(
-          "button",
-          {
-            className: "mh-btn",
-            onClick: submitKyc,
-            style: { gridColumn: "span 2" },
-          },
-          strings.submitKyc
-        )
-      ),
+
       React.createElement(
         "p",
         { className: "mh-muted", style: { marginTop: 10 } },
