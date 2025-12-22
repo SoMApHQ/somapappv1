@@ -8,6 +8,8 @@
   <!-- Icons + Tailwind -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css"/>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../somapappv1multischool/js/context.js"></script>
+  <script src="../Todashboardhtml/yearContext.js"></script>
 
   <style>
     body { font-family: Inter, system-ui, Arial; background:#f8fafc; color:#0f172a; }
@@ -363,7 +365,7 @@
 
   // ---- Password for restricted actions ----
   const ACTION_PASSWORD = 'REHEMam!'; // Hardcoded password for Edit/Delete
-  const SHIFT_REPORT_PATH = 'shiftReports';
+  const SHIFT_REPORT_PATH = SOMAP.P('shiftReports');
 
   // ---- Modal open/close ----
   const openModalBtn = document.getElementById('openRegistrationModal');
@@ -431,6 +433,16 @@
   const db = window.db || (window.firebase && firebase.database ? firebase.database() : null);
   const storage = window.storage || (window.firebase && firebase.storage ? firebase.storage() : null);
 
+  const currentSchool = window.SOMAP && SOMAP.getSchool();
+  if (!currentSchool || !currentSchool.id) {
+    window.location.href = "../somapappv1multischool/multischool.html";
+  }
+  window.currentSchoolId = currentSchool?.id;
+
+  function schoolRef(subPath) {
+    return db.ref(SOMAP.P(subPath));
+  }
+
   if (!db) {
     console.error('Firebase Realtime Database not available. Ensure ../firebase.js and Firebase SDKs are loaded.');
   }
@@ -450,8 +462,7 @@
   };
   const withSchool = (path) => {
     const trimmed = String(path || '').replace(/^\/+/, '');
-    const schoolId = resolveSchoolId();
-    return schoolId ? `schools/${schoolId}/${trimmed}` : trimmed;
+    return SOMAP.P(trimmed);
   };
 
   let cachedStudents = [];
@@ -522,7 +533,7 @@
     if (!db) return;
     const yearStr = String(year);
     if (yearEnrollRef) yearEnrollRef.off();
-    yearEnrollRef = db.ref(`enrollments/${yearStr}`);
+    yearEnrollRef = schoolRef(`enrollments/${yearStr}`);
     yearEnrollRef.on('value', (snap) => {
       yearEnrollments = snap.val() || {};
       queueRender();
@@ -663,7 +674,7 @@
 
         // Duplicate check: Look for existing student with same parent contact + name + dob + class + admission number
         let duplicate = false;
-        const dupQuery = db.ref('students').orderByChild('primaryParentContact').equalTo(studentData.primaryParentContact);
+        const dupQuery = schoolRef('students').orderByChild('primaryParentContact').equalTo(studentData.primaryParentContact);
         const dupSnap = await dupQuery.once('value');
         console.log('Duplicate check: Matches=', dupSnap.numChildren(), 'Ignored self=', editingKey ? `Yes (${editingKey})` : 'N/A'); // Debug log
         dupSnap.forEach(child => {
@@ -692,7 +703,7 @@
 
         if (!editingKey) {
           // CREATE NEW
-          const newRef = db.ref('students').push();
+          const newRef = schoolRef('students').push();
           const newKey = newRef.key;
           // Upload files (all required for new registration)
           console.log('Creating new student, uploading files for key:', newKey); // Debug log
@@ -737,12 +748,12 @@
           studentData.joiningLetterUrl = await uploadMaybe("joiningLetterUpload", "joiningLetter", keyToUpdate, existing.joiningLetterUrl || null);
           studentData.medicalDocsUrl = await uploadMaybe("medicalDocsUpload", "medicalDocs", keyToUpdate, existing.medicalDocsUrl || null);
           // Do an update (preserves existing createdAt if present)
-          await db.ref('students/' + keyToUpdate).update({ ...studentData, updatedAt: firebase.database.ServerValue.TIMESTAMP });
+          await schoolRef(`students/${keyToUpdate}`).update({ ...studentData, updatedAt: firebase.database.ServerValue.TIMESTAMP });
           await syncFinanceAfterUpsert(keyToUpdate, studentData);
           // Clean up unused files after update
           await cleanupUnusedFiles(keyToUpdate);
           // Fetch fresh data from Firebase to ensure latest state
-          const updatedSnap = await db.ref('students/' + keyToUpdate).once('value');
+          const updatedSnap = await schoolRef(`students/${keyToUpdate}`).once('value');
           const updatedStudent = { key: keyToUpdate, ...updatedSnap.val() };
           if (confirm('✅ Changes saved! Stay in edit mode?')) {
             populateFormWithStudent(updatedStudent); // Reload form with fresh data
@@ -761,7 +772,7 @@
 
   // ---- Live cache + rendering for search (and edit buttons) ----
   if (db) {
-    db.ref('students').on('value', (snapshot) => {
+  schoolRef('students').on('value', (snapshot) => {
       const raw = snapshot.val() || {};
       cachedStudentsById.clear();
       cachedStudents = Object.entries(raw).map(([key, s]) => {
@@ -771,11 +782,11 @@
       });
       queueRender();
     });
-    db.ref(SHIFT_REPORT_PATH).on('value', (snapshot) => {
+  db.ref(SHIFT_REPORT_PATH).on('value', (snapshot) => {
       shiftReports = snapshot.exists() ? snapshot.val() : {};
       queueRender();
     });
-    anchorEnrollRef = db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`);
+  anchorEnrollRef = schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`);
     anchorEnrollRef.on('value', (snapshot) => {
       anchorEnrollments = snapshot.val() || {};
       queueRender();
@@ -986,7 +997,7 @@
         alert('No shift alert details found for this student.');
         return;
       }
-      const snap = await db.ref('students/' + key).get();
+      const snap = await schoolRef(`students/${key}`).get();
       if (!snap.exists()) {
         alert('Student record not found or already shifted.');
         return;
@@ -996,7 +1007,7 @@
       const nowIso = new Date().toISOString();
       const shiftDate = shiftInfo.dateShifted || nowIso.slice(0, 10);
       const updates = {};
-      updates[`shiftedStudents/${key}`] = {
+      updates[SOMAP.P(`shiftedStudents/${key}`)] = {
         ...studentData,
         status: 'shifted',
         shiftedAt: shiftDate,
@@ -1008,7 +1019,7 @@
           outstandingBalance: balance
         }
       };
-      updates[`students/${key}`] = null;
+      updates[SOMAP.P(`students/${key}`)] = null;
       updates[`${SHIFT_REPORT_PATH}/${key}/status`] = 'shifted';
       updates[`${SHIFT_REPORT_PATH}/${key}/adminShiftedAt`] = nowIso;
       updates[`${SHIFT_REPORT_PATH}/${key}/outstandingBalance`] = balance;
@@ -1024,7 +1035,7 @@
   async function doDeleteKey(key) {
     if (!confirm('Delete this student record? This action cannot be undone.')) return;
     try {
-      await db.ref('students/' + key).remove();
+      await schoolRef(`students/${key}`).remove();
       await cleanupUnusedFiles(key); // Clean up files after deletion
       alert('✅ Student deleted.');
     } catch (err) {
@@ -1083,7 +1094,7 @@
 
   // ---- Connectivity sanity check ----
   if (db) {
-    db.ref('z_test_write').set({ ok: true, ts: Date.now() })
+    schoolRef('z_test_write').set({ ok: true, ts: Date.now() })
       .then(() => console.log('DB test write OK'))
       .catch(err => console.warn('DB test write failed (ignore if rules block):', err.message));
   }

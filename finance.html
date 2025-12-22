@@ -6,6 +6,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-analytics-compat.js"></script>
+  <script src="somapappv1multischool/js/context.js"></script>
   <script src="Todashboardhtml/yearContext.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="firebase.js"></script>
@@ -300,6 +301,15 @@
   }
 
   const db = window.db || null;
+  const currentSchool = window.SOMAP && SOMAP.getSchool();
+  if (!currentSchool || !currentSchool.id) {
+    window.location.href = "somapappv1multischool/multischool.html";
+  }
+  window.currentSchoolId = currentSchool?.id;
+
+  function schoolRef(subPath) {
+    return db.ref(SOMAP.P(subPath));
+  }
   const yearContext = window.somapYearContext || null;
   const yearSelectEl = document.querySelector('[data-somap-year-select]');
   const financeQuery = new URLSearchParams(location.search);
@@ -965,7 +975,7 @@ function buildFinanceStudents(
     const targetYear = String(year || financeYear || SOMAP_DEFAULT_YEAR);
     if (!force && financeApprovalsCache.has(targetYear)) return financeApprovalsCache.get(targetYear);
     try {
-      const snapshot = await db.ref('approvalsHistory').once('value');
+      const snapshot = await schoolRef('approvalsHistory').once('value');
       const tree = snapshot.val() || {};
       const grouped = {};
       const normalizedTargetYear = Number(targetYear);
@@ -1027,25 +1037,25 @@ function buildFinanceStudents(
           stOverridesSnap,
           studentFeesSnap,
           plansSnap,
-          ledgerSnap,
-          carrySnap,
-        ] = await Promise.all([
-          db.ref('students').once('value'),
-          db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
-          db.ref(`enrollments/${key}`).once('value'),
-          db.ref(`feesStructure/${key}`).once('value'),
-          db.ref(`studentOverrides/${key}`).once('value'),
-          db.ref(`studentFees/${key}`).once('value'),
-          db.ref(`installmentPlans/${key}`).once('value'),
-          db.ref(`financeLedgers/${key}`).once('value'),
-          db.ref(`financeCarryForward/${key}`).once('value'),
+        ledgerSnap,
+        carrySnap,
+      ] = await Promise.all([
+        schoolRef('students').once('value'),
+        schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
+        schoolRef(`enrollments/${key}`).once('value'),
+        schoolRef(`feesStructure/${key}`).once('value'),
+        schoolRef(`studentOverrides/${key}`).once('value'),
+        schoolRef(`studentFees/${key}`).once('value'),
+        schoolRef(`installmentPlans/${key}`).once('value'),
+        schoolRef(`financeLedgers/${key}`).once('value'),
+        schoolRef(`financeCarryForward/${key}`).once('value'),
         ]);
 
         const baseStudents = baseSnap.val() || {};
         let ledgerData = ledgerSnap.val() || {};
         if (!Object.keys(ledgerData || {}).length) {
           try {
-            const legacyLedgerSnap = await db.ref('financeLedgers').once('value');
+            const legacyLedgerSnap = await schoolRef('financeLedgers').once('value');
             ledgerData = legacyLedgerSnap.val() || {};
           } catch (legacyErr) {
             console.warn('Legacy financeLedgers read failed (helper)', legacyErr?.message || legacyErr);
@@ -1055,7 +1065,7 @@ function buildFinanceStudents(
         let studentFeesData = studentFeesSnap.val() || {};
         if (!Object.keys(studentFeesData || {}).length) {
           try {
-            const legacyStudentFeesSnap = await db.ref(`finance/${key}/studentFees`).once('value');
+            const legacyStudentFeesSnap = await schoolRef(`finance/${key}/studentFees`).once('value');
             studentFeesData = legacyStudentFeesSnap.val() || {};
           } catch (studentFeesErr) {
             console.warn('Student fee override read failed (helper)', studentFeesErr?.message || studentFeesErr);
@@ -1292,7 +1302,7 @@ function buildFinanceStudents(
     financeAggregateSnapshot = computeAggregateTotals();
     if (!activeSchoolId || !db) return;
     try {
-      const summaryRef = db.ref(`schools/${activeSchoolId}/financials/${financeYear}/financeAggregates`);
+      const summaryRef = schoolRef(`financials/${financeYear}/financeAggregates`);
       await summaryRef.update({
         totalStudents: financeAggregateSnapshot.totalStudents,
         totalFeesExpected: financeAggregateSnapshot.totalDue,
@@ -1375,10 +1385,10 @@ function buildFinanceStudents(
   async function loadExpenses(year = activeYear) {
     try {
       const targetYear = String(year || activeYear);
-      let snap = await db.ref(`expenses/${targetYear}`).once('value');
+      let snap = await schoolRef(`expenses/${targetYear}`).once('value');
       let raw = snap.val();
       if (!raw || (typeof raw === 'object' && !Object.keys(raw).length)) {
-        snap = await db.ref('expenses').once('value');
+        snap = await schoolRef('expenses').once('value');
         raw = snap.val();
       }
       expenseTableBody.innerHTML = '';
@@ -1616,7 +1626,7 @@ function buildFinanceStudents(
     }
     const rounded = Math.round(parsed);
     try {
-      await db.ref(`studentFees/${financeYear}/${studentId}`).update({ feePerYear: rounded });
+      await schoolRef(`studentFees/${financeYear}/${studentId}`).update({ feePerYear: rounded });
       await loadStudents(financeYear);
       openDetailsModal(studentId);
       alert(`Base fee updated for ${financeYear}.`);
@@ -1780,7 +1790,7 @@ function buildFinanceStudents(
     if (!paidBy) return alert('Please enter who made the payment');
     if (!payerContact) return alert('Please enter contact of payer');
     try {
-      const studentRef = db.ref('students/' + studentId);
+      const studentRef = schoolRef(`students/${studentId}`);
       const snap = await studentRef.once('value');
       const student = snap.val();
       if (!student) throw new Error('Student not found');
@@ -1794,7 +1804,7 @@ function buildFinanceStudents(
       const paymentTimestamp = new Date(paymentDateInput).getTime() || Date.now();
       const parentContact = student.primaryParentContact || student.parentPhone || student.guardianPhone || student.emergencyPhone || '--';
 
-      const pendingRef = db.ref('approvalsPending').push();
+      const pendingRef = schoolRef('approvalsPending').push();
       await pendingRef.set({
         approvalId: pendingRef.key,
         sourceModule: 'finance',
@@ -1926,21 +1936,21 @@ function buildFinanceStudents(
         carrySnap,
         studentFeesSnap
       ] = await Promise.all([
-        db.ref('students').once('value'),
-        db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
-        db.ref(`enrollments/${targetYear}`).once('value'),
-        db.ref(`feesStructure/${targetYear}`).once('value'),
-        db.ref(`studentOverrides/${targetYear}`).once('value'),
-        db.ref(`installmentPlans/${targetYear}`).once('value'),
-        db.ref(`financeLedgers/${targetYear}`).once('value'),
-        db.ref(`financeCarryForward/${targetYear}`).once('value'),
-        db.ref(`studentFees/${targetYear}`).once('value'),
+        schoolRef('students').once('value'),
+        schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
+        schoolRef(`enrollments/${targetYear}`).once('value'),
+        schoolRef(`feesStructure/${targetYear}`).once('value'),
+        schoolRef(`studentOverrides/${targetYear}`).once('value'),
+        schoolRef(`installmentPlans/${targetYear}`).once('value'),
+        schoolRef(`financeLedgers/${targetYear}`).once('value'),
+        schoolRef(`financeCarryForward/${targetYear}`).once('value'),
+        schoolRef(`studentFees/${targetYear}`).once('value'),
       ]);
       const baseStudents = baseSnap.val() || {};
       let ledgerData = ledgerSnap.val() || {};
       if (!Object.keys(ledgerData || {}).length) {
         try {
-          const legacyLedgerSnap = await db.ref('financeLedgers').once('value');
+          const legacyLedgerSnap = await schoolRef('financeLedgers').once('value');
           ledgerData = legacyLedgerSnap.val() || {};
         } catch (legacyErr) {
           console.warn('Legacy financeLedgers read failed', legacyErr?.message || legacyErr);
@@ -1949,7 +1959,7 @@ function buildFinanceStudents(
       let studentFeesData = studentFeesSnap.val() || {};
       if (!Object.keys(studentFeesData || {}).length) {
         try {
-          const legacyStudentFeesSnap = await db.ref(`finance/${targetYear}/studentFees`).once('value');
+          const legacyStudentFeesSnap = await schoolRef(`finance/${targetYear}/studentFees`).once('value');
           studentFeesData = legacyStudentFeesSnap.val() || {};
         } catch (studentFeesErr) {
           console.warn('Student fee override read failed', studentFeesErr?.message || studentFeesErr);
