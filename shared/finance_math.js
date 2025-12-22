@@ -53,8 +53,10 @@
   }
 
   function schoolPrefix(){
-    const schoolId = global.currentSchoolId;
-    if (!schoolId) return '';
+    const schoolId =
+      global.currentSchoolId ||
+      (global.SOMAP && (typeof SOMAP.getSchoolId === 'function' ? SOMAP.getSchoolId() : (SOMAP.getSchool?.()?.id)));
+    if (!schoolId || schoolId === 'socrates-school') return '';
     return `schools/${schoolId.replace(/\/+$/,'')}/`;
   }
 
