@@ -300,6 +300,19 @@
     rowsByAdm: {}, className:'', stream:'', month:'', year:'', examKey:'', schoolBranch:''
   };
 
+  function classVariants(name){
+    const set = new Set();
+    const raw = String(name || '').trim();
+    if (raw) set.add(raw);
+    const noSpaces = raw.replace(/\s+/g, '');
+    if (noSpaces) set.add(noSpaces);
+    const normalized = raw.replace(/Class\s*(\d+)/i, 'Class $1').trim();
+    if (normalized) set.add(normalized);
+    const compact = raw.replace(/Class\s*(\d+)/i, 'Class$1').trim();
+    if (compact) set.add(compact);
+    return Array.from(set).filter(Boolean);
+  }
+
   const currentSchool = window.SOMAP && SOMAP.getSchool();
   if (!currentSchool || !currentSchool.id) {
     window.location.href = "../somapappv1multischool/multischool.html";
@@ -447,65 +460,89 @@
     async function fetchAttendance(year, month, className){
       const db = getDB();
       if(!db) return {};
-    const refPath = `attendance/${year}/${month}/${className}`;
-    try{
-      const snap = await schoolRef(refPath)?.get();
-        const out = {};
-        if(snap && snap.exists && snap.exists()){
-          const val = snap.val();
-          Object.keys(val).forEach(adm=>{
-            const a = val[adm] || {};
-            out[adm] = { present: Number(a.present || a.daysPresent || 0), absent: Number(a.absent || a.daysAbsent || 0), days: Number(a.days || (Number(a.present||0)+Number(a.absent||0))) };
-          });
-        }
-        return out;
-      }catch(e){ console.warn('fetchAttendance', e && e.message); return {}; }
+      const classes = classVariants(className);
+      const paths = classes.map(cls => `attendance/${year}/${month}/${cls}`);
+      const out = {};
+      for (const refPath of paths){
+        try{
+          const snap = await schoolRef(refPath)?.get();
+          if(snap && snap.exists && snap.exists()){
+            const val = snap.val();
+            Object.keys(val).forEach(adm=>{
+              const a = val[adm] || {};
+              out[adm] = { present: Number(a.present || a.daysPresent || 0), absent: Number(a.absent || a.daysAbsent || 0), days: Number(a.days || (Number(a.present||0)+Number(a.absent||0))) };
+            });
+            if (Object.keys(out).length) break;
+          }
+        }catch(e){ /* try next */ }
+      }
+      if (!Object.keys(out).length) console.warn('fetchAttendance: no data found for', className, 'paths tried', paths);
+      return out;
     }
 
     async function fetchFees(year, className){
       const db = getDB();
       if(!db) return {};
-    const refPath = `fees/${year}/${className}`;
-    try{
-      const snap = await schoolRef(refPath)?.get();
-        const out = {};
-        if(snap && snap.exists && snap.exists()){
-          const val = snap.val();
-          Object.keys(val).forEach(adm=>{
-            const f = val[adm] || {};
-            const required = Number(f.required || f.expected || f.total || 0);
-            const paid = Number(f.paid || f.paidAmount || 0);
-            out[adm] = { required, paid, balance: Math.max(0, required - paid) };
-          });
-        }
-        return out;
-      }catch(e){ console.warn('fetchFees', e && e.message); return {}; }
+      const classes = classVariants(className);
+      const paths = classes.map(cls => `fees/${year}/${cls}`);
+      const out = {};
+      for (const refPath of paths){
+        try{
+          const snap = await schoolRef(refPath)?.get();
+          if(snap && snap.exists && snap.exists()){
+            const val = snap.val();
+            Object.keys(val).forEach(adm=>{
+              const f = val[adm] || {};
+              const required = Number(f.required || f.expected || f.total || 0);
+              const paid = Number(f.paid || f.paidAmount || 0);
+              out[adm] = { required, paid, balance: Math.max(0, required - paid) };
+            });
+            if (Object.keys(out).length) break;
+          }
+        }catch(e){ /* try next */ }
+      }
+      if (!Object.keys(out).length) console.warn('fetchFees: no data found for', className, 'paths tried', paths);
+      return out;
     }
 
     async function fetchScores({year, className, examKey, month}){
-    const db = getDB();
-    if(!db) return {};
-    const refPath = `scores/${year}/${className}/${examKey}/${month}`;
-    try{
-      const snap = await schoolRef(refPath)?.get();
-        const out = {};
-        if(snap && snap.exists && snap.exists()){
-          const val = snap.val();
-          Object.keys(val).forEach(adm=>{
-            out[adm] = {};
-            const subjObj = val[adm] || {};
-            Object.keys(subjObj).forEach(sub=>{
-              const o = subjObj[sub] || {};
-              const canonicalLabel = SomapSub().canonSubject ? SomapSub().canonSubject(sub) : sub;
-              const key = makeSubjectKey(canonicalLabel);
-              const entry = { score: Number(o.score||0), max: Number(o.max||100), label: canonicalLabel };
-              out[adm][key] = entry;
-              if (!out[adm][canonicalLabel]) out[adm][canonicalLabel] = entry;
+      const db = getDB();
+      if(!db) return {};
+      const classes = classVariants(className);
+      const variants = monthVariants(month);
+      const paths = [];
+      classes.forEach(cls => {
+        variants.forEach(v => {
+          paths.push(`scores/${year}/${cls}/${examKey}/${v}`);
+          paths.push(`scores/${year}/${cls}/${examKey.toLowerCase()}/${v}`);
+          paths.push(`scores/${year}/${cls}/${examKey.toUpperCase()}/${v}`);
+          paths.push(`scores/${year}/${cls}/${v}`);
+        });
+      });
+      const out = {};
+      for (const refPath of paths){
+        try{
+          const snap = await schoolRef(refPath)?.get();
+          if(snap && snap.exists && snap.exists()){
+            const val = snap.val();
+            Object.keys(val).forEach(adm=>{
+              out[adm] = out[adm] || {};
+              const subjObj = val[adm] || {};
+              Object.keys(subjObj).forEach(sub=>{
+                const o = subjObj[sub] || {};
+                const canonicalLabel = SomapSub().canonSubject ? SomapSub().canonSubject(sub) : sub;
+                const key = makeSubjectKey(canonicalLabel);
+                const entry = { score: Number(o.score||0), max: Number(o.max||100), label: canonicalLabel };
+                out[adm][key] = entry;
+                if (!out[adm][canonicalLabel]) out[adm][canonicalLabel] = entry;
+              });
             });
-          });
-        }
-        return out;
-      }catch(e){ console.warn('fetchScores', e && e.message); return {}; }
+            if (Object.keys(out).length) break;
+          }
+        }catch(e){ /* try next */ }
+      }
+      if(!Object.keys(out).length) console.warn('fetchScores: no data found for', className, examKey, month, 'paths tried', paths);
+      return out;
     }
 
     /* ---------- Save ---------- */

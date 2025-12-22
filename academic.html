@@ -267,6 +267,19 @@
       return Array.from(set).filter(Boolean);
     }
 
+    function classVariants(name){
+      const set = new Set();
+      const raw = String(name || '').trim();
+      if (raw) set.add(raw);
+      const noSpaces = raw.replace(/\s+/g, '');
+      if (noSpaces) set.add(noSpaces);
+      const normalized = raw.replace(/Class\s*(\d+)/i, 'Class $1').trim();
+      if (normalized) set.add(normalized);
+      const compact = raw.replace(/Class\s*(\d+)/i, 'Class$1').trim();
+      if (compact) set.add(compact);
+      return Array.from(set).filter(Boolean);
+    }
+
     function getSubjectList(className, year){
       const api = SomapSub();
       const cls = api.canonClass ? api.canonClass(className) : (className || '');
@@ -478,52 +491,65 @@ function schoolRef(subPath) {
     async function fetchAttendance(year, month, className) {
       const db = getDB();
       if (!db) return {};
-      const refPath = `attendance/${year}/${month}/${className}`;
-      try {
-        const snap = await schoolRef(refPath)?.get();
-        const out = {};
-        if (snap && snap.exists && snap.exists()) {
-          const val = snap.val();
-          Object.keys(val).forEach(adm => {
-            const a = val[adm] || {};
-            out[adm] = { present: Number(a.present || a.daysPresent || 0), absent: Number(a.absent || a.daysAbsent || 0), days: Number(a.days || (Number(a.present || 0) + Number(a.absent || 0))) };
-          });
-        }
-        return out;
-      } catch (e) { console.warn('fetchAttendance', e && e.message); return {}; }
+      const classes = classVariants(className);
+      const paths = classes.map(cls => `attendance/${year}/${month}/${cls}`);
+      const out = {};
+      for (const refPath of paths) {
+        try {
+          const snap = await schoolRef(refPath)?.get();
+          if (snap && snap.exists && snap.exists()) {
+            const val = snap.val();
+            Object.keys(val).forEach(adm => {
+              const a = val[adm] || {};
+              out[adm] = { present: Number(a.present || a.daysPresent || 0), absent: Number(a.absent || a.daysAbsent || 0), days: Number(a.days || (Number(a.present || 0) + Number(a.absent || 0))) };
+            });
+            if (Object.keys(out).length) break;
+          }
+        } catch (e) { /* try next */ }
+      }
+      if (!Object.keys(out).length) console.warn('fetchAttendance: no data found for', className, 'paths tried', paths);
+      return out;
     }
 
     async function fetchFees(year, className) {
       const db = getDB();
       if (!db) return {};
-      const refPath = `fees/${year}/${className}`;
-      try {
-        const snap = await schoolRef(refPath)?.get();
-        const out = {};
-        if (snap && snap.exists && snap.exists()) {
-          const val = snap.val();
-          Object.keys(val).forEach(adm => {
-            const f = val[adm] || {};
-            const required = Number(f.required || f.expected || f.total || 0);
-            const paid = Number(f.paid || f.paidAmount || 0);
-            out[adm] = { required, paid, balance: Math.max(0, required - paid) };
-          });
-        }
-        return out;
-      } catch (e) { console.warn('fetchFees', e && e.message); return {}; }
+      const classes = classVariants(className);
+      const paths = classes.map(cls => `fees/${year}/${cls}`);
+      const out = {};
+      for (const refPath of paths) {
+        try {
+          const snap = await schoolRef(refPath)?.get();
+          if (snap && snap.exists && snap.exists()) {
+            const val = snap.val();
+            Object.keys(val).forEach(adm => {
+              const f = val[adm] || {};
+              const required = Number(f.required || f.expected || f.total || 0);
+              const paid = Number(f.paid || f.paidAmount || 0);
+              out[adm] = { required, paid, balance: Math.max(0, required - paid) };
+            });
+            if (Object.keys(out).length) break;
+          }
+        } catch (e) { /* try next */ }
+      }
+      if (!Object.keys(out).length) console.warn('fetchFees: no data found for', className, 'paths tried', paths);
+      return out;
     }
 
     async function fetchScores({ year, className, examKey, month }) {
       const db = getDB();
       if (!db) return {};
-      const base = `scores/${year}/${className}`;
-      const variants = monthVariants(month);
+      const classes = classVariants(className);
+      const monthVars = monthVariants(month);
       const paths = [];
-      variants.forEach(v => {
-        paths.push(`${base}/${examKey}/${v}`);
-        paths.push(`${base}/${examKey.toLowerCase()}/${v}`);
-        paths.push(`${base}/${examKey.toUpperCase()}/${v}`);
-        paths.push(`${base}/${v}`); // fallback (some datasets skip examKey level)
+      classes.forEach(cls => {
+        const base = `scores/${year}/${cls}`;
+        monthVars.forEach(v => {
+          paths.push(`${base}/${examKey}/${v}`);
+          paths.push(`${base}/${examKey.toLowerCase()}/${v}`);
+          paths.push(`${base}/${examKey.toUpperCase()}/${v}`);
+          paths.push(`${base}/${v}`); // fallback
+        });
       });
       const out = {};
       for (const refPath of paths){
@@ -545,7 +571,7 @@ function schoolRef(subPath) {
             });
             if (Object.keys(out).length) break;
           }
-        } catch (e) { /* continue to next */ }
+        } catch (e) { /* continue */ }
       }
       if (!Object.keys(out).length) console.warn('fetchScores: no data found for', className, examKey, month, 'paths tried', paths);
       return out;
