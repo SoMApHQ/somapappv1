@@ -21,6 +21,10 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <!-- Your Firebase config wrapper (exports window.db, window.storage) -->
   <script src="firebase.js"></script>
+  <!-- Multi-school Context -->
+  <script src="somapappv1multischool/js/context.js"></script>
+  <!-- Year Context -->
+  <script src="Todashboardhtml/yearContext.js"></script>
   <script type="module">
     import { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass } from './js/modules/subjects.js';
     window.SomapSubjects = { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass };
@@ -101,7 +105,7 @@
 
       <div class="bg-white rounded-2xl p-4 shadow">
         <label class="text-xs text-slate-500">Academic Year</label>
-        <input id="yearInput" class="mt-1 w-full border rounded px-2 py-2 text-sm" placeholder="e.g., 2025">
+        <select id="yearSelect" data-somap-year-select class="mt-1 w-full border rounded px-2 py-2 text-sm bg-white"></select>
       </div>
     </section>
 
@@ -358,6 +362,29 @@
       return firebase.database();
     }
 
+    /* ---------- Multi-school Helper ---------- */
+    // Initialize current school and guard
+    const currentSchool = window.SOMAP && SOMAP.getSchool();
+    if (!currentSchool || !currentSchool.id) {
+       window.location.href = "somapappv1multischool/multischool.html";
+    }
+
+    function schoolRef(subPath) {
+       const db = getDB();
+       if (!db) return null;
+       return db.ref(SOMAP.P(subPath));
+    }
+    
+    // Update dashboard header with school name
+    document.addEventListener('DOMContentLoaded', () => {
+        if (currentSchool && currentSchool.name) {
+            const h1 = document.querySelector('h1');
+            if (h1) h1.textContent += ` · ${currentSchool.name}`;
+            const sbInput = document.getElementById('schoolBranch');
+            if (sbInput && !sbInput.value) sbInput.value = currentSchool.name;
+        }
+    });
+
     /* ---------- Parse class from Gmail ---------- */
     function parseClassFromEmail(email) {
       const emailPrefix = email.split('@')[0].toLowerCase();
@@ -502,15 +529,39 @@
     async function fetchScores({ year, className, examKey, month }) {
       const db = getDB();
       if (!db) return {};
+      // primary Socrates path (e.g. /scores/2025/Class 3)
       const base = `/scores/${year}/${className}`;
-      const variants = monthVariants(month);
       const paths = [];
-      variants.forEach(v => {
-        paths.push(`${base}/${examKey}/${v}`);
-        paths.push(`${base}/${examKey.toLowerCase()}/${v}`);
-        paths.push(`${base}/${examKey.toUpperCase()}/${v}`);
-        paths.push(`${base}/${v}`); // fallback (some datasets skip examKey level)
-      });
+      const variants = monthVariants(month);
+
+      // Helper to push all variants for a given base
+      function addPathsForBase(b) {
+        variants.forEach(v => {
+          paths.push(`${b}/${examKey}/${v}`);
+          paths.push(`${b}/${examKey.toLowerCase()}/${v}`);
+          paths.push(`${b}/${examKey.toUpperCase()}/${v}`);
+          paths.push(`${b}/${v}`); // fallback (some datasets skip examKey level)
+        });
+      }
+
+      // 1. Add paths for the primary named base
+      addPathsForBase(base);
+
+      // 2. If className is something like "Class 3", also try numeric legacy "3"
+      let numericBase = null;
+      if (typeof className === 'string') {
+        const m = className.match(/Class\s+(\d+)/i);
+        if (m && m[1]) {
+          numericBase = `/scores/${year}/${m[1]}`;
+        }
+      }
+
+      // 3. Add legacy numeric path(s), if applicable
+      if (numericBase) {
+        addPathsForBase(numericBase);
+      }
+      
+      console.log('[academic] score lookup candidates:', paths);
       const out = {};
       for (const refPath of paths){
         try {
