@@ -19,8 +19,6 @@
 
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-analytics-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
-  <script src="somapappv1multischool/js/context.js"></script>
-  <script src="Todashboardhtml/yearContext.js"></script>
   <!-- Your Firebase config wrapper (exports window.db, window.storage) -->
   <script src="firebase.js"></script>
   <script type="module">
@@ -55,15 +53,6 @@
       </div>
 
       <div class="flex items-center gap-2">
-        <!-- Year Selector -->
-        <label class="flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
-          <span class="hidden sm:inline text-[0.7rem]">Academic Year</span>
-          <select
-            data-somap-year-select
-            class="min-w-[110px] rounded border border-slate-300 bg-white px-2 py-1 text-sm font-medium text-slate-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-200"
-          ></select>
-        </label>
-
         <button id="btnOpenScoresheet" class="px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm flex items-center gap-2">
           <i class="fas fa-table"></i> Scoresheet
         </button>
@@ -108,6 +97,11 @@
           <option value="07">July</option><option value="08">August</option><option value="09">September</option>
           <option value="10">October</option><option value="11">November</option><option value="12">December</option>
         </select>
+      </div>
+
+      <div class="bg-white rounded-2xl p-4 shadow">
+        <label class="text-xs text-slate-500">Academic Year</label>
+        <input id="yearInput" class="mt-1 w-full border rounded px-2 py-2 text-sm" placeholder="e.g., 2025">
       </div>
     </section>
 
@@ -272,19 +266,6 @@
       return Array.from(set).filter(Boolean);
     }
 
-    function classVariants(name){
-      const set = new Set();
-      const raw = String(name || '').trim();
-      if (raw) set.add(raw);
-      const noSpaces = raw.replace(/\s+/g, '');
-      if (noSpaces) set.add(noSpaces);
-      const normalized = raw.replace(/Class\s*(\d+)/i, 'Class $1').trim();
-      if (normalized) set.add(normalized);
-      const compact = raw.replace(/Class\s*(\d+)/i, 'Class$1').trim();
-      if (compact) set.add(compact);
-      return Array.from(set).filter(Boolean);
-    }
-
     function getSubjectList(className, year){
       const api = SomapSub();
       const cls = api.canonClass ? api.canonClass(className) : (className || '');
@@ -321,29 +302,19 @@
     }
 
     /* ---------- STATE ---------- */
-const state = {
-  students: [], attendance: {}, fees: {}, scores: {}, subjectList: [],
-  rowsByAdm: {}, className: '', stream: '', month: '', year: '', examKey: '', schoolBranch: '',
-  assignedClass: ''
-};
+    const state = {
+      students: [], attendance: {}, fees: {}, scores: {}, subjectList: [],
+      rowsByAdm: {}, className: '', stream: '', month: '', year: '', examKey: '', schoolBranch: '',
+      assignedClass: ''
+    };
 
-/* ---------- ELEMENTS ---------- */
-const classSelect = document.getElementById('classSelect');
-const streamInput = document.getElementById('streamInput');
-const monthSelect = document.getElementById('monthSelect');
-const examType = document.getElementById('examType');
-const schoolBranch = document.getElementById('schoolBranch');
-
-const currentSchool = window.SOMAP && SOMAP.getSchool();
-if (!currentSchool || !currentSchool.id) {
-  window.location.href = "somapappv1multischool/multischool.html";
-}
-window.currentSchoolId = currentSchool?.id;
-
-function schoolRef(subPath) {
-  const db = getDB();
-  return db ? db.ref(SOMAP.P(subPath)) : null;
-}
+    /* ---------- ELEMENTS ---------- */
+    const classSelect = document.getElementById('classSelect');
+    const streamInput = document.getElementById('streamInput');
+    const monthSelect = document.getElementById('monthSelect');
+    const yearInput = document.getElementById('yearInput');
+    const examType = document.getElementById('examType');
+    const schoolBranch = document.getElementById('schoolBranch');
 
     const subjectsChartCtx = document.getElementById('chartSubjects');
     const top10ChartCtx = document.getElementById('chartTop10');
@@ -413,20 +384,15 @@ function schoolRef(subPath) {
     /* ---------- Populate class dropdown (locked to assigned class) ---------- */
     function populateClasses(assignedClass) {
       const opts = Object.keys(SomapSub().SUBJECTS_BY_CLASS || {});
-      
-      if (assignedClass) {
-        const assignedCanonical = SomapSub().canonClass ? SomapSub().canonClass(assignedClass) : assignedClass;
-        if (assignedCanonical && opts.includes(assignedCanonical)) {
-          classSelect.innerHTML = `<option value="${assignedCanonical}">${assignedCanonical}</option>`;
-          classSelect.value = assignedCanonical;
-          classSelect.disabled = true;
-          return;
-        }
+      const assignedCanonical = SomapSub().canonClass ? SomapSub().canonClass(assignedClass) : assignedClass;
+      if (assignedCanonical && opts.includes(assignedCanonical)) {
+        classSelect.innerHTML = `<option value="${assignedCanonical}">${assignedCanonical}</option>`;
+        classSelect.value = assignedCanonical;
+        classSelect.disabled = true;
+      } else {
+        classSelect.innerHTML = '<option value="">Select Class…</option>' + opts.map(c => `<option>${c}</option>`).join('');
+        classSelect.disabled = false;
       }
-      
-      // Admin/Open mode or Fallback
-      classSelect.innerHTML = '<option value="">Select Class…</option>' + opts.map(c => `<option value="${c}">${c}</option>`).join('');
-      classSelect.disabled = false;
     }
 
     /* ---------- Robust student loader ---------- */
@@ -434,18 +400,11 @@ function schoolRef(subPath) {
       const db = getDB();
       if (!db) return [];
       const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List', 'studentList', 'studentlist', 'attendance', 'school', 'schoolerp'];
-      
-      console.log('Fetching students for', className, stream);
-      
       for (const p of tryPaths) {
         try {
-          const ref = schoolRef(p);
-          if (!ref) continue;
-          const snap = await ref.get();
+          const snap = await db.ref(p).get();
           if (snap && snap.exists && snap.exists()) {
             const data = snap.val();
-            // ... (rest of logic)
-            console.log('Found students at path:', p);
             const arr = [];
             if (Array.isArray(data)) {
               data.forEach((item, idx) => {
@@ -505,71 +464,57 @@ function schoolRef(subPath) {
     async function fetchAttendance(year, month, className) {
       const db = getDB();
       if (!db) return {};
-      const classes = classVariants(className);
-      const paths = classes.map(cls => `attendance/${year}/${month}/${cls}`);
-      const out = {};
-      for (const refPath of paths) {
-        try {
-          const snap = await schoolRef(refPath)?.get();
-          if (snap && snap.exists && snap.exists()) {
-            const val = snap.val();
-            Object.keys(val).forEach(adm => {
-              const a = val[adm] || {};
-              out[adm] = { present: Number(a.present || a.daysPresent || 0), absent: Number(a.absent || a.daysAbsent || 0), days: Number(a.days || (Number(a.present || 0) + Number(a.absent || 0))) };
-            });
-            if (Object.keys(out).length) break;
-          }
-        } catch (e) { /* try next */ }
-      }
-      if (!Object.keys(out).length) console.warn('fetchAttendance: no data found for', className, 'paths tried', paths);
-      return out;
+      const refPath = `/attendance/${year}/${month}/${className}`;
+      try {
+        const snap = await db.ref(refPath).get();
+        const out = {};
+        if (snap && snap.exists && snap.exists()) {
+          const val = snap.val();
+          Object.keys(val).forEach(adm => {
+            const a = val[adm] || {};
+            out[adm] = { present: Number(a.present || a.daysPresent || 0), absent: Number(a.absent || a.daysAbsent || 0), days: Number(a.days || (Number(a.present || 0) + Number(a.absent || 0))) };
+          });
+        }
+        return out;
+      } catch (e) { console.warn('fetchAttendance', e && e.message); return {}; }
     }
 
     async function fetchFees(year, className) {
       const db = getDB();
       if (!db) return {};
-      const classes = classVariants(className);
-      const paths = classes.map(cls => `fees/${year}/${cls}`);
-      const out = {};
-      for (const refPath of paths) {
-        try {
-          const snap = await schoolRef(refPath)?.get();
-          if (snap && snap.exists && snap.exists()) {
-            const val = snap.val();
-            Object.keys(val).forEach(adm => {
-              const f = val[adm] || {};
-              const required = Number(f.required || f.expected || f.total || 0);
-              const paid = Number(f.paid || f.paidAmount || 0);
-              out[adm] = { required, paid, balance: Math.max(0, required - paid) };
-            });
-            if (Object.keys(out).length) break;
-          }
-        } catch (e) { /* try next */ }
-      }
-      if (!Object.keys(out).length) console.warn('fetchFees: no data found for', className, 'paths tried', paths);
-      return out;
+      const refPath = `/fees/${year}/${className}`;
+      try {
+        const snap = await db.ref(refPath).get();
+        const out = {};
+        if (snap && snap.exists && snap.exists()) {
+          const val = snap.val();
+          Object.keys(val).forEach(adm => {
+            const f = val[adm] || {};
+            const required = Number(f.required || f.expected || f.total || 0);
+            const paid = Number(f.paid || f.paidAmount || 0);
+            out[adm] = { required, paid, balance: Math.max(0, required - paid) };
+          });
+        }
+        return out;
+      } catch (e) { console.warn('fetchFees', e && e.message); return {}; }
     }
 
     async function fetchScores({ year, className, examKey, month }) {
       const db = getDB();
       if (!db) return {};
-      const classes = classVariants(className);
-      const monthVars = monthVariants(month);
+      const base = `/scores/${year}/${className}`;
+      const variants = monthVariants(month);
       const paths = [];
-      classes.forEach(cls => {
-        const base = `scores/${year}/${cls}`;
-        monthVars.forEach(v => {
-          paths.push(`${base}/${examKey}/${v}`);
-          paths.push(`${base}/${examKey.toLowerCase()}/${v}`);
-          paths.push(`${base}/${examKey.toUpperCase()}/${v}`);
-          paths.push(`${base}/${v}`); // fallback
-        });
+      variants.forEach(v => {
+        paths.push(`${base}/${examKey}/${v}`);
+        paths.push(`${base}/${examKey.toLowerCase()}/${v}`);
+        paths.push(`${base}/${examKey.toUpperCase()}/${v}`);
+        paths.push(`${base}/${v}`); // fallback (some datasets skip examKey level)
       });
-      console.log('fetchScores trying paths:', paths);
       const out = {};
       for (const refPath of paths){
         try {
-          const snap = await schoolRef(refPath)?.get();
+          const snap = await db.ref(refPath).get();
           if (snap && snap.exists && snap.exists()) {
             const val = snap.val();
             Object.keys(val).forEach(adm => {
@@ -586,7 +531,7 @@ function schoolRef(subPath) {
             });
             if (Object.keys(out).length) break;
           }
-        } catch (e) { /* continue */ }
+        } catch (e) { /* continue to next */ }
       }
       if (!Object.keys(out).length) console.warn('fetchScores: no data found for', className, examKey, month, 'paths tried', paths);
       return out;
@@ -603,20 +548,13 @@ function schoolRef(subPath) {
 
     /* ---------- Load sequence (main entry) ---------- */
     async function loadAll() {
-      // Wait for auth to complete first to avoid premature loading/alerts
-      if (!authInitDone) return;
-
-      // If restricted user (teacher) and no class assigned, stop (should be handled in auth already, but double check)
-      if (authUserRole === 'teacher' && state.assignedClass && !classSelect.value) {
-         classSelect.value = state.assignedClass;
+      if (!state.assignedClass) {
+        alert('No assigned class detected. Please contact the administrator.');
+        return;
       }
-      
       const selectedClassValue = SomapSub().canonClass ? SomapSub().canonClass(classSelect.value) : classSelect.value;
-      
-      // Strict check only for restricted teachers
-      if (state.assignedClass && selectedClassValue !== state.assignedClass) {
-        // If they somehow changed it (e.g. dev tools), revert
-        console.warn('Class mismatch for teacher, reverting.');
+      if (selectedClassValue !== state.assignedClass) {
+        alert('NOT YOUR CLASS BUDDY! You are restricted to ' + state.assignedClass);
         classSelect.value = state.assignedClass;
         return;
       }
@@ -624,7 +562,7 @@ function schoolRef(subPath) {
       state.className = selectedClassValue;
       let inputStream = (streamInput.value || '').trim();
       state.month = monthSelect.value;
-      state.year = window.somapYearContext ? window.somapYearContext.getSelectedYear() : new Date().getFullYear().toString();
+      state.year = (yearInput.value || '').trim();
       state.examKey = EXAM_KEYS[examType.value] || 'monthly';
       state.schoolBranch = (schoolBranch.value || '').trim();
 
@@ -648,9 +586,6 @@ function schoolRef(subPath) {
     }
 
     /* ---------- Authentication and class lock ---------- */
-    let authUserRole = 'teacher'; // default to restricted
-    let authInitDone = false;
-
     firebase.auth().onAuthStateChanged(user => {
       if (!user) {
         window.location.href = 'index.html';
@@ -660,44 +595,25 @@ function schoolRef(subPath) {
       const db = getDB();
       db.ref('users/' + safeEmail).once('value').then(snap => {
         const ud = snap.val() || {};
-        authUserRole = ud.role || 'teacher';
-        
-        // Allow admin/headteacher/director/manager to access all classes
-        const canAccessAll = ['admin', 'headteacher', 'director', 'manager', 'bursar', 'secretary'].includes(authUserRole);
-        
-        if (authUserRole !== 'teacher' && !canAccessAll) {
-          alert('Unauthorized: only teachers or admins allowed');
+        if (ud.role !== 'teacher') {
+          alert('Unauthorized: only teachers allowed');
           firebase.auth().signOut();
           window.location.href = 'index.html';
           return;
         }
-
         // Parse class from email or use Firebase user data
         const derivedClass = parseClassFromEmail(user.email) || ud.class || ud.classLevel || '';
         state.assignedClass = SomapSub().canonClass ? SomapSub().canonClass(derivedClass) : derivedClass;
-        
-        // Only restrict if regular teacher and has specific class assigned
-        if (!canAccessAll) {
-          if (!state.assignedClass || !Object.keys(SomapSub().SUBJECTS_BY_CLASS || {}).includes(state.assignedClass)) {
-            alert('Invalid or no class assigned. Contact administrator.');
-            firebase.auth().signOut();
-            window.location.href = 'index.html';
-            return;
-          }
-          // Lock dropdown
-          populateClasses(state.assignedClass);
-          classSelect.value = state.assignedClass;
-        } else {
-          // Admin mode: populate all classes, do not lock
-          state.assignedClass = null; // Clear restriction
-          populateClasses(null); 
-          // Attempt to preserve selected value or default to first
-          if (!classSelect.value && classSelect.options.length > 1) {
-             classSelect.selectedIndex = 1;
-          }
+        if (!state.assignedClass || !Object.keys(SomapSub().SUBJECTS_BY_CLASS || {}).includes(state.assignedClass)) {
+          alert('Invalid or no class assigned. Contact administrator.');
+          firebase.auth().signOut();
+          window.location.href = 'index.html';
+          return;
         }
-        
-        authInitDone = true;
+        // Lock dropdown to assigned class
+        populateClasses(state.assignedClass);
+        classSelect.value = state.assignedClass;
+        yearInput.value = new Date().getFullYear().toString(); // Default to current year
         loadAll();
       });
     });
@@ -798,8 +714,7 @@ function schoolRef(subPath) {
     /* ---------- Load on change ---------- */
     classSelect.addEventListener('change', () => {
       const selected = SomapSub().canonClass ? SomapSub().canonClass(classSelect.value) : classSelect.value;
-      // Only enforce restriction if assignedClass is set
-      if (state.assignedClass && selected !== state.assignedClass) {
+      if (selected !== state.assignedClass) {
         alert('NOT YOUR CLASS BUDDY! You are restricted to ' + state.assignedClass);
         classSelect.value = state.assignedClass;
         return;
@@ -808,17 +723,9 @@ function schoolRef(subPath) {
     });
     streamInput.addEventListener('change', loadAll);
     monthSelect.addEventListener('change', loadAll);
-    // yearInput.addEventListener('change', loadAll); // Removed
+    yearInput.addEventListener('change', loadAll);
     examType.addEventListener('change', loadAll);
     schoolBranch.addEventListener('change', loadAll);
-
-    // Sync with year context
-    if (window.somapYearContext) {
-      window.somapYearContext.onYearChanged((y) => {
-        state.year = y;
-        loadAll();
-      });
-    }
 
     /* ---------- Modal Control ---------- */
     btnOpenScoresheet.addEventListener('click', () => {
