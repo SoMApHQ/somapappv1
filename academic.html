@@ -413,15 +413,20 @@ function schoolRef(subPath) {
     /* ---------- Populate class dropdown (locked to assigned class) ---------- */
     function populateClasses(assignedClass) {
       const opts = Object.keys(SomapSub().SUBJECTS_BY_CLASS || {});
-      const assignedCanonical = SomapSub().canonClass ? SomapSub().canonClass(assignedClass) : assignedClass;
-      if (assignedCanonical && opts.includes(assignedCanonical)) {
-        classSelect.innerHTML = `<option value="${assignedCanonical}">${assignedCanonical}</option>`;
-        classSelect.value = assignedCanonical;
-        classSelect.disabled = true;
-      } else {
-        classSelect.innerHTML = '<option value="">Select Class…</option>' + opts.map(c => `<option>${c}</option>`).join('');
-        classSelect.disabled = false;
+      
+      if (assignedClass) {
+        const assignedCanonical = SomapSub().canonClass ? SomapSub().canonClass(assignedClass) : assignedClass;
+        if (assignedCanonical && opts.includes(assignedCanonical)) {
+          classSelect.innerHTML = `<option value="${assignedCanonical}">${assignedCanonical}</option>`;
+          classSelect.value = assignedCanonical;
+          classSelect.disabled = true;
+          return;
+        }
       }
+      
+      // Admin/Open mode or Fallback
+      classSelect.innerHTML = '<option value="">Select Class…</option>' + opts.map(c => `<option value="${c}">${c}</option>`).join('');
+      classSelect.disabled = false;
     }
 
     /* ---------- Robust student loader ---------- */
@@ -429,6 +434,9 @@ function schoolRef(subPath) {
       const db = getDB();
       if (!db) return [];
       const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List', 'studentList', 'studentlist', 'attendance', 'school', 'schoolerp'];
+      
+      console.log('Fetching students for', className, stream);
+      
       for (const p of tryPaths) {
         try {
           const ref = schoolRef(p);
@@ -436,6 +444,8 @@ function schoolRef(subPath) {
           const snap = await ref.get();
           if (snap && snap.exists && snap.exists()) {
             const data = snap.val();
+            // ... (rest of logic)
+            console.log('Found students at path:', p);
             const arr = [];
             if (Array.isArray(data)) {
               data.forEach((item, idx) => {
@@ -593,13 +603,20 @@ function schoolRef(subPath) {
 
     /* ---------- Load sequence (main entry) ---------- */
     async function loadAll() {
-      if (!state.assignedClass) {
-        alert('No assigned class detected. Please contact the administrator.');
-        return;
+      // Wait for auth to complete first to avoid premature loading/alerts
+      if (!authInitDone) return;
+
+      // If restricted user (teacher) and no class assigned, stop (should be handled in auth already, but double check)
+      if (authUserRole === 'teacher' && state.assignedClass && !classSelect.value) {
+         classSelect.value = state.assignedClass;
       }
+      
       const selectedClassValue = SomapSub().canonClass ? SomapSub().canonClass(classSelect.value) : classSelect.value;
-      if (selectedClassValue !== state.assignedClass) {
-        alert('NOT YOUR CLASS BUDDY! You are restricted to ' + state.assignedClass);
+      
+      // Strict check only for restricted teachers
+      if (state.assignedClass && selectedClassValue !== state.assignedClass) {
+        // If they somehow changed it (e.g. dev tools), revert
+        console.warn('Class mismatch for teacher, reverting.');
         classSelect.value = state.assignedClass;
         return;
       }
@@ -631,6 +648,9 @@ function schoolRef(subPath) {
     }
 
     /* ---------- Authentication and class lock ---------- */
+    let authUserRole = 'teacher'; // default to restricted
+    let authInitDone = false;
+
     firebase.auth().onAuthStateChanged(user => {
       if (!user) {
         window.location.href = 'index.html';
@@ -640,25 +660,44 @@ function schoolRef(subPath) {
       const db = getDB();
       db.ref('users/' + safeEmail).once('value').then(snap => {
         const ud = snap.val() || {};
-        if (ud.role !== 'teacher') {
-          alert('Unauthorized: only teachers allowed');
+        authUserRole = ud.role || 'teacher';
+        
+        // Allow admin/headteacher/director/manager to access all classes
+        const canAccessAll = ['admin', 'headteacher', 'director', 'manager', 'bursar', 'secretary'].includes(authUserRole);
+        
+        if (authUserRole !== 'teacher' && !canAccessAll) {
+          alert('Unauthorized: only teachers or admins allowed');
           firebase.auth().signOut();
           window.location.href = 'index.html';
           return;
         }
+
         // Parse class from email or use Firebase user data
         const derivedClass = parseClassFromEmail(user.email) || ud.class || ud.classLevel || '';
         state.assignedClass = SomapSub().canonClass ? SomapSub().canonClass(derivedClass) : derivedClass;
-        if (!state.assignedClass || !Object.keys(SomapSub().SUBJECTS_BY_CLASS || {}).includes(state.assignedClass)) {
-          alert('Invalid or no class assigned. Contact administrator.');
-          firebase.auth().signOut();
-          window.location.href = 'index.html';
-          return;
+        
+        // Only restrict if regular teacher and has specific class assigned
+        if (!canAccessAll) {
+          if (!state.assignedClass || !Object.keys(SomapSub().SUBJECTS_BY_CLASS || {}).includes(state.assignedClass)) {
+            alert('Invalid or no class assigned. Contact administrator.');
+            firebase.auth().signOut();
+            window.location.href = 'index.html';
+            return;
+          }
+          // Lock dropdown
+          populateClasses(state.assignedClass);
+          classSelect.value = state.assignedClass;
+        } else {
+          // Admin mode: populate all classes, do not lock
+          state.assignedClass = null; // Clear restriction
+          populateClasses(null); 
+          // Attempt to preserve selected value or default to first
+          if (!classSelect.value && classSelect.options.length > 1) {
+             classSelect.selectedIndex = 1;
+          }
         }
-        // Lock dropdown to assigned class
-        populateClasses(state.assignedClass);
-        classSelect.value = state.assignedClass;
-        // yearInput.value = new Date().getFullYear().toString(); // Removed manual year input
+        
+        authInitDone = true;
         loadAll();
       });
     });
@@ -759,7 +798,8 @@ function schoolRef(subPath) {
     /* ---------- Load on change ---------- */
     classSelect.addEventListener('change', () => {
       const selected = SomapSub().canonClass ? SomapSub().canonClass(classSelect.value) : classSelect.value;
-      if (selected !== state.assignedClass) {
+      // Only enforce restriction if assignedClass is set
+      if (state.assignedClass && selected !== state.assignedClass) {
         alert('NOT YOUR CLASS BUDDY! You are restricted to ' + state.assignedClass);
         classSelect.value = state.assignedClass;
         return;
