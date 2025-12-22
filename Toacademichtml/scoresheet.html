@@ -231,6 +231,49 @@
       'Monthly': 'monthly','Midterm 1':'midterm1','End Term':'endterm','Midterm 2':'midterm2','Annual':'annual'
     };
 
+    const MONTH_KEYS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const MONTH_LABELS = {
+      '1':'Jan','01':'Jan',January:'Jan',
+      '2':'Feb','02':'Feb',February:'Feb',
+      '3':'Mar','03':'Mar',March:'Mar',
+      '4':'Apr','04':'Apr',April:'Apr',
+      '5':'May','05':'May',May:'May',
+      '6':'Jun','06':'Jun',June:'Jun',
+      '7':'Jul','07':'Jul',July:'Jul',
+      '8':'Aug','08':'Aug',August:'Aug',
+      '9':'Sep','09':'Sep',September:'Sep',
+      '10':'Oct',October:'Oct',
+      '11':'Nov',November:'Nov',
+      '12':'Dec',December:'Dec'
+    };
+
+    function monthVariants(mon){
+      const set = new Set();
+      const raw = String(mon || '').trim();
+      if (raw) set.add(raw);
+      const stripped = raw.replace(/^0+/, '') || raw;
+      if (stripped) set.add(stripped);
+      const canonical = MONTH_LABELS[raw] || MONTH_LABELS[stripped];
+      if (canonical){
+        set.add(canonical);
+        set.add(canonical.toLowerCase());
+        set.add(canonical.toUpperCase());
+        const idx = MONTH_KEYS.indexOf(canonical);
+        if (idx >= 0) set.add(String(idx + 1).padStart(2,'0'));
+        if (idx >= 0) set.add(String(idx + 1));
+        const full = {
+          Jan:'January', Feb:'February', Mar:'March', Apr:'April', May:'May', Jun:'June',
+          Jul:'July', Aug:'August', Sep:'September', Oct:'October', Nov:'November', Dec:'December'
+        }[canonical];
+        if (full){
+          set.add(full);
+          set.add(full.toLowerCase());
+          set.add(full.toUpperCase());
+        }
+      }
+      return Array.from(set).filter(Boolean);
+    }
+
     const SomapSub = () => window.SomapSubjects || {};
 
     // Attempt/grade helpers (inline; do not import other files)
@@ -472,52 +515,60 @@
       const db = getDB();
       if(!db) return {};
       
-      // Build initial (modern) path using the class name, e.g. "Class 3"
-      let refPath = `/scores/${year}/${className}/${examKey}/${month}`;
-      console.log('[scoresheet] primary scores path:', refPath);
+      const variants = monthVariants(month);
+      const paths = [];
 
-      // Try to derive a legacy numeric class key, e.g. "3" from "Class 3"
-      let legacyPath = null;
+      // Helper to push all variants for a given base
+      function addPathsForBase(b) {
+        variants.forEach(v => {
+          paths.push(`${b}/${examKey}/${v}`);
+          paths.push(`${b}/${examKey.toLowerCase()}/${v}`);
+          paths.push(`${b}/${examKey.toUpperCase()}/${v}`);
+          paths.push(`${b}/${v}`); // fallback
+        });
+      }
+
+      // 1) Primary path
+      addPathsForBase(`/scores/${year}/${className}`);
+
+      // 2) Legacy numeric path
       if (typeof className === 'string') {
         const m = className.match(/Class\s+(\d+)/i);
         if (m && m[1]) {
-          legacyPath = `/scores/${year}/${m[1]}/${examKey}/${month}`;
-          console.log('[scoresheet] legacy scores path candidate:', legacyPath);
+           addPathsForBase(`/scores/${year}/${m[1]}`);
         }
       }
 
-      try{
-        // 1) Try the primary path first
-        let snap = await db.ref(refPath).get();
+      console.log('[scoresheet] candidates:', paths);
 
-        // 2) If nothing found and we have a legacy numeric path, try that
-        if ((!snap || !snap.exists || !snap.exists()) && legacyPath) {
-          console.log('[scoresheet] primary empty, trying legacy path:', legacyPath);
-          const legacySnap = await db.ref(legacyPath).get();
-          if (legacySnap && legacySnap.exists && legacySnap.exists()) {
-            snap = legacySnap;
-            refPath = legacyPath; // so any logs / further code use the actual path
-          }
-        }
-
-        const out = {};
-        if(snap && snap.exists && snap.exists()){
-          const val = snap.val();
-          Object.keys(val).forEach(adm=>{
-            out[adm] = {};
-            const subjObj = val[adm] || {};
-            Object.keys(subjObj).forEach(sub=>{
-              const o = subjObj[sub] || {};
-              const canonicalLabel = SomapSub().canonSubject ? SomapSub().canonSubject(sub) : sub;
-              const key = makeSubjectKey(canonicalLabel);
-              const entry = { score: Number(o.score||0), max: Number(o.max||100), label: canonicalLabel };
-              out[adm][key] = entry;
-              if (!out[adm][canonicalLabel]) out[adm][canonicalLabel] = entry;
+      const out = {};
+      for (const refPath of paths) {
+        try {
+          const snap = await db.ref(refPath).get();
+          if (snap && snap.exists && snap.exists()) {
+            const val = snap.val();
+            console.log('[scoresheet] found data at:', refPath);
+            Object.keys(val).forEach(adm => {
+              out[adm] = out[adm] || {};
+              const subjObj = val[adm] || {};
+              Object.keys(subjObj).forEach(sub => {
+                const o = subjObj[sub] || {};
+                const canonicalLabel = SomapSub().canonSubject ? SomapSub().canonSubject(sub) : sub;
+                const key = makeSubjectKey(canonicalLabel);
+                const entry = { score: Number(o.score || 0), max: Number(o.max || 100), label: canonicalLabel };
+                out[adm][key] = entry;
+                if (!out[adm][canonicalLabel]) out[adm][canonicalLabel] = entry;
+              });
             });
-          });
+            // Stop after finding the first valid dataset
+            if (Object.keys(out).length > 0) break;
+          }
+        } catch (e) { 
+           console.warn('fetchScores path failed:', refPath, e);
         }
-        return out;
-      }catch(e){ console.warn('fetchScores', e && e.message); return {}; }
+      }
+      
+      return out;
     }
 
     /* ---------- Save ---------- */
