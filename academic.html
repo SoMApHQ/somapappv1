@@ -530,62 +530,79 @@
     async function fetchScores({ year, className, examKey, month }) {
       const db = getDB();
       if (!db) return {};
-      // primary Socrates path (e.g. /scores/2025/Class 3)
-      const base = `/scores/${year}/${className}`;
-      const paths = [];
-      const variants = monthVariants(month);
 
-      // Helper to push all variants for a given base
-      function addPathsForBase(b) {
-        variants.forEach(v => {
-          paths.push(`${b}/${examKey}/${v}`);
-          paths.push(`${b}/${examKey.toLowerCase()}/${v}`);
-          paths.push(`${b}/${examKey.toUpperCase()}/${v}`);
-          paths.push(`${b}/${v}`); // fallback (some datasets skip examKey level)
-        });
-      }
+      // 1. Build tolerant class key candidates: "Class 3" ↔ "3"
+      const classCandidates = [];
+      if (className) {
+        const cls = String(className).trim();
+        classCandidates.push(cls);
 
-      // 1. Add paths for the primary named base
-      addPathsForBase(base);
+        const match = cls.match(/(\d+)/);
+        if (match) {
+          const num = match[1];
+          const numericKey = num;
+          const withPrefix = `Class ${num}`;
 
-      // 2. If className is something like "Class 3", also try numeric legacy "3"
-      let numericBase = null;
-      if (typeof className === 'string') {
-        const m = className.match(/Class\s+(\d+)/i);
-        if (m && m[1]) {
-          numericBase = `/scores/${year}/${m[1]}`;
+          if (!classCandidates.includes(numericKey)) classCandidates.push(numericKey);
+          if (!classCandidates.includes(withPrefix)) classCandidates.push(withPrefix);
         }
       }
 
-      // 3. Add legacy numeric path(s), if applicable
-      if (numericBase) {
-        addPathsForBase(numericBase);
-      }
-      
-      console.log('[academic] score lookup candidates:', paths);
+      const variants = monthVariants(month);
+      const paths = [];
+
+      classCandidates.forEach(clsKey => {
+        const base = `/scores/${year}/${clsKey}`;
+        variants.forEach(v => {
+          paths.push(`${base}/${examKey}/${v}`);
+          paths.push(`${base}/${examKey.toLowerCase()}/${v}`);
+          paths.push(`${base}/${examKey.toUpperCase()}/${v}`);
+          paths.push(`${base}/${v}`); // when examKey level is missing
+        });
+      });
+
       const out = {};
-      for (const refPath of paths){
+
+      for (const refPath of paths) {
         try {
           const snap = await db.ref(refPath).get();
+          console.log('[academic.fetchScores] trying', refPath, snap && snap.exists && snap.exists());
+
           if (snap && snap.exists && snap.exists()) {
-            const val = snap.val();
+            const val = snap.val() || {};
+
             Object.keys(val).forEach(adm => {
               out[adm] = out[adm] || {};
               const subjObj = val[adm] || {};
               Object.keys(subjObj).forEach(sub => {
                 const o = subjObj[sub] || {};
-                const canonicalLabel = SomapSub().canonSubject ? SomapSub().canonSubject(sub) : sub;
+                const canonicalLabel = SomapSub().canonSubject
+                  ? SomapSub().canonSubject(sub)
+                  : sub;
                 const labelKey = canonicalLabel || sub;
-                const entry = { score: Number(o.score || 0), max: Number(o.max || 100) };
+                const entry = {
+                  score: Number(o.score || 0),
+                  max: Number(o.max || 100),
+                };
                 out[adm][labelKey] = entry;
                 if (!out[adm][sub]) out[adm][sub] = entry;
               });
             });
+
             if (Object.keys(out).length) break;
           }
-        } catch (e) { /* continue to next */ }
+        } catch (e) {
+          console.warn('[academic.fetchScores] error on', refPath, e);
+        }
       }
-      if (!Object.keys(out).length) console.warn('fetchScores: no data found for', className, examKey, month, 'paths tried', paths);
+
+      if (!Object.keys(out).length) {
+        console.warn(
+          '[academic.fetchScores] NO DATA for',
+          { year, className, examKey, month, classCandidates, pathsTried: paths }
+        );
+      }
+
       return out;
     }
 

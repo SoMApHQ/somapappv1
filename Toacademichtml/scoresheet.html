@@ -511,63 +511,80 @@
       }catch(e){ console.warn('fetchFees', e && e.message); return {}; }
     }
 
-    async function fetchScores({year, className, examKey, month}){
+    async function fetchScores({ year, className, examKey, month }) {
       const db = getDB();
-      if(!db) return {};
-      
-      const variants = monthVariants(month);
-      const paths = [];
+      if (!db) return {};
 
-      // Helper to push all variants for a given base
-      function addPathsForBase(b) {
-        variants.forEach(v => {
-          paths.push(`${b}/${examKey}/${v}`);
-          paths.push(`${b}/${examKey.toLowerCase()}/${v}`);
-          paths.push(`${b}/${examKey.toUpperCase()}/${v}`);
-          paths.push(`${b}/${v}`); // fallback
-        });
-      }
+      // Tolerant class keys
+      const classCandidates = [];
+      if (className) {
+        const cls = String(className).trim();
+        classCandidates.push(cls);
 
-      // 1) Primary path
-      addPathsForBase(`/scores/${year}/${className}`);
+        const match = cls.match(/(\d+)/);
+        if (match) {
+          const num = match[1];
+          const numericKey = num;
+          const withPrefix = `Class ${num}`;
 
-      // 2) Legacy numeric path
-      if (typeof className === 'string') {
-        const m = className.match(/Class\s+(\d+)/i);
-        if (m && m[1]) {
-           addPathsForBase(`/scores/${year}/${m[1]}`);
+          if (!classCandidates.includes(numericKey)) classCandidates.push(numericKey);
+          if (!classCandidates.includes(withPrefix)) classCandidates.push(withPrefix);
         }
       }
 
-      console.log('[scoresheet] candidates:', paths);
+      const paths = [];
+      classCandidates.forEach(clsKey => {
+        paths.push(`/scores/${year}/${clsKey}/${examKey}/${month}`);
+        paths.push(`/scores/${year}/${clsKey}/${examKey.toLowerCase()}/${month}`);
+        paths.push(`/scores/${year}/${clsKey}/${examKey.toUpperCase()}/${month}`);
+      });
 
-      const out = {};
+      let snap = null;
+      let usedPath = null;
+
       for (const refPath of paths) {
         try {
-          const snap = await db.ref(refPath).get();
-          if (snap && snap.exists && snap.exists()) {
-            const val = snap.val();
-            console.log('[scoresheet] found data at:', refPath);
-            Object.keys(val).forEach(adm => {
-              out[adm] = out[adm] || {};
-              const subjObj = val[adm] || {};
-              Object.keys(subjObj).forEach(sub => {
-                const o = subjObj[sub] || {};
-                const canonicalLabel = SomapSub().canonSubject ? SomapSub().canonSubject(sub) : sub;
-                const key = makeSubjectKey(canonicalLabel);
-                const entry = { score: Number(o.score || 0), max: Number(o.max || 100), label: canonicalLabel };
-                out[adm][key] = entry;
-                if (!out[adm][canonicalLabel]) out[adm][canonicalLabel] = entry;
-              });
-            });
-            // Stop after finding the first valid dataset
-            if (Object.keys(out).length > 0) break;
+          const candidateSnap = await db.ref(refPath).get();
+          console.log('[scoresheet.fetchScores] trying', refPath, candidateSnap && candidateSnap.exists && candidateSnap.exists());
+          if (candidateSnap && candidateSnap.exists && candidateSnap.exists()) {
+            snap = candidateSnap;
+            usedPath = refPath;
+            break;
           }
-        } catch (e) { 
-           console.warn('fetchScores path failed:', refPath, e);
+        } catch (e) {
+          console.warn('[scoresheet.fetchScores] error on', refPath, e);
         }
       }
-      
+
+      if (!snap) {
+        console.warn(
+          '[scoresheet.fetchScores] NO DATA for',
+          { year, className, examKey, month, classCandidates, pathsTried: paths }
+        );
+        return {};
+      }
+
+      console.log('[scoresheet.fetchScores] USING', usedPath);
+
+      const out = {};
+      const val = snap.val() || {};
+
+      Object.keys(val).forEach(adm => {
+        out[adm] = {};
+        const subjObj = val[adm] || {};
+        Object.keys(subjObj).forEach(sub => {
+          const o = subjObj[sub] || {};
+          const canonicalLabel = SomapSub().canonSubject
+            ? SomapSub().canonSubject(sub)
+            : sub;
+          const labelKey = canonicalLabel || sub;
+          out[adm][labelKey] = {
+            score: Number(o.score || 0),
+            max: Number(o.max || 100),
+          };
+        });
+      });
+
       return out;
     }
 
