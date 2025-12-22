@@ -4,9 +4,10 @@
   const listeners = new Set();
   const STORAGE_KEY = 'somap.currentSchoolId';
   const STORAGE_META_KEY = 'somap.currentSchool';
+  const DEFAULT_SCHOOL_ID = 'socrates-school';
 
   function getSchoolId() {
-    return localStorage.getItem(STORAGE_KEY) || null;
+    return localStorage.getItem(STORAGE_KEY) || DEFAULT_SCHOOL_ID;
   }
 
   function setSchoolId(id) {
@@ -45,7 +46,7 @@
       console.warn('Failed to read school meta', err);
     }
     const id = getSchoolId();
-    return id ? { id } : null;
+    return id ? { id, name: id === DEFAULT_SCHOOL_ID ? 'Socrates School' : undefined } : null;
   }
 
   function onSchoolChange(fn) {
@@ -57,6 +58,7 @@
     const sid = getSchoolId();
     if (!sid) throw new Error('No current schoolId set');
     const trimmed = String(subpath || '').replace(/^\/+/, '');
+    if (sid === DEFAULT_SCHOOL_ID) return trimmed; // Legacy data lives at root for Socrates
     return `schools/${sid}/${trimmed}`;
   }
 
