@@ -25,6 +25,10 @@
     window.SomapSubjects = { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass };
   </script>
 
+  <!-- SoMAp multischool context + DB helpers -->
+  <script src="../somapappv1multischool/js/context.js"></script>
+  <script src="../somapappv1multischool/js/dbhelpers.js"></script>
+
   <style>
     :root { color-scheme: only dark; }
     body {
@@ -397,6 +401,7 @@
     };
     if (!firebase.apps.length) { firebase.initializeApp(firebaseConfig); }
     const db = firebase.database();
+    window.db = db; // allow dbhelpers.js to reuse this instance
     const LOGO_PATH = '../images/somap-logo.png.jpg';
     const PLACEHOLDER_PHOTO = 'https://via.placeholder.com/160x210.png?text=Passport';
 
@@ -863,7 +868,7 @@
     async function loadTeachers(){
       try {
         // Try a reasonably generic location; fall back silently if absent
-        const snap = await db.ref('/teachers').once('value');
+        const snap = await refP('/teachers').once('value');
         const teachers = snap.val() || {};
         state.teachers = new Map();
         Object.entries(teachers).forEach(([id, value]) => {
@@ -882,7 +887,7 @@
         
         for (const path of searchPaths) {
           try {
-            const snap = await db.ref(path).once('value');
+            const snap = await refP(path).once('value');
             if (snap && snap.exists && snap.exists()) {
               const data = snap.val();
               
@@ -993,7 +998,7 @@
       const tryPaths = ['students','Students','StudentsList','Students_List','studentList','studentlist','attendance','school','schoolerp'];
       for (const p of tryPaths){
         try{
-          const snap = await db.ref(p).get();
+          const snap = await refP(p).get();
           if (snap && snap.exists && snap.exists()){
             const data = snap.val();
             const out = [];
@@ -1071,7 +1076,7 @@
       const map = {};
       for (const path of candidates){
         try{
-          const snap = await db.ref(path).get();
+          const snap = await refP(path).get();
           if (snap && snap.exists && snap.exists()){
             const val = snap.val() || {};
             const keys = Object.keys(val);
@@ -1212,7 +1217,7 @@
           if (!path || tried.has(path)) continue;
           tried.add(path);
           try {
-            const snap = await db.ref(path).get();
+            const snap = await refP(path).get();
             if (snap && snap.exists && snap.exists()) {
               const normalized = normalizeMonthlyAttendanceMap(snap.val());
               if (Object.keys(normalized).length) {
@@ -1235,7 +1240,7 @@
           if (!path || tried.has(path)) continue;
           tried.add(path);
           try {
-            const snap = await db.ref(path).get();
+            const snap = await refP(path).get();
             if (snap && snap.exists && snap.exists()) {
               const aggregated = aggregateClassFirstAttendance(snap.val());
               if (Object.keys(aggregated).length) {
@@ -1253,7 +1258,7 @@
     async function fetchFees(year, className){
       const refPath = `/fees/${year}/${className}`;
       try{
-        const snap = await db.ref(refPath).get();
+        const snap = await refP(refPath).get();
         const out = {};
         if (snap && snap.exists && snap.exists()){
           const val = snap.val();
@@ -1393,7 +1398,7 @@
           if (!path || tried.has(path)) continue;
           tried.add(path);
           try {
-            const snap = await db.ref(path).get();
+            const snap = await refP(path).get();
             if (snap && snap.exists && snap.exists()) {
               const normalized = normalizeMonthlyScoreMap(snap.val());
               if (Object.keys(normalized).length) {
@@ -1838,16 +1843,34 @@
       if (totalPctEl) totalPctEl.textContent = '0%';
     }
 
-    function toNormalizedRows(subjects){
-      return (subjects || []).map(entry => {
-        const rawScore = Number(entry?.score) || 0;
-        const rawMax = Number(entry?.max) || 0;
-        const pct = rawMax > 0 ? (rawScore / rawMax) * 100 : 0;
-        const dispMax = 100;
-        const dispScore = pct;
-        return { ...entry, rawScore, rawMax, pct, dispScore, dispMax };
-      });
-    }
+function toNormalizedRows(subjects){
+  return (subjects || []).map(entry => {
+    // Raw values coming from Firebase (same structure as scoresheet)
+    const rawScore = Number(entry?.score) || 0;
+    const rawMaxVal = Number(entry?.max);
+    
+    // If max is missing/invalid, fall back to 100 (but keep it as a real "max")
+    const safeMax = Number.isFinite(rawMaxVal) && rawMaxVal > 0 ? rawMaxVal : 100;
+    
+    // Percentage based on score/max
+    const pct = safeMax > 0 ? (rawScore / safeMax) * 100 : 0;
+    
+    // What we actually DISPLAY in the table and PDF:
+    //  - Score = real score from scoresheet
+    //  - Max   = real max from scoresheet
+    const dispScore = rawScore;
+    const dispMax   = safeMax;
+    
+    return {
+      ...entry,
+      rawScore,
+      rawMax: safeMax,
+      pct,
+      dispScore,
+      dispMax
+    };
+  });
+}
 
     function bestSubject(s){ const x = [...s.subjectStats.subjects].sort((a,b) => b.percent - a.percent)[0]; return x ? `${x.subject} ${x.percent.toFixed(0)}%` : '-'; }
     function lowestSubject(s){ const x = [...s.subjectStats.subjects].sort((a,b) => a.percent - b.percent)[0]; return x ? `${x.subject} ${x.percent.toFixed(0)}%` : '-'; }
