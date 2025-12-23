@@ -24,7 +24,8 @@
       elementId = 'school-logo-display',
       defaultLogo = 'images/socrates_logo.png',
       fallbackLogo = 'images/somap-logo.png.jpg',
-      cachePrefix = 'school_logo_'
+      cachePrefix = 'school_logo_',
+      schoolId: explicitSchoolId = null
     } = options;
 
     const logoEl = document.getElementById(elementId);
@@ -41,14 +42,29 @@
       };
     }
 
+    const searchParams = (() => {
+      try {
+        return new URLSearchParams(global.location.search);
+      } catch (_err) {
+        return new URLSearchParams();
+      }
+    })();
+
     const ctx = activeSchoolContext();
-    const schoolId = ctx?.id || ctx?.schoolId || null;
+    const schoolId =
+      explicitSchoolId ||
+      searchParams.get('school') ||
+      searchParams.get('schoolId') ||
+      ctx?.id ||
+      ctx?.schoolId ||
+      (typeof localStorage !== 'undefined' && localStorage.getItem('somap_school')) ||
+      null;
     const db =
       options.db ||
       global.db ||
       (global.firebase && typeof global.firebase.database === 'function' ? global.firebase.database() : null);
 
-    if (!schoolId || schoolId === 'socrates-school' || schoolId === 'default') {
+    if (!schoolId || schoolId === 'socrates-school' || schoolId === 'default' || schoolId === 'socrates') {
       setLocal();
       return;
     }
