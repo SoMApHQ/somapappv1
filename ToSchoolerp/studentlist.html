@@ -9,6 +9,8 @@
   <link rel="stylesheet"
         href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css"/>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../somapappv1multischool/js/context.js"></script>
+  <script src="../Todashboardhtml/yearContext.js"></script>
 
   <style>
     body { font-family: Inter, system-ui, Arial; background:#f8fafc; color:#0f172a; }
@@ -28,8 +30,7 @@
   </style>
 
   <script>
-  /** Year range + anchor **/
-  const SOMAP_ALLOWED_YEARS = Array.from({length: 20}, (_,i)=>2023+i); // 2023..2042
+  /** Anchor year for class progression **/
   const SOMAP_DEFAULT_YEAR = 2025;
 
   /** Tanzania class ladder (no Class 8). Keep labels EXACTLY. */
@@ -46,25 +47,6 @@
     return CLASS_ORDER[j];
   }
   </script>
-
-  <script>
-  /** Reuse shared year context if present, else create a light fallback. */
-  window.somapYearContext = window.somapYearContext || (function(){
-    let selected = (sessionStorage.getItem('somap_selected_year') || SOMAP_DEFAULT_YEAR)+'';
-    const listeners = new Set();
-    return {
-      getSelectedYear(){ return selected; },
-      setSelectedYear(y){
-        y = String(y);
-        if (selected===y) return;
-        selected = y;
-        try{ sessionStorage.setItem('somap_selected_year', y); }catch(_e){}
-        listeners.forEach(fn=>{ try{ fn(y); }catch(err){ console.error(err); } });
-      },
-      onYearChanged(fn){ if (typeof fn==='function') listeners.add(fn); }
-    };
-  })();
-  </script>
 </head>
 <body class="bg-gray-50 p-4">
 
@@ -78,7 +60,8 @@
   <!-- Students List Content -->
   <div class="bg-white rounded-lg shadow p-4">
     <h3 class="font-medium text-gray-800">Student List</h3>
-    <p class="text-sm text-gray-500 mb-3">Filter by class and download the list.</p>
+    <p class="text-sm text-gray-500 mb-1">Filter by class and download the list.</p>
+    <p class="text-xs text-slate-600 mb-3" id="currentSchoolLabel"></p>
 
     <div id="somapYearWrap" style="display:flex;gap:.5rem;align-items:center;margin-bottom:1rem;">
       <label class="text-xs font-semibold">Academic Year</label>
@@ -108,23 +91,6 @@
         </div>
       </div>
     </div>
-
-    <script>
-    (function initYearSelector(){
-      const sel = document.querySelector('[data-somap-year-select]');
-      const hint = document.getElementById('somapYearHint');
-      if (!sel) return;
-      sel.innerHTML = SOMAP_ALLOWED_YEARS.map(y=>`<option value="${y}">${y}</option>`).join('');
-      const current = window.somapYearContext.getSelectedYear();
-      sel.value = current;
-      if (hint) hint.textContent = current;
-      sel.addEventListener('change', e=>{
-        const y = String(e.target.value);
-        window.somapYearContext.setSelectedYear(y);
-        if (hint) hint.textContent = y;
-      });
-    })();
-    </script>
 
     <div class="mb-3 md:flex md:items-center md:gap-3">
       <select id="student-list-class" class="w-full md:w-1/3 p-2 border rounded-lg mb-2 md:mb-0">
@@ -275,6 +241,24 @@
         return;
       }
 
+      const school = window.SOMAP?.getSchool?.();
+      if (!school || !school.id) {
+        window.location.href = '../somapappv1multischool/multischool.html';
+        return;
+      }
+      if (!window.SOMAP?.P) {
+        console.error('Missing SOMAP path helper; redirecting to school selector.');
+        window.location.href = '../somapappv1multischool/multischool.html';
+        return;
+      }
+      window.currentSchoolId = school.id;
+      const schoolRef = (subPath) => db.ref(window.SOMAP.P(subPath));
+      const schoolLabel = document.getElementById('currentSchoolLabel');
+      if (schoolLabel) {
+        const schoolName = school.name || school.id;
+        schoolLabel.textContent = `Current school: ${schoolName}`;
+      }
+
       const elements = {
         listBody: document.getElementById('studentListBody'),
         schoolReportBody: document.getElementById('schoolReportBody'),
@@ -288,11 +272,18 @@
         reportDownloadPdf: document.getElementById('reportDownloadPdf'),
       };
 
-      const withSchool = (path) => window.currentSchoolId ? `schools/${window.currentSchoolId}/${path}` : path;
       const currencyFormatter = new Intl.NumberFormat('en-US', { minimumFractionDigits: 0 });
       const fmtCurrency = (value) => `TSh ${currencyFormatter.format(Number(value) || 0)}`;
       const normalize = (value) => String(value || '').trim().toLowerCase();
-      const getWorkingYear = () => window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR;
+      const yearSelect = document.querySelector('[data-somap-year-select]');
+      const yearHint = document.getElementById('somapYearHint');
+      const getWorkingYear = () => {
+        const fromCtx = window.somapYearContext?.getSelectedYear?.();
+        return String(fromCtx || SOMAP_DEFAULT_YEAR);
+      };
+      if (yearSelect && window.somapYearContext?.attachYearDropdown) {
+        window.somapYearContext.attachYearDropdown(yearSelect);
+      }
 
       const state = {
         students: new Map(),
@@ -306,10 +297,26 @@
         yearEnrollRef: null,
         ledgerRef: null,
       };
-
       const queueRender = () => {
         renderAllTables().catch((err) => console.error('Render error', err));
       };
+      const updateYearUI = (year) => {
+        const yearStr = String(year || SOMAP_DEFAULT_YEAR);
+        if (yearHint) yearHint.textContent = yearStr;
+        if (yearSelect && yearSelect.value !== yearStr) yearSelect.value = yearStr;
+      };
+      window.somapYearContext?.onYearChanged?.((year) => {
+        const yearStr = String(year || SOMAP_DEFAULT_YEAR);
+        updateYearUI(yearStr);
+        state.planCache.clear();
+        attachYearListeners(yearStr);
+        state.latestYear = yearStr;
+        queueRender();
+      });
+      updateYearUI(getWorkingYear());
+      if (!state.yearEnrollRef) {
+        attachYearListeners(getWorkingYear());
+      }
 
       function resolveClassForYear(studentId, fallbackClass, year) {
         const override = state.yearEnrollments[studentId] || {};
@@ -356,20 +363,20 @@
         if (state.yearEnrollRef) state.yearEnrollRef.off();
         if (state.ledgerRef) state.ledgerRef.off();
 
-        state.yearEnrollRef = db.ref(`enrollments/${yearStr}`);
+        state.yearEnrollRef = schoolRef(`enrollments/${yearStr}`);
         state.yearEnrollRef.on('value', (snap) => {
           state.yearEnrollments = snap.val() || {};
           queueRender();
         });
 
-        state.ledgerRef = db.ref(withSchool(`financeLedgers/${yearStr}`));
+        state.ledgerRef = schoolRef(`financeLedgers/${yearStr}`);
         state.ledgerRef.on('value', (snap) => {
           state.ledger = snap.val() || {};
           queueRender();
         });
       }
 
-      db.ref('students').on('value', (snapshot) => {
+      schoolRef('students').on('value', (snapshot) => {
         const raw = snapshot.val() || {};
         state.students.clear();
         Object.entries(raw).forEach(([key, value]) => {
@@ -378,22 +385,8 @@
         queueRender();
       });
 
-      db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`).on('value', (snapshot) => {
+      schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).on('value', (snapshot) => {
         state.anchorEnrollments = snapshot.val() || {};
-        queueRender();
-      });
-
-      attachYearListeners(getWorkingYear());
-
-      window.somapYearContext.onYearChanged((newYear) => {
-        const year = String(newYear);
-        state.planCache.clear();
-        attachYearListeners(year);
-        state.latestYear = year;
-        const sel = document.querySelector('[data-somap-year-select]');
-        const hint = document.getElementById('somapYearHint');
-        if (sel) sel.value = year;
-        if (hint) hint.textContent = year;
         queueRender();
       });
 
