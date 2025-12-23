@@ -1,12 +1,14 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SoMAp â€” Welcome</title>
+    <title>SoMAp — Welcome</title>
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+    <!-- Multischool context (active school) -->
+    <script src="somapappv1multischool/js/context.js"></script>
     <script src="https://www.google.com/recaptcha/api.js" async defer></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link
@@ -854,12 +856,12 @@
         </section>
         <footer class="footer">
           <div class="container">
-            <strong>SoMAp</strong> â€” School & Society Management
+            <strong>SoMAp</strong> — School & Society Management
             <div class="text-sm mt-2">
               Project: somaptestt | Contact: mnyorej@gmail.com
             </div>
             <div class="mt-4 text-sm">
-              &copy; <span id="year"></span> SoMAp â€” Built for African schools.
+              &copy; <span id="year"></span> SoMAp — Built for African schools.
             </div>
           </div>
         </footer>
@@ -881,6 +883,68 @@
       const auth = firebase.auth();
       const db = firebase.database();
 
+      function getActiveSchoolContext() {
+        if (window.SOMAP) {
+          if (typeof SOMAP.getActiveSchool === "function") {
+            return SOMAP.getActiveSchool();
+          }
+          if (typeof SOMAP.getSchool === "function") {
+            return SOMAP.getSchool();
+          }
+        }
+        return null;
+      }
+
+      // Prefix Firebase paths with the active school when applicable.
+      function withSchoolPrefix(path) {
+        const clean = String(path || "").replace(/^\/+/, "");
+        if (window.SOMAP && typeof SOMAP.P === "function") {
+          return SOMAP.P(clean);
+        }
+        const ctx = getActiveSchoolContext();
+        if (!ctx || !ctx.id || ctx.id === "default" || ctx.id === "socrates-school") {
+          return clean;
+        }
+        return `schools/${ctx.id}/${clean}`;
+      }
+
+      function showToast(message, type = "info") {
+        if (window.Swal) {
+          Swal.fire({
+            toast: true,
+            position: "top-end",
+            icon: ["error", "warning", "success", "info"].includes(type) ? type : "info",
+            title: message,
+            timer: 2200,
+            showConfirmButton: false,
+          });
+        } else {
+          console.log(`[${type}] ${message}`);
+        }
+      }
+
+      function showLoading(message) {
+        const el =
+          document.getElementById("parent-login-error") ||
+          document.getElementById("error-message");
+        if (el) {
+          el.textContent = message || "Loading...";
+          el.classList.remove("hidden");
+          el.dataset.loading = "1";
+        }
+      }
+
+      function hideLoading() {
+        const el =
+          document.getElementById("parent-login-error") ||
+          document.getElementById("error-message");
+        if (el && el.dataset.loading === "1") {
+          el.textContent = "";
+          el.classList.add("hidden");
+          delete el.dataset.loading;
+        }
+      }
+
       function hasLoginIntent() {
         const params = new URLSearchParams(window.location.search);
         const savedSchool = localStorage.getItem("somap.currentSchoolId");
@@ -892,7 +956,7 @@
         );
       }
 
-            // ƒo. Show login panel on this page (used when returning with ?login=1)
+            // �o. Show login panel on this page (used when returning with ?login=1)
       function goToLogin() {
         const welcome = document.getElementById("welcome-page");
         const login = document.getElementById("login-page");
@@ -902,7 +966,7 @@
         if (signoutBtn) signoutBtn.classList.remove("hidden");
       }
 
-      // ƒo. Redirect to multischool hub after Get Started
+      // �o. Redirect to multischool hub after Get Started
       function goToHub() {
         window.location.href = "somapappv1multischool/multischool.html";
       }
@@ -966,19 +1030,9 @@
             const parts = s.split(" ");
             if (parts.length !== 3)
               throw new Error(
-                "Enter THREE names (e.g., JOHN DOE JUNIOR). Spacing doesnâ€™t matter."
+                "Enter THREE names (e.g., JOHN DOE JUNIOR). Spacing doesn't matter."
               );
             return parts.join(" ");
-          }
-          const WORKER_PHONE_REGEX = /^\+2550\d{9}$/;
-
-          async function sha256Hex(value) {
-            const encoder = new TextEncoder();
-            const data = encoder.encode(value);
-            const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-            return Array.from(new Uint8Array(hashBuffer))
-              .map((b) => b.toString(16).padStart(2, "0"))
-              .join("");
           }
 
           try {
@@ -992,25 +1046,32 @@
               );
             }
 
-            // Search directly in /workers/ by matching fullNameUpper and phone
-            const workersSnap = await db.ref("workers").once("value");
-            if (!workersSnap.exists()) {
-              throw new Error("No workers in database. Contact admin.");
+            const workerRoots = [withSchoolPrefix("workers")];
+            if (workerRoots[0] !== "workers") {
+              workerRoots.push("workers");
             }
 
-            const workers = workersSnap.val();
             let foundWorkerId = null;
+            let matchedRoot = null;
 
-            // Find worker by matching fullNameUpper and phone
-            for (const [id, worker] of Object.entries(workers)) {
-              const profile = worker?.profile || {};
-              if (
-                profile.fullNameUpper === normalizedName &&
-                profile.phone === rawPhone
-              ) {
-                foundWorkerId = id;
-                break;
+            for (const root of workerRoots) {
+              const workersSnap = await db.ref(root).once("value");
+              const workers = workersSnap.val();
+              if (!workers) continue;
+
+              for (const [id, worker] of Object.entries(workers)) {
+                const profile = worker?.profile || {};
+                if (
+                  profile.fullNameUpper === normalizedName &&
+                  profile.phone === rawPhone
+                ) {
+                  foundWorkerId = id;
+                  matchedRoot = root;
+                  break;
+                }
               }
+
+              if (foundWorkerId) break;
             }
 
             if (!foundWorkerId) {
@@ -1021,12 +1082,19 @@
 
             const workerId = foundWorkerId;
 
-            // âœ… Clear any old data first, then save new login
-            localStorage.clear(); // Remove any stale data
+            // Save login without clearing multischool context
             localStorage.setItem("role", "worker");
             localStorage.setItem("workerId", workerId);
+            if (matchedRoot) {
+              sessionStorage.setItem("workerDataRoot", matchedRoot);
+            }
+            const schoolCtx = getActiveSchoolContext();
+            if (schoolCtx?.id) {
+              sessionStorage.setItem("workerSchoolId", schoolCtx.id);
+              sessionStorage.setItem("somap_worker_school", schoolCtx.id);
+            }
 
-            console.log("âœ… Login successful! Worker ID:", workerId);
+            console.log("Worker login successful. Worker ID:", workerId);
             window.location.href = "workershtml/workersdashboard.html";
           } catch (err) {
             errorEl.textContent = err.message || "Worker login failed.";
@@ -1190,153 +1258,258 @@
           }
         });
 
-      document
-        .getElementById("parent-signin")
-        .addEventListener("submit", async (e) => {
+      const parentForm = document.getElementById("parent-signin");
+      if (parentForm) {
+        parentForm.addEventListener("submit", function (e) {
           e.preventDefault();
-          const btn = document.querySelector("#parent-signin button");
-          try {
+
+          const btn = parentForm.querySelector("button[type='submit']");
+          const childNameInput = document
+            .getElementById("child-name")
+            .value.trim()
+            .toLowerCase();
+          const parentPhoneInput = document
+            .getElementById("parent-phone")
+            .value.trim();
+
+          const parentLoginError =
+            document.getElementById("parent-login-error") ||
+            document.getElementById("error-message");
+          if (parentLoginError) {
+            parentLoginError.classList.add("hidden");
+            parentLoginError.textContent = "";
+          }
+
+          if (!childNameInput || !parentPhoneInput) {
+            if (parentLoginError) {
+              parentLoginError.textContent =
+                "Enter child's names and parent phone number.";
+              parentLoginError.classList.remove("hidden");
+            } else {
+              showToast("Enter child's names and parent phone number.", "warning");
+            }
+            return;
+          }
+
+          const nameParts = childNameInput.split(/\s+/).filter(Boolean);
+          if (nameParts.length < 2) {
+            if (parentLoginError) {
+              parentLoginError.textContent =
+                "Enter at least two of the child's names.";
+              parentLoginError.classList.remove("hidden");
+            } else {
+              showToast("Enter at least two of the child's names.", "warning");
+            }
+            return;
+          }
+
+          const normalizedPhone = normalizePhone(parentPhoneInput);
+          showLoading("Looking for matching student...");
+          if (btn) {
             btn.disabled = true;
+            btn.dataset.prevText = btn.textContent;
             btn.textContent = "Signing In...";
-            const rawName = document.getElementById("child-name").value.trim();
-            const rawPhone = document
-              .getElementById("parent-phone")
-              .value.trim();
-            const msgEl = document.getElementById("error-message");
-            if (!rawName || !rawPhone) {
-              msgEl.textContent = "Please enter child names and parent phone.";
-              msgEl.classList.remove("hidden");
-              btn.disabled = false;
-              btn.textContent = "Sign In as Parent";
-              return;
-            }
-            const phone = normalizePhone(rawPhone);
-            if (!phone.match(/^\+(254|255)\d{8,9}$/)) {
-              msgEl.textContent =
-                "Phone format invalid. Use +254 or +255. Example: +254724841852";
-              msgEl.classList.remove("hidden");
-              btn.disabled = false;
-              btn.textContent = "Sign In as Parent";
-              return;
-            }
-            const fragments = nameFragments(rawName);
-            if (fragments.length < 2) {
-              msgEl.textContent =
-                "Enter at least two name parts of your child.";
-              msgEl.classList.remove("hidden");
-              btn.disabled = false;
-              btn.textContent = "Sign In as Parent";
-              return;
-            }
-            const studentsSnap = await db.ref("students").once("value");
-            const studentsObj = studentsSnap.val() || {};
-            let foundKey = null;
-            let foundStudent = null;
-            for (const [key, s] of Object.entries(studentsObj)) {
-              const dbPhone = normalizePhone(
-                s.primaryParentContact || s.primaryParentPhone || ""
-              );
-              if (!dbPhone || dbPhone !== phone) continue;
-              const childNames = [
-                (s.firstName || "").toLowerCase(),
-                (s.middleName || "").toLowerCase(),
-                (s.lastName || "").toLowerCase(),
-              ].filter(Boolean);
-              let matches = 0;
-              for (const frag of fragments) {
-                if (childNames.some((cn) => cn.includes(frag))) matches++;
-              }
-              if (matches >= 2) {
-                foundKey = key;
-                foundStudent = s;
-                break;
-              }
-            }
-            btn.disabled = false;
-            btn.textContent = "Sign In as Parent";
+          }
 
-            // Preform One check (parallel query - fallback to regular if no match)
-            const currentYear2 = new Date().getFullYear(); // Auto 2025
-            const phoneNorm = phone; // Use normalized phone
-            const inputNamesFull = rawName; // Full input for matching
+          const db = firebase.database();
+          const schoolStudentsPath = withSchoolPrefix("students");
+          const rootsToCheck = [schoolStudentsPath];
 
-            const preformSnap = await db
-              .ref(
-                `/schools/Socrates School Preform one/${currentYear2}/students`
-              )
-              .orderByChild("parentContact")
-              .equalTo(phoneNorm)
-              .once("value");
-            if (preformSnap.exists()) {
-              const preformData = preformSnap.val();
-              if (namesMatch(preformData, inputNamesFull)) {
-                // Direct to Preform One parent dashboard
-                localStorage.setItem("role", "parent");
-                localStorage.setItem("preformParent", "true");
-                // PF1 keys expected by prefoneparent.html
-                localStorage.setItem("prefoneParent", "true");
-                localStorage.setItem("prefoneParentContact", phoneNorm);
-                localStorage.setItem("prefoneParentName", inputNamesFull);
-                // Compatibility keys used elsewhere
-                localStorage.setItem("parentContact", phoneNorm);
-                localStorage.setItem("parentName", inputNamesFull);
-                // Also set studentKey and default ADM for quick actions (use first match key)
-                const preformKeys = Object.keys(preformData);
-                if (preformKeys.length) {
-                  localStorage.setItem("studentKey", preformKeys[0]);
-                  localStorage.setItem("currentChildAdm", preformKeys[0]);
+          if (schoolStudentsPath !== "students") {
+            rootsToCheck.push("students");
+          }
+
+          function searchUnderRoot(rootPath) {
+            return db.ref(rootPath).once("value").then((snapshot) => {
+              let matched = null;
+
+              snapshot.forEach((childSnapshot) => {
+                const student = childSnapshot.val();
+                if (!student) return;
+
+                const fallbackName = [
+                  student.firstName,
+                  student.middleName,
+                  student.lastName,
+                ]
+                  .filter(Boolean)
+                  .join(" ");
+                const fullName = (
+                  student.fullName ||
+                  student.fullname ||
+                  student.name ||
+                  fallbackName
+                )
+                  .toString()
+                  .trim()
+                  .toLowerCase();
+
+                if (!fullName) return;
+
+                const phone =
+                  (student.parentPhone ||
+                    student.parentContact ||
+                    student.primaryParentContact ||
+                    student.primaryParentPhone ||
+                    student.guardianPhone ||
+                    student.phone ||
+                    "") +
+                  "";
+
+                const normalizedDbPhone = normalizePhone(phone);
+
+                const nameMatch = nameParts.every((part) => fullName.includes(part));
+                const phoneMatch =
+                  (!!normalizedDbPhone &&
+                    (normalizedDbPhone === normalizedPhone ||
+                      normalizedDbPhone.endsWith(parentPhoneInput) ||
+                      normalizedPhone.endsWith(normalizedDbPhone))) ||
+                  phone === parentPhoneInput ||
+                  phone.endsWith(parentPhoneInput);
+
+                if (nameMatch && phoneMatch) {
+                  matched = {
+                    key: childSnapshot.key,
+                    rootPath,
+                    ...student,
+                  };
                 }
-                Swal.fire({
-                  title: "Welcome to Preform One",
-                  text: `Access granted for Preform One student`,
-                  icon: "success",
-                  timer: 1100,
-                  showConfirmButton: false,
-                });
-                setTimeout(() => {
-                  window.location.href = "preformonehtml/prefoneparent.html";
-                }, 900);
-                return; // Exit early - don't run regular logic
+              });
+
+              return matched;
+            });
+          }
+
+          (async () => {
+            let match = null;
+
+            for (const root of rootsToCheck) {
+              match = await searchUnderRoot(root);
+              if (match) break;
+            }
+
+            if (!match) {
+              const currentYear2 = new Date().getFullYear();
+              const preformSnap = await db
+                .ref(
+                  `/schools/Socrates School Preform one/${currentYear2}/students`
+                )
+                .orderByChild("parentContact")
+                .equalTo(normalizedPhone)
+                .once("value");
+
+              if (preformSnap.exists()) {
+                const preformData = preformSnap.val();
+                if (namesMatch(preformData, childNameInput)) {
+                  localStorage.setItem("role", "parent");
+                  localStorage.setItem("preformParent", "true");
+                  localStorage.setItem("prefoneParent", "true");
+                  localStorage.setItem("prefoneParentContact", normalizedPhone);
+                  localStorage.setItem("prefoneParentName", childNameInput);
+                  const preformKeys = Object.keys(preformData);
+                  if (preformKeys.length) {
+                    localStorage.setItem("studentKey", preformKeys[0]);
+                    localStorage.setItem("currentChildAdm", preformKeys[0]);
+                  }
+                  hideLoading();
+                  if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = btn.dataset.prevText || "Sign In as Parent";
+                  }
+                  Swal.fire({
+                    title: "Welcome to Preform One",
+                    text: `Access granted for Preform One student`,
+                    icon: "success",
+                    timer: 1100,
+                    showConfirmButton: false,
+                  });
+                  setTimeout(() => {
+                    window.location.href = "preformonehtml/prefoneparent.html";
+                  }, 900);
+                  return;
+                }
               }
             }
 
-            if (!foundStudent) {
-              msgEl.textContent =
-                "No matching student found. Check names and phone.";
-              msgEl.classList.remove("hidden");
+            hideLoading();
+            if (btn) {
+              btn.disabled = false;
+              btn.textContent = btn.dataset.prevText || "Sign In as Parent";
+            }
+
+            if (!match) {
+              if (parentLoginError) {
+                parentLoginError.textContent =
+                  "No matching student found. Check names and phone.";
+                parentLoginError.classList.remove("hidden");
+              } else {
+                showToast("No matching student found. Check names and phone.", "warning");
+              }
               return;
             }
+
+            const adm =
+              match.adm || match.admissionNumber || match.admNo || match.key;
+            const fullName =
+              match.fullName ||
+              match.fullname ||
+              match.name ||
+              [match.firstName, match.middleName, match.lastName]
+                .filter(Boolean)
+                .join(" ");
+            const parentPhone =
+              match.parentPhone ||
+              match.parentContact ||
+              match.primaryParentContact ||
+              match.primaryParentPhone ||
+              match.guardianPhone ||
+              parentPhoneInput;
 
             localStorage.setItem("role", "parent");
-            localStorage.setItem("studentKey", foundKey);
-            // Enable Preform One icon for Class 7 parents (if applicable)
-            if (
-              foundStudent.classLevel === "Class 7" ||
-              foundStudent.class === "Class 7"
-            ) {
-              // Adjust field if your DB uses 'class' instead
-              localStorage.setItem("preformParentIcon", "true"); // Shows icon in parent.html
+            localStorage.setItem("studentKey", adm);
+            localStorage.setItem("currentChildAdm", adm);
+            try {
+              sessionStorage.setItem("somap_parent_adm", adm);
+              sessionStorage.setItem("somap_parent_name", fullName);
+              sessionStorage.setItem("somap_parent_phone", parentPhone);
+              const ctx = getActiveSchoolContext();
+              sessionStorage.setItem(
+                "somap_parent_school_id",
+                ctx && ctx.id ? ctx.id : ""
+              );
+              sessionStorage.setItem(
+                "somap_parent_school_name",
+                ctx && ctx.name ? ctx.name : ""
+              );
+              sessionStorage.setItem(
+                "somap_parent_year",
+                ctx && ctx.year ? String(ctx.year) : ""
+              );
+            } catch (_) {}
+
+            const parentUrl = `parent.html?studentKey=${encodeURIComponent(
+              adm
+            )}&adm=${encodeURIComponent(adm)}&name=${encodeURIComponent(
+              fullName
+            )}&phone=${encodeURIComponent(parentPhone)}`;
+            window.location.href = parentUrl;
+          })().catch((err) => {
+            console.error("Parent sign-in error", err);
+            hideLoading();
+            if (btn) {
+              btn.disabled = false;
+              btn.textContent = btn.dataset.prevText || "Sign In as Parent";
             }
-            Swal.fire({
-              title: "Welcome",
-              text: `Signed in for ${foundStudent.firstName || ""} ${
-                foundStudent.lastName || ""
-              }`,
-              icon: "success",
-              timer: 1100,
-              showConfirmButton: false,
-            });
-            setTimeout(() => {
-              window.location.href = "parent.html";
-            }, 900);
-          } catch (err) {
-            btn.disabled = false;
-            btn.textContent = "Sign In as Parent";
-            document.getElementById("error-message").textContent =
-              "Sign-in failed: " + err.message;
-            document.getElementById("error-message").classList.remove("hidden");
-          }
+            if (parentLoginError) {
+              parentLoginError.textContent =
+                "Error during sign in. Please try again.";
+              parentLoginError.classList.remove("hidden");
+            } else {
+              showToast("Error during sign in. Please try again.", "error");
+            }
+          });
         });
+      }
 
       auth.onAuthStateChanged(async (user) => {
         // Don't interfere if worker dashboard is active
@@ -1428,7 +1601,7 @@
         toast.style.borderRadius = "8px";
         toast.style.boxShadow = "0 8px 30px rgba(2,6,23,0.3)";
         toast.style.zIndex = 9999;
-        toast.innerHTML = `<div style="font-size:13px">Signed-in as parent â€” <a href="parent.html" style="color:#60a5fa">Open dashboard</a></div>`;
+        toast.innerHTML = `<div style="font-size:13px">Signed-in as parent — <a href="parent.html" style="color:#60a5fa">Open dashboard</a></div>`;
         document.body.appendChild(toast);
         setTimeout(() => {
           toast.style.opacity = "0";
@@ -1456,3 +1629,10 @@
     </script>
   </body>
 </html>
+
+
+
+
+
+
+
