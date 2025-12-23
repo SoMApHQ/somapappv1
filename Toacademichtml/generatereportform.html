@@ -635,7 +635,10 @@
       state.year = ss.getItem('year') || ss.getItem(PREFS.YEAR_KEY) || new Date().getFullYear();
       const rawMonth = ss.getItem('month') || ss.getItem(PREFS.MONTH_KEY) || '';
       state.examKey = ss.getItem('examKey') || ss.getItem(PREFS.EXAM_KEY) || 'monthly';
-      state.examType = Object.keys(EXAM_KEYS).find(k => EXAM_KEYS[k] === state.examKey) || 'Monthly';
+      
+      // Use the stored label if available, otherwise reverse lookup or default
+      state.examType = ss.getItem('examTypeLabel') || Object.keys(EXAM_KEYS).find(k => EXAM_KEYS[k] === state.examKey) || 'Monthly';
+      
       if (state.examKey === 'annual') {
         state.month = 'All';
         state.monthRaw = 'All';
@@ -1266,26 +1269,32 @@
     }
 
     async function fetchScores({ year, className, examKey, month, rawMonth }) {
-      const key = (examKey || 'monthly').toLowerCase();
-      if (key === 'monthly') {
-        return getMonthlyScores(year, className, month, rawMonth);
+      const key = (examKey || 'monthly');
+      const lowerKey = key.toLowerCase();
+
+      // Multi-month aggregation (only if explicitly defined in plan AND different from direct fetch)
+      // If EXAM_MONTH_PLAN has it, we assume it is an aggregation of 'monthly' scores
+      if (lowerKey !== 'monthly' && EXAM_MONTH_PLAN[lowerKey]) {
+        const months = (EXAM_MONTH_PLAN[lowerKey] || (() => []))(month);
+        if (Array.isArray(months) && months.length) {
+          // Sum raw score and max across months, per subject
+          const perMonth = await Promise.all(months.map(m => getMonthlyScores(year, className, m, null, 'monthly')));
+          const merged = {};
+          for (const monthMap of perMonth) {
+            Object.entries(monthMap || {}).forEach(([adm, subs]) => {
+              merged[adm] = merged[adm] || {};
+              Object.entries(subs || {}).forEach(([subject, o]) => {
+                const cur = merged[adm][subject] || { score: 0, max: 0 };
+                merged[adm][subject] = { score: cur.score + Number(o.score||0), max: cur.max + Number(o.max||0) };
+              });
+            });
+          }
+          return merged;
+        }
       }
-      // Multi-month aggregation
-      const months = (EXAM_MONTH_PLAN[key] || (() => []))(month);
-      if (!Array.isArray(months) || !months.length) return {};
-      // Sum raw score and max across months, per subject
-      const perMonth = await Promise.all(months.map(m => getMonthlyScores(year, className, m, null)));
-      const merged = {};
-      for (const monthMap of perMonth) {
-        Object.entries(monthMap || {}).forEach(([adm, subs]) => {
-          merged[adm] = merged[adm] || {};
-          Object.entries(subs || {}).forEach(([subject, o]) => {
-            const cur = merged[adm][subject] || { score: 0, max: 0 };
-            merged[adm][subject] = { score: cur.score + Number(o.score||0), max: cur.max + Number(o.max||0) };
-          });
-        });
-      }
-      return merged;
+
+      // Default: single exam fetch (Monthly, Midterm 1, etc)
+      return getMonthlyScores(year, className, month, rawMonth, key);
     }
 
     function normalizeMonthlyScoreMap(val){
@@ -1303,18 +1312,23 @@
           const scoreVal = hasScore ? Number(o.score ?? o.Score ?? 0) : 0;
           let maxVal = hasMax ? Number(o.max ?? o.Max ?? 0) : 100;
           if (!Number.isFinite(maxVal) || maxVal <= 0) maxVal = 100;
-          const canonicalSubject = SomapSub().canonSubject ? SomapSub().canonSubject(subject) : subject;
-          const key = canonicalSubject || subject;
-          out[adm][key] = { score: scoreVal, max: maxVal };
-          if (!out[adm][subject]) out[adm][subject] = { score: scoreVal, max: maxVal };
+          
+          // Use label if available to determine canonical subject, matching scoresheet logic
+          const labelFromDB = o.label || subject;
+          const canonicalSubject = SomapSub().canonSubject ? SomapSub().canonSubject(labelFromDB) : labelFromDB;
+          const key = canonicalSubject || labelFromDB;
+          
+          const entry = { score: scoreVal, max: maxVal };
+          out[adm][key] = entry;
+          if (!out[adm][subject]) out[adm][subject] = entry;
         });
       });
       return out;
     }
 
-    async function getMonthlyScores(year, className, mon, rawMon) {
+    async function getMonthlyScores(year, className, mon, rawMon, examKey = 'monthly') {
       const canonical = resolveMonthKey(mon) || resolveMonthKey(rawMon) || String(mon || rawMon || '').trim() || 'unknown';
-      const cacheKey = `${year}::${className}::${canonical}`;
+      const cacheKey = `${year}::${className}::${canonical}::${examKey}`;
       if (CACHE.scoresMonthly.has(cacheKey)) return CACHE.scoresMonthly.get(cacheKey);
       let out = {};
       const variants = monthVariants(mon, rawMon);
@@ -1322,11 +1336,18 @@
       for (const variant of variants.length ? variants : [mon, rawMon]) {
         if (!variant) continue;
         const base = `/scores/${year}/${className}`;
+        
         const paths = [
-          `${base}/monthly/${variant}`,
-          `${base}/Monthly/${variant}`,
-          `${base}/${variant}`
+          `${base}/${examKey}/${variant}`,
+          `${base}/${examKey.toLowerCase()}/${variant}`,
+          `${base}/${examKey.toUpperCase()}/${variant}`
         ];
+        
+        // Legacy fallback for 'monthly' key specifically
+        if (examKey.toLowerCase() === 'monthly') {
+           paths.push(`${base}/${variant}`);
+        }
+
         for (const path of paths) {
           if (!path || tried.has(path)) continue;
           tried.add(path);

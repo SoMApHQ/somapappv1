@@ -532,11 +532,17 @@
         }
       }
 
+      const variants = monthVariants(month);
       const paths = [];
+
       classCandidates.forEach(clsKey => {
-        paths.push(`/scores/${year}/${clsKey}/${examKey}/${month}`);
-        paths.push(`/scores/${year}/${clsKey}/${examKey.toLowerCase()}/${month}`);
-        paths.push(`/scores/${year}/${clsKey}/${examKey.toUpperCase()}/${month}`);
+        const base = `/scores/${year}/${clsKey}`;
+        variants.forEach(v => {
+          paths.push(`${base}/${examKey}/${v}`);
+          paths.push(`${base}/${examKey.toLowerCase()}/${v}`);
+          paths.push(`${base}/${examKey.toUpperCase()}/${v}`);
+          paths.push(`${base}/${v}`); // Legacy support
+        });
       });
 
       let snap = null;
@@ -574,14 +580,23 @@
         const subjObj = val[adm] || {};
         Object.keys(subjObj).forEach(sub => {
           const o = subjObj[sub] || {};
-          const canonicalLabel = SomapSub().canonSubject
-            ? SomapSub().canonSubject(sub)
-            : sub;
-          const labelKey = canonicalLabel || sub;
-          out[adm][labelKey] = {
+          
+          // Determine the canonical key
+          const labelFromDB = o.label || sub;
+          // Use makeSubjectKey to ensure consistency with saveAllScores
+          const subjectKey = makeSubjectKey(labelFromDB);
+          
+          const entry = {
             score: Number(o.score || 0),
             max: Number(o.max || 100),
           };
+          
+          out[adm][subjectKey] = entry;
+          
+          // Also fallback to mapped label just in case
+          if (labelFromDB !== subjectKey) {
+             out[adm][labelFromDB] = entry;
+          }
         });
       });
 
@@ -936,15 +951,32 @@
     }
 
     /* ---------- Load sequence (main entry) ---------- */
+    function getQueryParams() {
+      const params = new URLSearchParams(window.location.search || '');
+      return {
+        year: params.get('year') || '',
+        className: params.get('class') || '',
+        stream: params.get('stream') || '',
+        examTypeLabel: params.get('examType') || 'Monthly',
+        month: params.get('month') || '',
+      };
+    }
+
     async function loadAll(){
       console.log('=== Loading scoresheet data ===');
       
-      state.className = window.sessionStorage.getItem('className') || '';
-      let inputStream = window.sessionStorage.getItem('stream') || '';
-      state.month = window.sessionStorage.getItem('month') || '';
-      state.year = window.sessionStorage.getItem('year') || '';
-      state.examKey = window.sessionStorage.getItem('examKey') || 'monthly';
-      state.schoolBranch = window.sessionStorage.getItem('schoolBranch') || '';
+      const qp = getQueryParams();
+      const ss = window.sessionStorage || {};
+
+      state.className = qp.className || ss.getItem('className') || '';
+      let inputStream = qp.stream || ss.getItem('stream') || '';
+      state.month = qp.month || ss.getItem('month') || '';
+      state.year = qp.year || ss.getItem('year') || '';
+      
+      const examTypeLabel = qp.examTypeLabel || ss.getItem('examTypeLabel') || 'Monthly';
+      state.examKey = EXAM_KEYS[examTypeLabel] || 'monthly';
+      
+      state.schoolBranch = ss.getItem('schoolBranch') || '';
 
       console.log('Session data:', {
         className: state.className,
@@ -952,7 +984,8 @@
         month: state.month,
         year: state.year,
         examKey: state.examKey,
-        schoolBranch: state.schoolBranch
+        schoolBranch: state.schoolBranch,
+        examTypeLabel: examTypeLabel
       });
 
       if(!state.className){ 
@@ -965,6 +998,11 @@
         alert('Year not selected; please select from dashboard'); 
         return; 
       }
+
+      // Store the label for report generation usage
+      try {
+        ss.setItem('examTypeLabel', examTypeLabel);
+      } catch(e) {}
 
       const classNumMatch = state.className.match(/\d+/);
       const classNum = classNumMatch ? classNumMatch[0] : '';
