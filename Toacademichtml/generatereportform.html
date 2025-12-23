@@ -1297,32 +1297,73 @@
       return getMonthlyScores(year, className, month, rawMonth, key);
     }
 
-    function normalizeMonthlyScoreMap(val){
+    function normalizeMonthlyScoreMap(raw) {
       const out = {};
-      Object.keys(val || {}).forEach(adm => {
-        const subjObj = val[adm] || {};
-        out[adm] = out[adm] || {};
-        Object.keys(subjObj).forEach(subject => {
-          const o = subjObj[subject];
-          if (!o || typeof o !== 'object') return;
-          if (String(subject || '').toLowerCase() === 'snap') return;
-          const hasScore = Object.prototype.hasOwnProperty.call(o, 'score') || Object.prototype.hasOwnProperty.call(o, 'Score');
-          const hasMax = Object.prototype.hasOwnProperty.call(o, 'max') || Object.prototype.hasOwnProperty.call(o, 'Max');
-          if (!hasScore && !hasMax) return;
-          const scoreVal = hasScore ? Number(o.score ?? o.Score ?? 0) : 0;
-          let maxVal = hasMax ? Number(o.max ?? o.Max ?? 0) : 100;
-          if (!Number.isFinite(maxVal) || maxVal <= 0) maxVal = 100;
-          
-          // Use label if available to determine canonical subject, matching scoresheet logic
-          const labelFromDB = o.label || subject;
-          const canonicalSubject = SomapSub().canonSubject ? SomapSub().canonSubject(labelFromDB) : labelFromDB;
-          const key = canonicalSubject || labelFromDB;
-          
-          const entry = { score: scoreVal, max: maxVal };
-          out[adm][key] = entry;
-          if (!out[adm][subject]) out[adm][subject] = entry;
-        });
-      });
+      if (!raw || typeof raw !== 'object') return out;
+
+      for (const [studentId, subjects] of Object.entries(raw)) {
+        if (!subjects || typeof subjects !== 'object') continue;
+
+        const normalizedSubjects = {};
+
+        for (const [subjectKey, scoreObj] of Object.entries(subjects)) {
+          if (!scoreObj || typeof scoreObj !== 'object') continue;
+
+          const o = scoreObj;
+
+          // ✅ FIX: do NOT spread the object, just pass it.
+          const hasScore =
+            Object.prototype.hasOwnProperty.call(o, 'score') ||
+            Object.prototype.hasOwnProperty.call(o, 'Score');
+
+          const hasMax =
+            Object.prototype.hasOwnProperty.call(o, 'max') ||
+            Object.prototype.hasOwnProperty.call(o, 'Max');
+
+          // Score
+          let safeScore = 0;
+          if (hasScore) {
+            safeScore = Number(o.score ?? o.Score ?? 0);
+            if (!Number.isFinite(safeScore)) safeScore = 0;
+            if (safeScore < 0) safeScore = 0;
+            if (safeScore > 10000) safeScore = 10000;
+          }
+
+          // Label
+          let label =
+            (typeof o.label === 'string' && o.label.trim()) ||
+            (typeof o.name === 'string' && o.name.trim()) ||
+            subjectKey;
+          if (!label) label = subjectKey;
+          if (label.length > 60) label = label.slice(0, 57) + '...';
+
+          // Max
+          let maxVal = 100;
+          if (hasMax) {
+            maxVal = Number(o.max ?? o.Max ?? 0);
+            if (!Number.isFinite(maxVal) || maxVal <= 0) maxVal = 100;
+          }
+          if (!Number.isFinite(maxVal) || maxVal <= 0) {
+            maxVal = 100;
+          }
+
+          // If score is clearly insane compared to max, clamp.
+          if (safeScore > maxVal * 1.2) {
+            safeScore = maxVal;
+          }
+
+          normalizedSubjects[subjectKey] = {
+            subject: label,
+            score: safeScore,
+            max: maxVal
+          };
+        }
+
+        if (Object.keys(normalizedSubjects).length) {
+          out[studentId] = normalizedSubjects;
+        }
+      }
+
       return out;
     }
 
