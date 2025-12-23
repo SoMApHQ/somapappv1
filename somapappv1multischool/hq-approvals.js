@@ -77,8 +77,10 @@
 
     const status = (raw.status || 'pending').toLowerCase();
     const submittedAt = raw.submittedAt || raw.createdAt || raw.created_at || null;
+    const logoUrl = raw.logoUrl || school.logoUrl || raw.logo || '';
+    const schoolId = raw.schoolId || raw.schoolKey || null;
 
-    return { id, status, submittedAt, school: schoolData, contact: contactData };
+    return { id, status, submittedAt, school: schoolData, contact: contactData, logoUrl, schoolId };
   }
 
   function renderRows(data) {
@@ -141,7 +143,8 @@
 
     setButtonsDisabled(requestId, true);
     const now = Date.now();
-    const schoolId = makeSchoolId(request.school.name || request.school.shortName || 'school');
+    const schoolId = request.schoolId || makeSchoolId(request.school.name || request.school.shortName || 'school');
+    const logoUrl = request.logoUrl || request.school.logoUrl || '';
 
     const meta = {
       schoolName: request.school.name || 'School',
@@ -158,17 +161,19 @@
       ownerName: request.contact.ownerName || '',
       ownerPhone: request.contact.ownerPhone || '',
       ownerEmail: request.contact.ownerEmail || '',
-      registrationNumber: request.school.registrationNumber || ''
+      registrationNumber: request.school.registrationNumber || '',
+      logoUrl
     };
 
     const updates = {};
-    updates[`schools/${schoolId}`] = {
-      meta,
-      status: 'active',
-      approvedAt: now,
-      approvedBy: approverId,
-      requestId
-    };
+    updates[`schools/${schoolId}/meta`] = meta;
+    updates[`schools/${schoolId}/status`] = 'active';
+    updates[`schools/${schoolId}/approvedAt`] = now;
+    updates[`schools/${schoolId}/approvedBy`] = approverId;
+    updates[`schools/${schoolId}/requestId`] = requestId;
+    if (logoUrl) {
+      updates[`schools/${schoolId}/profile/logoUrl`] = logoUrl;
+    }
     updates[`schoolRequests/${requestId}/status`] = 'approved';
     updates[`schoolRequests/${requestId}/approvedAt`] = now;
     updates[`schoolRequests/${requestId}/approvedBy`] = approverId;

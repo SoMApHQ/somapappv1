@@ -3,6 +3,8 @@
   // Use global SOMAP context defined in context.js
   const SOMAP = window.SOMAP;
   const SOCRATES_SCHOOL_ID = 'socrates-school';
+  const CLOUDINARY_CLOUD = 'dg7vnrkgd';
+  const SCHOOL_LOGO_PRESET = 'somap_schools';
 
   const hubCards = document.getElementById('hubCards');
   const registerSection = document.getElementById('registerSection');
@@ -34,6 +36,16 @@
     registerSection.classList.add('hidden');
     chooseSection.classList.remove('hidden');
     loadSchools();
+  }
+
+  function makeSchoolId(name) {
+    return (
+      String(name || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'school-' + Date.now()
+    );
   }
 
   async function ensureSocratesSchoolExists() {
@@ -121,6 +133,13 @@
     registerStatus.classList.add('hidden');
 
     const formData = new FormData(registerForm);
+    const logoInput = document.getElementById('school-logo');
+
+    if (!logoInput || !logoInput.files.length) {
+      alert('Please upload your school logo before submission.');
+      return;
+    }
+
     const payload = {
       country: formData.get('country') || '',
       name: formData.get('name') || '',
@@ -141,11 +160,45 @@
       createdAt: Date.now(),
       status: 'pending'
     };
+    const schoolId = makeSchoolId(payload.name || 'school');
 
     try {
       toggleSubmitState(true);
+
+      const uploadForm = new FormData();
+      uploadForm.append('file', logoInput.files[0]);
+      uploadForm.append('upload_preset', SCHOOL_LOGO_PRESET);
+
+      const uploadRes = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`, {
+        method: 'POST',
+        body: uploadForm
+      });
+      const uploadData = await uploadRes.json();
+      if (!uploadRes.ok || !uploadData?.secure_url) {
+        throw new Error(uploadData?.error?.message || 'Logo upload failed.');
+      }
+      const logoUrl = uploadData.secure_url;
+
       const requestRef = db.ref('schoolRequests').push();
-      await requestRef.set(payload);
+      const schoolProfile = {
+        name: payload.name || '',
+        phone: payload.phone || '',
+        email: payload.schoolEmail || '',
+        registrationNumber: payload.registrationNo || '',
+        location: payload.location || '',
+        logoUrl,
+        updatedAt: Date.now()
+      };
+
+      const requestPayload = { ...payload, logoUrl, schoolId };
+      const updates = {};
+      updates[`schoolRequests/${requestRef.key}`] = requestPayload;
+      updates[`schools/${schoolId}/profile`] = schoolProfile;
+      updates[`schools/${schoolId}/meta/logoUrl`] = logoUrl;
+      updates[`schools/${schoolId}/status`] = 'pending';
+
+      await db.ref().update(updates);
+
       registerStatus.textContent = 'Asante! Your school has been submitted to SoMAp HQ for approval.';
       registerStatus.classList.remove('hidden');
       registerStatus.classList.add('text-emerald-300');

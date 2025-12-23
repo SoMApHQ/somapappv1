@@ -62,6 +62,10 @@
     return `schools/${sid}/${trimmed}`;
   }
 
-  const SOMAP = { getSchoolId, setSchoolId, setSchool, getSchool, onSchoolChange, P };
+  function getActiveSchool() {
+    return getSchool();
+  }
+
+  const SOMAP = { getSchoolId, setSchoolId, setSchool, getSchool, getActiveSchool, onSchoolChange, P };
   window.SOMAP = SOMAP;
 })();
