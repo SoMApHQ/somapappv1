@@ -128,12 +128,14 @@
       .page-inner { width: 98%; }
     }
   </style>
+  <script src="../somapappv1multischool/js/context.js"></script>
+  <script src="../Todashboardhtml/yearContext.js"></script>
 </head>
 <body>
   <!-- ======= Top ======= -->
   <header class="bg-white border-b border-gray-200">
     <div class="maxw px-4 py-3 flex items-center justify-between">
-      <h1 class="text-lg font-extrabold tracking-tight">📚 Magical Books Library</h1>
+      <h1 class="text-lg font-extrabold tracking-tight">Magical Books Library</h1>
       <a id="backBtn" href="../index.html" class="text-sm font-extrabold text-indigo-600 hover:text-indigo-700">Back</a>
     </div>
   </header>
@@ -142,10 +144,21 @@
   <section class="maxw px-4 mt-4">
     <div class="hero">
       <div class="hero-inner">
-        <img class="hero-img" src="../assets/socrates.png" onerror="this.src='https://dummyimage.com/128x128/ffffff/000000.png&text=S'" alt="Socrates"/>
+        <img id="school-logo-display" class="hero-img" src="../images/socrates_logo.png" alt="School Logo" onerror="this.onerror=null;this.src='../images/socrates_logo.png';"/>
         <div>
           <h2 class="text-xl sm:text-2xl">Here is your Library — <span class="text-indigo-700">Read</span>, enjoy <span class="text-emerald-700">school books</span>, <span class="text-purple-700">story books</span>, and <span class="text-amber-700">fun books</span>. Build your own future.</h2>
           <p class="mt-1 italic">“An unexamined life is not worth living.” — <strong>Socrates</strong></p>
+
+          <div class="mt-3 flex flex-wrap items-center gap-3">
+            <div class="text-sm font-bold text-gray-700">School: <span id="somapSchoolName">—</span></div>
+            <div class="text-sm font-bold text-gray-700">Class: <span id="somapResolvedClass">—</span></div>
+            <div class="ml-auto flex flex-wrap items-center gap-2">
+              <label class="text-xs uppercase tracking-wider text-gray-500 font-extrabold">Academic Year</label>
+              <select data-somap-year-select class="rounded-lg border border-gray-300 px-2 py-1 text-sm font-extrabold"></select>
+              <div class="text-xs text-gray-600">Working year: <span id="somapYearHint" class="font-extrabold">—</span></div>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>
@@ -233,6 +246,54 @@
   const urlParams = new URLSearchParams(location.search);
   const forcedStudentId = urlParams.get('student');
   const forcedClassParam = (urlParams.get('class') || '').trim();
+  const forcedYearParam = (urlParams.get('year') || '').trim();
+
+  // Sync year from URL to the shared yearContext (navigation should not "pin" manual year).
+  if (forcedYearParam && window.somapYearContext && typeof window.somapYearContext.setSelectedYear === 'function') {
+    window.somapYearContext.setSelectedYear(forcedYearParam, { manual: false, forceDispatch: true });
+  }
+
+  function getActiveYear(){
+    return (window.somapYearContext && typeof window.somapYearContext.getSelectedYear === 'function')
+      ? String(window.somapYearContext.getSelectedYear())
+      : String(new Date().getFullYear());
+  }
+
+  // MULTI-SCHOOL guard (required on every SoMAp page)
+  let currentSchool = null;
+  try { currentSchool = window.SOMAP && typeof SOMAP.getSchool === 'function' ? SOMAP.getSchool() : null; } catch(_e){}
+  if (!currentSchool || !currentSchool.id) {
+    location.href = "../somapappv1multischool/multischool.html";
+    throw new Error("No active school selected");
+  }
+  const schoolId = String(currentSchool.id);
+  const schoolName = String(currentSchool.name || currentSchool.id || "");
+  const schoolRef = (subPath) => db.ref(SOMAP.P(subPath));
+
+  // UI: show school name + working year
+  const schoolNameEl = document.getElementById('somapSchoolName');
+  if (schoolNameEl) schoolNameEl.textContent = schoolName || schoolId;
+  const yearHintEl = document.getElementById('somapYearHint');
+  if (yearHintEl) yearHintEl.textContent = getActiveYear();
+
+  // Dynamic school logo (falls back to Socrates logo)
+  async function loadSchoolLogo(){
+    const img = document.getElementById('school-logo-display');
+    if (!img) return;
+    if (schoolId === "socrates-school" || schoolId === "default") {
+      img.src = "../images/socrates_logo.png";
+      return;
+    }
+    try{
+      const snap = await db.ref(`schools/${schoolId}/profile/logoUrl`).once('value');
+      const url = snap.val();
+      img.src = url || "../images/socrates_logo.png";
+    } catch(_e){
+      img.src = "../images/socrates_logo.png";
+    }
+  }
+  loadSchoolLogo();
+
   if (forcedStudentId){
     try{ localStorage.setItem('studentKey', forcedStudentId); }catch(_e){}
   }
@@ -240,6 +301,47 @@
   let userMode = 'child'; // 'child' | 'teacher'
   let className = '';
   let userKey = '';
+
+  let childBaseClass = '';
+  let teacherBaseClass = '';
+
+  function updateResolvedClassUI(cls){
+    const el = document.getElementById('somapResolvedClass');
+    if (el) el.textContent = cls || '—';
+  }
+
+  function showGraduatedState(){
+    updateResolvedClassUI('Graduated');
+    const grid = document.getElementById('booksGrid');
+    if (grid) grid.innerHTML = '<div class="empty">Student has graduated (Class 7 completed). Books are in the previous years.</div>';
+  }
+
+  function refreshForActiveYear(){
+    const yr = getActiveYear();
+    const yearEl = document.getElementById('somapYearHint');
+    if (yearEl) yearEl.textContent = yr;
+
+    if (userMode === 'child' && childBaseClass){
+      const cls = shiftClassForYear(childBaseClass, yr);
+      className = cls;
+      updateResolvedClassUI(cls);
+      if (cls === 'GRADUATED') { showGraduatedState(); return; }
+      fetchBooks(cls);
+      return;
+    }
+    if (userMode === 'teacher' && teacherBaseClass){
+      const cls = normalizeClassName(teacherBaseClass);
+      className = cls;
+      updateResolvedClassUI(cls);
+      fetchBooks(cls);
+    }
+  }
+
+  // React to year selector changes
+  if (window.somapYearContext && typeof window.somapYearContext.onYearChanged === 'function') {
+    window.somapYearContext.onYearChanged(() => refreshForActiveYear());
+  }
+
 
   auth.onAuthStateChanged(async (user) => {
     if (user) {
@@ -249,9 +351,11 @@
         const u = snap.val();
         if (u && u.role === 'teacher' && u.class) {
           userMode = 'teacher';
-          className = normalizeClassName((u.class||'').trim());
+          teacherBaseClass = (u.class || '').trim();
+          className = normalizeClassName(teacherBaseClass);
+          updateResolvedClassUI(className);
           initTeacher();
-          fetchBooks(className);
+          refreshForActiveYear();
         } else {
           alert('Invalid teacher access'); location.href='../index.html';
         }
@@ -260,23 +364,22 @@
       const studentKey = forcedStudentId || localStorage.getItem('studentKey');
       if (!studentKey){ alert('Please sign in'); location.href='../index.html'; return; }
       try {
-        const snap = await db.ref(`students/${studentKey}`).once('value');
+        const snap = await schoolRef(`students/${studentKey}`).once('value');
         const s = snap.val();
         if (!s && !forcedClassParam){
           localStorage.removeItem('studentKey');
           location.href='../index.html';
           return;
         }
-        const resolvedClass = normalizeClassName((forcedClassParam || s?.classLevel || s?.class || '').trim());
-        if (!resolvedClass){
-          alert('Class information missing for this learner.');
-          return;
-        }
-        userMode = 'child';
-        className = resolvedClass;
-        userKey = studentKey;
-        try{ localStorage.setItem('studentKey', studentKey); }catch(_e){}
-        initChild(); fetchBooks(className);
+        const baseClassRaw = (forcedClassParam || s?.classLevel || s?.class || 'Class 1').trim();
+      childBaseClass = baseClassRaw;
+
+      userMode = 'child';
+      className = shiftClassForYear(baseClassRaw, getActiveYear());
+      updateResolvedClassUI(className);
+
+      initChild();
+      refreshForActiveYear();
       } catch(e){ alert(e.message); }
     }
   });
@@ -304,45 +407,86 @@
     const raw = (value || '').trim();
     if (!raw) return '';
     const lower = raw.toLowerCase();
-    if (lower.includes('baby') || lower.includes('pre unit') || lower.includes('pre-unit') || lower.includes('middle')){
-      return 'Baby Class';
-    }
+
+    // Canonical class labels for Books module:
+    // Baby Class, Middle Class, Pre-Unit, Class 1..Class 7
+    if (lower.includes('baby') || lower.includes('nursery')) return 'Baby Class';
+    if (lower.includes('middle')) return 'Middle Class';
+    if (lower.includes('pre unit') || lower.includes('pre-unit') || lower.includes('preunit')) return 'Pre-Unit';
+
     const classMatch = lower.match(/class\s*(\d+)/);
-    if (classMatch){
-      return `Class ${classMatch[1]}`;
-    }
+    if (classMatch) return `Class ${classMatch[1]}`;
+
     if (lower.includes('std 7') || lower.includes('standard 7') || lower.includes('grade 7')) return 'Class 7';
     return raw;
   }
 
+  const SOMAP_CLASS_ANCHOR_YEAR = 2025;
+  const BOOKS_CLASS_ORDER = [
+    'Baby Class',
+    'Middle Class',
+    'Pre-Unit',
+    'Class 1',
+    'Class 2',
+    'Class 3',
+    'Class 4',
+    'Class 5',
+    'Class 6',
+    'Class 7',
+  ];
+
+  function shiftClassForYear(baseClass, targetYear){
+    const base = normalizeClassName(baseClass);
+    const yearNum = Number(targetYear);
+    const delta = (Number.isFinite(yearNum) ? yearNum : new Date().getFullYear()) - SOMAP_CLASS_ANCHOR_YEAR;
+
+    const idx = BOOKS_CLASS_ORDER.findIndex((c) => c.toLowerCase() === base.toLowerCase());
+    if (idx < 0) return base;
+
+    const next = idx + delta;
+    if (next >= BOOKS_CLASS_ORDER.length) return 'GRADUATED';
+    if (next < 0) return base;
+    return BOOKS_CLASS_ORDER[next];
+  }
+
   async function fetchBooks(cls){
-    grid.innerHTML = '';
-    loadingEl.classList.remove('hidden');
-    noBooksEl.classList.add('hidden');
+    const normalizedCls = normalizeClassName(cls);
+    const year = getActiveYear();
 
-    const normalizedCls = normalizeClassName(cls) || cls;
-    className = normalizedCls;
-    const path = `class_books/${encodeURIComponent(normalizedCls)}`;
-    const key = `books_${normalizedCls}`;
-    if (cache.has(key)) { renderBooks(cache.get(key)); }
-
-    try{
-      const snap = await db.ref(path).once('value');
-      const data = snap.val() || {};
-      const entries = Object.entries(data);
-      cache.set(key, entries);
-      renderBooks(entries);
-      db.ref(path).on('value', s=>{
-        const d = s.val()||{};
-        const e = Object.entries(d);
-        if (JSON.stringify(e)!==JSON.stringify(cache.get(key))){
-          cache.set(key,e); renderBooks(e);
-        }
-      });
-    }catch(e){
-      loadingEl.classList.add('hidden');
-      alert('Error loading books: ' + e.message);
+    // Cache key must include YEAR to prevent showing last year's books.
+    const cacheKey = `books_${year}_${normalizedCls}`;
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) {
+      try { renderBooks(Object.values(JSON.parse(cached))); } catch(_e){}
     }
+
+    // Prefer year-scoped books: class_books/<YEAR>/<CLASS>
+    const yearPath = `class_books/${year}/${encodeURIComponent(normalizedCls)}`;
+    const legacyPath = `class_books/${encodeURIComponent(normalizedCls)}`;
+
+    // stop old listeners
+    if (window.__booksRefUnsub) { window.__booksRefUnsub(); window.__booksRefUnsub = null; }
+
+    const attachListener = (ref) => {
+      ref.on('value', (snap) => {
+        const val = snap.val();
+        const books = val ? Object.values(val) : [];
+        try { localStorage.setItem(cacheKey, JSON.stringify(books)); } catch(_e){}
+        renderBooks(books);
+      });
+      return () => ref.off();
+    };
+
+    // Try year path first, then fallback to legacy.
+    try{
+      const snap = await db.ref(yearPath).once('value');
+      if (snap.exists()) {
+        window.__booksRefUnsub = attachListener(db.ref(yearPath));
+        return;
+      }
+    } catch(_e){}
+
+    window.__booksRefUnsub = attachListener(db.ref(legacyPath));
   }
 
   // attach once
@@ -721,7 +865,7 @@
         const rect = el.getBoundingClientRect();
         const inView = rect.bottom > 0 && rect.top < window.innerHeight*1.8;
         if (inView || force){
-          const pageNo = Number(el.dataset.page);
+          const pageNo = Number(en.target.dataset.page);
           renderPdfPage(pageNo);
         }
       });
