@@ -318,18 +318,20 @@
 
   function refreshForActiveYear(){
     const yr = getActiveYear();
-    const yearEl = document.getElementById('somapYearHint');
+    const yearEl = document.getElementById("somapYearHint");
     if (yearEl) yearEl.textContent = yr;
 
-    if (userMode === 'child' && childBaseClass){
+    if (userMode === "child" && childBaseClass){
       const cls = shiftClassForYear(childBaseClass, yr);
       className = cls;
       updateResolvedClassUI(cls);
-      if (cls === 'GRADUATED') { showGraduatedState(); return; }
+
+      if (cls === "GRADUATED") { showGraduatedState(); return; }
       fetchBooks(cls);
       return;
     }
-    if (userMode === 'teacher' && teacherBaseClass){
+
+    if (userMode === "teacher" && teacherBaseClass){
       const cls = normalizeClassName(teacherBaseClass);
       className = cls;
       updateResolvedClassUI(cls);
@@ -449,54 +451,89 @@
     return BOOKS_CLASS_ORDER[next];
   }
 
-  async function fetchBooks(cls){
-    const normalizedCls = normalizeClassName(cls);
-    const year = getActiveYear();
+let currentBooksCacheKey = ""; // used by search
 
-    // Cache key must include YEAR to prevent showing last year's books.
-    const cacheKey = `books_${year}_${normalizedCls}`;
-    const cached = localStorage.getItem(cacheKey);
-    if (cached) {
-      try { renderBooks(Object.values(JSON.parse(cached))); } catch(_e){}
-    }
+function classKeyVariants(normalizedCls){
+  const raw = String(normalizedCls || "").trim();
+  const enc = encodeURIComponent(raw);
+  // Try encoded first (new uploader), then raw (older nodes)
+  return (enc && enc !== raw) ? [enc, raw] : [raw];
+}
 
-    // Prefer year-scoped books: class_books/<YEAR>/<CLASS>
-    const yearPath = `class_books/${year}/${encodeURIComponent(normalizedCls)}`;
-    const legacyPath = `class_books/${encodeURIComponent(normalizedCls)}`;
-
-    // stop old listeners
-    if (window.__booksRefUnsub) { window.__booksRefUnsub(); window.__booksRefUnsub = null; }
-
-    const attachListener = (ref) => {
-      ref.on('value', (snap) => {
-        const val = snap.val();
-        const books = val ? Object.values(val) : [];
-        try { localStorage.setItem(cacheKey, JSON.stringify(books)); } catch(_e){}
-        renderBooks(books);
-      });
-      return () => ref.off();
-    };
-
-    // Try year path first, then fallback to legacy.
+async function pickFirstExistingPath(paths){
+  for (const p of paths){
     try{
-      const snap = await db.ref(yearPath).once('value');
-      if (snap.exists()) {
-        window.__booksRefUnsub = attachListener(db.ref(yearPath));
-        return;
-      }
-    } catch(_e){}
-
-    window.__booksRefUnsub = attachListener(db.ref(legacyPath));
+      const snap = await db.ref(p).once("value");
+      if (snap.exists()) return p;
+    }catch(_e){}
   }
+  return paths[0]; // if none exists yet, still listen on the best candidate
+}
+
+async function fetchBooks(cls){
+  const normalizedCls = normalizeClassName(cls);
+  const year = getActiveYear();
+
+  // UI loading
+  grid.innerHTML = "";
+  loadingEl.classList.remove("hidden");
+  noBooksEl.classList.add("hidden");
+
+  // Cache key MUST include year
+  const cacheKey = `books_${year}_${normalizedCls}`;
+  currentBooksCacheKey = cacheKey;
+
+  // Show cached immediately (if any)
+  try{
+    const cached = localStorage.getItem(cacheKey);
+    if (cached){
+      const entries = JSON.parse(cached);
+      if (Array.isArray(entries)){
+        cache.set(cacheKey, entries);
+        renderBooks(entries);
+      }
+    }
+  }catch(_e){}
+
+  // stop old listeners
+  if (window.__booksRefUnsub) { window.__booksRefUnsub(); window.__booksRefUnsub = null; }
+
+  // Build candidate paths (try YEAR first, then legacy; try encoded + raw class keys)
+  const keys = classKeyVariants(normalizedCls);
+  const candidates = [];
+  for (const k of keys) candidates.push(`class_books/${year}/${k}`);
+  for (const k of keys) candidates.push(`class_books/${k}`);
+
+  const chosenPath = await pickFirstExistingPath(candidates);
+  const ref = db.ref(chosenPath);
+
+  ref.on("value", (snap) => {
+    const val = snap.val() || {};
+
+    // IMPORTANT: keep [id, book] entries so renderBooks works
+    let entries = Object.entries(val);
+
+    // store in memory + local cache
+    cache.set(cacheKey, entries);
+    try{ localStorage.setItem(cacheKey, JSON.stringify(entries)); }catch(_e){}
+
+    renderBooks(entries);
+  });
+
+  window.__booksRefUnsub = () => ref.off();
+}
 
   // attach once
-  searchInput.addEventListener('input', ()=>{
-    const q = (searchInput.value||'').toLowerCase().trim();
-    const all = cache.get(`books_${className}`)||[];
-    const filtered = all.filter(([id,b])=>{
-      const t=(b.title||'').toLowerCase(); const s=(b.subject||'').toLowerCase();
-      return t.includes(q)||s.includes(q);
+  searchInput.addEventListener("input", () => {
+    const q = (searchInput.value || "").toLowerCase().trim();
+    const all = cache.get(currentBooksCacheKey) || [];
+
+    const filtered = all.filter(([id, b]) => {
+      const t = (b?.title || "").toLowerCase();
+      const s = (b?.subject || "").toLowerCase();
+      return t.includes(q) || s.includes(q);
     });
+
     renderBooks(filtered);
   });
 
