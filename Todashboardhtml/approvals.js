@@ -2,12 +2,12 @@
 (function () {
   'use strict';
 
-  const ADMIN_EMAIL = 'socratesschool2020@gmail.com';
   const COST_PER_FRIDAY = 1000;
   const SOMAP_DEFAULT_YEAR = 2025;
+  const DEFAULT_ACTOR = 'system@somap.app';
   const yearContext = window.somapYearContext;
   const trimText = (value) => (value == null ? '' : String(value).trim());
-  const getContextYear = () => String(yearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR);
+  const getContextYear = () => String(yearContext?.getSelectedYear?.() || new Date().getFullYear());
   const P = (subPath) => (window.SOMAP && typeof SOMAP.P === 'function') ? SOMAP.P(subPath) : subPath;
   const sref = (subPath) => firebase.database().ref(P(subPath));
   const MODULE_LABELS = {
@@ -29,6 +29,7 @@
 
   const els = {
     loader: document.getElementById('page-loader'),
+    schoolLabel: document.getElementById('schoolNameLabel'),
     refresh: document.getElementById('refreshApprovals'),
     filterModule: document.getElementById('filterModule'),
     filterMonth: document.getElementById('filterMonth'),
@@ -86,6 +87,8 @@
 
   const state = {
     user: null,
+    userProfile: null,
+    school: null,
     pending: {},
     pendingList: [],
     selectedRecord: null,
@@ -125,15 +128,48 @@
     return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
   }
 
-  function resolveSchoolId() {
-    if (window.currentSchoolId) return window.currentSchoolId;
-    const params = new URLSearchParams(window.location.search || '');
-    const q = params.get('school') || params.get('schoolId');
-    const stored = (typeof localStorage !== 'undefined') ? localStorage.getItem('somap_school') : '';
-    const id = (q || stored || 'socrates').trim();
-    window.currentSchoolId = id;
-    return id;
+  const schoolContext = { resolved: null };
+
+  function getActiveSchool() {
+    if (schoolContext.resolved) return schoolContext.resolved;
+    const school = window.SOMAP?.getSchool?.();
+    if (school && school.id) {
+      schoolContext.resolved = school;
+      window.currentSchoolId = school.id;
+      return school;
+    }
+    return null;
   }
+
+  const buildEmailKeys = (email) => {
+    const safe = String(email || '').toLowerCase();
+    if (!safe) return [];
+    return Array.from(new Set([
+      safe.replace(/\./g, '_'),
+      safe.replace(/[@.]/g, '_'),
+    ]));
+  };
+
+  async function fetchUserProfile(email) {
+    const keys = buildEmailKeys(email);
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
+      const snap = await db.ref(`users/${key}`).once('value');
+      if (snap.exists()) {
+        return { key, data: snap.val() };
+      }
+    }
+    return null;
+  }
+
+  function resolveSchoolId() {
+    const school = getActiveSchool();
+    if (school?.id) return school.id;
+    window.location.href = '../somapappv1multischool/multischool.html';
+    return '';
+  }
+
+  const actorEmail = () => state.user?.email || state.userProfile?.email || DEFAULT_ACTOR;
 
   function normalizeYearValue(value) {
     const candidate = Number(value);
@@ -204,24 +240,53 @@
     }, duration);
   }
 
-  function guardAccess(user) {
+  async function guardAccess(user) {
     if (!user) {
       window.location.href = '../index.html';
       return false;
     }
-    const email = (user.email || '').toLowerCase();
-    if (email !== ADMIN_EMAIL) {
+    const school = getActiveSchool();
+    if (!school || !school.id) {
+      window.location.href = '../somapappv1multischool/multischool.html';
+      return false;
+    }
+    try {
+      const profileRes = await fetchUserProfile(user.email);
+      const profile = profileRes?.data || {};
+      const role = String(profile.role || '').toLowerCase();
+      const allowed = role === 'admin' || role === 'accountant';
+      const sameSchool = profile.schoolId === school.id;
+      if (!profile || !allowed || !sameSchool) {
+        Swal.fire({
+          icon: 'error',
+          title: 'Restricted',
+          text: 'Payment approvals are restricted to admins/accountants of this school.',
+          confirmButtonColor: '#0ea5e9',
+        }).then(() => {
+          window.location.href = '../dashboard.html';
+        });
+        return false;
+      }
+      state.userProfile = { ...profile, key: profileRes.key };
+      state.school = school;
+      if (window.SomapFinance && typeof window.SomapFinance._clearFinanceCaches === 'function') {
+        window.SomapFinance._clearFinanceCaches();
+      }
+      if (els.schoolLabel) {
+        const label = school.name || school.code || school.id;
+        els.schoolLabel.textContent = `${label} Admin`;
+      }
+      return true;
+    } catch (err) {
+      console.error('Approvals: access guard failed', err);
       Swal.fire({
         icon: 'error',
         title: 'Restricted',
-        text: 'Payment approvals are restricted to the main admin account.',
+        text: 'Could not verify your approval rights. Please try again.',
         confirmButtonColor: '#0ea5e9',
-      }).then(() => {
-        window.location.href = '../dashboard.html';
       });
       return false;
     }
-    return true;
   }
 
   function attachListeners() {
@@ -452,29 +517,87 @@
     }
   }
 
-  function openDetailModal(record) {
+  const getStudentKeyFromRecord = (record) => (
+    record?.modulePayload?.studentKey
+    || record?.studentKey
+    || record?.studentId
+    || record?.modulePayload?.studentId
+    || ''
+  );
+
+  async function buildFinanceSnapshot(record) {
+    if (!record || record.sourceModule !== 'finance') return null;
+    if (!window.SomapFinance || typeof window.SomapFinance.loadStudentFinance !== 'function') return null;
+    const studentKey = getStudentKeyFromRecord(record);
+    if (!studentKey) return null;
+    const selectedYear = state.selectedYear || getContextYear();
+    try {
+      const fin = await window.SomapFinance.loadStudentFinance(selectedYear, studentKey);
+      if (!fin) return null;
+      const claimed = Number(record.amountPaidNow || 0);
+      const totalRequired = Number(fin.due || fin.feePerYear || 0);
+      const paidBefore = Number(fin.paid || 0);
+      const newBalance = Math.max(0, totalRequired - (paidBefore + claimed));
+      const breakdown = [
+        { label: 'Academic Year', value: selectedYear },
+        { label: 'Plan', value: fin.paymentPlan || record.paymentPlan || '--' },
+        { label: 'Fee (Year)', value: formatCurrency(totalRequired) },
+        { label: 'Paid Before', value: formatCurrency(paidBefore) },
+        { label: 'Balance After Approval', value: formatCurrency(newBalance) },
+        { label: 'Paid By', value: record.paidBy || record.modulePayload?.payment?.paidBy || '--' },
+        { label: 'Payer Contact', value: record.payerContact || record.modulePayload?.payment?.payerContact || '--' },
+      ];
+      return {
+        ...record,
+        className: fin.classLevel || record.className,
+        totalRequired,
+        totalPaidBefore: paidBefore,
+        newBalanceAfterThis: newBalance,
+        paymentPlan: fin.paymentPlan || record.paymentPlan,
+        modulePayload: {
+          ...record.modulePayload,
+          studentKey,
+          breakdown,
+        },
+      };
+    } catch (err) {
+      console.warn('Approvals: live finance snapshot failed', err);
+      return null;
+    }
+  }
+
+  async function openDetailModal(record) {
     state.selectedRecord = record;
     if (!els.detailContent || !els.detailModal) return;
 
+    let viewModel = record;
+    if (record?.sourceModule === 'finance') {
+      const liveSnapshot = await buildFinanceSnapshot(record);
+      if (liveSnapshot) {
+        viewModel = liveSnapshot;
+        state.selectedRecord = liveSnapshot;
+      }
+    }
+
     const dataRows = [
-      { label: 'Student', value: `${record.studentName || '--'} (${record.studentAdm || '--'})` },
-      { label: 'Class', value: record.className || '--' },
-      { label: 'Parent Contact', value: record.parentContact || '--' },
-      { label: 'Source Module', value: MODULE_LABELS[record.sourceModule] || record.sourceModule },
-      { label: 'Amount Claimed', value: formatCurrency(record.amountPaidNow) },
-      { label: 'Payment Method', value: record.paymentMethod || '--' },
-      { label: 'Reference Code', value: record.paymentReferenceCode || '--' },
-      { label: 'Recorded By', value: record.recordedBy || '--' },
-      { label: 'Recorded At', value: formatDate(record.datePaid || record.createdAt) },
-      { label: 'Total Required', value: formatCurrency(record.totalRequired) },
-      { label: 'Paid Before', value: formatCurrency(record.totalPaidBefore) },
-      { label: 'New Balance After Approval', value: formatCurrency(record.newBalanceAfterThis) },
+      { label: 'Student', value: `${viewModel.studentName || '--'} (${viewModel.studentAdm || '--'})` },
+      { label: 'Class', value: viewModel.className || '--' },
+      { label: 'Parent Contact', value: viewModel.parentContact || '--' },
+      { label: 'Source Module', value: MODULE_LABELS[viewModel.sourceModule] || viewModel.sourceModule },
+      { label: 'Amount Claimed', value: formatCurrency(viewModel.amountPaidNow) },
+      { label: 'Payment Method', value: viewModel.paymentMethod || '--' },
+      { label: 'Reference Code', value: viewModel.paymentReferenceCode || '--' },
+      { label: 'Recorded By', value: viewModel.recordedBy || '--' },
+      { label: 'Recorded At', value: formatDate(viewModel.datePaid || viewModel.createdAt) },
+      { label: 'Total Required', value: formatCurrency(viewModel.totalRequired) },
+      { label: 'Paid Before', value: formatCurrency(viewModel.totalPaidBefore) },
+      { label: 'New Balance After Approval', value: formatCurrency(viewModel.newBalanceAfterThis) },
     ];
 
-    const notesHtml = record.notes
+    const notesHtml = viewModel.notes
       ? `<div class="rounded-2xl border border-slate-500/30 bg-slate-900/50 px-4 py-3 text-sm text-slate-200">
           <p class="uppercase text-xs tracking-[0.3em] text-slate-400/70 mb-1">Accountant Note</p>
-          <p>${record.notes}</p>
+          <p>${viewModel.notes}</p>
         </div>`
       : '';
 
@@ -487,14 +610,14 @@
           </div>`).join('')}
       </div>`;
 
-    const moduleMessage = buildModuleReminder(record.sourceModule);
+    const moduleMessage = buildModuleReminder(viewModel.sourceModule);
 
     els.detailContent.innerHTML = `
       <div class="space-y-4">
         ${moduleMessage}
         ${metaHtml}
         ${notesHtml}
-        ${buildLedgerPreview(record)}
+        ${buildLedgerPreview(viewModel)}
       </div>`;
 
     els.detailModal.classList.add('active');
@@ -590,10 +713,10 @@
       note: paymentData.note || record.notes || '',
       paidBy: paymentData.paidBy || record.paidBy || '',
       payerContact: paymentData.payerContact || record.payerContact || '',
-      recordedBy: paymentData.recordedBy || record.recordedBy || state.user?.email || ADMIN_EMAIL,
+      recordedBy: paymentData.recordedBy || record.recordedBy || actorEmail(),
       referenceCode: trimText(paymentData.referenceCode || record.paymentReferenceCode || paymentData.reference || ''),
       approvedAt: Number(options.approvedAt || record.approvedAt || Date.now()),
-      approvedBy: options.approvedBy || record.approvedBy || state.user?.email || ADMIN_EMAIL,
+      approvedBy: options.approvedBy || record.approvedBy || actorEmail(),
       module: MODULE_LABELS.finance,
       status: options.status || (record.status || 'approved'),
       forYear: resolvedYear,
@@ -656,7 +779,7 @@
     const targetYear = await ensureApprovalHasYear(record, record.forYear || state.selectedYear);
     const approvedAt = Date.now();
     record.approvedAt = record.approvedAt || approvedAt;
-    record.approvedBy = record.approvedBy || state.user?.email || ADMIN_EMAIL;
+    record.approvedBy = record.approvedBy || actorEmail();
     showLoader(true);
     try {
       if (record.source === 'Finance Reclassifier') {
@@ -703,7 +826,7 @@
     const basePath = `schools/${schoolId}/joiningApplications/${year}/${appId}`;
     updates[`${basePath}/paymentVerificationStatus`] = 'verified';
     updates[`${basePath}/paymentVerifiedAt`] = record.approvedAt || Date.now();
-    updates[`${basePath}/paymentVerifiedByUserId`] = record.approvedBy || state.user?.email || ADMIN_EMAIL;
+    updates[`${basePath}/paymentVerifiedByUserId`] = record.approvedBy || actorEmail();
     updates[`${basePath}/status`] = 'paid_form_issued';
     await db.ref().update(updates);
   }
@@ -763,7 +886,7 @@
     if (paymentKey) {
       // Update the ledger entry to mark as approved
       updates[`${prefix}transportLedgers/${year}/${studentKey}/payments/${paymentKey}/approved`] = true;
-      updates[`${prefix}transportLedgers/${year}/${studentKey}/payments/${paymentKey}/approvedBy`] = state.user?.email || ADMIN_EMAIL;
+      updates[`${prefix}transportLedgers/${year}/${studentKey}/payments/${paymentKey}/approvedBy`] = actorEmail();
       updates[`${prefix}transportLedgers/${year}/${studentKey}/payments/${paymentKey}/approvedAt`] = firebase.database.ServerValue.TIMESTAMP;
     }
     
@@ -773,7 +896,7 @@
       ...paymentData,
       approved: true,
       approvedAt: firebase.database.ServerValue.TIMESTAMP,
-      approvedBy: state.user?.email || ADMIN_EMAIL,
+      approvedBy: actorEmail(),
     };
     
     await db.ref().update(updates);
@@ -789,7 +912,7 @@
     await pushRef.set({
       ...paymentData,
       approvedAt: firebase.database.ServerValue.TIMESTAMP,
-      approvedBy: state.user?.email || ADMIN_EMAIL,
+      approvedBy: actorEmail(),
     });
     await db.ref(`${basePath}/students/${admission}`).update({
       updatedAt: firebase.database.ServerValue.TIMESTAMP,
@@ -808,7 +931,7 @@
       ...paymentData,
       receiptRefId: paymentId,
       approvedAt: firebase.database.ServerValue.TIMESTAMP,
-      approvedBy: state.user?.email || ADMIN_EMAIL,
+      approvedBy: actorEmail(),
     });
 
     await db.ref(`graduation/${year}/students/${admission}`).transaction((stu) => {
@@ -836,14 +959,14 @@
       method: paymentData.method,
       note,
       reference: paymentData.reference || null,
-      recordedBy: state.user?.email || ADMIN_EMAIL,
+      recordedBy: actorEmail(),
       timestamp: firebase.database.ServerValue.TIMESTAMP,
       graduationYear: year,
       _src: `graduation/${year}/payments/${paymentId}`,
     });
 
     await db.ref(`graduation/${year}/audits`).push({
-      actor: state.user?.email || ADMIN_EMAIL,
+      actor: actorEmail(),
       action: 'payment:approve',
       refType: 'payment',
       refId: paymentId,
@@ -866,7 +989,7 @@
 
     await db.ref(`fridayMoney/${fridayId}/${studentId}`).update({
       ...entryUpdate,
-      approvedBy: state.user?.email || ADMIN_EMAIL,
+      approvedBy: actorEmail(),
       approvedAt: firebase.database.ServerValue.TIMESTAMP,
     });
   }
@@ -886,7 +1009,7 @@
       forYear: Number.isFinite(resolvedForYear) ? resolvedForYear : undefined,
       status: 'completed',
       finalStatus,
-      approvedBy: state.user?.email || ADMIN_EMAIL,
+      approvedBy: actorEmail(),
       approvedAt: firebase.database.ServerValue.TIMESTAMP,
     };
 
@@ -1223,8 +1346,9 @@
 
   function init() {
     attachListeners();
-    auth.onAuthStateChanged((user) => {
-      if (!guardAccess(user)) return;
+    auth.onAuthStateChanged(async (user) => {
+      const allowed = await guardAccess(user);
+      if (!allowed) return;
       state.user = user;
       loadAllData();
     });

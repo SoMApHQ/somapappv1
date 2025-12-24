@@ -6,12 +6,14 @@
   <title>Financial Statements Dashboard</title>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="../../firebase.js"></script>
+  <script src="../../somapappv1multischool/js/context.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-slate-50 min-h-screen">
-  <div class="max-w-5xl mx-auto px-4 py-6">
+  <div id="fsShell" class="max-w-5xl mx-auto px-4 py-6">
     <header class="flex items-start justify-between flex-col md:flex-row md:items-center gap-3 mb-6">
       <div>
         <p class="text-xs uppercase tracking-widest text-indigo-500">SoMAp</p>
@@ -42,9 +44,17 @@
       </div>
       <div class="bg-indigo-700 text-white rounded-xl p-4 shadow-sm border border-indigo-400">
         <p class="text-xs uppercase tracking-wide text-indigo-100 mb-1">Info</p>
-        <h2 class="text-lg font-semibold mb-2">Socrates audited format</h2>
+        <h2 id="fsSchoolName" class="text-lg font-semibold mb-2">Socrates audited format</h2>
         <p class="text-sm text-indigo-100">Ripoti zitafuata mpangilio wa TRA/Socrates. Unaweza kuzifunga (final) ukikamilisha.</p>
       </div>
+    </div>
+  </div>
+
+  <div id="fsRestricted" class="max-w-3xl mx-auto px-4 py-12 hidden">
+    <div class="rounded-xl border border-slate-200 bg-white p-8 shadow-sm text-center">
+      <h2 class="text-2xl font-semibold text-slate-900">Restricted</h2>
+      <p class="mt-2 text-slate-600">Financial statements are only available to this school&apos;s admins or accountants.</p>
+      <a href="../../somapappv1multischool/multischool.html" class="mt-4 inline-flex items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-white font-semibold shadow hover:bg-indigo-700">Switch School</a>
     </div>
   </div>
 
@@ -52,11 +62,79 @@
   <script src="../../Tojs/financialstatements/fs_mapping.js"></script>
   <script src="../../Tojs/financialstatements/fs_ui.js"></script>
   <script>
-    document.addEventListener('DOMContentLoaded', () => {
-      if (window.FinancialStatementsUI?.wireDashboardPage) {
-        window.FinancialStatementsUI.wireDashboardPage();
+    (function () {
+      const shell = document.getElementById('fsShell');
+      const restricted = document.getElementById('fsRestricted');
+      const schoolNameEl = document.getElementById('fsSchoolName');
+      if (shell) shell.classList.add('hidden');
+
+      const db = firebase.database();
+      const auth = firebase.auth();
+
+      const buildEmailKeys = (email) => {
+        const safe = String(email || '').toLowerCase();
+        if (!safe) return [];
+        return Array.from(new Set([
+          safe.replace(/\./g, '_'),
+          safe.replace(/[@.]/g, '_'),
+        ]));
+      };
+
+      async function fetchUserProfile(email) {
+        const keys = buildEmailKeys(email);
+        for (let i = 0; i < keys.length; i += 1) {
+          const key = keys[i];
+          const snap = await db.ref(`users/${key}`).once('value');
+          if (snap.exists()) {
+            return { key, data: snap.val() };
+          }
+        }
+        return null;
       }
-    });
+
+      function showRestricted(message) {
+        if (shell) shell.classList.add('hidden');
+        if (restricted) {
+          const msg = restricted.querySelector('p.text-slate-600');
+          if (msg && message) msg.textContent = message;
+          restricted.classList.remove('hidden');
+        }
+      }
+
+      auth.onAuthStateChanged(async (user) => {
+        const school = window.SOMAP?.getSchool?.();
+        if (!school || !school.id) {
+          window.location.href = '../../somapappv1multischool/multischool.html';
+          return;
+        }
+        if (!user) {
+          showRestricted('Please sign in with your admin or accountant account.');
+          return;
+        }
+        try {
+          const profileRes = await fetchUserProfile(user.email);
+          const profile = profileRes?.data || {};
+          const role = String(profile.role || '').toLowerCase();
+          const allowed = role === 'admin' || role === 'accountant';
+          if (!allowed || profile.schoolId !== school.id) {
+            showRestricted('Financial statements are only available to this school\'s admins or accountants.');
+            return;
+          }
+          if (restricted) restricted.classList.add('hidden');
+          if (shell) shell.classList.remove('hidden');
+          if (schoolNameEl) {
+            const label = school.name || school.code || school.id || 'School';
+            schoolNameEl.textContent = `${label} audited format`;
+          }
+          if (window.FinancialStatementsUI?.wireDashboardPage) {
+            window.FinancialStatementsUI.wireDashboardPage();
+          }
+        } catch (err) {
+          console.error('FS Dashboard auth gate failed', err);
+          showRestricted('Restricted. Please try again or contact support.');
+        }
+      });
+    })();
   </script>
 </body>
 </html>
