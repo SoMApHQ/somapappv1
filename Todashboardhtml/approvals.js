@@ -254,7 +254,7 @@
       const profileRes = await fetchUserProfile(user.email);
       const profile = profileRes?.data || {};
       const role = String(profile.role || '').toLowerCase();
-      const allowed = role === 'admin' || role === 'accountant';
+      const allowed = role === 'admin';
       const profileSchoolId = profile.schoolId || profile.schoolid || '';
       const isSocrates = school.id === 'socrates-school';
       const sameSchool = profileSchoolId
@@ -264,7 +264,7 @@
         Swal.fire({
           icon: 'error',
           title: 'Restricted',
-          text: 'Payment approvals are restricted to admins/accountants of this school.',
+          text: 'Payment approvals are restricted to admins of this school.',
           confirmButtonColor: '#0ea5e9',
         }).then(() => {
           window.location.href = '../dashboard.html';
