@@ -255,7 +255,11 @@
       const profile = profileRes?.data || {};
       const role = String(profile.role || '').toLowerCase();
       const allowed = role === 'admin' || role === 'accountant';
-      const sameSchool = profile.schoolId === school.id;
+      const profileSchoolId = profile.schoolId || profile.schoolid || '';
+      const isSocrates = school.id === 'socrates-school';
+      const sameSchool = profileSchoolId
+        ? (profileSchoolId === school.id || (isSocrates && profileSchoolId === 'socrates'))
+        : isSocrates; // allow legacy admins without schoolId for default school
       if (!profile || !allowed || !sameSchool) {
         Swal.fire({
           icon: 'error',
@@ -267,7 +271,7 @@
         });
         return false;
       }
-      state.userProfile = { ...profile, key: profileRes.key };
+      state.userProfile = { ...profile, key: profileRes.key, email: user.email };
       state.school = school;
       if (window.SomapFinance && typeof window.SomapFinance._clearFinanceCaches === 'function') {
         window.SomapFinance._clearFinanceCaches();
