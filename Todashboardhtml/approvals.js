@@ -7,7 +7,13 @@
   const DEFAULT_ACTOR = 'system@somap.app';
   const yearContext = window.somapYearContext;
   const trimText = (value) => (value == null ? '' : String(value).trim());
-  const getContextYear = () => String(yearContext?.getSelectedYear?.() || new Date().getFullYear());
+  const getContextYear = () => {
+    const ctx = window.somapYearContext;
+    if (ctx && typeof ctx.getSelectedYear === 'function') {
+      return String(ctx.getSelectedYear());
+    }
+    return String(new Date().getFullYear());
+  };
   const P = (subPath) => (window.SOMAP && typeof SOMAP.P === 'function') ? SOMAP.P(subPath) : subPath;
   const sref = (subPath) => firebase.database().ref(P(subPath));
   const MODULE_LABELS = {
@@ -526,6 +532,10 @@
     || record?.studentKey
     || record?.studentId
     || record?.modulePayload?.studentId
+    || record?.studentAdm
+    || record?.admissionNumber
+    || record?.modulePayload?.admissionNumber
+    || record?.modulePayload?.admission
     || ''
   );
 
@@ -534,7 +544,7 @@
     if (!window.SomapFinance || typeof window.SomapFinance.loadStudentFinance !== 'function') return null;
     const studentKey = getStudentKeyFromRecord(record);
     if (!studentKey) return null;
-    const selectedYear = state.selectedYear || getContextYear();
+    const selectedYear = getContextYear();
     try {
       const fin = await window.SomapFinance.loadStudentFinance(selectedYear, studentKey);
       if (!fin) return null;
