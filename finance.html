@@ -436,7 +436,17 @@
 
   // ===== Helpers (kept as-is) =====
   function fmt(n) { n = Number(n) || 0; return n.toLocaleString(); }
-  function clamp(n) { return Math.max(0, Math.round(Number(n) || 0)); }
+  function parseMoney(value) {
+    if (value == null) return 0;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+    if (typeof value === 'string') {
+      const cleaned = value.replace(/[^\d.-]/g, '');
+      const parsed = Number(cleaned);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    return 0;
+  }
+  function clamp(n) { return Math.max(0, Math.round(parseMoney(n))); }
   function todayYMD() {
     const now = new Date();
     const selectedYear = Number(financeYear);
@@ -700,21 +710,27 @@
 
   function normalizePayments(source, targetYear) {
     if (!source) return {};
+    let bucket = source;
+    if (source && typeof source === 'object' && !Array.isArray(source) && source.payments) {
+      bucket = source.payments;
+    }
+    if (!bucket || typeof bucket !== 'object') return {};
     const normalized = {};
     const desiredYear = Number(targetYear);
-    Object.entries(source).forEach(([key, raw]) => {
+    Object.entries(bucket).forEach(([key, raw]) => {
       if (raw == null) return;
-      if (typeof raw === 'number') {
-        if (raw <= 0) return;
+      if (typeof raw === 'number' || typeof raw === 'string') {
+        const amount = parseMoney(raw);
+        if (!(amount > 0)) return;
         normalized[key] = {
-          amount: Number(raw),
+          amount,
           timestamp: Date.now(),
           academicYear: Number.isFinite(desiredYear) ? desiredYear : undefined,
         };
         return;
       }
-      const amount = Number(raw.amount ?? raw.value ?? raw.paid ?? raw.payment ?? raw.total ?? 0);
-      if (!Number.isFinite(amount) || amount <= 0) return;
+      const amount = parseMoney(raw.amount ?? raw.value ?? raw.paid ?? raw.payment ?? raw.total ?? 0);
+      if (!(amount > 0)) return;
       const timestamp = Number(
         raw.timestamp ?? raw.datePaid ?? raw.createdAt ?? raw.updatedAt ?? raw.recordedAt ?? raw.time ?? Date.now()
       );
@@ -934,6 +950,7 @@ function buildFinanceStudents(
         (override && Object.keys(override).length > 0) ||
         (classDefaults && Object.keys(classDefaults).length > 0) ||
         carryAmount > 0 ||
+        effectiveFee > 0 ||
         Object.keys(payments || {}).length > 0 ||
         Object.keys(base.payments || {}).length > 0;
 
@@ -1178,8 +1195,8 @@ function buildFinanceStudents(
       if (!isParentScope && student.isGraduated) return;
 
       let fin = computeStudentFinancials(student);
-      if (!student.hasYearData || student.isGraduated) {
-        const effectiveFee = student.isGraduated ? 0 : Number(student.feePerYear) || 0;
+      if (student.isGraduated) {
+        const effectiveFee = 0;
         fin = {
           feePerYear: isParentScope ? 0 : effectiveFee,
           previousDebt: 0,
@@ -1646,7 +1663,7 @@ function buildFinanceStudents(
   async function openDetailsModal(id) {
     const s = cachedStudents[id]; if (!s) return alert('Student not found');
     let fin = computeStudentFinancials(s);
-    if (!s.hasYearData || s.isGraduated) {
+    if (s.isGraduated) {
       fin = {
         feePerYear: 0,
         previousDebt: 0,

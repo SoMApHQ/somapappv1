@@ -8,6 +8,8 @@
   const yearContext = window.somapYearContext;
   const trimText = (value) => (value == null ? '' : String(value).trim());
   const getContextYear = () => String(yearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR);
+  const P = (subPath) => (window.SOMAP && typeof SOMAP.P === 'function') ? SOMAP.P(subPath) : subPath;
+  const sref = (subPath) => firebase.database().ref(P(subPath));
   const MODULE_LABELS = {
     finance: 'School Fees',
     transport: 'Transport',
@@ -297,7 +299,7 @@
       try { state.unsubPending(); } catch (err) { console.warn('Approvals: failed to detach previous listener', err); }
       state.unsubPending = null;
     }
-    const ref = db.ref('approvalsPending');
+    const ref = sref('approvalsPending');
     const handler = (snapshot) => {
       state.pending = snapshot.val() || {};
       state.pendingList = Object.entries(state.pending).map(([key, value]) => ({
@@ -417,7 +419,7 @@
     const normalized = normalizeYearValue(targetYear || record.forYear || state.selectedYear);
     const numeric = Number(normalized);
     try {
-      await db.ref(`approvalsPending/${approvalId}`).update({
+      await sref(`approvalsPending/${approvalId}`).update({
         forYear: numeric,
         academicYear: numeric,
       });
@@ -615,7 +617,7 @@
     const normalizedYear = normalizeYearValue(targetYear || record.forYear || state.selectedYear);
     const ledgerPath = `financeLedgers/${normalizedYear}/${studentKey}/payments/${approvalId}`;
     const payload = buildFinanceLedgerPayload(record, normalizedYear, options);
-    await db.ref(ledgerPath).set(payload);
+    await sref(ledgerPath).set(payload);
   }
 
   async function commitReclassifiedFinancePayment(record, targetYear) {
@@ -712,15 +714,16 @@
     if (!studentKey || !paymentData) throw new Error('Missing finance payload.');
 
     const updates = {};
-    const pushRef = db.ref(`students/${studentKey}/payments`).push();
-    updates[`students/${studentKey}/payments/${pushRef.key}`] = {
+    const pushRef = sref(`students/${studentKey}/payments`).push();
+    const paymentPath = `students/${studentKey}/payments/${pushRef.key}`;
+    updates[P(paymentPath)] = {
       ...paymentData,
       approvedAt: firebase.database.ServerValue.TIMESTAMP,
       approvedBy: record.approvedBy,
       referenceCode: record.paymentReferenceCode || null,
     };
-    updates[`students/${studentKey}/lastPaymentAt`] = firebase.database.ServerValue.TIMESTAMP;
-    await db.ref().update(updates);
+    updates[P(`students/${studentKey}/lastPaymentAt`)] = firebase.database.ServerValue.TIMESTAMP;
+    await firebase.database().ref().update(updates);
     await mirrorFinanceLedger(record, targetYear, {
       status: 'approved',
       approvedAt: record.approvedAt,
@@ -888,12 +891,12 @@
     };
 
     const updates = {};
-    updates[`approvalsPending/${approvalId}`] = null;
-    updates[historyPath] = payload;
-    await db.ref().update(updates);
+    updates[P(`approvalsPending/${approvalId}`)] = null;
+    updates[P(historyPath)] = payload;
+    await firebase.database().ref().update(updates);
   }
   async function loadHistorySnapshot() {
-    const snapshot = await db.ref('approvalsHistory').once('value');
+    const snapshot = await sref('approvalsHistory').once('value');
     const tree = snapshot.val() || {};
     const entries = [];
 
