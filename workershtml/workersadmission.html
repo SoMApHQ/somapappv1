@@ -1,10 +1,13 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="sw">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Kuajiri Wafanyakazi | SoMAp</title>
   <link rel="stylesheet" href="../css/workers.css"/>
+
+  <script src="../somapappv1multischool/js/context.js"></script>
+  <script src="../Todashboardhtml/yearContext.js"></script>
 
   <!-- Firebase compat SDKs -->
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
@@ -34,14 +37,35 @@
     .workers-table td.actions-cell button{font-size:.75rem;padding:.4rem .65rem;border-radius:8px}
     .workers-form-status{margin-top:10px;font-weight:600;color:#047857;min-height:1.2rem}
     .workers-form-status.error{color:#b91c1c}
+    .school-header{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:12px}
+    .school-brand{display:flex;align-items:center;gap:12px}
+    .school-logo{width:56px;height:56px;border-radius:14px;object-fit:contain;background:#fff;border:1px solid #e5e7eb;padding:6px}
+    .school-name{margin:0;font-weight:700;color:#111827}
+    .school-year{margin:0;color:#4b5563;font-size:.95rem}
+    .year-selector label{display:grid;gap:6px;font-weight:600}
+    .year-selector select{min-width:140px}
   </style>
 </head>
 <body>
 <main>
   <header>
+    <div class="school-header">
+      <div class="school-brand">
+        <img id="school-logo-display" class="school-logo" alt="School logo">
+        <div>
+          <p id="schoolNameDisplay" class="school-name"></p>
+          <p id="currentYearDisplay" class="school-year"></p>
+        </div>
+      </div>
+      <div class="year-selector">
+        <label for="yearSelect">Mwaka wa Masomo
+          <select id="yearSelect" data-somap-year-select></select>
+        </label>
+      </div>
+    </div>
     <h1>Usajili wa Mfanyakazi Mpya</h1>
     <p class="workers-card__subtitle">
-      Jaza kila sehemu → weka picha mbili (ID & Passport) → bonyeza “Hifadhi Mfanyakazi”.
+      Jaza kila sehemu ? weka picha mbili (ID & Passport) ? bonyeza �Hifadhi Mfanyakazi�.
     </p>
   </header>
 
@@ -178,10 +202,26 @@
   if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
   const db = firebase.database();
 
+  /* ---------- Multi-school + year context ---------- */
+  const activeSchool = (window.SOMAP && SOMAP.getSchool && SOMAP.getSchool()) || null;
+  if (!activeSchool || !activeSchool.id) {
+    window.location.href = '../somapappv1multischool/multischool.html';
+    throw new Error('No school selected for SoMAp multi-school context');
+  }
+  const schoolId = activeSchool.id;
+  const schoolDisplayName = activeSchool.name || schoolId;
+  const legacyFriendlyId = (schoolId === 'socrates-school' || schoolId === 'default');
+  const schoolRef = (subPath)=>db.ref(SOMAP.P(subPath));
+
+  const schoolNameEl = document.getElementById('schoolNameDisplay');
+  const yearDisplayEl = document.getElementById('currentYearDisplay');
+  const yearSelectEl = document.getElementById('yearSelect');
+  if (schoolNameEl) schoolNameEl.textContent = schoolDisplayName;
+
   /* ---------- Cloudinary (edit in DevTools if needed) ---------- */
   const CLD_CLOUD_NAME    = localStorage.getItem('cloud_name')    || 'dg7vnrkgd';
   const CLD_UPLOAD_PRESET = localStorage.getItem('upload_preset') || 'books_unsigned';
-  const CLD_FOLDER        = 'somapappv1/workers';
+  const getCloudinaryFolder = ()=>`somapappv1/${schoolId}/years/${currentYear}/workers`;
 
   /* ---------- Small helpers ---------- */
   const $ = (id)=>document.getElementById(id);
@@ -214,6 +254,8 @@
   let currentEditingWorkerId = '';
   let currentEditingDocs = {};
   let skipResetHandler = false;
+  let currentYear = (window.somapYearContext && somapYearContext.getSelectedYear && somapYearContext.getSelectedYear()) || String(new Date().getFullYear());
+  let currentWorkersSource = 'scoped';
 
   function setStatus(message='', isError=false){
     if (!statusEl) return;
@@ -247,11 +289,6 @@
     if (t.length!==3) throw new Error('Majina lazima yawe MATATU (mf. JOHN DOE JUNIOR)');
     return t.join(' ');
   }
-  async function sha256Hex(str){
-    const buf = new TextEncoder().encode(str);
-    const hash = await crypto.subtle.digest('SHA-256', buf);
-    return Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,'0')).join('');
-  }
 
   async function cldUpload(file, publicIdHint='file'){
     if (!file || !file.size) throw new Error('Chagua faili kwanza');
@@ -261,7 +298,7 @@
     const fd = new FormData();
     fd.append('file', file);
     fd.append('upload_preset', CLD_UPLOAD_PRESET);
-    fd.append('folder', CLD_FOLDER);
+    fd.append('folder', getCloudinaryFolder());
     fd.append('public_id', String(publicIdHint).replace(/[^a-z0-9_\-]/gi, '_'));
     const res = await fetch(url, { method:'POST', body: fd });
     const data = await res.json();
@@ -269,18 +306,45 @@
     return data.secure_url;
   }
 
+  function updateYearUI(){
+    if (yearDisplayEl) yearDisplayEl.textContent = `Mwaka wa masomo: ${currentYear}`;
+  }
+
+  function attachYearSelector(){
+    if (window.somapYearContext && yearSelectEl){
+      somapYearContext.attachYearDropdown(yearSelectEl);
+    }
+    if (window.somapYearContext){
+      const systemYear = String(new Date().getFullYear());
+      const selected = somapYearContext.getSelectedYear();
+      if (Number(selected) < Number(systemYear)){
+        currentYear = somapYearContext.resetToCurrentYear();
+      }else{
+        currentYear = somapYearContext.setSelectedYear(selected, { forceDispatch:true });
+      }
+      somapYearContext.onYearChanged((yr)=>{
+        currentYear = yr;
+        updateYearUI();
+        loadWorkers();
+        runRolloverIfNeeded(yr).catch(err=>console.error('Rollover error', err));
+      });
+    }
+    updateYearUI();
+  }
+  attachYearSelector();
+
   function getDisplayName(profile){
-    if (!profile) return '—';
+    if (!profile) return '-';
     if (profile.fullNameUpper) return profile.fullNameUpper;
     const parts = [profile.firstName, profile.middleName, profile.lastName].filter(Boolean);
-    return parts.join(' ') || '—';
+    return parts.join(' ') || '-';
   }
 
   function renderWorkersTable(rows){
     workerTableContainer.innerHTML = '';
     workerCountEl.textContent = rows.length
-      ? `Idadi ya wafanyakazi: ${rows.length}`
-      : 'Hakuna wafanyakazi waliopatikana (bado).';
+      ? `Idadi ya wafanyakazi (${currentYear}): ${rows.length}`
+      : `Hakuna wafanyakazi waliopatikana (bado) kwa ${currentYear}.`;
     if (!rows.length) {
       const empty = document.createElement('div');
       empty.style.padding = '12px';
@@ -314,6 +378,9 @@
       const salary = Number(profile.baseSalary||0).toLocaleString('sw-TZ');
       const tr = document.createElement('tr');
       tr.dataset.workerId = worker.id;
+      tr.dataset.source = worker.source || 'scoped';
+      const isLegacy = worker.source === 'legacy';
+      const deleteAttrs = isLegacy ? 'disabled title="Data ya Socrates (legacy) ni read-only"' : '';
       tr.innerHTML = `
         <td class="photo-cell">${photoHtml}</td>
         <td>${getDisplayName(profile)}</td>
@@ -323,7 +390,7 @@
         <td>${statusText}</td>
         <td class="actions-cell">
           <button type="button" class="workers-btn secondary" data-action="edit" data-worker-id="${worker.id}">Edit</button>
-          <button type="button" class="workers-btn secondary" data-action="delete" data-worker-id="${worker.id}">Delete</button>
+          <button type="button" class="workers-btn secondary" data-action="delete" data-worker-id="${worker.id}" ${deleteAttrs}>Delete</button>
         </td>`;
       tb.appendChild(tr);
     });
@@ -332,6 +399,7 @@
 
   function populateForm(worker){
     const profile = worker.profile||{};
+    currentWorkersSource = worker.source || 'scoped';
     currentEditingWorkerId = worker.id;
     currentEditingDocs = worker.docs||{};
     skipResetHandler = true;
@@ -359,15 +427,19 @@
     setField('medicalConditions', profile.medicalConditions);
     const activeSelect = formEl.querySelector('[name="active"]');
     if (activeSelect) activeSelect.value = profile.active !== false ? 'true' : 'false';
-    setStatus(`Editing ${getDisplayName(profile)} – save to update.`);
+    setStatus(`Editing ${getDisplayName(profile)} - save to update.`);
     formEl.scrollIntoView({behavior:'smooth'});
     const focusField = formEl.querySelector('[name="firstName"]');
     if (focusField) focusField.focus();
   }
 
   async function deleteWorker(workerId){
+    if (currentWorkersSource === 'legacy'){
+      alert('Data ya Socrates (legacy) ni ya kusoma tu. Tafadhali hifadhi tena kwenye mwaka uliochaguliwa ili urekebishe.');
+      return;
+    }
     try{
-      await db.ref(`workers/${workerId}`).remove();
+      await schoolRef(`years/${currentYear}/workers/${workerId}`).remove();
       if (currentEditingWorkerId === workerId){
         currentEditingWorkerId = '';
         currentEditingDocs = {};
@@ -394,20 +466,105 @@
     }
     if (btn.dataset.action==='delete'){
       if (!confirm('Una hakika unataka kufuta mfanyakazi huyu?')) return;
+      currentWorkersSource = worker.source || 'scoped';
       await deleteWorker(workerId);
     }
   });
 
+  function normalizeClassKey(value=''){
+    return String(value||'').replace(/\s+/g,'').toLowerCase();
+  }
+
+  function getPromotedClassName(current=''){
+    const key = normalizeClassKey(current);
+    const ladder = {
+      baby:'Middle',
+      middle:'Preunit',
+      preunit:'Class1',
+      class1:'Class2',
+      class2:'Class3',
+      class3:'Class4',
+      class4:'Class5',
+      class5:'Class6',
+      class6:'Class7',
+      class7:'Graduated/Archive'
+    };
+    return ladder[key] || current || '';
+  }
+
+  async function runRolloverIfNeeded(targetYear){
+    if (!targetYear) return;
+    const flagRef = schoolRef(`meta/rolloverDone/${targetYear}`);
+    const flagSnap = await flagRef.get();
+    if (flagSnap.exists()) return;
+
+    const previousYear = String(Number(targetYear) - 1);
+    const srcSnap = await schoolRef(`years/${previousYear}/students`).get();
+    const existingDestSnap = await schoolRef(`years/${targetYear}/students`).get();
+    const existingIds = new Set();
+    existingDestSnap.forEach(ch=>existingIds.add(ch.key));
+    if (srcSnap.exists()){
+      const updates = {};
+      srcSnap.forEach(ch=>{
+        if (existingIds.has(ch.key)) return;
+        const student = ch.val()||{};
+        const nextClass = getPromotedClassName(student.class || student.className || '');
+        updates[ch.key] = {
+          ...student,
+          class: nextClass,
+          className: nextClass,
+          rolledOverFrom: previousYear
+        };
+      });
+      if (Object.keys(updates).length){
+        await schoolRef(`years/${targetYear}/students`).update(updates);
+      }
+    }
+    await flagRef.set(true);
+  }
+
+  async function scopedOrSocratesLegacy(scopedSubPath, legacyPath){
+    const scopedSnap = await schoolRef(scopedSubPath).get();
+    if (scopedSnap.exists()) return { snap: scopedSnap, source:'scoped' };
+    if (legacyFriendlyId){
+      const legacySnap = await db.ref(legacyPath).get();
+      if (legacySnap.exists()) return { snap: legacySnap, source:'legacy' };
+    }
+    return { snap: scopedSnap, source:'scoped' };
+  }
+
+  async function loadSchoolLogo(){
+    const el = document.getElementById('school-logo-display');
+    if (!el) return;
+    try{
+      let logoUrl = '';
+      if (schoolId === 'socrates-school' || schoolId === 'default'){
+        logoUrl = '../images/socrates_logo.png';
+      }else{
+        const snap = await schoolRef('profile/logoUrl').get();
+        logoUrl = snap.val() || '';
+      }
+      el.src = logoUrl || '../images/socrates_logo.png';
+      el.alt = `${schoolDisplayName} logo`;
+    }catch(err){
+      console.warn('Logo load failed', err);
+      el.src = '../images/socrates_logo.png';
+      el.alt = `${schoolDisplayName} logo`;
+    }
+  }
+
   async function loadWorkers(){
     try{
-      const snap = await db.ref('workers').get();
+      currentWorkersSource = 'scoped';
+      const { snap, source } = await scopedOrSocratesLegacy(`years/${currentYear}/workers`, 'workers');
       const rows = [];
       (snap && snap.forEach) && snap.forEach(ch=>{
         const v = ch.val()||{};
         rows.push({
           id: ch.key,
           profile: v.profile||{},
-          docs: v.docs||{}
+          docs: v.docs||{},
+          source
         });
       });
       rows.sort((a,b)=>{
@@ -423,7 +580,6 @@
       renderWorkersTable([]);
     }
   }
-  loadWorkers();
 
   formEl.addEventListener('reset', ()=>{
     if (skipResetHandler){
@@ -432,6 +588,7 @@
     }
     currentEditingWorkerId = '';
     currentEditingDocs = {};
+    currentWorkersSource = 'scoped';
     setStatus('');
     setTimeout(renderRoleDocs,0);
   });
@@ -454,7 +611,7 @@
     if (!role) return alert('Chagua jukumu (Role)');
 
     const isEditing = Boolean(currentEditingWorkerId);
-    const workerId = isEditing ? currentEditingWorkerId : db.ref('workers').push().key;
+    const workerId = isEditing ? currentEditingWorkerId : schoolRef(`years/${currentYear}/workers`).push().key;
     const baseHint = `w_${workerId}_${Date.now()}`;
 
     const idPhoto = fd.get('idPhoto');
@@ -516,11 +673,12 @@
           accepted:false, acceptedTs:0, contractPdfUrl:''
         }
       };
-      await db.ref(`workers/${workerId}`).set(payload);
+      await schoolRef(`years/${currentYear}/workers/${workerId}`).set(payload);
       setStatus('SAVED SUCCESSFULLY');
       alert('SAVED SUCCESSFULLY');
       currentEditingWorkerId = '';
       currentEditingDocs = {};
+      currentWorkersSource = 'scoped';
       skipResetHandler = true;
       formEl.reset();
       renderRoleDocs();
@@ -530,6 +688,10 @@
       alert('Imeshindikana kuhifadhi. Angalia Cloudinary preset / intaneti / RTDB path.');
     }
   });
+
+  loadSchoolLogo();
+  runRolloverIfNeeded(currentYear).catch(err=>console.error('Rollover error', err));
+  loadWorkers();
 </script>
 
 </body>
