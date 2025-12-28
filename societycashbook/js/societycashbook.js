@@ -24,6 +24,10 @@ async function signInFlow(name, pass, repeat) {
       return false;
     }
   } else {
+    if (!repeat) {
+      alert("Rudia nenosiri ili kujiandikisha.");
+      return false;
+    }
     if (pass !== repeat) {
       alert("Passwords do not match");
       return false;
@@ -778,14 +782,19 @@ window.addEventListener("load", () => {
 
   if (signinBtn) {
     signinBtn.onclick = async () => {
-      const n = cashName?.value || "";
-      const p = cashPass?.value || "";
-      const r = cashPassRepeat?.value || "";
-      if (await signInFlow(n, p, r)) {
-        if (signinBox) signinBox.classList.add("hidden");
-        if (recoverBox) recoverBox.classList.add("hidden");
-        if (overlay) overlay.style.display = "none";
-        window.initCashbook();
+      try {
+        const n = cashName?.value || "";
+        const p = cashPass?.value || "";
+        const r = cashPassRepeat?.value || "";
+        if (await signInFlow(n, p, r)) {
+          if (signinBox) signinBox.classList.add("hidden");
+          if (recoverBox) recoverBox.classList.add("hidden");
+          if (overlay) overlay.style.display = "none";
+          window.initCashbook();
+        }
+      } catch (err) {
+        console.error("Sign in failed", err);
+        alert("Imeshindikana kuingia. Tafadhali jaribu tena.");
       }
     };
   }
