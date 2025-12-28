@@ -1,3 +1,56 @@
+const db = firebase.database();
+let CASHBOOK_USER = null;
+
+const cleanKey = (n) => (n || "").toLowerCase().replace(/[^a-z0-9]/g, "_");
+const hash = (str) => btoa(unescape(encodeURIComponent(str || ""))).replace(/=/g, "");
+
+async function signInFlow(name, pass, repeat) {
+  const key = cleanKey(name);
+  if (!key || !pass) {
+    alert("Weka jina na nenosiri kwanza.");
+    return false;
+  }
+  const ref = db.ref("/cashbookUsers/" + key);
+  const snap = await ref.once("value");
+  if (snap.exists()) {
+    const user = snap.val();
+    if (user.passwordHash === hash(pass)) {
+      CASHBOOK_USER = key;
+      localStorage.setItem("cashbook_user", key);
+      return true;
+    } else {
+      alert("Wrong password");
+      return false;
+    }
+  } else {
+    if (pass !== repeat) {
+      alert("Passwords do not match");
+      return false;
+    }
+    const fav = prompt("Set recovery question: Who is your favourite family member?");
+    await ref.set({ passwordHash: hash(pass), recovery: fav || "" });
+    CASHBOOK_USER = key;
+    localStorage.setItem("cashbook_user", key);
+    return true;
+  }
+}
+
+async function recoverPassword(name, ans) {
+  const key = cleanKey(name);
+  const snap = await db.ref("/cashbookUsers/" + key).once("value");
+  if (snap.exists() && (snap.val().recovery || "").toLowerCase() === (ans || "").toLowerCase()) {
+    alert("Your password cannot be shown, but you can reset now.");
+    await db.ref("/cashbookUsers/" + key).remove();
+  } else {
+    alert("Incorrect answer.");
+  }
+}
+
+function userPath(sub) {
+  const base = `/cashbook/${CASHBOOK_USER || "guest"}`;
+  return sub ? `${base}/${sub}` : base;
+}
+
 (function () {
   const MoneyMemoryState = {
     mode: "guest",
@@ -31,17 +84,14 @@
     }
   };
 
-  document.addEventListener("DOMContentLoaded", initMoneyMemory);
-
   async function initMoneyMemory() {
     MoneyMemoryState.ui.isLoading = true;
     renderLoading();
     try {
-      const user = window.firebase?.auth?.().currentUser || null;
-      if (user) {
+      if (window.CASHBOOK_USER) {
         MoneyMemoryState.mode = "firebase";
-        MoneyMemoryState.uid = user.uid;
-        await loadFromFirebase(user.uid);
+        MoneyMemoryState.uid = window.CASHBOOK_USER;
+        await loadFromFirebase();
       } else {
         MoneyMemoryState.mode = "guest";
         loadFromLocalStorage();
@@ -64,8 +114,8 @@
     }
   }
 
-  async function loadFromFirebase(uid) {
-    const snapshot = await firebase.database().ref("society/" + uid).once("value");
+  async function loadFromFirebase() {
+    const snapshot = await db.ref(userPath("")).once("value");
     const data = snapshot.val() || {};
     const cashbooks = data.cashbooks || {};
     MoneyMemoryState.cashbooks = {};
@@ -576,7 +626,7 @@
   function saveTransaction(tx) {
     const cbId = MoneyMemoryState.currentCashbookId;
     if (MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid) {
-      const ref = firebase.database().ref(`society/${MoneyMemoryState.uid}/cashbooks/${cbId}/transactions`).push();
+      const ref = db.ref(`${userPath("cashbooks")}/${cbId}/transactions`).push();
       const id = ref.key;
       const fullTx = { ...tx, id };
       ref.set(fullTx);
@@ -599,7 +649,7 @@
   function saveLastOpenedCashbook() {
     MoneyMemoryState.settings.lastOpenedCashbookId = MoneyMemoryState.currentCashbookId;
     if (MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid) {
-      firebase.database().ref(`society/${MoneyMemoryState.uid}/settings/lastOpenedCashbookId`).set(MoneyMemoryState.currentCashbookId);
+      db.ref(`${userPath("settings")}/lastOpenedCashbookId`).set(MoneyMemoryState.currentCashbookId);
     } else {
       saveToLocalStorage();
     }
@@ -609,14 +659,11 @@
     if (MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid) {
       const cbId = MoneyMemoryState.currentCashbookId;
       const updates = {};
-      updates[`society/${MoneyMemoryState.uid}/cashbooks/${cbId}/pots`] =
-        MoneyMemoryState.potsByCashbook[cbId] || {};
-      updates[`society/${MoneyMemoryState.uid}/cashbooks/${cbId}/budgets`] =
-        MoneyMemoryState.budgetsByCashbook[cbId] || {};
-      updates[`society/${MoneyMemoryState.uid}/cashbooks/${cbId}/meta`] =
-        MoneyMemoryState.cashbooks[cbId];
-      updates[`society/${MoneyMemoryState.uid}/settings`] = MoneyMemoryState.settings;
-      firebase.database().ref().update(updates);
+      updates[`${userPath("cashbooks")}/${cbId}/pots`] = MoneyMemoryState.potsByCashbook[cbId] || {};
+      updates[`${userPath("cashbooks")}/${cbId}/budgets`] = MoneyMemoryState.budgetsByCashbook[cbId] || {};
+      updates[`${userPath("cashbooks")}/${cbId}/meta`] = MoneyMemoryState.cashbooks[cbId];
+      updates[userPath("settings")] = MoneyMemoryState.settings;
+      db.ref().update(updates);
     } else {
       saveToLocalStorage();
     }
@@ -684,4 +731,58 @@
     const date = new Date(y, m - 1, d);
     return date.toLocaleDateString("en-KE", { day: "numeric", month: "short" });
   }
+
+  window.initCashbook = function () {
+    if (MoneyMemoryState.initialized) return;
+    initMoneyMemory();
+  };
 })();
+
+window.addEventListener("load", () => {
+  const overlay = document.getElementById("signin-overlay");
+  const signinBox = document.getElementById("signin-box");
+  const recoverBox = document.getElementById("recover-box");
+  const cashName = document.getElementById("cashName");
+  const cashPass = document.getElementById("cashPass");
+  const cashPassRepeat = document.getElementById("cashPassRepeat");
+  const recoveryInput = document.getElementById("recoveryInput");
+  const signinBtn = document.getElementById("signinBtn");
+  const forgotLink = document.getElementById("forgotLink");
+  const recoverBtn = document.getElementById("recoverBtn");
+
+  const localUser = localStorage.getItem("cashbook_user");
+  if (!localUser) {
+    if (overlay) overlay.style.display = "flex";
+    if (signinBox) signinBox.style.display = "block";
+  } else {
+    CASHBOOK_USER = localUser;
+    if (overlay) overlay.style.display = "none";
+    window.initCashbook();
+  }
+
+  if (signinBtn) {
+    signinBtn.onclick = async () => {
+      const n = cashName?.value || "";
+      const p = cashPass?.value || "";
+      const r = cashPassRepeat?.value || "";
+      if (await signInFlow(n, p, r)) {
+        if (signinBox) signinBox.style.display = "none";
+        if (recoverBox) recoverBox.classList.add("hidden");
+        if (overlay) overlay.style.display = "none";
+        window.initCashbook();
+      }
+    };
+  }
+
+  if (forgotLink) {
+    forgotLink.onclick = () => {
+      if (recoverBox) recoverBox.classList.remove("hidden");
+    };
+  }
+
+  if (recoverBtn) {
+    recoverBtn.onclick = () => {
+      recoverPassword(cashName?.value || "", recoveryInput?.value || "");
+    };
+  }
+});
