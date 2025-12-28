@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SoMAp — Admin Join Approvals</title>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Icons -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <!-- Firebase compat -->
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+
+  <!-- Alerts -->
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+  <!-- School context -->
+  <script src="somapappv1multischool/js/context.js"></script>
+
+  <style>
+    body{
+      min-height:100vh;
+      background:linear-gradient(180deg,#020617,#0b1220);
+      color:#e5e7eb;
+      font-family:Inter,system-ui,Arial;
+    }
+    .glass{
+      background:rgba(15,23,42,.85);
+      border:1px solid rgba(148,163,184,.25);
+      border-radius:1rem;
+    }
+    .btn{
+      padding:.5rem 1rem;
+      border-radius:.6rem;
+      font-weight:700;
+    }
+    .btn-approve{
+      background:linear-gradient(120deg,#16a34a,#22c55e);
+    }
+    .btn-reject{
+      background:linear-gradient(120deg,#dc2626,#ef4444);
+    }
+  </style>
+</head>
+
+<body class="p-4 md:p-8">
+
+<main class="max-w-5xl mx-auto space-y-6">
+
+  <section class="glass p-6">
+    <h1 class="text-3xl font-extrabold text-white">
+      Student Join Requests
+    </h1>
+    <p class="text-slate-300 mt-1">
+      Review, approve or reject admission requests.
+    </p>
+  </section>
+
+  <section id="requestsList" class="space-y-4"></section>
+
+</main>
+
+<script>
+/* ---------------- Firebase Init ---------------- */
+const firebaseConfig = {
+  apiKey: "AIzaSyBhONntRE_aRsU0y1YcPZzWud3CBfwH_a8",
+  authDomain: "somaptestt.firebaseapp.com",
+  databaseURL: "https://somaptestt-default-rtdb.firebaseio.com",
+  projectId: "somaptestt",
+  storageBucket: "somaptestt.appspot.com",
+  messagingSenderId: "105526245138",
+  appId: "1:105526245138:web:b8e7c0cb82a46e861965cb"
+};
+
+if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+/* School scoped reference */
+function schoolRef(path){
+  return db.ref(SOMAP.P(path));
+}
+
+/* ---------------- Load Join Requests ---------------- */
+const listEl = document.getElementById("requestsList");
+
+schoolRef("approvalsPending")
+  .orderByChild("approvalType")
+  .equalTo("JOIN_REQUEST")
+  .on("value", snap => {
+    listEl.innerHTML = "";
+    if (!snap.exists()) {
+      listEl.innerHTML =
+        `<div class="glass p-4 text-slate-400">No pending requests.</div>`;
+      return;
+    }
+    snap.forEach(child => renderRequest(child.key, child.val()));
+  });
+
+function renderRequest(id, data){
+  const card = document.createElement("div");
+  card.className = "glass p-6";
+
+  const docsHtml = Object.entries(data.documents || {}).map(
+    ([key,url]) => `
+      <a href="${url}" target="_blank"
+         class="text-blue-400 underline text-sm block">
+        View ${key.replace("Url","")}
+      </a>`
+  ).join("");
+
+  card.innerHTML = `
+    <h3 class="text-xl font-bold text-white">
+      ${data.studentSnapshot.firstName} ${data.studentSnapshot.lastName}
+    </h3>
+
+    <p class="text-slate-300 mt-1">
+      Class: ${data.studentSnapshot.classLevel} |
+      Year: ${data.academicYear}
+    </p>
+
+    <p class="text-slate-400 mt-1">
+      Parent: ${data.parentSnapshot.name} (${data.parentSnapshot.phone})
+    </p>
+
+    <div class="mt-3 space-y-1">
+      ${docsHtml || "<span class='text-slate-500 text-sm'>No documents</span>"}
+    </div>
+
+    <div class="mt-4 flex gap-3">
+      <button class="btn btn-approve"
+              onclick="approveRequest('${id}')">
+        <i class="fas fa-check mr-1"></i> Approve
+      </button>
+      <button class="btn btn-reject"
+              onclick="rejectRequest('${id}')">
+        <i class="fas fa-times mr-1"></i> Reject
+      </button>
+    </div>
+  `;
+
+  listEl.appendChild(card);
+}
+
+/* ---------------- Approve Logic ---------------- */
+async function approveRequest(approvalId){
+  const snap = await schoolRef(`approvalsPending/${approvalId}`).get();
+  if (!snap.exists()) return;
+
+  const data = snap.val();
+  const now = Date.now();
+
+  try{
+    const studentRef = schoolRef("students").push();
+
+    await studentRef.set({
+      firstName: data.studentSnapshot.firstName,
+      lastName: data.studentSnapshot.lastName,
+      classLevel: data.studentSnapshot.classLevel,
+      academicYear: data.academicYear,
+
+      parent: data.parentSnapshot,
+      documents: data.documents,
+
+      referral: data.referral || null,
+      createdFromApproval: approvalId,
+      createdAt: now
+    });
+
+    await schoolRef(`approvalsHistory/${approvalId}`).set({
+      ...data,
+      status: "approved",
+      approvedAt: now
+    });
+
+    await schoolRef(`approvalsPending/${approvalId}`).remove();
+
+    Swal.fire("Approved",
+      "Student added successfully",
+      "success");
+
+  }catch(err){
+    console.error(err);
+    Swal.fire("Error","Approval failed","error");
+  }
+}
+
+/* ---------------- Reject Logic ---------------- */
+async function rejectRequest(approvalId){
+  const snap = await schoolRef(`approvalsPending/${approvalId}`).get();
+  if (!snap.exists()) return;
+
+  try{
+    await schoolRef(`approvalsHistory/${approvalId}`).set({
+      ...snap.val(),
+      status: "rejected",
+      rejectedAt: Date.now()
+    });
+
+    await schoolRef(`approvalsPending/${approvalId}`).remove();
+
+    Swal.fire("Rejected",
+      "Request rejected and archived",
+      "info");
+
+  }catch(err){
+    console.error(err);
+    Swal.fire("Error","Rejection failed","error");
+  }
+}
+</script>
+
+</body>
+</html>
