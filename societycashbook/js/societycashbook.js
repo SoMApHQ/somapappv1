@@ -24,6 +24,10 @@ async function signInFlow(name, pass, repeat) {
       return false;
     }
   } else {
+    if (!repeat) {
+      alert("Rudia nenosiri ili kujiandikisha.");
+      return false;
+    }
     if (pass !== repeat) {
       alert("Passwords do not match");
       return false;
@@ -744,6 +748,7 @@ window.addEventListener("load", () => {
   const overlay = document.getElementById("signin-overlay");
   const signinBox = document.getElementById("signin-box");
   const recoverBox = document.getElementById("recover-box");
+  const backToSignin = document.getElementById("backToSignin");
   const cashName = document.getElementById("cashName");
   const cashPass = document.getElementById("cashPass");
   const cashPassRepeat = document.getElementById("cashPassRepeat");
@@ -753,10 +758,21 @@ window.addEventListener("load", () => {
   const recoverBtn = document.getElementById("recoverBtn");
   const eyeToggles = document.querySelectorAll(".eye-toggle");
 
+  const showSignin = () => {
+    if (recoverBox) recoverBox.classList.add("hidden");
+    if (signinBox) signinBox.classList.remove("hidden");
+    if (overlay) overlay.style.display = "flex";
+  };
+
+  const showRecover = () => {
+    if (signinBox) signinBox.classList.add("hidden");
+    if (recoverBox) recoverBox.classList.remove("hidden");
+    if (overlay) overlay.style.display = "flex";
+  };
+
   const localUser = localStorage.getItem("cashbook_user");
   if (!localUser) {
-    if (overlay) overlay.style.display = "flex";
-    if (signinBox) signinBox.style.display = "block";
+    showSignin();
   } else {
     CASHBOOK_USER = localUser;
     window.CASHBOOK_USER = localUser;
@@ -766,27 +782,38 @@ window.addEventListener("load", () => {
 
   if (signinBtn) {
     signinBtn.onclick = async () => {
-      const n = cashName?.value || "";
-      const p = cashPass?.value || "";
-      const r = cashPassRepeat?.value || "";
-      if (await signInFlow(n, p, r)) {
-        if (signinBox) signinBox.style.display = "none";
-        if (recoverBox) recoverBox.classList.add("hidden");
-        if (overlay) overlay.style.display = "none";
-        window.initCashbook();
+      try {
+        const n = cashName?.value || "";
+        const p = cashPass?.value || "";
+        const r = cashPassRepeat?.value || "";
+        if (await signInFlow(n, p, r)) {
+          if (signinBox) signinBox.classList.add("hidden");
+          if (recoverBox) recoverBox.classList.add("hidden");
+          if (overlay) overlay.style.display = "none";
+          window.initCashbook();
+        }
+      } catch (err) {
+        console.error("Sign in failed", err);
+        alert("Imeshindikana kuingia. Tafadhali jaribu tena.");
       }
     };
   }
 
   if (forgotLink) {
     forgotLink.onclick = () => {
-      if (recoverBox) recoverBox.classList.remove("hidden");
+      showRecover();
     };
   }
 
   if (recoverBtn) {
     recoverBtn.onclick = () => {
       recoverPassword(cashName?.value || "", recoveryInput?.value || "");
+    };
+  }
+
+  if (backToSignin) {
+    backToSignin.onclick = () => {
+      showSignin();
     };
   }
 
