@@ -1,8 +1,50 @@
-// Database instance is retrieved from window (set by firebase.js) or initialized on demand
+let db;
+try {
+  db = firebase.database();
+} catch (e) {
+  console.warn("Firebase DB init error in societycashbook.js (might be already initialized or waiting):", e);
+  if (window.db) db = window.db;
+}
+
 let CASHBOOK_USER = null;
 
 const cleanKey = (n) => (n || "").toLowerCase().replace(/[^a-z0-9]/g, "_");
-const hash = (str) => btoa(unescape(encodeURIComponent(str || ""))).replace(/=/g, "");
+
+// Legacy weak hash (base64) kept only for backward compatibility.
+const legacyHash = (str) => btoa(unescape(encodeURIComponent(str || ""))).replace(/=/g, "");
+
+// Stronger (still client-side) hash using SHA-256.
+async function sha256Hex(str) {
+  const input = new TextEncoder().encode(str || "");
+  const buf = await crypto.subtle.digest("SHA-256", input);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function passwordHash(str) {
+  try {
+    return await sha256Hex(str);
+  } catch (e) {
+    // Very old browsers fallback (still better than crashing)
+    return legacyHash(str);
+  }
+}
+
+async function verifyPassword(storedHash, pass) {
+  if (!storedHash) return false;
+  const modern = await passwordHash(pass);
+  if (storedHash === modern) return true;
+  // Accept legacy hashes so old users can still sign in.
+  return storedHash === legacyHash(pass);
+}
+
+function setSignedInUser(key, displayName) {
+  CASHBOOK_USER = key;
+  window.CASHBOOK_USER = key;
+  localStorage.setItem("cashbook_user", key);
+  if (displayName) localStorage.setItem("cashbook_display_name", displayName);
+}
 
 function getDB() {
   if (window.db) return window.db;
@@ -11,46 +53,63 @@ function getDB() {
 }
 
 async function signInFlow(name, pass, repeat) {
-  const key = cleanKey(name);
-  if (!key || !pass) {
-    alert("Weka jina na nenosiri kwanza.");
+  if (!db) {
+    alert("Connection error: Database not ready. Please refresh.");
     return false;
   }
-  const db = getDB();
+  const key = cleanKey(name);
+  if (!key || !pass) {
+    return { ok: false, code: "MISSING_FIELDS", message: "Please enter a name and password." };
+  }
   const ref = db.ref("/cashbookUsers/" + key);
   const snap = await ref.once("value");
+
   if (snap.exists()) {
-    const user = snap.val();
-    if (user.passwordHash === hash(pass)) {
-      CASHBOOK_USER = key;
-      window.CASHBOOK_USER = key;
-      localStorage.setItem("cashbook_user", key);
-      return true;
-    } else {
-      alert("Wrong password");
-      return false;
+    const user = snap.val() || {};
+    const ok = await verifyPassword(user.passwordHash, pass);
+    if (!ok) return { ok: false, code: "WRONG_PASSWORD", message: "Wrong password" };
+
+    // Upgrade legacy hash silently.
+    const modern = await passwordHash(pass);
+    if (user.passwordHash !== modern) {
+      ref.child("passwordHash").set(modern);
     }
-  } else {
-    if (!repeat) {
-      alert("Rudia nenosiri ili kujiandikisha.");
-      return false;
+
+    // Ensure profile displayName exists.
+    if (!user.profile || !user.profile.displayName) {
+      ref.child("profile/displayName").set(displayName);
     }
-    if (pass !== repeat) {
-      alert("Passwords do not match");
-      return false;
-    }
-    const fav = prompt("Set recovery question: Who is your favourite family member?");
-    await ref.set({ passwordHash: hash(pass), recovery: fav || "" });
-    CASHBOOK_USER = key;
-    window.CASHBOOK_USER = key;
-    localStorage.setItem("cashbook_user", key);
-    return true;
+
+    setSignedInUser(key, user.profile?.displayName || displayName);
+    return { ok: true, action: "login", message: `Welcome back, ${user.profile?.displayName || displayName}` };
   }
+
+  // Register
+  if (!repeat) {
+    return { ok: false, code: "NEED_REPEAT", message: "Repeat password to register." };
+  }
+  if (pass !== repeat) {
+    return { ok: false, code: "PASS_MISMATCH", message: "Passwords do not match." };
+  }
+
+  const fav = prompt("Recovery question: Who is your favourite family member?") || "";
+  const payload = {
+    passwordHash: await passwordHash(pass),
+    recovery: (fav || "").trim(),
+    profile: {
+      displayName,
+      avatarDataUrl: ""
+    },
+    createdAt: new Date().toISOString()
+  };
+
+  await ref.set(payload);
+  setSignedInUser(key, displayName);
+  return { ok: true, action: "register", message: `Registered successfully. Welcome, ${displayName}` };
 }
 
 async function recoverPassword(name, ans) {
   const key = cleanKey(name);
-  const db = getDB();
   const snap = await db.ref("/cashbookUsers/" + key).once("value");
   if (snap.exists() && (snap.val().recovery || "").toLowerCase() === (ans || "").toLowerCase()) {
     alert("Your password cannot be shown, but you can reset now.");
@@ -102,12 +161,16 @@ function userPath(sub) {
     MoneyMemoryState.ui.isLoading = true;
     renderLoading();
     try {
-      if (CASHBOOK_USER) {
+      const _db = getDb();
+      if (CASHBOOK_USER && _db) {
         MoneyMemoryState.mode = "firebase";
         MoneyMemoryState.uid = CASHBOOK_USER;
+        db = _db;
         await loadFromFirebase();
       } else {
+        // If DB isn't ready, fall back to local-only mode (still private on this device).
         MoneyMemoryState.mode = "guest";
+        MoneyMemoryState.uid = null;
         loadFromLocalStorage();
       }
 
@@ -115,6 +178,7 @@ function userPath(sub) {
         MoneyMemoryState.currentCashbookId = "default";
       }
       ensureDefaultCashbook();
+      await initUserChip();
       bindUIHandlers();
       renderAll();
       MoneyMemoryState.initialized = true;
@@ -128,8 +192,7 @@ function userPath(sub) {
     }
   }
 
-  async function loadFromFirebase() {
-    const db = getDB();
+async function loadFromFirebase() {
     const snapshot = await db.ref(userPath("")).once("value");
     const data = snapshot.val() || {};
     const cashbooks = data.cashbooks || {};
@@ -212,6 +275,142 @@ function userPath(sub) {
         akiba: { id: "akiba", name: "Akiba", emoji: "💰" }
       };
     }
+  }
+
+  async function initUserChip() {
+    const chip = document.getElementById("mm-user-chip");
+    const logoutBtn = document.getElementById("mm-logout-btn");
+    if (!chip) return;
+
+    const loggedIn = MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid;
+    chip.classList.toggle("hidden", !loggedIn);
+    if (logoutBtn) logoutBtn.classList.toggle("hidden", !loggedIn);
+
+    if (!loggedIn) return;
+
+    // Load profile (Firebase → local fallback)
+    let profile = {
+      displayName: localStorage.getItem("cashbook_display_name") || MoneyMemoryState.uid,
+      avatarDataUrl: localStorage.getItem("cashbook_avatar") || ""
+    };
+
+    try {
+      const snap = await db.ref(`/cashbookUsers/${MoneyMemoryState.uid}/profile`).once("value");
+      profile = { ...profile, ...(snap.val() || {}) };
+    } catch (e) {
+      console.warn("Failed to load profile, using local cache.", e);
+    }
+
+    renderUserChip(profile);
+    bindUserChipHandlers();
+  }
+
+  function renderUserChip(profile) {
+    const nameEl = document.getElementById("mm-user-name");
+    const img = document.getElementById("mm-user-avatar");
+    const icon = document.getElementById("mm-user-avatar-icon");
+
+    if (nameEl) nameEl.textContent = profile?.displayName || "User";
+
+    const dataUrl = profile?.avatarDataUrl || "";
+    if (img && icon) {
+      if (dataUrl) {
+        img.src = dataUrl;
+        img.classList.remove("hidden");
+        icon.classList.add("hidden");
+      } else {
+        img.classList.add("hidden");
+        icon.classList.remove("hidden");
+      }
+    }
+  }
+
+  function bindUserChipHandlers() {
+    const avatarBtn = document.getElementById("mm-avatar-btn");
+    const fileInput = document.getElementById("mm-avatar-input");
+    const logoutBtn = document.getElementById("mm-logout-btn");
+
+    if (avatarBtn && fileInput && !avatarBtn.dataset.bound) {
+      avatarBtn.dataset.bound = "1";
+      avatarBtn.addEventListener("click", () => fileInput.click());
+    }
+
+    if (fileInput && !fileInput.dataset.bound) {
+      fileInput.dataset.bound = "1";
+      fileInput.addEventListener("change", async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+
+        try {
+          const dataUrl = await toSquareAvatarDataUrl(file, 96, 0.85);
+          localStorage.setItem("cashbook_avatar", dataUrl);
+
+          // Update UI immediately
+          renderUserChip({
+            displayName: localStorage.getItem("cashbook_display_name") || MoneyMemoryState.uid,
+            avatarDataUrl: dataUrl
+          });
+
+          // Persist to Firebase for this user
+          if (MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid) {
+            await db.ref(`/cashbookUsers/${MoneyMemoryState.uid}/profile`).update({
+              avatarDataUrl: dataUrl,
+              updatedAt: new Date().toISOString()
+            });
+          }
+        } catch (e) {
+          console.error("Avatar upload failed", e);
+          alert("Failed to set profile photo. Try a smaller image.");
+        } finally {
+          fileInput.value = "";
+        }
+      });
+    }
+
+    if (logoutBtn && !logoutBtn.dataset.bound) {
+      logoutBtn.dataset.bound = "1";
+      logoutBtn.addEventListener("click", () => {
+        localStorage.removeItem("cashbook_user");
+        localStorage.removeItem("cashbook_display_name");
+        localStorage.removeItem("cashbook_avatar");
+        location.reload();
+      });
+    }
+  }
+
+  function toSquareAvatarDataUrl(file, size = 96, quality = 0.85) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Failed to read file."));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error("Invalid image."));
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext("2d");
+
+          // Crop center square
+          const side = Math.min(img.width, img.height);
+          const sx = Math.floor((img.width - side) / 2);
+          const sy = Math.floor((img.height - side) / 2);
+
+          ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+
+          const dataUrl = canvas.toDataURL("image/jpeg", quality);
+
+          // Guard size (~120KB)
+          if (dataUrl.length > 160000) {
+            resolve(canvas.toDataURL("image/jpeg", 0.7));
+            return;
+          }
+          resolve(dataUrl);
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
   }
 
   function bindUIHandlers() {
@@ -760,28 +959,46 @@ window.addEventListener("load", () => {
   const overlay = document.getElementById("signin-overlay");
   const signinBox = document.getElementById("signin-box");
   const recoverBox = document.getElementById("recover-box");
-  const backToSignin = document.getElementById("backToSignin");
+
   const cashName = document.getElementById("cashName");
   const cashPass = document.getElementById("cashPass");
   const cashPassRepeat = document.getElementById("cashPassRepeat");
-  const recoveryInput = document.getElementById("recoveryInput");
   const signinBtn = document.getElementById("signinBtn");
   const forgotLink = document.getElementById("forgotLink");
+  const authMsg = document.getElementById("authMsg");
+
+  const recoverName = document.getElementById("recoverName");
+  const recoveryInput = document.getElementById("recoveryInput");
+  const recoverNewPass = document.getElementById("recoverNewPass");
+  const recoverNewPassRepeat = document.getElementById("recoverNewPassRepeat");
   const recoverBtn = document.getElementById("recoverBtn");
+  const backToSignin = document.getElementById("backToSignin");
+  const recoverMsg = document.getElementById("recoverMsg");
+
   const eyeToggles = document.querySelectorAll(".eye-toggle");
 
+  console.log("DOM Loaded or App Init. Setup starting...");
+
   const showSignin = () => {
+    clearMsg(authMsg);
+    clearMsg(recoverMsg);
     if (recoverBox) recoverBox.classList.add("hidden");
     if (signinBox) signinBox.classList.remove("hidden");
     if (overlay) overlay.style.display = "flex";
   };
 
   const showRecover = () => {
+    clearMsg(authMsg);
+    clearMsg(recoverMsg);
     if (signinBox) signinBox.classList.add("hidden");
     if (recoverBox) recoverBox.classList.remove("hidden");
     if (overlay) overlay.style.display = "flex";
+
+    // Carry over name for convenience
+    if (recoverName && cashName && cashName.value && !recoverName.value) recoverName.value = cashName.value;
   };
 
+  // Auto sign-in if user already saved
   const localUser = localStorage.getItem("cashbook_user");
   if (!localUser) {
     showSignin();
@@ -793,50 +1010,112 @@ window.addEventListener("load", () => {
   }
 
   if (signinBtn) {
-    signinBtn.onclick = async () => {
-      console.log("Sign in clicked");
+    // Remove old listeners just in case
+    const newBtn = signinBtn.cloneNode(true);
+    signinBtn.parentNode.replaceChild(newBtn, signinBtn);
+    
+    newBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log("Sign In button clicked");
+      
+      const n = cashName?.value || "";
+      const p = cashPass?.value || "";
+      const r = cashPassRepeat?.value || "";
+      
+      if (!n || !p) {
+        alert("Please enter a name and password.");
+        return;
+      }
+      
+      newBtn.textContent = "Processing...";
+      newBtn.disabled = true;
+
       try {
-        const n = cashName?.value || "";
-        const p = cashPass?.value || "";
-        const r = cashPassRepeat?.value || "";
-        if (await signInFlow(n, p, r)) {
+        console.log(`Attempting sign in for: ${n}`);
+        const success = await signInFlow(n, p, r);
+        
+        if (success) {
+          console.log("Sign in success");
           if (signinBox) signinBox.classList.add("hidden");
           if (recoverBox) recoverBox.classList.add("hidden");
           if (overlay) overlay.style.display = "none";
           window.initCashbook();
+        } else {
+          console.log("Sign in flow returned false");
+          // Alert is handled in signInFlow
         }
       } catch (err) {
-        console.error("Sign in failed", err);
-        alert("Imeshindikana kuingia. Tafadhali jaribu tena.");
+        console.error("Sign in CRASHED", err);
+        alert("System Error during sign in: " + err.message);
+      } finally {
+        newBtn.textContent = "Sign In / Register";
+        newBtn.disabled = false;
       }
-    };
+    });
+  } else {
+    console.error("signinBtn element NOT found in DOM");
   }
 
   if (forgotLink) {
-    forgotLink.onclick = () => {
+    forgotLink.onclick = (e) => {
+      e.preventDefault();
       showRecover();
-    };
+    });
   }
 
   if (recoverBtn) {
-    recoverBtn.onclick = () => {
+    recoverBtn.onclick = (e) => {
+      e.preventDefault();
       recoverPassword(cashName?.value || "", recoveryInput?.value || "");
     };
   }
 
   if (backToSignin) {
-    backToSignin.onclick = () => {
+    backToSignin.onclick = (e) => {
+      e.preventDefault();
       showSignin();
-    };
+    });
   }
 
+  // Eye toggles for password fields
   eyeToggles.forEach((btn) => {
-    btn.onclick = () => {
-      const targetId = btn.getAttribute("data-target");
-      const input = document.getElementById(targetId);
-      if (!input) return;
-      input.type = input.type === "password" ? "text" : "password";
-      btn.innerHTML = `<i class="fa ${input.type === "password" ? "fa-eye" : "fa-eye-slash"}"></i>`;
-    };
+    // Clone to remove old listeners
+    const newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+
+    newBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      // Find the input relative to the button if ID lookup fails, or use data-target
+      const targetId = newBtn.getAttribute("data-target");
+      let input = document.getElementById(targetId);
+      
+      // Fallback: look for sibling input
+      if (!input) {
+        input = newBtn.parentElement.querySelector("input");
+      }
+
+      if (!input) {
+        console.error("Target input not found for eye toggle", targetId);
+        return;
+      }
+
+      // Toggle Type
+      if (input.type === "password") {
+        input.type = "text";
+        newBtn.innerHTML = '<i class="fa fa-eye-slash"></i>';
+      } else {
+        input.type = "password";
+        newBtn.innerHTML = '<i class="fa fa-eye"></i>';
+      }
+    });
   });
-});
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", setupAuthUI);
+} else {
+  setupAuthUI();
+}
