@@ -751,6 +751,7 @@ window.addEventListener("load", () => {
   const signinBtn = document.getElementById("signinBtn");
   const forgotLink = document.getElementById("forgotLink");
   const recoverBtn = document.getElementById("recoverBtn");
+  const eyeToggles = document.querySelectorAll(".eye-toggle");
 
   const localUser = localStorage.getItem("cashbook_user");
   if (!localUser) {
@@ -788,4 +789,14 @@ window.addEventListener("load", () => {
       recoverPassword(cashName?.value || "", recoveryInput?.value || "");
     };
   }
+
+  eyeToggles.forEach((btn) => {
+    btn.onclick = () => {
+      const targetId = btn.getAttribute("data-target");
+      const input = document.getElementById(targetId);
+      if (!input) return;
+      input.type = input.type === "password" ? "text" : "password";
+      btn.innerHTML = `<i class="fa ${input.type === "password" ? "fa-eye" : "fa-eye-slash"}"></i>`;
+    };
+  });
 });
