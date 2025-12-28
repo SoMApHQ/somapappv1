@@ -1,4 +1,3 @@
-let db;
 
 /**
  * Lazy DB getter.
@@ -14,6 +13,12 @@ function getDb() {
   }
   if (!db && window.db) db = window.db;
   return db;
+=======
+try {
+  db = firebase.database();
+} catch (e) {
+  console.warn("Firebase DB init error in societycashbook.js (might be already initialized or waiting):", e);
+  if (window.db) db = window.db;
 }
 
 let CASHBOOK_USER = null;
@@ -38,7 +43,104 @@ async function passwordHash(str) {
   } catch (e) {
     // Very old browsers fallback (still better than crashing)
     return legacyHash(str);
+
+// Legacy weak hash (base64) kept only for backward compatibility.
+const legacyHash = (str) => btoa(unescape(encodeURIComponent(str || ""))).replace(/=/g, "");
+
+// Stronger (still client-side) hash using SHA-256.
+async function sha256Hex(str) {
+  const input = new TextEncoder().encode(str || "");
+  const buf = await crypto.subtle.digest("SHA-256", input);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function passwordHash(str) {
+  try {
+    return await sha256Hex(str);
+  } catch (e) {
+    // Very old browsers fallback (still better than crashing)
+    return legacyHash(str);
   }
+}
+
+async function verifyPassword(storedHash, pass) {
+  if (!storedHash) return false;
+  const modern = await passwordHash(pass);
+  if (storedHash === modern) return true;
+  // Accept legacy hashes so old users can still sign in.
+  return storedHash === legacyHash(pass);
+}
+
+function setSignedInUser(key, displayName) {
+  CASHBOOK_USER = key;
+  window.CASHBOOK_USER = key;
+  localStorage.setItem("cashbook_user", key);
+  if (displayName) localStorage.setItem("cashbook_display_name", displayName);
+}
+
+function getDB() {
+  if (window.db) return window.db;
+  if (typeof firebase !== "undefined") return firebase.database();
+  throw new Error("Firebase not initialized");
+}
+
+async function signInFlow(name, pass, repeat) {
+  if (!db) {
+    alert("Connection error: Database not ready. Please refresh.");
+    return false;
+  }
+  const key = cleanKey(name);
+  if (!key || !pass) {
+    return { ok: false, code: "MISSING_FIELDS", message: "Please enter a name and password." };
+  }
+  const ref = db.ref("/cashbookUsers/" + key);
+  const snap = await ref.once("value");
+
+  if (snap.exists()) {
+    const user = snap.val() || {};
+    const ok = await verifyPassword(user.passwordHash, pass);
+    if (!ok) return { ok: false, code: "WRONG_PASSWORD", message: "Wrong password" };
+
+    // Upgrade legacy hash silently.
+    const modern = await passwordHash(pass);
+    if (user.passwordHash !== modern) {
+      ref.child("passwordHash").set(modern);
+    }
+
+    // Ensure profile displayName exists.
+    if (!user.profile || !user.profile.displayName) {
+      ref.child("profile/displayName").set(displayName);
+    }
+
+    setSignedInUser(key, user.profile?.displayName || displayName);
+    return { ok: true, action: "login", message: `Welcome back, ${user.profile?.displayName || displayName}` };
+>>>>>>> origin/cashbook
+  }
+
+  // Register
+  if (!repeat) {
+    return { ok: false, code: "NEED_REPEAT", message: "Repeat password to register." };
+  }
+  if (pass !== repeat) {
+    return { ok: false, code: "PASS_MISMATCH", message: "Passwords do not match." };
+  }
+
+  const fav = prompt("Recovery question: Who is your favourite family member?") || "";
+  const payload = {
+    passwordHash: await passwordHash(pass),
+    recovery: (fav || "").trim(),
+    profile: {
+      displayName,
+      avatarDataUrl: ""
+    },
+    createdAt: new Date().toISOString()
+  };
+
+  await ref.set(payload);
+  setSignedInUser(key, displayName);
+  return { ok: true, action: "register", message: `Registered successfully. Welcome, ${displayName}` };
 }
 
 async function verifyPassword(storedHash, pass) {
@@ -866,6 +968,7 @@ function userPath(sub) {
   function saveTransaction(tx) {
     const cbId = MoneyMemoryState.currentCashbookId;
     if (MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid) {
+      const db = getDB();
       const ref = db.ref(`${userPath("cashbooks")}/${cbId}/transactions`).push();
       const id = ref.key;
       const fullTx = { ...tx, id };
@@ -889,6 +992,7 @@ function userPath(sub) {
   function saveLastOpenedCashbook() {
     MoneyMemoryState.settings.lastOpenedCashbookId = MoneyMemoryState.currentCashbookId;
     if (MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid) {
+      const db = getDB();
       db.ref(`${userPath("settings")}/lastOpenedCashbookId`).set(MoneyMemoryState.currentCashbookId);
     } else {
       saveToLocalStorage();
@@ -897,6 +1001,7 @@ function userPath(sub) {
 
   function persistState() {
     if (MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid) {
+      const db = getDB();
       const cbId = MoneyMemoryState.currentCashbookId;
       const updates = {};
       updates[`${userPath("cashbooks")}/${cbId}/pots`] = MoneyMemoryState.potsByCashbook[cbId] || {};
@@ -1003,7 +1108,6 @@ function setupAuthUI() {
   const recoverMsg = document.getElementById("recoverMsg");
 
   const eyeToggles = document.querySelectorAll(".eye-toggle");
-
   if (setupAuthUI._bound) return;
   setupAuthUI._bound = true;
 
@@ -1022,6 +1126,8 @@ function setupAuthUI() {
     el.classList.add("hidden");
     el.textContent = "";
   };
+  console.log("DOM Loaded or App Init. Setup starting...");
+>>>>>>> origin/cashbook
 
   const showSignin = () => {
     clearMsg(authMsg);
@@ -1078,6 +1184,34 @@ function setupAuthUI() {
 
         // Hide overlay & load app
         setTimeout(() => {
+    // Remove old listeners just in case
+    const newBtn = signinBtn.cloneNode(true);
+    signinBtn.parentNode.replaceChild(newBtn, signinBtn);
+    
+    newBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log("Sign In button clicked");
+      
+      const n = cashName?.value || "";
+      const p = cashPass?.value || "";
+      const r = cashPassRepeat?.value || "";
+      
+      if (!n || !p) {
+        alert("Please enter a name and password.");
+        return;
+      }
+      
+      newBtn.textContent = "Processing...";
+      newBtn.disabled = true;
+
+      try {
+        console.log(`Attempting sign in for: ${n}`);
+        const success = await signInFlow(n, p, r);
+        
+        if (success) {
+          console.log("Sign in success");
+>>>>>>> origin/cashbook
           if (signinBox) signinBox.classList.add("hidden");
           if (recoverBox) recoverBox.classList.add("hidden");
           if (overlay) overlay.style.display = "none";
@@ -1094,45 +1228,40 @@ function setupAuthUI() {
   }
 
   if (forgotLink) {
-    forgotLink.addEventListener("click", (e) => {
+    forgotLink.addEventListener("click", (e) => 
+        } else {
+          console.log("Sign in flow returned false");
+          // Alert is handled in signInFlow
+        }
+      } catch (err) {
+        console.error("Sign in CRASHED", err);
+        alert("System Error during sign in: " + err.message);
+      } finally {
+        newBtn.textContent = "Sign In / Register";
+        newBtn.disabled = false;
+      }
+    });
+  } else {
+    console.error("signinBtn element NOT found in DOM");
+  }
+
+  if (forgotLink) {
+    forgotLink.onclick = (e) => {
+>>>>>>> origin/cashbook
       e.preventDefault();
       showRecover();
     });
   }
 
   if (recoverBtn) {
-    recoverBtn.addEventListener("click", async (e) => {
+    recoverBtn.onclick = (e) => {
       e.preventDefault();
-      clearMsg(recoverMsg);
-
-      const n = recoverName?.value || cashName?.value || "";
-      const ans = recoveryInput?.value || "";
-      const newP = recoverNewPass?.value || "";
-      const rep = recoverNewPassRepeat?.value || "";
-
-      recoverBtn.textContent = "Processing...";
-      recoverBtn.disabled = true;
-
-      try {
-        const res = await recoverPasswordFlow(n, ans, newP, rep);
-        if (!res.ok) {
-          setMsg(recoverMsg, res.message || "Failed.", "error");
-          return;
-        }
-        setMsg(recoverMsg, res.message || "Password reset successful.", "success");
-        setTimeout(() => showSignin(), 600);
-      } catch (err) {
-        console.error("Recover crashed", err);
-        setMsg(recoverMsg, "System error: " + (err?.message || err), "error");
-      } finally {
-        recoverBtn.textContent = "Reset Password";
-        recoverBtn.disabled = false;
-      }
-    });
+      recoverPassword(cashName?.value || "", recoveryInput?.value || "");
+    };
   }
 
   if (backToSignin) {
-    backToSignin.addEventListener("click", (e) => {
+    backToSignin.onclick = (e) => {
       e.preventDefault();
       showSignin();
     });
@@ -1163,6 +1292,36 @@ function setupAuthUI() {
       } else {
         input.type = "password";
         btn.innerHTML = '<i class="fa fa-eye"></i>';
+    // Clone to remove old listeners
+    const newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+
+    newBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      // Find the input relative to the button if ID lookup fails, or use data-target
+      const targetId = newBtn.getAttribute("data-target");
+      let input = document.getElementById(targetId);
+      
+      // Fallback: look for sibling input
+      if (!input) {
+        input = newBtn.parentElement.querySelector("input");
+      }
+
+      if (!input) {
+        console.error("Target input not found for eye toggle", targetId);
+        return;
+      }
+
+      // Toggle Type
+      if (input.type === "password") {
+        input.type = "text";
+        newBtn.innerHTML = '<i class="fa fa-eye-slash"></i>';
+      } else {
+        input.type = "password";
+        newBtn.innerHTML = '<i class="fa fa-eye"></i>';
+>>>>>>> origin/cashbook
       }
     });
   });
