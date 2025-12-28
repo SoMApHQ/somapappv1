@@ -16,6 +16,7 @@ async function signInFlow(name, pass, repeat) {
     const user = snap.val();
     if (user.passwordHash === hash(pass)) {
       CASHBOOK_USER = key;
+      window.CASHBOOK_USER = key;
       localStorage.setItem("cashbook_user", key);
       return true;
     } else {
@@ -30,6 +31,7 @@ async function signInFlow(name, pass, repeat) {
     const fav = prompt("Set recovery question: Who is your favourite family member?");
     await ref.set({ passwordHash: hash(pass), recovery: fav || "" });
     CASHBOOK_USER = key;
+    window.CASHBOOK_USER = key;
     localStorage.setItem("cashbook_user", key);
     return true;
   }
@@ -88,9 +90,9 @@ function userPath(sub) {
     MoneyMemoryState.ui.isLoading = true;
     renderLoading();
     try {
-      if (window.CASHBOOK_USER) {
+      if (CASHBOOK_USER) {
         MoneyMemoryState.mode = "firebase";
-        MoneyMemoryState.uid = window.CASHBOOK_USER;
+        MoneyMemoryState.uid = CASHBOOK_USER;
         await loadFromFirebase();
       } else {
         MoneyMemoryState.mode = "guest";
@@ -114,7 +116,7 @@ function userPath(sub) {
     }
   }
 
-  async function loadFromFirebase() {
+async function loadFromFirebase() {
     const snapshot = await db.ref(userPath("")).once("value");
     const data = snapshot.val() || {};
     const cashbooks = data.cashbooks || {};
@@ -756,6 +758,7 @@ window.addEventListener("load", () => {
     if (signinBox) signinBox.style.display = "block";
   } else {
     CASHBOOK_USER = localUser;
+    window.CASHBOOK_USER = localUser;
     if (overlay) overlay.style.display = "none";
     window.initCashbook();
   }
