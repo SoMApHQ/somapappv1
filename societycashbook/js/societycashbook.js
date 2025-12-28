@@ -757,10 +757,9 @@ async function loadFromFirebase() {
 
 window.addEventListener("load", () => {
   // Use DOMContentLoaded if load is too slow, but load ensures CSS/Fonts are ready.
-  // We'll add a backup check just in case.
 });
 
-document.addEventListener("DOMContentLoaded", () => {
+function setupAuthUI() {
   const overlay = document.getElementById("signin-overlay");
   const signinBox = document.getElementById("signin-box");
   const recoverBox = document.getElementById("recover-box");
@@ -774,7 +773,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const recoverBtn = document.getElementById("recoverBtn");
   const eyeToggles = document.querySelectorAll(".eye-toggle");
 
-  console.log("DOM Loaded. Setup starting...");
+  console.log("DOM Loaded or App Init. Setup starting...");
 
   const showSignin = () => {
     if (recoverBox) recoverBox.classList.add("hidden");
@@ -799,22 +798,32 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   if (signinBtn) {
-    // Remove old listeners if any by cloning (optional but safe) or just overwriting onclick
-    // We use onclick property to ensure single handler
-    signinBtn.onclick = async (e) => {
+    // Remove old listeners just in case
+    const newBtn = signinBtn.cloneNode(true);
+    signinBtn.parentNode.replaceChild(newBtn, signinBtn);
+    
+    newBtn.addEventListener("click", async (e) => {
       e.preventDefault();
-      e.stopPropagation(); // Stop bubbling
-      console.log("Sign In button clicked (onclick)");
-      // alert("Processing Sign In..."); // Debugging alert for user
+      e.stopPropagation();
+      console.log("Sign In button clicked");
       
+      const n = cashName?.value || "";
+      const p = cashPass?.value || "";
+      const r = cashPassRepeat?.value || "";
+      
+      if (!n || !p) {
+        alert("Please enter a name and password.");
+        return;
+      }
+      
+      newBtn.textContent = "Processing...";
+      newBtn.disabled = true;
+
       try {
-        const n = cashName?.value || "";
-        const p = cashPass?.value || "";
-        const r = cashPassRepeat?.value || "";
-        
         console.log(`Attempting sign in for: ${n}`);
+        const success = await signInFlow(n, p, r);
         
-        if (await signInFlow(n, p, r)) {
+        if (success) {
           console.log("Sign in success");
           if (signinBox) signinBox.classList.add("hidden");
           if (recoverBox) recoverBox.classList.add("hidden");
@@ -822,12 +831,16 @@ document.addEventListener("DOMContentLoaded", () => {
           window.initCashbook();
         } else {
           console.log("Sign in flow returned false");
+          // Alert is handled in signInFlow
         }
       } catch (err) {
         console.error("Sign in CRASHED", err);
         alert("System Error during sign in: " + err.message);
+      } finally {
+        newBtn.textContent = "Sign In / Register";
+        newBtn.disabled = false;
       }
-    };
+    });
   } else {
     console.error("signinBtn element NOT found in DOM");
   }
@@ -854,23 +867,42 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   eyeToggles.forEach((btn) => {
-    btn.onclick = (e) => {
+    // Clone to remove old listeners
+    const newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+
+    newBtn.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      const targetId = btn.getAttribute("data-target");
-      const input = document.getElementById(targetId);
+      
+      // Find the input relative to the button if ID lookup fails, or use data-target
+      const targetId = newBtn.getAttribute("data-target");
+      let input = document.getElementById(targetId);
+      
+      // Fallback: look for sibling input
+      if (!input) {
+        input = newBtn.parentElement.querySelector("input");
+      }
+
       if (!input) {
         console.error("Target input not found for eye toggle", targetId);
         return;
       }
+
       // Toggle Type
       if (input.type === "password") {
         input.type = "text";
-        btn.innerHTML = '<i class="fa fa-eye-slash"></i>';
+        newBtn.innerHTML = '<i class="fa fa-eye-slash"></i>';
       } else {
         input.type = "password";
-        btn.innerHTML = '<i class="fa fa-eye"></i>';
+        newBtn.innerHTML = '<i class="fa fa-eye"></i>';
       }
-    };
+    });
   });
-});
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", setupAuthUI);
+} else {
+  setupAuthUI();
+}
