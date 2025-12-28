@@ -1,8 +1,14 @@
-const db = firebase.database();
+// Database instance is retrieved from window (set by firebase.js) or initialized on demand
 let CASHBOOK_USER = null;
 
 const cleanKey = (n) => (n || "").toLowerCase().replace(/[^a-z0-9]/g, "_");
 const hash = (str) => btoa(unescape(encodeURIComponent(str || ""))).replace(/=/g, "");
+
+function getDB() {
+  if (window.db) return window.db;
+  if (typeof firebase !== "undefined") return firebase.database();
+  throw new Error("Firebase not initialized");
+}
 
 async function signInFlow(name, pass, repeat) {
   const key = cleanKey(name);
@@ -10,6 +16,7 @@ async function signInFlow(name, pass, repeat) {
     alert("Weka jina na nenosiri kwanza.");
     return false;
   }
+  const db = getDB();
   const ref = db.ref("/cashbookUsers/" + key);
   const snap = await ref.once("value");
   if (snap.exists()) {
@@ -43,6 +50,7 @@ async function signInFlow(name, pass, repeat) {
 
 async function recoverPassword(name, ans) {
   const key = cleanKey(name);
+  const db = getDB();
   const snap = await db.ref("/cashbookUsers/" + key).once("value");
   if (snap.exists() && (snap.val().recovery || "").toLowerCase() === (ans || "").toLowerCase()) {
     alert("Your password cannot be shown, but you can reset now.");
@@ -120,7 +128,8 @@ function userPath(sub) {
     }
   }
 
-async function loadFromFirebase() {
+  async function loadFromFirebase() {
+    const db = getDB();
     const snapshot = await db.ref(userPath("")).once("value");
     const data = snapshot.val() || {};
     const cashbooks = data.cashbooks || {};
@@ -632,6 +641,7 @@ async function loadFromFirebase() {
   function saveTransaction(tx) {
     const cbId = MoneyMemoryState.currentCashbookId;
     if (MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid) {
+      const db = getDB();
       const ref = db.ref(`${userPath("cashbooks")}/${cbId}/transactions`).push();
       const id = ref.key;
       const fullTx = { ...tx, id };
@@ -655,6 +665,7 @@ async function loadFromFirebase() {
   function saveLastOpenedCashbook() {
     MoneyMemoryState.settings.lastOpenedCashbookId = MoneyMemoryState.currentCashbookId;
     if (MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid) {
+      const db = getDB();
       db.ref(`${userPath("settings")}/lastOpenedCashbookId`).set(MoneyMemoryState.currentCashbookId);
     } else {
       saveToLocalStorage();
@@ -663,6 +674,7 @@ async function loadFromFirebase() {
 
   function persistState() {
     if (MoneyMemoryState.mode === "firebase" && MoneyMemoryState.uid) {
+      const db = getDB();
       const cbId = MoneyMemoryState.currentCashbookId;
       const updates = {};
       updates[`${userPath("cashbooks")}/${cbId}/pots`] = MoneyMemoryState.potsByCashbook[cbId] || {};
@@ -782,6 +794,7 @@ window.addEventListener("load", () => {
 
   if (signinBtn) {
     signinBtn.onclick = async () => {
+      console.log("Sign in clicked");
       try {
         const n = cashName?.value || "";
         const p = cashPass?.value || "";
