@@ -16,7 +16,7 @@ if (!firebase.apps.length) {
 
 // --- Export handles globally so HTML pages can use them ---
 const db = firebase.database();
-const storage = firebase.storage();
+const storage = firebase.storage ? firebase.storage() : null;
 
 window.db = db;
 window.storage = storage;

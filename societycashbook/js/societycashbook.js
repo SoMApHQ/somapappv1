@@ -1,10 +1,21 @@
-const db = firebase.database();
+let db;
+try {
+  db = firebase.database();
+} catch (e) {
+  console.warn("Firebase DB init error in societycashbook.js (might be already initialized or waiting):", e);
+  if (window.db) db = window.db;
+}
+
 let CASHBOOK_USER = null;
 
 const cleanKey = (n) => (n || "").toLowerCase().replace(/[^a-z0-9]/g, "_");
 const hash = (str) => btoa(unescape(encodeURIComponent(str || ""))).replace(/=/g, "");
 
 async function signInFlow(name, pass, repeat) {
+  if (!db) {
+    alert("Connection error: Database not ready. Please refresh.");
+    return false;
+  }
   const key = cleanKey(name);
   if (!key || !pass) {
     alert("Weka jina na nenosiri kwanza.");
@@ -745,6 +756,10 @@ async function loadFromFirebase() {
 })();
 
 window.addEventListener("load", () => {
+  // Use DOMContentLoaded if load is too slow, but load ensures CSS/Fonts are ready.
+});
+
+function setupAuthUI() {
   const overlay = document.getElementById("signin-overlay");
   const signinBox = document.getElementById("signin-box");
   const recoverBox = document.getElementById("recover-box");
@@ -757,6 +772,8 @@ window.addEventListener("load", () => {
   const forgotLink = document.getElementById("forgotLink");
   const recoverBtn = document.getElementById("recoverBtn");
   const eyeToggles = document.querySelectorAll(".eye-toggle");
+
+  console.log("DOM Loaded or App Init. Setup starting...");
 
   const showSignin = () => {
     if (recoverBox) recoverBox.classList.add("hidden");
@@ -781,49 +798,111 @@ window.addEventListener("load", () => {
   }
 
   if (signinBtn) {
-    signinBtn.onclick = async () => {
+    // Remove old listeners just in case
+    const newBtn = signinBtn.cloneNode(true);
+    signinBtn.parentNode.replaceChild(newBtn, signinBtn);
+    
+    newBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log("Sign In button clicked");
+      
+      const n = cashName?.value || "";
+      const p = cashPass?.value || "";
+      const r = cashPassRepeat?.value || "";
+      
+      if (!n || !p) {
+        alert("Please enter a name and password.");
+        return;
+      }
+      
+      newBtn.textContent = "Processing...";
+      newBtn.disabled = true;
+
       try {
-        const n = cashName?.value || "";
-        const p = cashPass?.value || "";
-        const r = cashPassRepeat?.value || "";
-        if (await signInFlow(n, p, r)) {
+        console.log(`Attempting sign in for: ${n}`);
+        const success = await signInFlow(n, p, r);
+        
+        if (success) {
+          console.log("Sign in success");
           if (signinBox) signinBox.classList.add("hidden");
           if (recoverBox) recoverBox.classList.add("hidden");
           if (overlay) overlay.style.display = "none";
           window.initCashbook();
+        } else {
+          console.log("Sign in flow returned false");
+          // Alert is handled in signInFlow
         }
       } catch (err) {
-        console.error("Sign in failed", err);
-        alert("Imeshindikana kuingia. Tafadhali jaribu tena.");
+        console.error("Sign in CRASHED", err);
+        alert("System Error during sign in: " + err.message);
+      } finally {
+        newBtn.textContent = "Sign In / Register";
+        newBtn.disabled = false;
       }
-    };
+    });
+  } else {
+    console.error("signinBtn element NOT found in DOM");
   }
 
   if (forgotLink) {
-    forgotLink.onclick = () => {
+    forgotLink.onclick = (e) => {
+      e.preventDefault();
       showRecover();
     };
   }
 
   if (recoverBtn) {
-    recoverBtn.onclick = () => {
+    recoverBtn.onclick = (e) => {
+      e.preventDefault();
       recoverPassword(cashName?.value || "", recoveryInput?.value || "");
     };
   }
 
   if (backToSignin) {
-    backToSignin.onclick = () => {
+    backToSignin.onclick = (e) => {
+      e.preventDefault();
       showSignin();
     };
   }
 
   eyeToggles.forEach((btn) => {
-    btn.onclick = () => {
-      const targetId = btn.getAttribute("data-target");
-      const input = document.getElementById(targetId);
-      if (!input) return;
-      input.type = input.type === "password" ? "text" : "password";
-      btn.innerHTML = `<i class="fa ${input.type === "password" ? "fa-eye" : "fa-eye-slash"}"></i>`;
-    };
+    // Clone to remove old listeners
+    const newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+
+    newBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      // Find the input relative to the button if ID lookup fails, or use data-target
+      const targetId = newBtn.getAttribute("data-target");
+      let input = document.getElementById(targetId);
+      
+      // Fallback: look for sibling input
+      if (!input) {
+        input = newBtn.parentElement.querySelector("input");
+      }
+
+      if (!input) {
+        console.error("Target input not found for eye toggle", targetId);
+        return;
+      }
+
+      // Toggle Type
+      if (input.type === "password") {
+        input.type = "text";
+        newBtn.innerHTML = '<i class="fa fa-eye-slash"></i>';
+      } else {
+        input.type = "password";
+        newBtn.innerHTML = '<i class="fa fa-eye"></i>';
+      }
+    });
   });
-});
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", setupAuthUI);
+} else {
+  setupAuthUI();
+}
