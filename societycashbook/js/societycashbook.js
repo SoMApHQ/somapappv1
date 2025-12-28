@@ -744,6 +744,7 @@ window.addEventListener("load", () => {
   const overlay = document.getElementById("signin-overlay");
   const signinBox = document.getElementById("signin-box");
   const recoverBox = document.getElementById("recover-box");
+  const backToSignin = document.getElementById("backToSignin");
   const cashName = document.getElementById("cashName");
   const cashPass = document.getElementById("cashPass");
   const cashPassRepeat = document.getElementById("cashPassRepeat");
@@ -753,10 +754,21 @@ window.addEventListener("load", () => {
   const recoverBtn = document.getElementById("recoverBtn");
   const eyeToggles = document.querySelectorAll(".eye-toggle");
 
+  const showSignin = () => {
+    if (recoverBox) recoverBox.classList.add("hidden");
+    if (signinBox) signinBox.classList.remove("hidden");
+    if (overlay) overlay.style.display = "flex";
+  };
+
+  const showRecover = () => {
+    if (signinBox) signinBox.classList.add("hidden");
+    if (recoverBox) recoverBox.classList.remove("hidden");
+    if (overlay) overlay.style.display = "flex";
+  };
+
   const localUser = localStorage.getItem("cashbook_user");
   if (!localUser) {
-    if (overlay) overlay.style.display = "flex";
-    if (signinBox) signinBox.style.display = "block";
+    showSignin();
   } else {
     CASHBOOK_USER = localUser;
     window.CASHBOOK_USER = localUser;
@@ -770,7 +782,7 @@ window.addEventListener("load", () => {
       const p = cashPass?.value || "";
       const r = cashPassRepeat?.value || "";
       if (await signInFlow(n, p, r)) {
-        if (signinBox) signinBox.style.display = "none";
+        if (signinBox) signinBox.classList.add("hidden");
         if (recoverBox) recoverBox.classList.add("hidden");
         if (overlay) overlay.style.display = "none";
         window.initCashbook();
@@ -780,13 +792,19 @@ window.addEventListener("load", () => {
 
   if (forgotLink) {
     forgotLink.onclick = () => {
-      if (recoverBox) recoverBox.classList.remove("hidden");
+      showRecover();
     };
   }
 
   if (recoverBtn) {
     recoverBtn.onclick = () => {
       recoverPassword(cashName?.value || "", recoveryInput?.value || "");
+    };
+  }
+
+  if (backToSignin) {
+    backToSignin.onclick = () => {
+      showSignin();
     };
   }
 
