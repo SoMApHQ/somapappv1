@@ -283,55 +283,71 @@
         referralCode.value = refParam;
         referralCode.readOnly = true;
       }
-
-      /* Duplicate check */
-      async function findDuplicate(phone, cls, year) {
-        const snap = await schoolRef("approvalsPending").once("value");
-        const all = snap.val() || {};
-        return Object.values(all).some(
-          (r) =>
-            r.approvalType === "JOIN_REQUEST" &&
-            r.parentSnapshot?.phone === phone &&
-            r.studentSnapshot?.classLevel === cls &&
-            r.academicYear === year
-        );
-      }
-
       /* Submit */
       joinForm.addEventListener("submit", async (e) => {
         e.preventDefault();
         submitBtn.disabled = true;
 
         try {
-          const phone = parentPhone.value.trim();
-          const cls = classLevel.value;
-          const year = academicYear.value;
+          console.log("🚀 Join submit started");
 
-          if (await findDuplicate(phone, cls, year)) {
-            Swal.fire("Duplicate", "This request already exists.", "warning");
-            submitBtn.disabled = false;
-            return;
+          // Create SAFE isolated node (no school path, no overwrite)
+          const joinRef = db.ref("joinApprovalsPending").push();
+          const joinId = joinRef.key;
+
+          async function uploadFile(inputId, folder) {
+            const el = document.getElementById(inputId);
+            if (!el || !el.files.length) return null;
+
+            const fd = new FormData();
+            fd.append("file", el.files[0]);
+            fd.append("upload_preset", "somap_unsigned");
+            fd.append("folder", `joinRequests/${joinId}/${folder}`);
+
+            const res = await fetch(
+              "https://api.cloudinary.com/v1_1/dg7vnrkgd/auto/upload",
+              { method: "POST", body: fd }
+            );
+            const json = await res.json();
+            return json.secure_url || null;
           }
 
-          const refNode = schoolRef("approvalsPending").push();
-          await refNode.set({
-            approvalType: "JOIN_REQUEST",
+          const documents = {
+            passportPhotoUrl: await uploadFile("passportPhoto", "passport"),
+            birthCertUrl: await uploadFile("birthCert", "birthCert"),
+            reportCardUrl: await uploadFile("reportCard", "reportCard"),
+            joiningLetterUrl: await uploadFile("joiningLetter", "joiningForm"),
+            medicalDocsUrl: await uploadFile("medicalDocs", "medical"),
+          };
+
+          await joinRef.set({
             status: "pending",
-            academicYear: year,
-            createdAt: Date.now(),
+            academicYear: academicYear.value.trim(),
+
             studentSnapshot: {
               firstName: firstName.value.trim(),
               lastName: lastName.value.trim(),
-              classLevel: cls,
+              classLevel: classLevel.value,
             },
+
             parentSnapshot: {
               name: parentName.value.trim(),
-              phone,
+              phone: parentPhone.value.trim(),
             },
+
             referral: {
               code: referralCode.value.trim() || null,
             },
-            source: { submittedVia: "join.html" },
+
+            documents,
+
+            source: {
+              channel: referralCode.value ? "parent-referral" : "public",
+              submittedVia: "join.html",
+            },
+
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
           });
 
           Swal.fire(
