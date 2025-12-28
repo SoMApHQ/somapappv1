@@ -8,10 +8,15 @@
 (() => {
   "use strict";
 
+  console.log("[MoneyMemory] societycashbook.js loaded");
+  window.addEventListener("error", (e) => console.error("[MoneyMemory] ERROR:", e.error || e.message));
+  window.addEventListener("unhandledrejection", (e) => console.error("[MoneyMemory] PROMISE:", e.reason));
+
   // ----------------------------
   // Firebase / DB helper
   // ----------------------------
   let db = null;
+  let dbErrorShown = false;
 
   function getDb() {
     if (db) return db;
@@ -31,7 +36,28 @@
     } catch (e) {
       // Not ready yet
     }
+    if (!dbErrorShown) {
+      showDbError();
+      dbErrorShown = true;
+    }
     return null;
+  }
+
+  function showDbError() {
+    const msg = "Firebase not initialized or firebase.js not loading.";
+    console.error("[MoneyMemory]", msg);
+    try {
+      const el = document.getElementById("authMsg");
+      if (el) {
+        el.classList.remove("hidden");
+        el.textContent = msg;
+        el.classList.remove("text-rose-300", "text-emerald-300", "text-slate-600");
+        el.classList.add("text-rose-600");
+      }
+    } catch {
+      // ignore DOM update issues
+    }
+    return msg;
   }
 
   // ----------------------------
@@ -131,10 +157,11 @@
   // ----------------------------
   // Auth flows (RTDB)
   // ----------------------------
-  async function signInFlow(name, pass, repeat) {
+  async function signInFlow(name, pass) {
     const _db = getDb();
     if (!_db) {
-      return { ok: false, message: "Connection error: Database not ready. Please refresh." };
+      const msg = showDbError();
+      return { ok: false, message: msg };
     }
 
     const displayName = (name || "").trim();
@@ -147,35 +174,53 @@
     const ref = _db.ref(`/cashbookUsers/${key}`);
     const snap = await ref.once("value");
 
-    // Existing user
-    if (snap.exists()) {
-      const user = snap.val() || {};
-      const ok = await verifyPassword(user.passwordHash, pass);
-      if (!ok) return { ok: false, message: "Wrong password." };
-
-      // Upgrade legacy hash silently
-      const modern = await passwordHash(pass);
-      if (user.passwordHash !== modern) {
-        ref.child("passwordHash").set(modern);
-      }
-
-      // Ensure profile
-      if (!user.profile || !user.profile.displayName) {
-        ref.child("profile/displayName").set(displayName);
-      }
-
-      setSignedInUser(key, user.profile?.displayName || displayName);
-      return { ok: true, message: `Welcome back, ${user.profile?.displayName || displayName}.` };
+    if (!snap.exists()) {
+      return { ok: false, message: "Account not found. Use Register." };
     }
 
-    // Register
-    if (!repeat) return { ok: false, message: "Repeat password to register." };
-    if (pass !== repeat) return { ok: false, message: "Passwords do not match." };
+    const user = snap.val() || {};
+    const ok = await verifyPassword(user.passwordHash, pass);
+    if (!ok) return { ok: false, message: "Wrong password." };
 
-    const recoveryAnswer = prompt("Recovery question: What is your favourite family member?") || "";
+    // Upgrade legacy hash silently
+    const modern = await passwordHash(pass);
+    if (user.passwordHash !== modern) {
+      ref.child("passwordHash").set(modern);
+    }
+
+    // Ensure profile
+    if (!user.profile || !user.profile.displayName) {
+      ref.child("profile/displayName").set(displayName);
+    }
+
+    setSignedInUser(key, user.profile?.displayName || displayName);
+    return { ok: true, message: `Welcome back, ${user.profile?.displayName || displayName}.` };
+  }
+
+  async function registerFlow(name, pass, repeat, recoveryAnswer) {
+    const _db = getDb();
+    if (!_db) {
+      const msg = showDbError();
+      return { ok: false, message: msg };
+    }
+
+    const displayName = (name || "").trim();
+    const key = cleanKey(displayName);
+
+    if (!key || !pass || !repeat) {
+      return { ok: false, message: "Please fill in all fields." };
+    }
+    if (pass !== repeat) return { ok: false, message: "Passwords do not match." };
+    const recoveryClean = (recoveryAnswer || "").trim();
+    if (!recoveryClean) return { ok: false, message: "Please enter a recovery answer." };
+
+    const ref = _db.ref(`/cashbookUsers/${key}`);
+    const snap = await ref.once("value");
+    if (snap.exists()) return { ok: false, message: "Account already exists. Use Sign in." };
+
     const payload = {
       passwordHash: await passwordHash(pass),
-      recovery: (recoveryAnswer || "").trim(), // kept as plain for backward compatibility (simple)
+      recovery: recoveryClean,
       profile: { displayName, avatarDataUrl: "" },
       createdAt: new Date().toISOString()
     };
@@ -187,7 +232,10 @@
 
   async function recoverPasswordFlow(name, answer, newPass, repeat) {
     const _db = getDb();
-    if (!_db) return { ok: false, message: "Connection error: Database not ready. Please refresh." };
+    if (!_db) {
+      const msg = showDbError();
+      return { ok: false, message: msg };
+    }
 
     const displayName = (name || "").trim();
     const key = cleanKey(displayName);
@@ -946,9 +994,13 @@
     const signinBox = document.getElementById("signin-box");
     const recoverBox = document.getElementById("recover-box");
 
+    const authModeSignin = document.getElementById("auth-mode-signin");
+    const authModeRegister = document.getElementById("auth-mode-register");
     const cashName = document.getElementById("cashName");
     const cashPass = document.getElementById("cashPass");
     const cashPassRepeat = document.getElementById("cashPassRepeat");
+    const cashRecovery = document.getElementById("cashRecovery");
+    const registerOnlyFields = document.querySelectorAll(".auth-register-only");
     const signinBtn = document.getElementById("signinBtn");
     const forgotLink = document.getElementById("forgotLink");
     const authMsg = document.getElementById("authMsg");
@@ -965,7 +1017,7 @@
       if (!el) return;
       el.classList.remove("hidden");
       el.textContent = text || "";
-      el.classList.remove("text-rose-300", "text-emerald-300", "text-slate-600");
+      el.classList.remove("text-rose-300", "text-rose-600", "text-emerald-300", "text-emerald-700", "text-slate-600");
       if (kind === "error") el.classList.add("text-rose-600");
       else if (kind === "success") el.classList.add("text-emerald-700");
       else el.classList.add("text-slate-600");
@@ -975,6 +1027,16 @@
       if (!el) return;
       el.classList.add("hidden");
       el.textContent = "";
+      el.classList.remove("text-rose-300", "text-rose-600", "text-emerald-300", "text-emerald-700", "text-slate-600");
+    };
+
+    let authMode = "signin";
+    const setAuthMode = (mode = "signin") => {
+      authMode = mode === "register" ? "register" : "signin";
+      if (authModeSignin) authModeSignin.classList.toggle("active", authMode === "signin");
+      if (authModeRegister) authModeRegister.classList.toggle("active", authMode === "register");
+      registerOnlyFields.forEach((el) => el.classList.toggle("hidden", authMode === "signin"));
+      if (signinBtn) signinBtn.textContent = authMode === "signin" ? "Sign In" : "Register";
     };
 
     const showSignin = () => {
@@ -983,6 +1045,7 @@
       if (recoverBox) recoverBox.classList.add("hidden");
       if (signinBox) signinBox.classList.remove("hidden");
       if (overlay) overlay.style.display = "flex";
+      setAuthMode("signin");
     };
 
     const showRecover = () => {
@@ -993,6 +1056,26 @@
       if (overlay) overlay.style.display = "flex";
       if (recoverName && cashName && cashName.value && !recoverName.value) recoverName.value = cashName.value;
     };
+
+    setAuthMode("signin");
+
+    if (authModeSignin && !authModeSignin.dataset.bound) {
+      authModeSignin.dataset.bound = "1";
+      authModeSignin.addEventListener("click", (e) => {
+        e.preventDefault();
+        clearMsg(authMsg);
+        setAuthMode("signin");
+      });
+    }
+
+    if (authModeRegister && !authModeRegister.dataset.bound) {
+      authModeRegister.dataset.bound = "1";
+      authModeRegister.addEventListener("click", (e) => {
+        e.preventDefault();
+        clearMsg(authMsg);
+        setAuthMode("register");
+      });
+    }
 
     // Eye toggles
     document.querySelectorAll(".eye-toggle").forEach((btn) => {
@@ -1017,8 +1100,17 @@
     const localUser = localStorage.getItem("cashbook_user");
     if (localUser) {
       window.CASHBOOK_USER = localUser;
-      if (overlay) overlay.style.display = "none";
-      initMoneyMemory().catch(() => {});
+      if (!getDb()) {
+        showSignin();
+        showDbError();
+      } else {
+        if (overlay) overlay.style.display = "none";
+        initMoneyMemory().catch((err) => {
+          console.error("[MoneyMemory] initMoneyMemory failed", err);
+          showSignin();
+          setMsg(authMsg, "Could not initialize app. Try again.", "error");
+        });
+      }
     } else {
       showSignin();
     }
@@ -1032,12 +1124,15 @@
         const n = cashName?.value || "";
         const p = cashPass?.value || "";
         const r = cashPassRepeat?.value || "";
+        const recoveryAnswer = cashRecovery?.value || "";
 
         signinBtn.disabled = true;
-        signinBtn.textContent = "Processing...";
+        signinBtn.textContent = authMode === "signin" ? "Signing in..." : "Registering...";
 
         try {
-          const res = await signInFlow(n, p, r);
+          const res = authMode === "signin"
+            ? await signInFlow(n, p)
+            : await registerFlow(n, p, r, recoveryAnswer);
           if (!res.ok) {
             setMsg(authMsg, res.message || "Sign in failed.", "error");
             return;
@@ -1054,7 +1149,7 @@
           setMsg(authMsg, "System error during sign in: " + (err?.message || err), "error");
         } finally {
           signinBtn.disabled = false;
-          signinBtn.textContent = "Sign In / Register";
+          signinBtn.textContent = authMode === "signin" ? "Sign In" : "Register";
         }
       });
     }
@@ -1113,6 +1208,9 @@
     MoneyMemoryState.ui.isLoading = true;
 
     const _db = getDb();
+    if (window.CASHBOOK_USER && !_db) {
+      showDbError();
+    }
     if (window.CASHBOOK_USER && _db) {
       MoneyMemoryState.mode = "firebase";
       MoneyMemoryState.uid = window.CASHBOOK_USER;
@@ -1138,9 +1236,5 @@
   }
 
   // Boot
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", setupAuthUI);
-  } else {
-    setupAuthUI();
-  }
+  window.addEventListener("DOMContentLoaded", setupAuthUI, { once: true });
 })();
