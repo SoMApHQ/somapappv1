@@ -1,10 +1,21 @@
-const db = firebase.database();
+let db;
+try {
+  db = firebase.database();
+} catch (e) {
+  console.warn("Firebase DB init error in societycashbook.js (might be already initialized or waiting):", e);
+  if (window.db) db = window.db;
+}
+
 let CASHBOOK_USER = null;
 
 const cleanKey = (n) => (n || "").toLowerCase().replace(/[^a-z0-9]/g, "_");
 const hash = (str) => btoa(unescape(encodeURIComponent(str || ""))).replace(/=/g, "");
 
 async function signInFlow(name, pass, repeat) {
+  if (!db) {
+    alert("Connection error: Database not ready. Please refresh.");
+    return false;
+  }
   const key = cleanKey(name);
   if (!key || !pass) {
     alert("Weka jina na nenosiri kwanza.");
@@ -781,7 +792,9 @@ window.addEventListener("load", () => {
   }
 
   if (signinBtn) {
-    signinBtn.onclick = async () => {
+    signinBtn.onclick = async (e) => {
+      e.preventDefault(); // Prevent form submission if inside form
+      console.log("Sign In button clicked");
       try {
         const n = cashName?.value || "";
         const p = cashPass?.value || "";
@@ -797,10 +810,13 @@ window.addEventListener("load", () => {
         alert("Imeshindikana kuingia. Tafadhali jaribu tena.");
       }
     };
+  } else {
+    console.error("signinBtn element not found");
   }
 
   if (forgotLink) {
     forgotLink.onclick = () => {
+      console.log("Forgot password clicked");
       showRecover();
     };
   }
