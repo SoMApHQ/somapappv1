@@ -756,6 +756,11 @@ async function loadFromFirebase() {
 })();
 
 window.addEventListener("load", () => {
+  // Use DOMContentLoaded if load is too slow, but load ensures CSS/Fonts are ready.
+  // We'll add a backup check just in case.
+});
+
+document.addEventListener("DOMContentLoaded", () => {
   const overlay = document.getElementById("signin-overlay");
   const signinBox = document.getElementById("signin-box");
   const recoverBox = document.getElementById("recover-box");
@@ -768,6 +773,8 @@ window.addEventListener("load", () => {
   const forgotLink = document.getElementById("forgotLink");
   const recoverBtn = document.getElementById("recoverBtn");
   const eyeToggles = document.querySelectorAll(".eye-toggle");
+
+  console.log("DOM Loaded. Setup starting...");
 
   const showSignin = () => {
     if (recoverBox) recoverBox.classList.add("hidden");
@@ -792,54 +799,78 @@ window.addEventListener("load", () => {
   }
 
   if (signinBtn) {
+    // Remove old listeners if any by cloning (optional but safe) or just overwriting onclick
+    // We use onclick property to ensure single handler
     signinBtn.onclick = async (e) => {
-      e.preventDefault(); // Prevent form submission if inside form
-      console.log("Sign In button clicked");
+      e.preventDefault();
+      e.stopPropagation(); // Stop bubbling
+      console.log("Sign In button clicked (onclick)");
+      // alert("Processing Sign In..."); // Debugging alert for user
+      
       try {
         const n = cashName?.value || "";
         const p = cashPass?.value || "";
         const r = cashPassRepeat?.value || "";
+        
+        console.log(`Attempting sign in for: ${n}`);
+        
         if (await signInFlow(n, p, r)) {
+          console.log("Sign in success");
           if (signinBox) signinBox.classList.add("hidden");
           if (recoverBox) recoverBox.classList.add("hidden");
           if (overlay) overlay.style.display = "none";
           window.initCashbook();
+        } else {
+          console.log("Sign in flow returned false");
         }
       } catch (err) {
-        console.error("Sign in failed", err);
-        alert("Imeshindikana kuingia. Tafadhali jaribu tena.");
+        console.error("Sign in CRASHED", err);
+        alert("System Error during sign in: " + err.message);
       }
     };
   } else {
-    console.error("signinBtn element not found");
+    console.error("signinBtn element NOT found in DOM");
   }
 
   if (forgotLink) {
-    forgotLink.onclick = () => {
-      console.log("Forgot password clicked");
+    forgotLink.onclick = (e) => {
+      e.preventDefault();
       showRecover();
     };
   }
 
   if (recoverBtn) {
-    recoverBtn.onclick = () => {
+    recoverBtn.onclick = (e) => {
+      e.preventDefault();
       recoverPassword(cashName?.value || "", recoveryInput?.value || "");
     };
   }
 
   if (backToSignin) {
-    backToSignin.onclick = () => {
+    backToSignin.onclick = (e) => {
+      e.preventDefault();
       showSignin();
     };
   }
 
   eyeToggles.forEach((btn) => {
-    btn.onclick = () => {
+    btn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       const targetId = btn.getAttribute("data-target");
       const input = document.getElementById(targetId);
-      if (!input) return;
-      input.type = input.type === "password" ? "text" : "password";
-      btn.innerHTML = `<i class="fa ${input.type === "password" ? "fa-eye" : "fa-eye-slash"}"></i>`;
+      if (!input) {
+        console.error("Target input not found for eye toggle", targetId);
+        return;
+      }
+      // Toggle Type
+      if (input.type === "password") {
+        input.type = "text";
+        btn.innerHTML = '<i class="fa fa-eye-slash"></i>';
+      } else {
+        input.type = "password";
+        btn.innerHTML = '<i class="fa fa-eye"></i>';
+      }
     };
   });
 });
