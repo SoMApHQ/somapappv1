@@ -40,6 +40,7 @@
     container.innerHTML = `
       <h2>Headteacher Approvals</h2>
       <p class="subtitle">Thibitisha au kata check-ins za leo (scoped kwa shule na mwaka uliopo).</p>
+      <div id="${containerId}-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:10px;"></div>
       <div id="${containerId}-body">Loading...</div>
       <div class="rules" id="${containerId}-rules">
         <h3>Kanuni za Mahudhurio (Wi-Fi + adhabu)</h3>
@@ -104,6 +105,7 @@
 
       const container = createContainer();
       const body = document.getElementById(`${containerId}-body`);
+      const statsEl = document.getElementById(`${containerId}-stats`);
       const rulesBlock = document.getElementById(`${containerId}-rules`);
       const els = {
         requireWifi: document.getElementById('rules-requireWifi'),
@@ -161,6 +163,10 @@
         const attendanceData = attendance.snap.val() || {};
         const workersData = workers.snap.val() || {};
         const rows = [];
+        let totalWorkers = 0;
+        let approvedCount = 0;
+        let rejectedCount = 0;
+        let missingCount = 0;
 
         Object.entries(attendanceData).forEach(([id, months]) => {
           const rec = months?.[monthKey]?.[todayKey];
@@ -170,7 +176,25 @@
             profile: workersData[id]?.profile || {},
             record: rec
           });
+          totalWorkers += 1;
+          if (rec.approved === true) approvedCount += 1;
+          else if (rec.approved === false) rejectedCount += 1;
         });
+
+        // Workers who did not sign in today
+        Object.entries(workersData || {}).forEach(([id, w]) => {
+          if (attendanceData[id]?.[monthKey]?.[todayKey]) return;
+          missingCount += 1;
+        });
+
+        if (statsEl) {
+          statsEl.innerHTML = `
+            <div class="badge">Wafanyakazi: ${totalWorkers}</div>
+            <div class="badge">Approved: ${approvedCount}</div>
+            <div class="badge">Pending/Rejected: ${rejectedCount}</div>
+            <div class="badge">Hawakuingia leo: ${missingCount}</div>
+          `;
+        }
 
         if (!rows.length) {
           body.textContent = 'Hakuna check-ins leo (bado).';
@@ -234,6 +258,14 @@
 
       await loadRules();
       render();
+
+      // Allow external trigger (e.g., dashboard card) to force render/scroll
+      window.addEventListener('headteacher-approvals-open', () => {
+        createContainer();
+        render();
+        const anchor = document.getElementById(containerId);
+        if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
     } catch (err) {
       console.error('headteacherapprovals error', err);
     }
