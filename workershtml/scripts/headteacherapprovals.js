@@ -34,42 +34,46 @@
   }
 
   function createContainer() {
-    if (document.getElementById(containerId)) return document.getElementById(containerId);
-    const container = document.createElement('section');
-    container.id = containerId;
-    container.innerHTML = `
-      <h2>Headteacher Approvals</h2>
-      <p class="subtitle">Thibitisha au kata check-ins za leo (scoped kwa shule na mwaka uliopo).</p>
-      <div id="${containerId}-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:10px;"></div>
-      <div id="${containerId}-body">Loading...</div>
-      <div class="rules" id="${containerId}-rules">
-        <h3>Kanuni za Mahudhurio (Wi-Fi + adhabu)</h3>
-        <p class="subtitle">Badilisha utambuzi wa Wi-Fi na kiasi cha kukatwa (posho ya uwajibikaji) baada ya kuchelewa/kuondoka mapema.</p>
-        <div class="grid">
-          <label>Ruhusu Wi-Fi pekee
-            <input type="checkbox" id="rules-requireWifi">
-          </label>
-          <label>Majina ya Wi-Fi (SSID, koma kutenganisha)
-            <input type="text" id="rules-ssids" placeholder="SCHOOL_WIFI,OFFICE_WIFI">
-          </label>
-          <label>Kikomo cha kuchelewa (mara)
-            <input type="number" min="1" id="rules-lateThreshold" value="3">
-          </label>
-          <label>Kikomo cha kuondoka mapema (mara)
-            <input type="number" min="1" id="rules-earlyThreshold" value="3">
-          </label>
-          <label>Kiasi cha kukatwa (TZS)
-            <input type="number" min="0" id="rules-deductionAmount" value="1000">
-          </label>
-          <label>Kichwa cha malipo kinachokatwa
-            <input type="text" id="rules-deductionLabel" placeholder="Posho ya Uwajibikaji">
-          </label>
+    let container = document.getElementById(containerId);
+    if (!container) {
+      container = document.createElement('section');
+      container.id = containerId;
+      const host = document.querySelector('.dashboard-container') || document.body;
+      host.appendChild(container);
+    }
+    if (!container.innerHTML.trim()) {
+      container.innerHTML = `
+        <h2>Headteacher Approvals</h2>
+        <p class="subtitle">Thibitisha au kata check-ins za leo (scoped kwa shule na mwaka uliopo).</p>
+        <div id="${containerId}-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:10px;"></div>
+        <div id="${containerId}-body">Loading...</div>
+        <div class="rules" id="${containerId}-rules">
+          <h3>Kanuni za Mahudhurio (Wi-Fi + adhabu)</h3>
+          <p class="subtitle">Badilisha utambuzi wa Wi-Fi na kiasi cha kukatwa (posho ya uwajibikaji) baada ya kuchelewa/kuondoka mapema.</p>
+          <div class="grid">
+            <label>Ruhusu Wi-Fi pekee
+              <input type="checkbox" id="rules-requireWifi">
+            </label>
+            <label>Majina ya Wi-Fi (SSID, koma kutenganisha)
+              <input type="text" id="rules-ssids" placeholder="SCHOOL_WIFI,OFFICE_WIFI">
+            </label>
+            <label>Kikomo cha kuchelewa (mara)
+              <input type="number" min="1" id="rules-lateThreshold" value="3">
+            </label>
+            <label>Kikomo cha kuondoka mapema (mara)
+              <input type="number" min="1" id="rules-earlyThreshold" value="3">
+            </label>
+            <label>Kiasi cha kukatwa (TZS)
+              <input type="number" min="0" id="rules-deductionAmount" value="1000">
+            </label>
+            <label>Kichwa cha malipo kinachokatwa
+              <input type="text" id="rules-deductionLabel" placeholder="Posho ya Uwajibikaji">
+            </label>
+          </div>
+          <button class="btn save-btn" id="rules-save">Hifadhi Kanuni</button>
         </div>
-        <button class="btn save-btn" id="rules-save">Hifadhi Kanuni</button>
-      </div>
-    `;
-    const host = document.querySelector('.dashboard-container') || document.body;
-    host.appendChild(container);
+      `;
+    }
     return container;
   }
 
