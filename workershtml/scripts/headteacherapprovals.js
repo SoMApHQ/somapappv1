@@ -13,6 +13,12 @@
     #${containerId} .btn.approve { background:#ecfdf3; border-color:#bbf7d0; color:#166534; }
     #${containerId} .btn.reject { background:#fef2f2; border-color:#fecdd3; color:#9f1239; }
     #${containerId} .badge { display:inline-block; padding:4px 8px; border-radius:8px; font-size:0.85rem; border:1px solid #e2e8f0; background:#f8fafc; }
+    #${containerId} .rules { margin-top:12px; padding:12px; border:1px dashed #e2e8f0; border-radius:12px; background:#f8fafc; }
+    #${containerId} .rules h3 { margin:0 0 6px; font-size:1rem; }
+    #${containerId} .rules .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
+    #${containerId} label { font-weight:600; color:#1f2937; display:grid; gap:6px; font-size:0.92rem; }
+    #${containerId} input[type="text"], #${containerId} input[type="number"] { padding:8px 10px; border:1px solid #d1d5db; border-radius:10px; }
+    #${containerId} .save-btn { margin-top:10px; }
   `;
 
   const showToast = (window.toast) ? window.toast : (msg) => console.log('[approvals]', msg);
@@ -35,6 +41,31 @@
       <h2>Headteacher Approvals</h2>
       <p class="subtitle">Thibitisha au kata check-ins za leo (scoped kwa shule na mwaka uliopo).</p>
       <div id="${containerId}-body">Loading...</div>
+      <div class="rules" id="${containerId}-rules">
+        <h3>Kanuni za Mahudhurio (Wi-Fi + adhabu)</h3>
+        <p class="subtitle">Badilisha utambuzi wa Wi-Fi na kiasi cha kukatwa (posho ya uwajibikaji) baada ya kuchelewa/kuondoka mapema.</p>
+        <div class="grid">
+          <label>Ruhusu Wi-Fi pekee
+            <input type="checkbox" id="rules-requireWifi">
+          </label>
+          <label>Majina ya Wi-Fi (SSID, koma kutenganisha)
+            <input type="text" id="rules-ssids" placeholder="SCHOOL_WIFI,OFFICE_WIFI">
+          </label>
+          <label>Kikomo cha kuchelewa (mara)
+            <input type="number" min="1" id="rules-lateThreshold" value="3">
+          </label>
+          <label>Kikomo cha kuondoka mapema (mara)
+            <input type="number" min="1" id="rules-earlyThreshold" value="3">
+          </label>
+          <label>Kiasi cha kukatwa (TZS)
+            <input type="number" min="0" id="rules-deductionAmount" value="1000">
+          </label>
+          <label>Kichwa cha malipo kinachokatwa
+            <input type="text" id="rules-deductionLabel" placeholder="Posho ya Uwajibikaji">
+          </label>
+        </div>
+        <button class="btn save-btn" id="rules-save">Hifadhi Kanuni</button>
+      </div>
     `;
     const host = document.querySelector('.dashboard-container') || document.body;
     host.appendChild(container);
@@ -73,6 +104,48 @@
 
       const container = createContainer();
       const body = document.getElementById(`${containerId}-body`);
+      const rulesBlock = document.getElementById(`${containerId}-rules`);
+      const els = {
+        requireWifi: document.getElementById('rules-requireWifi'),
+        ssids: document.getElementById('rules-ssids'),
+        lateThreshold: document.getElementById('rules-lateThreshold'),
+        earlyThreshold: document.getElementById('rules-earlyThreshold'),
+        deductionAmount: document.getElementById('rules-deductionAmount'),
+        deductionLabel: document.getElementById('rules-deductionLabel'),
+        save: document.getElementById('rules-save')
+      };
+
+      const rulesRef = db.ref(SOMAP.P('settings/workers/attendanceRules'));
+
+      async function loadRules() {
+        const snap = await rulesRef.get();
+        const rules = snap.val() || {};
+        els.requireWifi.checked = rules.requireWifi !== false;
+        els.ssids.value = Array.isArray(rules.allowedSsids) ? rules.allowedSsids.join(',') : '';
+        els.lateThreshold.value = rules.lateThreshold || 3;
+        els.earlyThreshold.value = rules.earlyThreshold || 3;
+        els.deductionAmount.value = rules.deductionAmount || 1000;
+        els.deductionLabel.value = rules.deductionLabel || 'Posho ya Uwajibikaji';
+      }
+
+      async function saveRules() {
+        const payload = {
+          requireWifi: !!els.requireWifi.checked,
+          allowedSsids: els.ssids.value.split(',').map(s => s.trim()).filter(Boolean),
+          lateThreshold: Math.max(1, Number(els.lateThreshold.value) || 3),
+          earlyThreshold: Math.max(1, Number(els.earlyThreshold.value) || 3),
+          deductionAmount: Math.max(0, Number(els.deductionAmount.value) || 0),
+          deductionLabel: els.deductionLabel.value.trim() || 'Posho ya Uwajibikaji',
+          updatedTs: localTs()
+        };
+        await rulesRef.set(payload);
+        showToast('Kanuni za mahudhurio zimehifadhiwa', 'success');
+      }
+
+      els.save?.addEventListener('click', (e) => {
+        e.preventDefault();
+        saveRules().catch(err => console.error('rules save error', err));
+      });
 
       async function render() {
         const now = new Date();
@@ -159,6 +232,7 @@
         render();
       });
 
+      await loadRules();
       render();
     } catch (err) {
       console.error('headteacherapprovals error', err);
