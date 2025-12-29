@@ -21,7 +21,7 @@
     #${containerId} .save-btn { margin-top:10px; }
   `;
 
-  const showToast = (window.toast) ? window.toast : (msg) => console.log('[approvals]', msg);
+  const showToast = (window.toast) ? window.toast : (msg, type) => console.log(`[${type || 'info'}] ${msg}`);
   const todayYMD = (date = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(date);
   const localTs = () => new Date(new Date().toLocaleString('en-US', { timeZone: TZ })).getTime();
 
@@ -41,7 +41,8 @@
       const host = document.querySelector('.dashboard-container') || document.body;
       host.appendChild(container);
     }
-    if (!container.innerHTML.trim()) {
+    // Only reset innerHTML if it doesn't contain the structure we expect (e.g. it's just loading text)
+    if (!container.querySelector(`#${containerId}-stats`)) {
       container.innerHTML = `
         <h2>Headteacher Approvals</h2>
         <p class="subtitle">Thibitisha au kata check-ins za leo (scoped kwa shule na mwaka uliopo).</p>
@@ -88,13 +89,20 @@
     });
   }
 
-  document.addEventListener('DOMContentLoaded', async () => {
+  async function loadAndRender(isEvent = false) {
     try {
-      injectStyles();
-      if (!window.firebase || !firebase.database) return;
-      if (!window.SOMAP || !SOMAP.getSchool) return;
+      if (!window.firebase || !firebase.database) {
+        if (isEvent) showToast('Firebase haijapakiwa.', 'error');
+        return;
+      }
+      if (!window.SOMAP || !SOMAP.getSchool) {
+        if (isEvent) showToast('SOMAP haijapakiwa.', 'error');
+        return;
+      }
+
       const school = SOMAP.getSchool();
       if (!school || !school.id) return;
+      
       const legacyFriendly = school.id === 'socrates-school' || school.id === 'default';
       const db = firebase.database();
       const workerId = localStorage.getItem('workerId');
@@ -103,14 +111,20 @@
       const yearCtx = window.somapYearContext || null;
       let currentYear = String(yearCtx?.getSelectedYear?.() || new Date().getFullYear());
 
+      // Check role
       const profileSnap = await scopedOrLegacy(db, `years/${currentYear}/workers/${workerId}/profile`, `workers/${workerId}/profile`, legacyFriendly);
       const profile = profileSnap.snap.val() || {};
-      if (!profile.role || !profile.role.toLowerCase().includes('head')) return;
+      
+      if (!profile.role || !profile.role.toLowerCase().includes('head')) {
+        if (isEvent) showToast('Huna ruhusa ya Head Teacher.', 'warning');
+        return;
+      }
 
+      injectStyles();
       const container = createContainer();
       const body = document.getElementById(`${containerId}-body`);
       const statsEl = document.getElementById(`${containerId}-stats`);
-      const rulesBlock = document.getElementById(`${containerId}-rules`);
+      
       const els = {
         requireWifi: document.getElementById('rules-requireWifi'),
         ssids: document.getElementById('rules-ssids'),
@@ -123,7 +137,25 @@
 
       const rulesRef = db.ref(SOMAP.P('settings/workers/attendanceRules'));
 
-      async function loadRules() {
+      // Rules Logic
+      if (els.save && !els.save.hasAttribute('data-listening')) {
+        els.save.setAttribute('data-listening', 'true');
+        els.save.addEventListener('click', async (e) => {
+          e.preventDefault();
+          const payload = {
+            requireWifi: !!els.requireWifi.checked,
+            allowedSsids: els.ssids.value.split(',').map(s => s.trim()).filter(Boolean),
+            lateThreshold: Math.max(1, Number(els.lateThreshold.value) || 3),
+            earlyThreshold: Math.max(1, Number(els.earlyThreshold.value) || 3),
+            deductionAmount: Math.max(0, Number(els.deductionAmount.value) || 0),
+            deductionLabel: els.deductionLabel.value.trim() || 'Posho ya Uwajibikaji',
+            updatedTs: localTs()
+          };
+          await rulesRef.set(payload);
+          showToast('Kanuni za mahudhurio zimehifadhiwa', 'success');
+        });
+        
+        // Load Rules
         const snap = await rulesRef.get();
         const rules = snap.val() || {};
         els.requireWifi.checked = rules.requireWifi !== false;
@@ -134,30 +166,12 @@
         els.deductionLabel.value = rules.deductionLabel || 'Posho ya Uwajibikaji';
       }
 
-      async function saveRules() {
-        const payload = {
-          requireWifi: !!els.requireWifi.checked,
-          allowedSsids: els.ssids.value.split(',').map(s => s.trim()).filter(Boolean),
-          lateThreshold: Math.max(1, Number(els.lateThreshold.value) || 3),
-          earlyThreshold: Math.max(1, Number(els.earlyThreshold.value) || 3),
-          deductionAmount: Math.max(0, Number(els.deductionAmount.value) || 0),
-          deductionLabel: els.deductionLabel.value.trim() || 'Posho ya Uwajibikaji',
-          updatedTs: localTs()
-        };
-        await rulesRef.set(payload);
-        showToast('Kanuni za mahudhurio zimehifadhiwa', 'success');
-      }
-
-      els.save?.addEventListener('click', (e) => {
-        e.preventDefault();
-        saveRules().catch(err => console.error('rules save error', err));
-      });
-
       async function render() {
         const now = new Date();
         const todayKey = todayYMD(now).replace(/-/g, '');
         const monthKey = `${currentYear}${String(now.getMonth() + 1).padStart(2, '0')}`;
-        body.textContent = 'Loading...';
+        
+        if (body) body.textContent = 'Inapakia...';
 
         const [attendance, workers] = await Promise.all([
           scopedOrLegacy(db, `years/${currentYear}/attendance`, 'attendance', legacyFriendly),
@@ -172,36 +186,39 @@
         let rejectedCount = 0;
         let missingCount = 0;
 
+        // Process existing attendance
         Object.entries(attendanceData).forEach(([id, months]) => {
           const rec = months?.[monthKey]?.[todayKey];
-          if (!rec) return;
-          rows.push({
-            id,
-            profile: workersData[id]?.profile || {},
-            record: rec
-          });
-          totalWorkers += 1;
-          if (rec.approved === true) approvedCount += 1;
-          else if (rec.approved === false) rejectedCount += 1;
+          if (rec) {
+            rows.push({
+              id,
+              profile: workersData[id]?.profile || {},
+              record: rec
+            });
+            if (rec.approved === true) approvedCount += 1;
+            else if (rec.approved === false) rejectedCount += 1;
+          }
         });
 
-        // Workers who did not sign in today
+        // Calculate totals and missing
         Object.entries(workersData || {}).forEach(([id, w]) => {
-          if (attendanceData[id]?.[monthKey]?.[todayKey]) return;
-          missingCount += 1;
+          totalWorkers += 1;
+          if (!attendanceData[id]?.[monthKey]?.[todayKey]) {
+            missingCount += 1;
+          }
         });
 
         if (statsEl) {
           statsEl.innerHTML = `
             <div class="badge">Wafanyakazi: ${totalWorkers}</div>
-            <div class="badge">Approved: ${approvedCount}</div>
-            <div class="badge">Pending/Rejected: ${rejectedCount}</div>
-            <div class="badge">Hawakuingia leo: ${missingCount}</div>
+            <div class="badge" style="background:#f0fdf4;color:#166534;border-color:#bbf7d0;">Approved: ${approvedCount}</div>
+            <div class="badge" style="background:#fff7ed;color:#9a3412;border-color:#fed7aa;">Pending/Rejected: ${rejectedCount}</div>
+            <div class="badge" style="background:#fef2f2;color:#991b1b;border-color:#fecaca;">Hawakuingia: ${missingCount}</div>
           `;
         }
 
         if (!rows.length) {
-          body.textContent = 'Hakuna check-ins leo (bado).';
+          if (body) body.textContent = 'Hakuna check-ins leo (bado).';
           return;
         }
 
@@ -225,13 +242,15 @@
         rows.forEach((row) => {
           const tr = document.createElement('tr');
           const approvedText = row.record.approved === true ? 'Approved' : row.record.approved === false ? 'Pending' : 'Awaiting';
+          const badgeClass = row.record.approved === true ? 'background:#dcfce7;color:#166534;' : 'background:#fee2e2;color:#991b1b;';
+          
           tr.innerHTML = `
             <td>${row.profile.fullNameUpper || row.id}</td>
             <td>${row.profile.role || ''}</td>
             <td>${row.record.checkInTs ? new Date(row.record.checkInTs).toLocaleTimeString('sw-TZ', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }) : '—'}</td>
-            <td>${row.record.lateMinutes || 0}</td>
-            <td>${row.record.earlyMinutes || 0}</td>
-            <td><span class="badge">${approvedText}</span></td>
+            <td>${row.record.lateMinutes || 0}m</td>
+            <td>${row.record.earlyMinutes || 0}m</td>
+            <td><span class="badge" style="${badgeClass}">${approvedText}</span></td>
             <td class="actions">
               <button class="btn approve" data-action="approve" data-worker="${row.id}">Approve</button>
               <button class="btn reject" data-action="reject" data-worker="${row.id}">Reject</button>
@@ -245,33 +264,49 @@
           if (!btn) return;
           const targetWorker = btn.dataset.worker;
           const approveValue = btn.dataset.action === 'approve';
+          
           const ref = db.ref(SOMAP.P(`years/${currentYear}/attendance/${targetWorker}/${monthKey}/${todayKey}`));
           await ref.update({ approved: approveValue, approvedTs: localTs() });
+          
           showToast(`Entry ${approveValue ? 'approved' : 'rejected'}`, approveValue ? 'success' : 'warning');
-          render();
+          render(); // Re-render to update stats and UI
         };
 
-        body.innerHTML = '';
-        body.appendChild(table);
+        if (body) {
+          body.innerHTML = '';
+          body.appendChild(table);
+        }
       }
 
-      yearCtx?.onYearChanged?.((yr) => {
-        currentYear = String(yr);
-        render();
-      });
+      // Initial render
+      await render();
 
-      await loadRules();
-      render();
+      // Listen for year changes if context exists
+      if (yearCtx && yearCtx.onYearChanged) {
+        yearCtx.onYearChanged((yr) => {
+          currentYear = String(yr);
+          render();
+        });
+      }
 
-      // Allow external trigger (e.g., dashboard card) to force render/scroll
-      window.addEventListener('headteacher-approvals-open', () => {
-        createContainer();
-        render();
-        const anchor = document.getElementById(containerId);
-        if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
     } catch (err) {
       console.error('headteacherapprovals error', err);
+      if (isEvent) showToast('Hitilafu imetokea wakati wa kupakia.', 'error');
     }
+  }
+
+  // Initialize on load if possible
+  document.addEventListener('DOMContentLoaded', () => {
+    // Small delay to ensure other scripts loaded
+    setTimeout(() => loadAndRender(false), 1000);
   });
+
+  // Listen for open event from dashboard card
+  window.addEventListener('headteacher-approvals-open', () => {
+    loadAndRender(true).then(() => {
+        const anchor = document.getElementById(containerId);
+        if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+
 })();
