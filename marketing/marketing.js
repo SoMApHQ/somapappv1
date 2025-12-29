@@ -1,13 +1,49 @@
+﻿
 // marketing/marketing.js
-// Entry point for MarketingHub card + app shell (React via CDN, no build step).
+// MarketingHub: multi-soko marketplace (React CDN + Firebase RTDB, no build step).
 
+const STYLE_URL = new URL("./marketing.css", import.meta.url).href;
 const REACT_URL = "https://unpkg.com/react@18/umd/react.production.min.js";
 const REACT_DOM_URL =
   "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js";
 
-const STYLE_URL = new URL("./marketing.css", import.meta.url).href;
-
 const isBrowser = typeof window !== "undefined";
+
+// Default categories to seed when empty (admin only).
+const DEFAULT_CATEGORIES = [
+  {
+    id: "vehicle_spares",
+    nameSw: "Soko la Vifaa vya Magari",
+    nameEn: "Vehicle Spares",
+    icon: "CAR-SPARES",
+    order: 1,
+  },
+  { id: "cars", nameSw: "Soko la Magari", nameEn: "Cars", icon: "CARS", order: 2 },
+  { id: "land", nameSw: "Soko la Mashamba", nameEn: "Land", icon: "LAND", order: 3 },
+  { id: "houses", nameSw: "Soko la Nyumba", nameEn: "Houses", icon: "HOUSES", order: 4 },
+  {
+    id: "rentals",
+    nameSw: "Soko la Kupanga Nyumba",
+    nameEn: "Rentals",
+    icon: "RENTALS",
+    order: 5,
+  },
+  { id: "utensils", nameSw: "Soko la Vyombo", nameEn: "Utensils", icon: "UTENSILS", order: 6 },
+  {
+    id: "electronics",
+    nameSw: "Vifaa vya Elektroniki",
+    nameEn: "Electronics & Gadgets",
+    icon: "ELECTRONICS",
+    order: 7,
+  },
+  {
+    id: "uniforms",
+    nameSw: "Uniformu na Mahitaji ya Shule",
+    nameEn: "Uniforms & School Supplies",
+    icon: "UNIFORMS",
+    order: 8,
+  },
+];
 
 function loadScriptOnce(src, globalKey) {
   if (!isBrowser) return Promise.resolve();
@@ -56,76 +92,6 @@ function createRootCompat(el) {
   };
 }
 
-// ---- UI strings (Swahili-first) ----
-const STRINGS = {
-  sw: {
-    title: "MarketingHub",
-    subtitle: "Soko Huru • Nunua / Uze Haraka",
-    cta: "Anza Sasa",
-    buyer: "Mnunzi / Buyer",
-    seller: "Muuzaji / Seller",
-    landingLead:
-      "Karibu Soko Huru. Tengeneza biashara yako, au tafuta bidhaa papo hapo bila kusajili.",
-    searchPlaceholder: "Tafuta bidhaa, eneo, au muuzaji…",
-    filters: "Vichujio",
-    delivery: "Uwasilishaji",
-    payOnDelivery: "Lipa ukipokea",
-    priceMin: "Bei ndogo",
-    priceMax: "Bei kubwa",
-    category: "Kipengele",
-    location: "Eneo",
-    contact: "Wasiliana",
-    like: "Penda",
-    liked: "Umeweka Like",
-    enterBuyer: "Ingia kama Mnunzi",
-    enterSeller: "Anza kama Muuzaji",
-    sellerGate:
-      "Ingiza akaunti yako ya kuuza (Phone/Email) ili tukuthibitishe.",
-    kycTitle: "KYC ya Muuzaji",
-    submitKyc: "Tuma KYC",
-    notAuthed: "Tafadhali ingia ili uendelee kama muuzaji.",
-    quotaBlocked:
-      "Umefika ukomo wa bure. Tuma malipo: TZ 2,000 kwa 255686828732 au KE 100 kwa 254704479105.",
-    uploadNote: "Pakia 1-3 picha; tutakagua kabla ya kuchapisha.",
-    appTitle: "Soko Huru",
-  },
-  en: {
-    title: "MarketingHub",
-    subtitle: "Soko Huru • Buy & sell fast",
-    cta: "Get Started",
-    buyer: "Buyer",
-    seller: "Seller",
-    landingLead:
-      "Welcome to Soko Huru. Explore instantly; sellers are verified for safety.",
-    searchPlaceholder: "Search products, location, or seller…",
-    filters: "Filters",
-    delivery: "Delivery",
-    payOnDelivery: "Pay on delivery",
-    priceMin: "Min price",
-    priceMax: "Max price",
-    category: "Category",
-    location: "Location",
-    contact: "Contact",
-    like: "Like",
-    liked: "Liked",
-    enterBuyer: "Enter as Buyer",
-    enterSeller: "Start as Seller",
-    sellerGate:
-      "Sign in (phone/email) so we can verify you before listings go live.",
-    kycTitle: "Seller KYC",
-    submitKyc: "Submit KYC",
-    notAuthed: "Please sign in to continue as seller.",
-    quotaBlocked:
-      "Free upload quota reached. Pay: TZ 2,000 to 255686828732 or KE 100 to 254704479105.",
-    uploadNote: "Upload 1-3 photos; we review before publishing.",
-    appTitle: "Soko Huru",
-  },
-};
-
-function useLangStrings(lang) {
-  return STRINGS[lang] || STRINGS.sw;
-}
-
 function useFirebase() {
   const hasFb =
     isBrowser && window.firebase && firebase.apps && firebase.apps.length > 0;
@@ -141,9 +107,55 @@ function ensureAnonAuth(auth) {
   return auth.signInAnonymously().then((cred) => cred.user);
 }
 
-// ---- Components ----
-function MarketingCard({ onClick, lang = "sw" }) {
-  const t = useLangStrings(lang);
+function normalizePhoneDigits(input = "") {
+  return (input.match(/\d+/g) || []).join("");
+}
+
+function loginToEmail(login = "") {
+  const trimmed = (login || "").trim();
+  if (!trimmed) return "";
+  if (trimmed.includes("@")) return trimmed.toLowerCase();
+  const digits = normalizePhoneDigits(trimmed);
+  return digits ? `${digits}@somap-seller.com` : "";
+}
+
+function shopMatchesCategory(shop, catId) {
+  if (!catId || !shop) return false;
+  if (shop.categories && typeof shop.categories === "object") {
+    return Boolean(shop.categories[catId]);
+  }
+  if (Array.isArray(shop.categories)) {
+    return shop.categories.includes(catId);
+  }
+  return false;
+}
+
+function unique(array) {
+  return Array.from(new Set(array.filter(Boolean)));
+}
+
+function formatCurrency(val, currency = "TZS") {
+  if (val === undefined || val === null || val === "") return "";
+  const num = Number(val);
+  if (Number.isNaN(num)) return "";
+  return `${currency} ${num.toLocaleString()}`;
+}
+
+function formatDate(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  return d.toLocaleDateString();
+}
+
+function heroWhatsAppLink(shop, itemTitle) {
+  const phone = shop?.whatsappPhone || shop?.phones?.[0] || "";
+  const digits = normalizePhoneDigits(phone);
+  if (!digits) return null;
+  const msg = `Hi ${shop?.ownerName || shop?.shopName || "seller"}, I am interested in ${itemTitle || "your items"}.`;
+  return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
+}
+
+function MarketingCard({ onClick }) {
   return React.createElement(
     "div",
     { className: "mh-card-shell" },
@@ -159,613 +171,351 @@ function MarketingCard({ onClick, lang = "sw" }) {
           "MarketingHub",
           React.createElement("span", { className: "mh-pill" }, "Soko Huru")
         ),
-        React.createElement("div", { className: "mh-title" }, t.title),
-        React.createElement("p", { className: "mh-sub" }, t.subtitle)
-      ),
-      React.createElement("button", { className: "mh-cta", onClick }, t.cta)
-    )
-  );
-}
-
-function ListingCard({ listing, onLike, onContact, liked, lang }) {
-  const t = useLangStrings(lang);
-  return React.createElement(
-    "div",
-    { className: "mh-listing" },
-    React.createElement("img", {
-      src:
-        listing.photos?.[0] ||
-        "https://images.pexels.com/photos/1666021/pexels-photo-1666021.jpeg?auto=compress&cs=tinysrgb&h=400",
-      alt: listing.title || "Listing",
-    }),
-    React.createElement(
-      "div",
-      { className: "mh-listing-body" },
-      React.createElement(
-        "div",
-        { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
-        React.createElement("strong", null, listing.title || "Bidhaa"),
-        React.createElement(
-          "span",
-          { className: "mh-tag" },
-          listing.price ? `TZS ${Number(listing.price).toLocaleString()}` : "—"
-        )
-      ),
-      React.createElement(
-        "div",
-        { className: "mh-muted", style: { fontSize: "0.9rem" } },
-        listing.location || "Eneo halijawekewa"
-      ),
-      React.createElement(
-        "div",
-        { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
-        listing.category
-          ? React.createElement(
-              "span",
-              { className: "mh-tag" },
-              listing.category
-            )
-          : null,
-        listing.delivery
-          ? React.createElement("span", { className: "mh-tag" }, t.delivery)
-          : null,
-        listing.payOnDelivery
-          ? React.createElement(
-              "span",
-              { className: "mh-tag" },
-              t.payOnDelivery
-            )
-          : null
-      ),
-      React.createElement(
-        "div",
-        { style: { display: "flex", gap: 8, marginTop: 10 } },
-        React.createElement(
-          "button",
-          {
-            className: "mh-btn secondary",
-            onClick: () => onLike && onLike(listing),
-          },
-          liked ? `${t.liked}` : `${t.like}`
-        ),
-        React.createElement(
-          "button",
-          {
-            className: "mh-btn",
-            onClick: () => onContact && onContact(listing),
-          },
-          t.contact
-        )
-      )
-    )
-  );
-}
-
-function ContactModal({ listing, onClose }) {
-  if (!listing) return null;
-  const phone = listing.contactPhone || listing.phone || "";
-  const wa = phone ? `https://wa.me/${phone.replace(/[^0-9]/g, "")}` : null;
-  return React.createElement(
-    "div",
-    { className: "mh-modal", onClick: onClose },
-    React.createElement(
-      "div",
-      { className: "mh-modal-card", onClick: (e) => e.stopPropagation() },
-      React.createElement(
-        "h3",
-        { style: { margin: "0 0 8px 0" } },
-        listing.title || "Wasiliana"
-      ),
-      React.createElement(
-        "p",
-        { className: "mh-muted", style: { marginTop: 0 } },
-        listing.location || ""
-      ),
-      React.createElement(
-        "div",
-        { className: "mh-grid two", style: { marginTop: 12 } },
-        phone
-          ? React.createElement(
-              "a",
-              {
-                className: "mh-btn",
-                href: `tel:${phone}`,
-              },
-              "Piga Simu"
-            )
-          : null,
-        wa
-          ? React.createElement(
-              "a",
-              {
-                className: "mh-btn secondary",
-                href: wa,
-                target: "_blank",
-              },
-              "WhatsApp"
-            )
-          : null,
-        phone
-          ? React.createElement(
-              "a",
-              { className: "mh-btn secondary", href: `sms:${phone}` },
-              "SMS"
-            )
-          : null
-      ),
-      React.createElement(
-        "button",
-        {
-          className: "mh-btn secondary",
-          style: { width: "100%", marginTop: 14 },
-          onClick: onClose,
-        },
-        "Close"
-      )
-    )
-  );
-}
-
-function MarketingHubAppShell({ lang = "sw" }) {
-  const t = useLangStrings(lang);
-  const { hasFb, db, auth } = useFirebase();
-  const [mode, setMode] = React.useState("landing"); // landing | buyer | seller
-  const [listings, setListings] = React.useState([]);
-  const [liked, setLiked] = React.useState({});
-  const [contactItem, setContactItem] = React.useState(null);
-  const [filters, setFilters] = React.useState({
-    q: "",
-    category: "",
-    location: "",
-    delivery: "",
-    payOnDelivery: "",
-    itemType: "",
-    min: "",
-    max: "",
-  });
-  const [langState, setLang] = React.useState(lang);
-  const strings = useLangStrings(langState);
-
-  React.useEffect(() => {
-    ensureAnonAuth(auth).catch(() => {});
-  }, [auth]);
-
-  React.useEffect(() => {
-    ensureAnonAuth(auth).then((user) => {
-      if (hasFb && db && user) {
-        const likesRef = db.ref(`marketinghub/public/likes`);
-        likesRef.on("value", (snap) => {
-          const val = snap.val() || {};
-          const userLikes = {};
-          Object.entries(val).forEach(([listingId, users]) => {
-            if (users && users[user.uid]) userLikes[listingId] = true;
-          });
-          setLiked(userLikes);
-        });
-        const listRef = db.ref("marketinghub/public/listings").limitToLast(50);
-        listRef.on("value", (snap) => {
-          const val = snap.val() || {};
-          const arr = Object.entries(val)
-            .map(([id, v]) => ({ id, ...v }))
-            .filter((x) => (x.status || "approved") !== "rejected");
-          arr.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-          setListings(arr);
-        });
-        return () => {
-          listRef.off();
-          likesRef.off();
-        };
-      }
-      // fallback demo data
-      setListings([
-        {
-          id: "demo-1",
-          title: "Samaki ya Mama Omary",
-          price: 12000,
-          category: "Chakula",
-          location: "Kitengela",
-          itemType: "Samaki",
-          delivery: true,
-          payOnDelivery: true,
-          photos: [
-            "https://images.pexels.com/photos/3296273/pexels-photo-3296273.jpeg?auto=compress&cs=tinysrgb&h=400",
-          ],
-          contactPhone: "255686828732",
-        },
-        {
-          id: "demo-2",
-          title: "Uniformu za Shule",
-          price: 25000,
-          category: "Uniformu",
-          itemType: "t-shirt",
-          location: "Dar es Salaam",
-          delivery: true,
-          payOnDelivery: false,
-          photos: [
-            "https://images.pexels.com/photos/1250402/pexels-photo-1250402.jpeg?auto=compress&cs=tinysrgb&h=400",
-          ],
-          contactPhone: "254704479105",
-        },
-      ]);
-    });
-  }, [hasFb, db, auth]);
-
-  function handleLike(item) {
-    if (!auth) return;
-    ensureAnonAuth(auth).then((user) => {
-      if (!user) return;
-      if (hasFb && db) {
-        db.ref(`marketinghub/public/likes/${item.id}/${user.uid}`).set(true);
-      }
-      setLiked((prev) => ({ ...prev, [item.id]: true }));
-    });
-  }
-
-  function handleContact(item) {
-    if (hasFb && auth && db) {
-      ensureAnonAuth(auth).then((user) => {
-        if (user) {
-          db.ref(`marketinghub/private/analytics/contactClicked`).push({
-            listingId: item.id,
-            actor: user.uid,
-            at: Date.now(),
-          });
-        }
-      });
-    }
-    setContactItem(item);
-  }
-
-  const filtered = listings.filter((item) => {
-    const q = filters.q.toLowerCase();
-    const matchesQ =
-      !q ||
-      (item.title || "").toLowerCase().includes(q) ||
-      (item.location || "").toLowerCase().includes(q) ||
-      (item.category || "").toLowerCase().includes(q);
-    const matchesCat =
-      !filters.category ||
-      (item.category || "")
-        .toLowerCase()
-        .includes(filters.category.toLowerCase());
-    const matchesLoc =
-      !filters.location ||
-      (item.location || "")
-        .toLowerCase()
-        .includes(filters.location.toLowerCase());
-    const matchesDelivery =
-      filters.delivery === "" || String(item.delivery) === filters.delivery;
-    const matchesPOD =
-      filters.payOnDelivery === "" ||
-      String(item.payOnDelivery) === filters.payOnDelivery;
-    const matchesType = !filters.itemType || item.itemType === filters.itemType;
-
-    const minOk =
-      !filters.min || Number(item.price || 0) >= Number(filters.min);
-    const maxOk =
-      !filters.max || Number(item.price || 0) <= Number(filters.max);
-    return (
-      matchesQ &&
-      matchesCat &&
-      matchesLoc &&
-      matchesDelivery &&
-      matchesPOD &&
-      matchesType &&
-      minOk &&
-      maxOk
-    );
-  });
-
-  function SellerPanel() {
-    const { hasFb, db, auth } = useFirebase();
-
-    /* ---------- AUTH STATE ---------- */
-    const [email, setEmail] = React.useState("");
-    const [pass, setPass] = React.useState("");
-    const [status, setStatus] = React.useState("");
-
-    /* ---------- PRODUCT STATE ---------- */
-    const [product, setProduct] = React.useState({
-      title: "",
-      itemType: "",
-      category: "",
-      price: "",
-      available: true,
-    });
-
-    /* ---------- SIGN IN / REGISTER ---------- */
-    function signInSeller() {
-      if (!auth) return;
-      setStatus("Signing in…");
-
-      auth
-        .signInWithEmailAndPassword(email, pass)
-        .then(() => setStatus("Signed in successfully"))
-        .catch(() =>
-          auth
-            .createUserWithEmailAndPassword(email, pass)
-            .then(() => setStatus("Seller account created"))
-            .catch((err) => setStatus(err.message || "Authentication error"))
-        );
-    }
-
-    /* ---------- ADD PRODUCT (SAFE MODE) ---------- */
-    async function submitProduct() {
-      if (!hasFb || !db || !auth || !auth.currentUser) {
-        setStatus("Please sign in as seller first.");
-        return;
-      }
-
-      if (!product.title || !product.itemType || !product.price) {
-        setStatus("Title, item type, and price are required.");
-        return;
-      }
-
-      try {
-        const uid = auth.currentUser.uid;
-
-        const listingRef = db.ref("marketinghub/public/listings").push();
-
-        await listingRef.set({
-          title: product.title,
-          itemType: product.itemType,
-          category: product.category || "",
-          price: Number(product.price),
-          available: product.available,
-          sellerId: uid,
-          createdAt: Date.now(),
-          status: "pending", // safe default
-        });
-
-        setStatus("Product saved (images coming next).");
-        setProduct({
-          title: "",
-          itemType: "",
-          category: "",
-          price: "",
-          available: true,
-        });
-      } catch (err) {
-        setStatus(err.message || "Failed to save product.");
-      }
-    }
-
-    /* ---------- UI ---------- */
-    return React.createElement(
-      "div",
-      { className: "mh-app-card" },
-
-      /* --- SELLER LOGIN --- */
-      React.createElement(
-        "div",
-        { className: "mh-section-title" },
-        "Seller Login"
-      ),
-      React.createElement("input", {
-        className: "mh-input",
-        placeholder: "Email",
-        value: email,
-        onChange: (e) => setEmail(e.target.value),
-        type: "email",
-      }),
-      React.createElement("input", {
-        className: "mh-input",
-        placeholder: "Password",
-        value: pass,
-        onChange: (e) => setPass(e.target.value),
-        type: "password",
-      }),
-      React.createElement(
-        "button",
-        { className: "mh-btn", onClick: signInSeller },
-        "Sign in / Create Seller"
-      ),
-
-      /* --- ADD PRODUCT --- */
-      React.createElement(
-        "div",
-        { className: "mh-section-title", style: { marginTop: 20 } },
-        "Add Product"
-      ),
-      React.createElement("input", {
-        className: "mh-input",
-        placeholder: "Product title",
-        value: product.title,
-        onChange: (e) => setProduct({ ...product, title: e.target.value }),
-      }),
-      React.createElement(
-        "select",
-        {
-          className: "mh-select",
-          value: product.itemType,
-          onChange: (e) => setProduct({ ...product, itemType: e.target.value }),
-        },
-        React.createElement("option", { value: "" }, "Select item type"),
-        React.createElement("option", { value: "tshirt" }, "T-Shirt"),
-        React.createElement("option", { value: "shoes" }, "Shoes"),
-        React.createElement("option", { value: "tie" }, "Tie")
-      ),
-      React.createElement("input", {
-        className: "mh-input",
-        placeholder: "Category (e.g. Uniform)",
-        value: product.category,
-        onChange: (e) => setProduct({ ...product, category: e.target.value }),
-      }),
-      React.createElement("input", {
-        className: "mh-input",
-        type: "number",
-        placeholder: "Price (TZS)",
-        value: product.price,
-        onChange: (e) => setProduct({ ...product, price: e.target.value }),
-      }),
-      React.createElement(
-        "label",
-        { style: { display: "flex", gap: 8 } },
-        React.createElement("input", {
-          type: "checkbox",
-          checked: product.available,
-          onChange: (e) =>
-            setProduct({ ...product, available: e.target.checked }),
-        }),
-        "Available"
-      ),
-      React.createElement(
-        "button",
-        { className: "mh-btn", onClick: submitProduct },
-        "Save Product"
-      ),
-
-      React.createElement(
-        "p",
-        { className: "mh-muted", style: { marginTop: 10 } },
-        status
-      )
-    );
-  }
-
-  if (mode === "landing") {
-    return React.createElement(
-      "div",
-      { className: "mh-app-shell" },
-      React.createElement(
-        "header",
-        { className: "mh-app-header" },
         React.createElement(
           "div",
-          {
-            style: {
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 12,
-            },
-          },
-          React.createElement(
-            "h1",
-            { style: { margin: 0, fontSize: "2rem", fontWeight: 800 } },
-            strings.appTitle
-          ),
-          React.createElement(
-            "div",
-            { className: "mh-lang-toggle" },
-            ["sw", "en"].map((code) =>
-              React.createElement(
-                "button",
-                {
-                  key: code,
-                  className: code === langState ? "active" : "",
-                  onClick: () => setLang(code),
-                },
-                code.toUpperCase()
-              )
-            )
-          )
+          { className: "mh-title" },
+          "Wezesha masoko yote"
         ),
         React.createElement(
           "p",
-          { className: "mh-muted", style: { marginTop: 6 } },
-          strings.landingLead
-        ),
-        React.createElement(
-          "div",
-          {
-            style: {
-              display: "flex",
-              gap: 12,
-              marginTop: 16,
-              flexWrap: "wrap",
-            },
-          },
-          React.createElement(
-            "button",
-            { className: "mh-btn", onClick: () => setMode("buyer") },
-            strings.enterBuyer
-          ),
-          React.createElement(
-            "button",
-            { className: "mh-btn secondary", onClick: () => setMode("seller") },
-            strings.enterSeller
-          )
+          { className: "mh-sub" },
+          "Stat cards za kila soko. Bonyeza uingie moja kwa moja."
         )
       ),
-      React.createElement(
-        "main",
-        {
-          style: {
-            maxWidth: "1100px",
-            margin: "0 auto",
-            padding: "0 20px 30px",
-          },
-        },
-        React.createElement(
-          "div",
-          { className: "mh-grid two" },
-          React.createElement(
-            "div",
-            { className: "mh-app-card" },
-            React.createElement(
-              "div",
-              { className: "mh-section-title" },
-              strings.buyer
-            ),
-            React.createElement(
-              "p",
-              { className: "mh-muted" },
-              "Hakuna login. Browse, like, wasiliana moja kwa moja."
-            )
-          ),
-          React.createElement(
-            "div",
-            { className: "mh-app-card" },
-            React.createElement(
-              "div",
-              { className: "mh-section-title" },
-              strings.seller
-            ),
-            React.createElement(
-              "p",
-              { className: "mh-muted" },
-              "Muuzaji lazima athibitishwe (KYC, NIDA/ID, mawasiliano)."
-            )
-          )
-        )
-      )
-    );
-  }
+      React.createElement("button", { className: "mh-cta", onClick }, "Fungua")
+    )
+  );
+}
 
-  if (mode === "seller") {
-    return React.createElement(
+function StatCard({ cat, stats, onClick }) {
+  return React.createElement(
+    "button",
+    { className: "mh-stat-card", onClick },
+    React.createElement(
       "div",
-      { className: "mh-app-shell" },
+      { className: "mh-stat-top" },
+      React.createElement("span", { className: "mh-stat-icon" }, cat.icon || "SOKO"),
+      React.createElement("span", { className: "mh-badge" }, cat.enabled === false ? "Disabled" : "Live")
+    ),
+    React.createElement("div", { className: "mh-stat-name" }, cat.nameSw || cat.nameEn),
+    React.createElement(
+      "div",
+      { className: "mh-stat-metrics" },
       React.createElement(
-        "header",
-        { className: "mh-app-header" },
-        React.createElement(
-          "h1",
-          { style: { margin: 0, fontSize: "1.6rem", fontWeight: 800 } },
-          strings.seller
-        ),
+        "span",
+        { className: "mh-stat-metric" },
+        React.createElement("strong", null, stats.shops || 0),
+        " Shops"
+      ),
+      React.createElement(
+        "span",
+        { className: "mh-stat-metric" },
+        React.createElement("strong", null, stats.items || 0),
+        " Items"
+      ),
+      React.createElement(
+        "span",
+        { className: "mh-stat-metric" },
+        React.createElement("strong", null, stats.locations || 0),
+        " Locations"
+      )
+    )
+  );
+}
+function ShopCard({ shop, items, onOpen }) {
+  const sampleItems = (items || []).slice(0, 3);
+  const wa = heroWhatsAppLink(shop);
+  return React.createElement(
+    "div",
+    { className: "mh-shop-card" },
+    React.createElement(
+      "div",
+      { className: "mh-shop-head" },
+      React.createElement(
+        "div",
+        null,
+        React.createElement("h3", null, shop.shopName || "Shop"),
         React.createElement(
           "p",
           { className: "mh-muted" },
-          "Usalama kwanza: KYC, mawasiliano, na ukomo wa upakiaji."
+          [shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
+        )
+      ),
+      shop.verifiedStatus === "verified"
+        ? React.createElement("span", { className: "mh-badge" }, "Verified")
+        : null
+    ),
+    React.createElement(
+      "div",
+      { className: "mh-shop-items" },
+      sampleItems.map((item) =>
+        React.createElement(
+          "div",
+          { key: item.id, className: "mh-chip" },
+          `${item.title} @ ${formatCurrency(item.price, item.currency || "TZS")}`
+        )
+      )
+    ),
+    React.createElement(
+      "div",
+      { className: "mh-shop-actions" },
+      wa
+        ? React.createElement(
+            "a",
+            { className: "mh-btn secondary", href: wa, target: "_blank" },
+            "WhatsApp"
+          )
+        : null,
+      shop.phones?.[0]
+        ? React.createElement(
+            "a",
+            { className: "mh-btn secondary", href: `tel:${shop.phones[0]}` },
+            "Call"
+          )
+        : null,
+      React.createElement(
+        "button",
+        { className: "mh-btn", onClick: onOpen },
+        "Open shop"
+      )
+    )
+  );
+}
+
+function ItemsTable({ items }) {
+  if (!items || items.length === 0) {
+    return React.createElement("p", { className: "mh-muted" }, "Hakuna bidhaa bado.");
+  }
+  return React.createElement(
+    "div",
+    { className: "mh-items-table" },
+    React.createElement(
+      "table",
+      null,
+      React.createElement(
+        "thead",
+        null,
+        React.createElement(
+          "tr",
+          null,
+          React.createElement("th", null, "Bidhaa"),
+          React.createElement("th", null, "Bei"),
+          React.createElement("th", null, "Unit"),
+          React.createElement("th", null, "Maelezo"),
+          React.createElement("th", null, "Updated")
         )
       ),
       React.createElement(
-        "main",
-        {
-          style: {
-            maxWidth: "1100px",
-            margin: "0 auto",
-            padding: "0 20px 40px",
-          },
-        },
-        React.createElement(SellerPanel, null)
+        "tbody",
+        null,
+        items.map((item) =>
+          React.createElement(
+            "tr",
+            { key: item.id },
+            React.createElement("td", null, item.title || "-"),
+            React.createElement(
+              "td",
+              null,
+              formatCurrency(item.price, item.currency || "TZS")
+            ),
+            React.createElement("td", null, item.unit || "pcs"),
+            React.createElement("td", null, item.notes || item.vehicleModel || ""),
+            React.createElement("td", null, formatDate(item.updatedAt) || "")
+          )
+        )
       )
-    );
+    )
+  );
+}
+
+function SellerDashboard({ categories, db, auth, onBack }) {
+  const [loginId, setLoginId] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [user, setUser] = React.useState(auth?.currentUser || null);
+  const [status, setStatus] = React.useState("");
+  const [shop, setShop] = React.useState({
+    shopName: "",
+    ownerName: "",
+    phonesText: "",
+    whatsappPhone: "",
+    lipaNumber: "",
+    country: "",
+    region: "",
+    city: "",
+    area: "",
+    photosText: "",
+    categories: {},
+  });
+  const [itemForm, setItemForm] = React.useState({
+    id: null,
+    catId: "",
+    title: "",
+    vehicleModel: "",
+    brand: "",
+    price: "",
+    currency: "TZS",
+    unit: "pcs",
+    notes: "",
+    photoUrl: "",
+    status: "active",
+  });
+  const [myItems, setMyItems] = React.useState([]);
+
+  React.useEffect(() => {
+    if (!auth) return;
+    const unsub = auth.onAuthStateChanged((u) => setUser(u));
+    return () => unsub && unsub();
+  }, [auth]);
+
+  React.useEffect(() => {
+    if (!db || !user) return;
+    const shopRef = db.ref(`marketinghub/public/shops/${user.uid}`);
+    const itemsRef = db.ref(`marketinghub/public/items/${user.uid}`);
+    const shopCb = (snap) => {
+      const val = snap.val() || {};
+      setShop((prev) => ({
+        ...prev,
+        ...val,
+        phonesText: (val.phones || []).join(", "),
+        photosText: (val.photos || []).join("\n"),
+        categories: val.categories || {},
+      }));
+    };
+    const itemCb = (snap) => {
+      const val = snap.val() || {};
+      const arr = Object.entries(val).map(([id, v]) => ({ id, ...v }));
+      arr.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      setMyItems(arr);
+    };
+    shopRef.on("value", shopCb);
+    itemsRef.on("value", itemCb);
+    return () => {
+      shopRef.off("value", shopCb);
+      itemsRef.off("value", itemCb);
+    };
+  }, [db, user]);
+
+  function handleLogin() {
+    if (!auth) return;
+    const email = loginToEmail(loginId);
+    if (!email || !password) {
+      setStatus("Weka phone/email na nenosiri.");
+      return;
+    }
+    setStatus("Signing in...");
+    auth
+      .signInWithEmailAndPassword(email, password)
+      .then(() => setStatus("Signed in"))
+      .catch(() =>
+        auth
+          .createUserWithEmailAndPassword(email, password)
+          .then(() => setStatus("Account created, signed in"))
+          .catch((err) =>
+            setStatus(err?.message || "Auth failed. Check password.")
+          )
+      );
   }
 
-  // Buyer mode
+  async function saveShop() {
+    if (!db || !auth || !auth.currentUser) {
+      setStatus("Sign in first.");
+      return;
+    }
+    const uid = auth.currentUser.uid;
+    const phones = (shop.phonesText || "")
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const photos = (shop.photosText || "")
+      .split(/\r?\n/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .slice(0, 5);
+    const payload = {
+      shopName: shop.shopName || "",
+      ownerName: shop.ownerName || "",
+      phones,
+      whatsappPhone: shop.whatsappPhone || phones[0] || "",
+      lipaNumber: shop.lipaNumber || "",
+      country: shop.country || "",
+      region: shop.region || "",
+      city: shop.city || "",
+      area: shop.area || "",
+      categories: shop.categories || {},
+      photos,
+      updatedAt: Date.now(),
+      createdAt: shop.createdAt || Date.now(),
+    };
+    try {
+      await db.ref(`marketinghub/public/shops/${uid}`).set(payload);
+      setStatus("Shop profile saved.");
+    } catch (err) {
+      setStatus(err?.message || "Failed to save shop.");
+    }
+  }
+
+  async function saveItem() {
+    if (!db || !auth || !auth.currentUser) {
+      setStatus("Sign in first.");
+      return;
+    }
+    if (!itemForm.title || !itemForm.catId) {
+      setStatus("Weka jina la bidhaa na soko.");
+      return;
+    }
+    const uid = auth.currentUser.uid;
+    const itemsRef = db.ref(`marketinghub/public/items/${uid}`);
+    const ref = itemForm.id ? itemsRef.child(itemForm.id) : itemsRef.push();
+    const payload = {
+      catId: itemForm.catId,
+      title: itemForm.title,
+      vehicleModel: itemForm.vehicleModel || "",
+      brand: itemForm.brand || "",
+      price: Number(itemForm.price || 0),
+      currency: itemForm.currency || "TZS",
+      unit: itemForm.unit || "pcs",
+      notes: itemForm.notes || "",
+      photoUrl: itemForm.photoUrl || "",
+      updatedAt: Date.now(),
+      status: itemForm.status || "active",
+    };
+    try {
+      await ref.set(payload);
+      setStatus("Item saved.");
+      setItemForm({
+        id: null,
+        catId: itemForm.catId,
+        title: "",
+        vehicleModel: "",
+        brand: "",
+        price: "",
+        currency: "TZS",
+        unit: "pcs",
+        notes: "",
+        photoUrl: "",
+        status: "active",
+      });
+    } catch (err) {
+      setStatus(err?.message || "Failed to save item.");
+    }
+  }
+
+  function startEditItem(item) {
+    setItemForm({
+      id: item.id,
+      catId: item.catId || "",
+      title: item.title || "",
+      vehicleModel: item.vehicleModel || "",
+      brand: item.brand || "",
+      price: item.price || "",
+      currency: item.currency || "TZS",
+      unit: item.unit || "pcs",
+      notes: item.notes || "",
+      photoUrl: item.photoUrl || "",
+      status: item.status || "active",
+    });
+  }
+
   return React.createElement(
     "div",
     { className: "mh-app-shell" },
@@ -774,143 +524,784 @@ function MarketingHubAppShell({ lang = "sw" }) {
       { className: "mh-app-header" },
       React.createElement(
         "div",
-        {
-          style: {
-            display: "flex",
-            justifyContent: "space-between",
-            gap: 12,
-            alignItems: "center",
-          },
-        },
+        { style: { display: "flex", gap: 8, alignItems: "center" } },
+        React.createElement(
+          "button",
+          { className: "mh-btn secondary", onClick: onBack },
+          "Back"
+        ),
         React.createElement(
           "h1",
           { style: { margin: 0, fontSize: "1.8rem", fontWeight: 800 } },
-          strings.buyer
-        ),
-        React.createElement(
-          "div",
-          { className: "mh-lang-toggle" },
-          ["sw", "en"].map((code) =>
-            React.createElement(
-              "button",
-              {
-                key: code,
-                className: code === langState ? "active" : "",
-                onClick: () => setLang(code),
-              },
-              code.toUpperCase()
-            )
-          )
+          "Seller Dashboard"
         )
       ),
       React.createElement(
         "p",
         { className: "mh-muted" },
-        "Browse bila login ya manual. Tunatumia anonymous auth kurekodi likes na ripoti."
-      ),
-      React.createElement(
-        "div",
-        { className: "mh-filters", style: { marginTop: 12 } },
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: strings.searchPlaceholder,
-          value: filters.q,
-          onChange: (e) => setFilters({ ...filters, q: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: strings.category,
-          value: filters.category,
-          onChange: (e) => setFilters({ ...filters, category: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: strings.location,
-          value: filters.location,
-          onChange: (e) => setFilters({ ...filters, location: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: strings.priceMin,
-          type: "number",
-          value: filters.min,
-          onChange: (e) => setFilters({ ...filters, min: e.target.value }),
-        }),
-        React.createElement("input", {
-          className: "mh-input",
-          placeholder: strings.priceMax,
-          type: "number",
-          value: filters.max,
-          onChange: (e) => setFilters({ ...filters, max: e.target.value }),
-        }),
-        React.createElement(
-          "select",
-          {
-            className: "mh-select",
-            value: filters.delivery,
-            onChange: (e) =>
-              setFilters({ ...filters, delivery: e.target.value }),
-          },
-          React.createElement("option", { value: "" }, strings.delivery),
-          React.createElement("option", { value: "true" }, "Yes"),
-          React.createElement("option", { value: "false" }, "No")
-        ),
-        React.createElement(
-          "select",
-          {
-            className: "mh-select",
-            value: filters.payOnDelivery,
-            onChange: (e) =>
-              setFilters({ ...filters, payOnDelivery: e.target.value }),
-          },
-          React.createElement("option", { value: "" }, strings.payOnDelivery),
-          React.createElement("option", { value: "true" }, "Yes"),
-          React.createElement("option", { value: "false" }, "No")
-        ),
-        React.createElement(
-          "select",
-          {
-            className: "mh-select",
-            value: filters.itemType,
-            onChange: (e) =>
-              setFilters({ ...filters, itemType: e.target.value }),
-          },
-          React.createElement("option", { value: "" }, "All Items"),
-          React.createElement("option", { value: "tshirt" }, "T-Shirt"),
-          React.createElement("option", { value: "shoes" }, "Shoes"),
-          React.createElement("option", { value: "tie" }, "Tie")
-        )
+        "Phone/email + PIN. Usalama kwanza: KYC, mawasiliano, na ukomo wa picha (max 5)."
       )
     ),
     React.createElement(
       "main",
-      {
-        style: { maxWidth: "1100px", margin: "0 auto", padding: "0 20px 40px" },
-      },
+      { className: "mh-main" },
       React.createElement(
         "div",
-        { className: "mh-listings-grid" },
-        filtered.map((item) =>
-          React.createElement(ListingCard, {
-            key: item.id,
-            listing: item,
-            onLike: handleLike,
-            onContact: handleContact,
-            liked: liked[item.id],
-            lang: langState,
-          })
+        { className: "mh-grid two" },
+        React.createElement(
+          "div",
+          { className: "mh-app-card" },
+          React.createElement("div", { className: "mh-section-title" }, "Seller Login"),
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "Phone au Email",
+            value: loginId,
+            onChange: (e) => setLoginId(e.target.value),
+          }),
+          React.createElement("input", {
+            className: "mh-input",
+            type: "password",
+            placeholder: "Password / PIN",
+            value: password,
+            onChange: (e) => setPassword(e.target.value),
+          }),
+          React.createElement(
+            "div",
+            { style: { display: "flex", gap: 10, marginTop: 10 } },
+            React.createElement(
+              "button",
+              { className: "mh-btn", onClick: handleLogin },
+              "Sign in / Create Seller"
+            ),
+            user
+              ? React.createElement(
+                  "button",
+                  {
+                    className: "mh-btn secondary",
+                    onClick: () => auth && auth.signOut(),
+                  },
+                  "Sign out"
+                )
+              : null
+          ),
+          React.createElement(
+            "p",
+            { className: "mh-muted", style: { marginTop: 6 } },
+            status
+          )
+        ),
+        React.createElement(
+          "div",
+          { className: "mh-app-card" },
+          React.createElement("div", { className: "mh-section-title" }, "Shop Profile"),
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "Shop name (e.g. TWINS AUTOSPARES)",
+            value: shop.shopName,
+            onChange: (e) => setShop({ ...shop, shopName: e.target.value }),
+          }),
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "Owner name",
+            value: shop.ownerName,
+            onChange: (e) => setShop({ ...shop, ownerName: e.target.value }),
+          }),
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "Phones (comma separated)",
+            value: shop.phonesText,
+            onChange: (e) => setShop({ ...shop, phonesText: e.target.value }),
+          }),
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "WhatsApp phone",
+            value: shop.whatsappPhone,
+            onChange: (e) => setShop({ ...shop, whatsappPhone: e.target.value }),
+          }),
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "Lipa number (optional)",
+            value: shop.lipaNumber,
+            onChange: (e) => setShop({ ...shop, lipaNumber: e.target.value }),
+          }),
+          React.createElement(
+            "div",
+            { className: "mh-grid two" },
+            React.createElement("input", {
+              className: "mh-input",
+              placeholder: "Country",
+              value: shop.country,
+              onChange: (e) => setShop({ ...shop, country: e.target.value }),
+            }),
+            React.createElement("input", {
+              className: "mh-input",
+              placeholder: "Region",
+              value: shop.region,
+              onChange: (e) => setShop({ ...shop, region: e.target.value }),
+            }),
+            React.createElement("input", {
+              className: "mh-input",
+              placeholder: "City",
+              value: shop.city,
+              onChange: (e) => setShop({ ...shop, city: e.target.value }),
+            }),
+            React.createElement("input", {
+              className: "mh-input",
+              placeholder: "Area / Street",
+              value: shop.area,
+              onChange: (e) => setShop({ ...shop, area: e.target.value }),
+            })
+          ),
+          React.createElement(
+            "div",
+            { className: "mh-section-title", style: { marginTop: 10 } },
+            "Soko Categories"
+          ),
+          React.createElement(
+            "div",
+            { className: "mh-chip-row" },
+            categories.map((cat) =>
+              React.createElement(
+                "label",
+                { key: cat.id, className: "mh-chip selectable" },
+                React.createElement("input", {
+                  type: "checkbox",
+                  checked: Boolean(shop.categories?.[cat.id]),
+                  onChange: (e) => {
+                    const next = { ...(shop.categories || {}) };
+                    if (e.target.checked) {
+                      next[cat.id] = true;
+                    } else {
+                      delete next[cat.id];
+                    }
+                    setShop({ ...shop, categories: next });
+                  },
+                }),
+                React.createElement("span", null, cat.nameSw || cat.nameEn)
+              )
+            )
+          ),
+          React.createElement(
+            "label",
+            { className: "mh-label" },
+            "Photo URLs (max 5, one per line)"
+          ),
+          React.createElement("textarea", {
+            className: "mh-textarea",
+            value: shop.photosText,
+            onChange: (e) => setShop({ ...shop, photosText: e.target.value }),
+          }),
+          React.createElement(
+            "button",
+            { className: "mh-btn", style: { marginTop: 12 }, onClick: saveShop },
+            "Save Shop Profile"
+          )
+        )
+      ),
+      React.createElement(
+        "div",
+        { className: "mh-app-card", style: { marginTop: 16 } },
+        React.createElement("div", { className: "mh-section-title" }, "Price List / Items"),
+        React.createElement(
+          "div",
+          { className: "mh-grid two" },
+          React.createElement(
+            "div",
+            { className: "mh-grid" },
+            React.createElement(
+              "label",
+              { className: "mh-label" },
+              "Soko / Category"
+            ),
+            React.createElement(
+              "select",
+              {
+                className: "mh-select",
+                value: itemForm.catId,
+                onChange: (e) =>
+                  setItemForm({ ...itemForm, catId: e.target.value }),
+              },
+              React.createElement("option", { value: "" }, "Select"),
+              categories.map((cat) =>
+                React.createElement(
+                  "option",
+                  { key: cat.id, value: cat.id },
+                  cat.nameSw || cat.nameEn
+                )
+              )
+            ),
+            React.createElement("input", {
+              className: "mh-input",
+              placeholder: "Item title (e.g. Shock absorber)",
+              value: itemForm.title,
+              onChange: (e) => setItemForm({ ...itemForm, title: e.target.value }),
+            }),
+            React.createElement("input", {
+              className: "mh-input",
+              placeholder: "Vehicle model (optional)",
+              value: itemForm.vehicleModel,
+              onChange: (e) =>
+                setItemForm({ ...itemForm, vehicleModel: e.target.value }),
+            }),
+            React.createElement(
+              "div",
+              { className: "mh-grid two" },
+              React.createElement("input", {
+                className: "mh-input",
+                type: "number",
+                placeholder: "Price",
+                value: itemForm.price,
+                onChange: (e) =>
+                  setItemForm({ ...itemForm, price: e.target.value }),
+              }),
+              React.createElement(
+                "select",
+                {
+                  className: "mh-select",
+                  value: itemForm.currency,
+                  onChange: (e) =>
+                    setItemForm({ ...itemForm, currency: e.target.value }),
+                },
+                ["TZS", "KES", "USD"].map((c) =>
+                  React.createElement("option", { key: c, value: c }, c)
+                )
+              )
+            ),
+            React.createElement(
+              "div",
+              { className: "mh-grid two" },
+              React.createElement("input", {
+                className: "mh-input",
+                placeholder: "Unit (pcs, set, bag...)",
+                value: itemForm.unit,
+                onChange: (e) =>
+                  setItemForm({ ...itemForm, unit: e.target.value }),
+              }),
+              React.createElement(
+                "select",
+                {
+                  className: "mh-select",
+                  value: itemForm.status,
+                  onChange: (e) =>
+                    setItemForm({ ...itemForm, status: e.target.value }),
+                },
+                React.createElement("option", { value: "active" }, "Active"),
+                React.createElement("option", { value: "inactive" }, "Inactive")
+              )
+            ),
+            React.createElement("input", {
+              className: "mh-input",
+              placeholder: "Photo URL (optional)",
+              value: itemForm.photoUrl,
+              onChange: (e) =>
+                setItemForm({ ...itemForm, photoUrl: e.target.value }),
+            }),
+            React.createElement("textarea", {
+              className: "mh-textarea",
+              placeholder: "Notes (stock, fitment, brand, etc.)",
+              value: itemForm.notes,
+              onChange: (e) =>
+                setItemForm({ ...itemForm, notes: e.target.value }),
+            }),
+            React.createElement(
+              "button",
+              { className: "mh-btn", onClick: saveItem },
+              itemForm.id ? "Update Item" : "Save Item"
+            )
+          ),
+          React.createElement(
+            "div",
+            { className: "mh-items-table" },
+            React.createElement(
+              "div",
+              { className: "mh-section-title" },
+              "Your items"
+            ),
+            myItems.length === 0
+              ? React.createElement(
+                  "p",
+                  { className: "mh-muted" },
+                  "No items yet."
+                )
+              : React.createElement(
+                  "ul",
+                  { className: "mh-list" },
+                  myItems.map((item) =>
+                    React.createElement(
+                      "li",
+                      { key: item.id, className: "mh-list-item" },
+                      React.createElement(
+                        "div",
+                        null,
+                        React.createElement("strong", null, item.title || "Item"),
+                        " ",
+                        React.createElement(
+                          "span",
+                          { className: "mh-tag" },
+                          item.catId || "-"
+                        ),
+                        React.createElement(
+                          "span",
+                          { className: "mh-tag" },
+                          formatCurrency(item.price, item.currency || "TZS")
+                        )
+                      ),
+                      React.createElement(
+                        "div",
+                        { style: { display: "flex", gap: 8 } },
+                        React.createElement(
+                          "button",
+                          {
+                            className: "mh-btn secondary",
+                            onClick: () => startEditItem(item),
+                          },
+                          "Edit"
+                        )
+                      )
+                    )
+                  )
+                )
+          )
         )
       )
-    ),
-    React.createElement(ContactModal, {
-      listing: contactItem,
-      onClose: () => setContactItem(null),
-    })
+    )
   );
 }
 
-// ---- Public mounts ----
-export function mountMarketingHubCard({ el, context, lang = "sw" }) {
+function MarketingHubAppShell() {
+  const { hasFb, db, auth } = useFirebase();
+  const [view, setView] = React.useState({ page: "home", catId: null, shopId: null });
+  const [categories, setCategories] = React.useState([]);
+  const [shops, setShops] = React.useState([]);
+  const [itemsBySeller, setItemsBySeller] = React.useState({});
+  const [user, setUser] = React.useState(null);
+  const [isAdmin, setIsAdmin] = React.useState(false);
+  const [loading, setLoading] = React.useState(true);
+  const [homeSearch, setHomeSearch] = React.useState("");
+  const [catFilters, setCatFilters] = React.useState({
+    q: "",
+    country: "",
+    region: "",
+    city: "",
+    sort: "recent",
+  });
+  const [shopSearch, setShopSearch] = React.useState("");
+  const [status, setStatus] = React.useState("");
+
+  React.useEffect(() => {
+    if (!auth) return;
+    const unsub = auth.onAuthStateChanged((u) => {
+      setUser(u);
+      if (u && db) {
+        const adminRef = db.ref(`marketinghub/admins/${u.uid}`);
+        const cb = (snap) => setIsAdmin(Boolean(snap.val()));
+        adminRef.on("value", cb);
+        return () => adminRef.off("value", cb);
+      }
+    });
+    return () => unsub && unsub();
+  }, [auth, db]);
+
+  React.useEffect(() => {
+    if (!auth) return;
+    ensureAnonAuth(auth).catch(() => {});
+  }, [auth]);
+
+  React.useEffect(() => {
+    if (!db) return;
+    const catRef = db.ref("marketinghub/public/categories");
+    const shopsRef = db.ref("marketinghub/public/shops");
+    const itemsRef = db.ref("marketinghub/public/items");
+    catRef.on("value", (snap) => {
+      const val = snap.val() || {};
+      const arr = Object.entries(val)
+        .map(([id, v]) => ({ id, ...v }))
+        .sort((a, b) => (a.order || 999) - (b.order || 999));
+      setCategories(arr);
+      setLoading(false);
+    });
+    shopsRef.on("value", (snap) => {
+      const val = snap.val() || {};
+      const arr = Object.entries(val).map(([id, v]) => ({ id, ...v }));
+      setShops(arr);
+    });
+    itemsRef.on("value", (snap) => {
+      const val = snap.val() || {};
+      const map = {};
+      Object.entries(val).forEach(([sellerId, items]) => {
+        map[sellerId] = Object.entries(items || {}).map(([id, v]) => ({
+          id,
+          ...v,
+        }));
+      });
+      setItemsBySeller(map);
+    });
+    return () => {
+      catRef.off();
+      shopsRef.off();
+      itemsRef.off();
+    };
+  }, [db]);
+
+  const selectedCategory = categories.find((c) => c.id === view.catId);
+  const selectedShop = shops.find((s) => s.id === view.shopId);
+  const itemsForSelectedShop = selectedShop
+    ? itemsBySeller[selectedShop.id] || []
+    : [];
+
+  function categoryStats(catId) {
+    const catShops = shops.filter((s) => shopMatchesCategory(s, catId));
+    const locations = unique(
+      catShops.map((s) => [s.country, s.region, s.city].filter(Boolean).join(" / "))
+    );
+    let itemsCount = 0;
+    catShops.forEach((s) => {
+      const items = itemsBySeller[s.id] || [];
+      itemsCount += items.filter((i) => i.catId === catId).length;
+    });
+    return {
+      shops: catShops.length,
+      items: itemsCount,
+      locations: locations.length,
+    };
+  }
+
+  async function seedCategories() {
+    if (!db || !isAdmin) return;
+    const payload = {};
+    DEFAULT_CATEGORIES.forEach((c) => {
+      payload[c.id] = { ...c, enabled: true };
+    });
+    await db.ref("marketinghub/public/categories").set(payload);
+    setStatus("Categories initialized.");
+  }
+
+  const filteredCategories = categories.filter((c) => {
+    if (!homeSearch) return true;
+    const text = `${c.nameSw} ${c.nameEn}`.toLowerCase();
+    return text.includes(homeSearch.toLowerCase());
+  });
+
+  function renderHome() {
+    return React.createElement(
+      "div",
+      { className: "mh-app-shell" },
+      React.createElement(
+        "header",
+        { className: "mh-app-header" },
+        React.createElement(
+          "div",
+          { className: "mh-hero" },
+          React.createElement(
+            "div",
+            null,
+            React.createElement("p", { className: "mh-pill" }, "MarketingHub - Real Market"),
+            React.createElement(
+              "h1",
+              null,
+              "Soko Directory kwa kila biashara"
+            ),
+            React.createElement(
+              "p",
+              { className: "mh-muted" },
+              "Chagua soko (Vifaa vya Magari, Magari, Mashamba, Nyumba, Utensils, Electronics...). Stat card inaonyesha shops, items, locations."
+            ),
+            React.createElement(
+              "div",
+              { className: "mh-hero-actions" },
+              React.createElement(
+                "button",
+                { className: "mh-btn", onClick: () => setView({ page: "seller" }) },
+                "Seller / Muuzaji"
+              ),
+              React.createElement(
+                "button",
+                {
+                  className: "mh-btn secondary",
+                  onClick: () => setStatus("Save Quote coming soon (local memory)"),
+                },
+                "Save Quote (coming soon)"
+              )
+            )
+          ),
+          React.createElement(
+            "div",
+            { className: "mh-hero-panel" },
+            React.createElement(
+              "div",
+              { className: "mh-section-title" },
+              "Enter as buyer"
+            ),
+            React.createElement(
+              "p",
+              { className: "mh-muted" },
+              "No manual login. Browse sokos, contact sellers via WhatsApp au simu moja kwa moja."
+            ),
+            React.createElement("input", {
+              className: "mh-input",
+              placeholder: "Tafuta soko...",
+              value: homeSearch,
+              onChange: (e) => setHomeSearch(e.target.value),
+            }),
+            isAdmin && categories.length === 0
+              ? React.createElement(
+                  "button",
+                  { className: "mh-btn", onClick: seedCategories },
+                  "Initialize default categories"
+                )
+              : null,
+            status
+              ? React.createElement("p", { className: "mh-muted" }, status)
+              : null
+          )
+        )
+      ),
+      React.createElement(
+        "main",
+        { className: "mh-main" },
+        loading && categories.length === 0
+          ? React.createElement("p", { className: "mh-muted" }, "Loading categories...")
+          : React.createElement(
+              "div",
+              { className: "mh-stats-grid" },
+              filteredCategories.map((cat) =>
+                React.createElement(StatCard, {
+                  key: cat.id,
+                  cat,
+                  stats: categoryStats(cat.id),
+                  onClick: () => setView({ page: "category", catId: cat.id }),
+                })
+              )
+            )
+      )
+    );
+  }
+  function renderCategory() {
+    const cat = selectedCategory;
+    if (!cat) return renderHome();
+    const shopsForCat = shops.filter((s) => shopMatchesCategory(s, cat.id));
+    const filteredShops = shopsForCat.filter((s) => {
+      const text = `${s.shopName} ${s.ownerName} ${s.region} ${s.city} ${s.area}`.toLowerCase();
+      if (catFilters.q && !text.includes(catFilters.q.toLowerCase())) return false;
+      if (catFilters.country && (s.country || "").toLowerCase() !== catFilters.country.toLowerCase()) return false;
+      if (catFilters.region && (s.region || "").toLowerCase() !== catFilters.region.toLowerCase()) return false;
+      if (catFilters.city && (s.city || "").toLowerCase() !== catFilters.city.toLowerCase()) return false;
+      return true;
+    });
+    const catItems = filteredShops.flatMap((shop) =>
+      (itemsBySeller[shop.id] || []).filter((i) => i.catId === cat.id && i.status !== "inactive")
+    );
+    if (catFilters.sort === "cheap") {
+      catItems.sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
+    } else {
+      catItems.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    }
+    return React.createElement(
+      "div",
+      { className: "mh-app-shell" },
+      React.createElement(
+        "header",
+        { className: "mh-app-header" },
+        React.createElement(
+          "div",
+          { className: "mh-breadcrumb" },
+          React.createElement(
+            "button",
+            { className: "mh-btn secondary", onClick: () => setView({ page: "home" }) },
+            "Home"
+          ),
+          React.createElement("span", null, " / "),
+          React.createElement("strong", null, cat.nameSw || cat.nameEn)
+        ),
+        React.createElement(
+          "p",
+          { className: "mh-muted" },
+          "Buyer mode: tafuta shops, piga simu au WhatsApp bila login."
+        ),
+        React.createElement(
+          "div",
+          { className: "mh-filters", style: { marginTop: 12 } },
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "Search shop / area / owner",
+            value: catFilters.q,
+            onChange: (e) => setCatFilters({ ...catFilters, q: e.target.value }),
+          }),
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "Country",
+            value: catFilters.country,
+            onChange: (e) => setCatFilters({ ...catFilters, country: e.target.value }),
+          }),
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "Region",
+            value: catFilters.region,
+            onChange: (e) => setCatFilters({ ...catFilters, region: e.target.value }),
+          }),
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "City",
+            value: catFilters.city,
+            onChange: (e) => setCatFilters({ ...catFilters, city: e.target.value }),
+          }),
+          React.createElement(
+            "select",
+            {
+              className: "mh-select",
+              value: catFilters.sort,
+              onChange: (e) => setCatFilters({ ...catFilters, sort: e.target.value }),
+            },
+            React.createElement("option", { value: "recent" }, "Newest"),
+            React.createElement("option", { value: "cheap" }, "Cheapest")
+          )
+        )
+      ),
+      React.createElement(
+        "main",
+        { className: "mh-main" },
+        filteredShops.length === 0
+          ? React.createElement("p", { className: "mh-muted" }, "Hakuna shop bado.")
+          : React.createElement(
+              "div",
+              { className: "mh-grid two" },
+              filteredShops.map((shop) =>
+                React.createElement(ShopCard, {
+                  key: shop.id,
+                  shop,
+                  items: (itemsBySeller[shop.id] || []).filter((i) => i.catId === cat.id),
+                  onOpen: () => setView({ page: "shop", shopId: shop.id, catId: cat.id }),
+                })
+              )
+            ),
+        React.createElement(
+          "div",
+          { className: "mh-app-card", style: { marginTop: 20 } },
+          React.createElement("div", { className: "mh-section-title" }, "Items in this soko"),
+          ItemsTable({ items: catItems })
+        )
+      )
+    );
+  }
+
+  function renderShop() {
+    const shop = selectedShop;
+    if (!shop) return renderHome();
+    const items = (itemsForSelectedShop || [])
+      .filter((i) => !view.catId || i.catId === view.catId)
+      .filter((i) =>
+        shopSearch
+          ? (i.title || "").toLowerCase().includes(shopSearch.toLowerCase()) ||
+            (i.notes || "").toLowerCase().includes(shopSearch.toLowerCase())
+          : true
+      )
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const waLink = heroWhatsAppLink(shop);
+    return React.createElement(
+      "div",
+      { className: "mh-app-shell" },
+      React.createElement(
+        "header",
+        { className: "mh-app-header" },
+        React.createElement(
+          "div",
+          { className: "mh-breadcrumb" },
+          React.createElement(
+            "button",
+            { className: "mh-btn secondary", onClick: () => setView({ page: "category", catId: view.catId }) },
+            "Back to soko"
+          ),
+          React.createElement("span", null, " / "),
+          React.createElement("strong", null, shop.shopName || "Shop")
+        ),
+        React.createElement(
+          "div",
+          { className: "mh-shop-profile" },
+          React.createElement(
+            "div",
+            null,
+            React.createElement("h2", null, shop.shopName || "Shop"),
+            React.createElement(
+              "p",
+              { className: "mh-muted" },
+              [shop.country, shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
+            ),
+            shop.lipaNumber
+              ? React.createElement(
+                  "p",
+                  { className: "mh-muted" },
+                  `Lipa number: ${shop.lipaNumber}`
+                )
+              : null
+          ),
+          React.createElement(
+            "div",
+            { className: "mh-shop-actions" },
+            shop.phones?.[0]
+              ? React.createElement(
+                  "a",
+                  { className: "mh-btn secondary", href: `tel:${shop.phones[0]}` },
+                  "Call"
+                )
+              : null,
+            shop.phones?.[0]
+              ? React.createElement(
+                  "a",
+                  { className: "mh-btn secondary", href: `sms:${shop.phones[0]}` },
+                  "SMS"
+                )
+              : null,
+            waLink
+              ? React.createElement(
+                  "a",
+                  { className: "mh-btn", href: waLink, target: "_blank" },
+                  "WhatsApp"
+                )
+              : null
+          )
+        ),
+        React.createElement("input", {
+          className: "mh-input",
+          placeholder: "Search this shop items",
+          value: shopSearch,
+          onChange: (e) => setShopSearch(e.target.value),
+          style: { marginTop: 12 },
+        })
+      ),
+      React.createElement(
+        "main",
+        { className: "mh-main" },
+        React.createElement("div", { className: "mh-app-card" }, ItemsTable({ items }))
+      )
+    );
+  }
+
+  if (!hasFb) {
+    return React.createElement(
+      "div",
+      { className: "mh-app-shell" },
+      React.createElement(
+        "main",
+        { className: "mh-main" },
+        React.createElement("p", null, "Firebase not detected. Please load firebase.js.")
+      )
+    );
+  }
+
+  if (view.page === "seller") {
+    return React.createElement(SellerDashboard, {
+      categories,
+      db,
+      auth,
+      onBack: () => setView({ page: "home" }),
+    });
+  }
+  if (view.page === "category") return renderCategory();
+  if (view.page === "shop") return renderShop();
+  return renderHome();
+}
+
+export function mountMarketingHubCard({ el }) {
   if (!el) return;
   ensureStyle();
   ensureReact().then(() => {
@@ -919,15 +1310,15 @@ export function mountMarketingHubCard({ el, context, lang = "sw" }) {
       window.open(url, "_blank");
     };
     const root = createRootCompat(el);
-    root.render(React.createElement(MarketingCard, { onClick, lang, context }));
+    root.render(React.createElement(MarketingCard, { onClick }));
   });
 }
 
-export function mountMarketingHubApp({ el, lang = "sw" }) {
+export function mountMarketingHubApp({ el }) {
   if (!el) return;
   ensureStyle();
   ensureReact().then(() => {
     const root = createRootCompat(el);
-    root.render(React.createElement(MarketingHubAppShell, { lang }));
+    root.render(React.createElement(MarketingHubAppShell));
   });
 }
