@@ -223,7 +223,13 @@
 
       const profileSnap = await scopedOrLegacy(db, `years/${currentYear}/workers/${workerId}/profile`, `workers/${workerId}/profile`, legacyFriendly);
       const profile = profileSnap.snap.val() || {};
-      if (!profile.role || !profile.role.toLowerCase().includes('head')) {
+      const cachedRole = (localStorage.getItem('somap_role') || '').toLowerCase();
+      const teacherCfgSnap = await db.ref(`teachers_config/${workerId}`).get();
+      const teacherCfg = teacherCfgSnap.val() || {};
+      const teacherType = (teacherCfg.teacherType || '').toLowerCase();
+      const profileRole = (profile.role || '').toLowerCase();
+      const isHead = profileRole.includes('head') || teacherType.includes('head') || cachedRole.includes('head');
+      if (!isHead) {
         if (isEvent) showToast('Huna ruhusa ya Head Teacher.', 'warning');
         return;
       }
