@@ -121,9 +121,9 @@ function heroWhatsAppLink(shop, itemTitle) {
   return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
 }
 
-async function uploadToCloudinary(file, folder) {
+async function uploadToCloudinary(file, folder = "marketinghub/shops/general", preset = CLOUDINARY_PRESET) {
   const fd = new FormData();
-  fd.append("upload_preset", CLOUDINARY_PRESET);
+  fd.append("upload_preset", preset);
   if (folder) fd.append("folder", folder);
   fd.append("file", file);
   const res = await fetch(CLOUDINARY_ENDPOINT, { method: "POST", body: fd });
@@ -134,7 +134,7 @@ async function uploadToCloudinary(file, folder) {
 }
 
 function getCoverPhoto(shop) {
-  return shop?.profilePhotoUrl || (shop?.photos || [])[0] || "";
+  return (shop?.photos || [])[0] || shop?.profilePhotoUrl || "";
 }
 
 function MarketingCard({ onClick }) {
@@ -204,6 +204,8 @@ function ShopCard({ shop, items, onOpen }) {
   const sampleItems = (items || []).slice(0, 3);
   const wa = heroWhatsAppLink(shop);
   const cover = getCoverPhoto(shop);
+  const avatar = shop.profilePhotoUrl || cover;
+  const contact = shop.whatsappPhone || (shop.phones || [])[0] || "";
   return React.createElement(
     "div",
     { className: "mh-shop-card" },
@@ -213,8 +215,8 @@ function ShopCard({ shop, items, onOpen }) {
       React.createElement(
         "div",
         { className: "mh-shop-id" },
-        cover
-          ? React.createElement("img", { className: "mh-avatar", src: cover, alt: shop.shopName || "Shop" })
+        avatar
+          ? React.createElement("img", { className: "mh-avatar", src: avatar, alt: shop.shopName || "Shop" })
           : React.createElement("div", { className: "mh-avatar placeholder" }, (shop.shopName || "Soko").slice(0, 2).toUpperCase()),
         React.createElement(
           "div",
@@ -223,12 +225,24 @@ function ShopCard({ shop, items, onOpen }) {
           React.createElement(
             "p",
             { className: "mh-muted" },
-            [shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
+            [shop.country, shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
+          ),
+          React.createElement(
+            "p",
+            { className: "mh-muted" },
+            contact ? `Mawasiliano: ${contact}` : "Mawasiliano hayajawekwa"
           )
         )
       ),
       shop.verifiedStatus === "verified" ? React.createElement("span", { className: "mh-badge" }, "Verified") : null
-    ),
+      ),
+    cover
+      ? React.createElement(
+          "div",
+          { className: "mh-shop-cover" },
+          React.createElement("img", { src: cover, alt: `${shop.shopName || "Shop"} cover` })
+        )
+      : null,
     React.createElement(
       "div",
       { className: "mh-shop-items" },
@@ -301,12 +315,15 @@ function PhotoDropzone({ label, max = 5, value = [], onAdd, onRemove, folder, di
   const limitReached = current.length >= max;
 
   async function handleFiles(fileList) {
+    if (disabled || uploading) return;
+    setMessage("");
     const files = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
     if (files.length === 0) {
       setMessage("Chagua picha tu.");
       return;
     }
-    if (current.length + files.length > max) {
+    const remaining = max - current.length;
+    if (remaining <= 0 || files.length > remaining) {
       setMessage(`Max ${max} photos. Delete old first.`);
       return;
     }
@@ -328,7 +345,7 @@ function PhotoDropzone({ label, max = 5, value = [], onAdd, onRemove, folder, di
     e.preventDefault();
     e.stopPropagation();
     setDragging(false);
-    if (disabled || limitReached) return;
+    if (disabled || limitReached || uploading) return;
     handleFiles(e.dataTransfer.files);
   }
 
@@ -347,13 +364,13 @@ function PhotoDropzone({ label, max = 5, value = [], onAdd, onRemove, folder, di
         className: `mh-drop-area ${isDragging ? "dragging" : ""} ${limitReached ? "disabled" : ""}`,
         onDragOver: (e) => {
           e.preventDefault();
-          if (!disabled) setDragging(true);
+          if (!disabled && !uploading) setDragging(true);
         },
         onDragLeave: () => setDragging(false),
         onDrop,
-        onClick: () => !disabled && inputRef.current && inputRef.current.click(),
+        onClick: () => !disabled && !limitReached && !uploading && inputRef.current && inputRef.current.click(),
       },
-      uploading ? "Uploading..." : limitReached ? "Max photos reached" : "Drag & drop or click to upload"
+      uploading ? "Uploading..." : limitReached ? "Max photos reached - delete to add" : "Drag & drop or click to upload"
     ),
     React.createElement("input", {
       type: "file",
@@ -361,7 +378,7 @@ function PhotoDropzone({ label, max = 5, value = [], onAdd, onRemove, folder, di
       multiple: max > 1,
       ref: inputRef,
       style: { display: "none" },
-      disabled: disabled || limitReached,
+      disabled: disabled || limitReached || uploading,
       onChange: (e) => handleFiles(e.target.files),
     }),
     message ? React.createElement("p", { className: "mh-muted" }, message) : null,
@@ -395,6 +412,7 @@ function SellerDashboard({ categories, db, auth, onBack }) {
   const [password, setPassword] = React.useState("");
   const [user, setUser] = React.useState(auth?.currentUser || null);
   const [status, setStatus] = React.useState("");
+  const statusTimerRef = React.useRef(null);
   const [shop, setShop] = React.useState({
     shopName: "",
     ownerName: "",
@@ -431,6 +449,12 @@ function SellerDashboard({ categories, db, auth, onBack }) {
   }, [auth]);
 
   React.useEffect(() => {
+    return () => {
+      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+    };
+  }, []);
+
+  React.useEffect(() => {
     if (!db || !user) return;
     const shopRef = db.ref(`marketinghub/public/shops/${user.uid}`);
     const itemsRef = db.ref(`marketinghub/public/items/${user.uid}`);
@@ -442,7 +466,7 @@ function SellerDashboard({ categories, db, auth, onBack }) {
         phonesText: (val.phones || []).join(", "),
         categories: val.categories || {},
       }));
-      setShopPhotos(val.photos || []);
+      setShopPhotos((val.photos || []).slice(0, 5));
       setProfilePhoto(val.profilePhotoUrl || "");
     };
     const itemCb = (snap) => {
@@ -460,13 +484,15 @@ function SellerDashboard({ categories, db, auth, onBack }) {
   }, [db, user]);
 
   function showStatus(msg) {
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
     setStatus(msg);
-    if (msg) setTimeout(() => setStatus(""), 2500);
+    if (msg) statusTimerRef.current = setTimeout(() => setStatus(""), 2600);
   }
 
   function handleLogin() {
     if (!auth) return;
-    const email = loginToEmail(loginId);
+    const normalizedLogin = (loginId || "").trim();
+    const email = loginToEmail(normalizedLogin);
     if (!email || !password) {
       showStatus("Weka phone/email na nenosiri.");
       return;
@@ -474,18 +500,23 @@ function SellerDashboard({ categories, db, auth, onBack }) {
     showStatus("Signing in...");
     auth
       .signInWithEmailAndPassword(email, password)
-      .then(() => {
+      .then((cred) => {
+        setUser(cred?.user || auth.currentUser);
         setPassword("");
         showStatus("Signed in");
       })
       .catch(() =>
         auth
           .createUserWithEmailAndPassword(email, password)
-          .then(() => {
+          .then((cred) => {
+            setUser(cred?.user || auth.currentUser);
             setPassword("");
             showStatus("Account created, signed in");
           })
-          .catch((err) => showStatus(err?.message || "Auth failed. Check password."))
+          .catch((err) => {
+            setPassword("");
+            showStatus(err?.message || "Auth failed. Check password.");
+          })
       );
   }
 
@@ -594,6 +625,7 @@ function SellerDashboard({ categories, db, auth, onBack }) {
   return React.createElement(
     "div",
     { className: "mh-app-shell" },
+    status ? React.createElement("div", { className: "mh-toast" }, status) : null,
     React.createElement(
       "header",
       { className: "mh-app-header" },
@@ -606,22 +638,31 @@ function SellerDashboard({ categories, db, auth, onBack }) {
       React.createElement(
         "div",
         { className: "mh-signed" },
-        user && (profilePhoto || shopPhotos[0]
-          ? React.createElement("img", { className: "mh-avatar", src: profilePhoto || shopPhotos[0], alt: signedInLabel })
-          : React.createElement("div", { className: "mh-avatar placeholder" }, signedInLabel.slice(0, 2).toUpperCase())),
-        React.createElement(
-          "div",
-          null,
-          React.createElement("p", { className: "mh-muted" }, "Signed in as"),
-          React.createElement("strong", null, signedInLabel)
-        ),
         user
           ? React.createElement(
-              "button",
-              { className: "mh-btn secondary", onClick: () => auth && auth.signOut() },
-              "Sign out"
+              React.Fragment,
+              null,
+              profilePhoto || shopPhotos[0]
+                ? React.createElement("img", { className: "mh-avatar", src: profilePhoto || shopPhotos[0], alt: signedInLabel })
+                : React.createElement("div", { className: "mh-avatar placeholder" }, signedInLabel.slice(0, 2).toUpperCase()),
+              React.createElement(
+                "div",
+                null,
+                React.createElement("p", { className: "mh-muted" }, "Signed in as"),
+                React.createElement("strong", null, signedInLabel)
+              ),
+              React.createElement(
+                "button",
+                { className: "mh-btn secondary", onClick: () => auth && auth.signOut() },
+                "Sign out"
+              )
             )
-          : null
+          : React.createElement(
+              "div",
+              null,
+              React.createElement("p", { className: "mh-muted" }, "Seller login: Phone/Email + PIN. Usalama kwanza."),
+              React.createElement("strong", null, "Not signed in")
+            )
       )
     ),
     React.createElement(
@@ -652,15 +693,18 @@ function SellerDashboard({ categories, db, auth, onBack }) {
                 "div",
                 { style: { display: "flex", gap: 10, marginTop: 10 } },
                 React.createElement("button", { className: "mh-btn", onClick: handleLogin }, "Sign in / Create Seller")
-              ),
-              status ? React.createElement("p", { className: "mh-muted", style: { marginTop: 6 } }, status) : null
+              )
             )
           : React.createElement(
               "div",
               { className: "mh-app-card" },
               React.createElement("div", { className: "mh-section-title" }, "Logged in"),
-              React.createElement("p", { className: "mh-muted" }, "You are signed in. Manage shop and items below."),
-              status ? React.createElement("p", { className: "mh-muted" }, status) : null
+              React.createElement("p", { className: "mh-muted" }, `Signed in as ${signedInLabel}`),
+              React.createElement(
+                "button",
+                { className: "mh-btn secondary", onClick: () => auth && auth.signOut() },
+                "Sign out"
+              )
             ),
         React.createElement(
           "div",
@@ -1179,6 +1223,7 @@ function MarketingHubAppShell() {
   function renderShop() {
     const shop = selectedShop;
     if (!shop) return renderHome();
+    const contact = shop.whatsappPhone || (shop.phones || [])[0] || "";
     const items = (itemsForSelectedShop || [])
       .filter((i) => !view.catId || i.catId === view.catId)
       .filter((i) =>
@@ -1188,8 +1233,9 @@ function MarketingHubAppShell() {
       )
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     const waLink = heroWhatsAppLink(shop);
-    const gallery = shop.photos || [];
+    const gallery = (shop.photos || []).slice(0, 5);
     const cover = getCoverPhoto(shop);
+    const avatar = shop.profilePhotoUrl || cover;
     return React.createElement(
       "div",
       { className: "mh-app-shell" },
@@ -1213,8 +1259,8 @@ function MarketingHubAppShell() {
           React.createElement(
             "div",
             { className: "mh-shop-id" },
-            cover
-              ? React.createElement("img", { className: "mh-avatar", src: cover, alt: shop.shopName || "Shop" })
+            avatar
+              ? React.createElement("img", { className: "mh-avatar", src: avatar, alt: shop.shopName || "Shop" })
               : React.createElement("div", { className: "mh-avatar placeholder" }, (shop.shopName || "Shop").slice(0, 2).toUpperCase()),
             React.createElement(
               "div",
@@ -1225,6 +1271,7 @@ function MarketingHubAppShell() {
                 { className: "mh-muted" },
                 [shop.country, shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
               ),
+              React.createElement("p", { className: "mh-muted" }, contact ? `Mawasiliano: ${contact}` : "Mawasiliano hayajawekwa"),
               shop.lipaNumber ? React.createElement("p", { className: "mh-muted" }, `Lipa number: ${shop.lipaNumber}`) : null
             )
           ),
