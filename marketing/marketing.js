@@ -126,6 +126,18 @@ function heroWhatsAppLink(shop, itemTitle) {
   return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
 }
 
+function itemWhatsAppLink(shop, item, buyerPhone) {
+  const phone = shop?.whatsappPhone || shop?.phones?.[0] || "";
+  const digits = normalizePhoneDigits(phone);
+  if (!digits) return null;
+  const amount = `${item.currency || "TZS"} ${Number(item.price || 0).toLocaleString()}`;
+  const mine = buyerPhone ? ` Namba yangu ni ${buyerPhone}.` : "";
+  const msg =
+    `NIMEPATA NAMBA YAKO NA BIDHAA VYAKO KWENYE MFUMO WA SoMAP (SoMApv2i.com) ` +
+    `Kwamba unauza ${item.title} kwa shilingi ${amount}, naomba kulipia na kujua jinsi ya kunifikishia.${mine}`;
+  return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
+}
+
 async function uploadToCloudinary(file, folder = "marketinghub/shops/general", preset = CLOUDINARY_PRESET) {
   const fd = new FormData();
   fd.append("upload_preset", preset);
@@ -308,6 +320,43 @@ function ItemsTable({ items }) {
         )
       )
     )
+  );
+}
+
+function ItemsGrid({ items, shop, buyerPhone }) {
+  if (!items || items.length === 0) return React.createElement("p", { className: "mh-muted" }, "Hakuna bidhaa bado.");
+  return React.createElement(
+    "div",
+    { className: "mh-grid items" },
+    items.map((item) => {
+      const itemShop = shop || item.__shop || {};
+      const wa = itemWhatsAppLink(itemShop, item, buyerPhone);
+      const call = itemShop?.phones?.[0] ? `tel:${itemShop.phones[0]}` : null;
+      const photo = item.photoUrl || getCoverPhoto(itemShop);
+      return React.createElement(
+        "div",
+        { key: item.id, className: "mh-item-card" },
+        photo ? React.createElement("img", { className: "mh-item-photo", src: photo, alt: item.title || "Item" }) : null,
+        React.createElement(
+          "div",
+          { className: "mh-item-body" },
+          React.createElement(
+            "div",
+            { className: "mh-item-top" },
+            React.createElement("strong", null, item.title || "Bidhaa"),
+            React.createElement("span", { className: "mh-tag" }, formatCurrency(item.price, item.currency || "TZS"))
+          ),
+          item.vehicleModel ? React.createElement("p", { className: "mh-muted" }, item.vehicleModel) : null,
+          item.notes ? React.createElement("p", { className: "mh-muted" }, item.notes) : null,
+          React.createElement(
+            "div",
+            { className: "mh-item-actions" },
+            wa ? React.createElement("a", { className: "mh-btn", href: wa, target: "_blank" }, "WhatsApp kununua") : null,
+            call ? React.createElement("a", { className: "mh-btn secondary", href: call }, "Piga simu") : null
+          )
+        )
+      );
+    })
   );
 }
 
@@ -1059,6 +1108,7 @@ function MarketingHubAppShell() {
   const [shopSearch, setShopSearch] = React.useState("");
   const [status, setStatus] = React.useState("");
   const seededCategoriesRef = React.useRef(false);
+  const [buyerPhone, setBuyerPhone] = React.useState("");
 
   React.useEffect(() => {
     if (!auth) return;
@@ -1078,6 +1128,17 @@ function MarketingHubAppShell() {
     if (!auth) return;
     ensureAnonAuth(auth).catch(() => {});
   }, [auth]);
+
+  React.useEffect(() => {
+    if (!isBrowser) return;
+    const saved = localStorage.getItem("mh_buyer_phone");
+    if (saved) setBuyerPhone(saved);
+  }, []);
+
+  function persistBuyerPhone(val) {
+    setBuyerPhone(val);
+    if (isBrowser) localStorage.setItem("mh_buyer_phone", val);
+  }
 
   React.useEffect(() => {
     if (!db) return;
@@ -1247,7 +1308,9 @@ function MarketingHubAppShell() {
       return true;
     });
     const catItems = filteredShops.flatMap((shop) =>
-      (itemsBySeller[shop.id] || []).filter((i) => i.catId === cat.id && i.status !== "inactive")
+      (itemsBySeller[shop.id] || [])
+        .filter((i) => i.catId === cat.id && i.status !== "inactive")
+        .map((i) => ({ ...i, __shop: shop }))
     );
     if (catFilters.sort === "cheap") catItems.sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
     else catItems.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
@@ -1292,6 +1355,12 @@ function MarketingHubAppShell() {
             value: catFilters.city,
             onChange: (e) => setCatFilters({ ...catFilters, city: e.target.value }),
           }),
+          React.createElement("input", {
+            className: "mh-input",
+            placeholder: "Namba yako (optional, inaingia WhatsApp message)",
+            value: buyerPhone,
+            onChange: (e) => persistBuyerPhone(e.target.value),
+          }),
           React.createElement(
             "select",
             {
@@ -1324,8 +1393,12 @@ function MarketingHubAppShell() {
         React.createElement(
           "div",
           { className: "mh-app-card", style: { marginTop: 20 } },
-          React.createElement("div", { className: "mh-section-title" }, "Items in this soko"),
-          ItemsTable({ items: catItems })
+          React.createElement("div", { className: "mh-section-title" }, "Bidhaa za soko hili"),
+          React.createElement(ItemsGrid, {
+            items: catItems,
+            shop: null,
+            buyerPhone,
+          })
         )
       )
     );
@@ -1421,7 +1494,12 @@ function MarketingHubAppShell() {
               )
             )
           : null,
-        React.createElement("div", { className: "mh-app-card" }, ItemsTable({ items }))
+        React.createElement(
+          "div",
+          { className: "mh-app-card" },
+          React.createElement("div", { className: "mh-section-title" }, "Bidhaa"),
+          React.createElement(ItemsGrid, { items, shop, buyerPhone })
+        )
       )
     );
   }
