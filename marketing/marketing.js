@@ -100,6 +100,11 @@ function unique(array) {
   return Array.from(new Set(array.filter(Boolean)));
 }
 
+function slugifyId(text = "") {
+  const cleaned = text.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return cleaned || `custom_${Date.now()}`;
+}
+
 function formatCurrency(val, currency = "TZS") {
   if (val === undefined || val === null || val === "") return "";
   const num = Number(val);
@@ -427,6 +432,8 @@ function SellerDashboard({ categories, db, auth, onBack }) {
   });
   const [shopPhotos, setShopPhotos] = React.useState([]);
   const [profilePhoto, setProfilePhoto] = React.useState("");
+  const [newCategoryName, setNewCategoryName] = React.useState("");
+  const [newCategoryIcon, setNewCategoryIcon] = React.useState("SOKO");
   const [itemForm, setItemForm] = React.useState({
     id: null,
     catId: "",
@@ -621,6 +628,55 @@ function SellerDashboard({ categories, db, auth, onBack }) {
     : "Not signed in";
   const shopFolder = user ? `marketinghub/shops/${user.uid}` : "marketinghub/shops/anon";
   const itemFolder = user ? `marketinghub/items/${user.uid}` : "marketinghub/items/anon";
+  const availableCategories = categories && categories.length ? categories : DEFAULT_CATEGORIES;
+
+  async function addNewCategory() {
+    if (!db || !auth || !auth.currentUser) {
+      showStatus("Sign in first.");
+      return;
+    }
+    const name = (newCategoryName || "").trim();
+    if (!name) {
+      showStatus("Weka jina la soko.");
+      return;
+    }
+    const id = slugifyId(name);
+    const catData = {
+      id,
+      nameSw: name,
+      nameEn: name,
+      icon: (newCategoryIcon || "SOKO").toUpperCase(),
+      order: (categories?.length || DEFAULT_CATEGORIES.length) + 1,
+      enabled: true,
+      createdBy: auth.currentUser.uid,
+      createdAt: Date.now(),
+    };
+    try {
+      await db.ref(`marketinghub/public/categories/${id}`).set(catData);
+      setNewCategoryName("");
+      showStatus("Soko limeongezwa.");
+      setShop((prev) => ({ ...prev, categories: { ...(prev.categories || {}), [id]: true } }));
+    } catch (err) {
+      showStatus(err?.message || "Imeshindikana kuongeza soko.");
+    }
+  }
+
+  async function seedDefaultCategories() {
+    if (!db || !auth) {
+      showStatus("Sign in first.");
+      return;
+    }
+    const payload = {};
+    DEFAULT_CATEGORIES.forEach((c) => {
+      payload[c.id] = { ...c, enabled: true };
+    });
+    try {
+      await db.ref("marketinghub/public/categories").set(payload);
+      showStatus("Default sokos added.");
+    } catch (err) {
+      showStatus(err?.message || "Imeshindikana kuweka sokos.");
+    }
+  }
 
   return React.createElement(
     "div",
@@ -772,7 +828,7 @@ function SellerDashboard({ categories, db, auth, onBack }) {
           React.createElement(
             "div",
             { className: "mh-chip-row" },
-            categories.map((cat) =>
+            availableCategories.map((cat) =>
               React.createElement(
                 "label",
                 { key: cat.id, className: "mh-chip selectable" },
@@ -789,6 +845,41 @@ function SellerDashboard({ categories, db, auth, onBack }) {
                 React.createElement("span", null, cat.nameSw || cat.nameEn)
               )
             )
+          ),
+          availableCategories.length === 0
+            ? React.createElement("p", { className: "mh-muted" }, "Hakuna sokos bado. Ongeza mpya chini.")
+            : null,
+          React.createElement(
+            "div",
+            { className: "mh-grid two", style: { marginTop: 8 } },
+            React.createElement("input", {
+              className: "mh-input",
+              placeholder: "Add new soko (e.g. Vifaa vya Magari)",
+              value: newCategoryName,
+              onChange: (e) => setNewCategoryName(e.target.value),
+            }),
+            React.createElement("input", {
+              className: "mh-input",
+              placeholder: "Icon/label (optional, e.g. SOKO)",
+              value: newCategoryIcon,
+              onChange: (e) => setNewCategoryIcon(e.target.value),
+            })
+          ),
+          React.createElement(
+            "div",
+            { style: { display: "flex", gap: 10, marginTop: 6, flexWrap: "wrap" } },
+            React.createElement(
+              "button",
+              { className: "mh-btn secondary", onClick: addNewCategory, disabled: !user },
+              "Add soko"
+            ),
+            categories.length === 0
+              ? React.createElement(
+                  "button",
+                  { className: "mh-btn secondary", onClick: seedDefaultCategories, disabled: !user },
+                  "Load default sokos"
+                )
+              : null
           ),
           React.createElement(PhotoDropzone, {
             label: "Profile picture (optional)",
@@ -834,7 +925,9 @@ function SellerDashboard({ categories, db, auth, onBack }) {
                 onChange: (e) => setItemForm({ ...itemForm, catId: e.target.value }),
               },
               React.createElement("option", { value: "" }, "Select"),
-              categories.map((cat) => React.createElement("option", { key: cat.id, value: cat.id }, cat.nameSw || cat.nameEn))
+              availableCategories.map((cat) =>
+                React.createElement("option", { key: cat.id, value: cat.id }, cat.nameSw || cat.nameEn)
+              )
             ),
             React.createElement("input", {
               className: "mh-input",
@@ -965,6 +1058,7 @@ function MarketingHubAppShell() {
   const [catFilters, setCatFilters] = React.useState({ q: "", country: "", region: "", city: "", sort: "recent" });
   const [shopSearch, setShopSearch] = React.useState("");
   const [status, setStatus] = React.useState("");
+  const seededCategoriesRef = React.useRef(false);
 
   React.useEffect(() => {
     if (!auth) return;
@@ -992,7 +1086,24 @@ function MarketingHubAppShell() {
     const itemsRef = db.ref("marketinghub/public/items");
     catRef.on("value", (snap) => {
       const val = snap.val() || {};
-      const arr = Object.entries(val)
+      const entries = Object.entries(val);
+      if (entries.length === 0 && !seededCategoriesRef.current) {
+        seededCategoriesRef.current = true;
+        const payload = {};
+        DEFAULT_CATEGORIES.forEach((c) => {
+          payload[c.id] = { ...c, enabled: true };
+        });
+        catRef.set(payload).catch(() => {});
+        setCategories(DEFAULT_CATEGORIES);
+        setLoading(false);
+        return;
+      }
+      if (entries.length === 0) {
+        setCategories(DEFAULT_CATEGORIES);
+        setLoading(false);
+        return;
+      }
+      const arr = entries
         .map(([id, v]) => ({ id, ...v }))
         .sort((a, b) => (a.order || 999) - (b.order || 999));
       setCategories(arr);
