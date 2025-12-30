@@ -1,48 +1,23 @@
-﻿
-// marketing/marketing.js
+﻿// marketing/marketing.js
 // MarketingHub: multi-soko marketplace (React CDN + Firebase RTDB, no build step).
 
 const STYLE_URL = new URL("./marketing.css", import.meta.url).href;
 const REACT_URL = "https://unpkg.com/react@18/umd/react.production.min.js";
-const REACT_DOM_URL =
-  "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js";
+const REACT_DOM_URL = "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js";
+const CLOUDINARY_ENDPOINT = "https://api.cloudinary.com/v1_1/dg7vnrkgd/upload";
+const CLOUDINARY_PRESET = "somap_unsigned";
 
 const isBrowser = typeof window !== "undefined";
 
-// Default categories to seed when empty (admin only).
 const DEFAULT_CATEGORIES = [
-  {
-    id: "vehicle_spares",
-    nameSw: "Soko la Vifaa vya Magari",
-    nameEn: "Vehicle Spares",
-    icon: "CAR-SPARES",
-    order: 1,
-  },
+  { id: "vehicle_spares", nameSw: "Soko la Vifaa vya Magari", nameEn: "Vehicle Spares", icon: "CAR-SPARES", order: 1 },
   { id: "cars", nameSw: "Soko la Magari", nameEn: "Cars", icon: "CARS", order: 2 },
   { id: "land", nameSw: "Soko la Mashamba", nameEn: "Land", icon: "LAND", order: 3 },
   { id: "houses", nameSw: "Soko la Nyumba", nameEn: "Houses", icon: "HOUSES", order: 4 },
-  {
-    id: "rentals",
-    nameSw: "Soko la Kupanga Nyumba",
-    nameEn: "Rentals",
-    icon: "RENTALS",
-    order: 5,
-  },
+  { id: "rentals", nameSw: "Soko la Kupanga Nyumba", nameEn: "Rentals", icon: "RENTALS", order: 5 },
   { id: "utensils", nameSw: "Soko la Vyombo", nameEn: "Utensils", icon: "UTENSILS", order: 6 },
-  {
-    id: "electronics",
-    nameSw: "Vifaa vya Elektroniki",
-    nameEn: "Electronics & Gadgets",
-    icon: "ELECTRONICS",
-    order: 7,
-  },
-  {
-    id: "uniforms",
-    nameSw: "Uniformu na Mahitaji ya Shule",
-    nameEn: "Uniforms & School Supplies",
-    icon: "UNIFORMS",
-    order: 8,
-  },
+  { id: "electronics", nameSw: "Vifaa vya Elektroniki", nameEn: "Electronics & Gadgets", icon: "ELECTRONICS", order: 7 },
+  { id: "uniforms", nameSw: "Uniformu na Mahitaji ya Shule", nameEn: "Uniforms & School Supplies", icon: "UNIFORMS", order: 8 },
 ];
 
 function loadScriptOnce(src, globalKey) {
@@ -67,9 +42,7 @@ function loadScriptOnce(src, globalKey) {
 }
 
 function ensureReact() {
-  return loadScriptOnce(REACT_URL, "React").then(() =>
-    loadScriptOnce(REACT_DOM_URL, "ReactDOM")
-  );
+  return loadScriptOnce(REACT_URL, "React").then(() => loadScriptOnce(REACT_DOM_URL, "ReactDOM"));
 }
 
 function ensureStyle() {
@@ -87,14 +60,11 @@ function createRootCompat(el) {
   if (window.ReactDOM && typeof ReactDOM.createRoot === "function") {
     return ReactDOM.createRoot(el);
   }
-  return {
-    render: (node) => ReactDOM.render(node, el),
-  };
+  return { render: (node) => ReactDOM.render(node, el) };
 }
 
 function useFirebase() {
-  const hasFb =
-    isBrowser && window.firebase && firebase.apps && firebase.apps.length > 0;
+  const hasFb = isBrowser && window.firebase && firebase.apps && firebase.apps.length > 0;
   const db = hasFb ? firebase.database() : null;
   const auth = hasFb && firebase.auth ? firebase.auth() : null;
   return { hasFb, db, auth };
@@ -121,12 +91,8 @@ function loginToEmail(login = "") {
 
 function shopMatchesCategory(shop, catId) {
   if (!catId || !shop) return false;
-  if (shop.categories && typeof shop.categories === "object") {
-    return Boolean(shop.categories[catId]);
-  }
-  if (Array.isArray(shop.categories)) {
-    return shop.categories.includes(catId);
-  }
+  if (shop.categories && typeof shop.categories === "object") return Boolean(shop.categories[catId]);
+  if (Array.isArray(shop.categories)) return shop.categories.includes(catId);
   return false;
 }
 
@@ -155,6 +121,22 @@ function heroWhatsAppLink(shop, itemTitle) {
   return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
 }
 
+async function uploadToCloudinary(file, folder) {
+  const fd = new FormData();
+  fd.append("upload_preset", CLOUDINARY_PRESET);
+  if (folder) fd.append("folder", folder);
+  fd.append("file", file);
+  const res = await fetch(CLOUDINARY_ENDPOINT, { method: "POST", body: fd });
+  if (!res.ok) throw new Error("Upload failed");
+  const data = await res.json();
+  if (!data.secure_url) throw new Error("No URL returned");
+  return data.secure_url;
+}
+
+function getCoverPhoto(shop) {
+  return shop?.profilePhotoUrl || (shop?.photos || [])[0] || "";
+}
+
 function MarketingCard({ onClick }) {
   return React.createElement(
     "div",
@@ -171,11 +153,7 @@ function MarketingCard({ onClick }) {
           "MarketingHub",
           React.createElement("span", { className: "mh-pill" }, "Soko Huru")
         ),
-        React.createElement(
-          "div",
-          { className: "mh-title" },
-          "Wezesha masoko yote"
-        ),
+        React.createElement("div", { className: "mh-title" }, "Wezesha masoko yote"),
         React.createElement(
           "p",
           { className: "mh-sub" },
@@ -225,6 +203,7 @@ function StatCard({ cat, stats, onClick }) {
 function ShopCard({ shop, items, onOpen }) {
   const sampleItems = (items || []).slice(0, 3);
   const wa = heroWhatsAppLink(shop);
+  const cover = getCoverPhoto(shop);
   return React.createElement(
     "div",
     { className: "mh-shop-card" },
@@ -233,17 +212,22 @@ function ShopCard({ shop, items, onOpen }) {
       { className: "mh-shop-head" },
       React.createElement(
         "div",
-        null,
-        React.createElement("h3", null, shop.shopName || "Shop"),
+        { className: "mh-shop-id" },
+        cover
+          ? React.createElement("img", { className: "mh-avatar", src: cover, alt: shop.shopName || "Shop" })
+          : React.createElement("div", { className: "mh-avatar placeholder" }, (shop.shopName || "Soko").slice(0, 2).toUpperCase()),
         React.createElement(
-          "p",
-          { className: "mh-muted" },
-          [shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
+          "div",
+          null,
+          React.createElement("h3", null, shop.shopName || "Shop"),
+          React.createElement(
+            "p",
+            { className: "mh-muted" },
+            [shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
+          )
         )
       ),
-      shop.verifiedStatus === "verified"
-        ? React.createElement("span", { className: "mh-badge" }, "Verified")
-        : null
+      shop.verifiedStatus === "verified" ? React.createElement("span", { className: "mh-badge" }, "Verified") : null
     ),
     React.createElement(
       "div",
@@ -259,33 +243,17 @@ function ShopCard({ shop, items, onOpen }) {
     React.createElement(
       "div",
       { className: "mh-shop-actions" },
-      wa
-        ? React.createElement(
-            "a",
-            { className: "mh-btn secondary", href: wa, target: "_blank" },
-            "WhatsApp"
-          )
-        : null,
+      wa ? React.createElement("a", { className: "mh-btn secondary", href: wa, target: "_blank" }, "WhatsApp") : null,
       shop.phones?.[0]
-        ? React.createElement(
-            "a",
-            { className: "mh-btn secondary", href: `tel:${shop.phones[0]}` },
-            "Call"
-          )
+        ? React.createElement("a", { className: "mh-btn secondary", href: `tel:${shop.phones[0]}` }, "Call")
         : null,
-      React.createElement(
-        "button",
-        { className: "mh-btn", onClick: onOpen },
-        "Open shop"
-      )
+      React.createElement("button", { className: "mh-btn", onClick: onOpen }, "Open shop")
     )
   );
 }
 
 function ItemsTable({ items }) {
-  if (!items || items.length === 0) {
-    return React.createElement("p", { className: "mh-muted" }, "Hakuna bidhaa bado.");
-  }
+  if (!items || items.length === 0) return React.createElement("p", { className: "mh-muted" }, "Hakuna bidhaa bado.");
   return React.createElement(
     "div",
     { className: "mh-items-table" },
@@ -313,11 +281,7 @@ function ItemsTable({ items }) {
             "tr",
             { key: item.id },
             React.createElement("td", null, item.title || "-"),
-            React.createElement(
-              "td",
-              null,
-              formatCurrency(item.price, item.currency || "TZS")
-            ),
+            React.createElement("td", null, formatCurrency(item.price, item.currency || "TZS")),
             React.createElement("td", null, item.unit || "pcs"),
             React.createElement("td", null, item.notes || item.vehicleModel || ""),
             React.createElement("td", null, formatDate(item.updatedAt) || "")
@@ -328,6 +292,104 @@ function ItemsTable({ items }) {
   );
 }
 
+function PhotoDropzone({ label, max = 5, value = [], onAdd, onRemove, folder, disabled }) {
+  const [isDragging, setDragging] = React.useState(false);
+  const [uploading, setUploading] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+  const inputRef = React.useRef(null);
+  const current = Array.isArray(value) ? value.filter(Boolean) : value ? [value] : [];
+  const limitReached = current.length >= max;
+
+  async function handleFiles(fileList) {
+    const files = Array.from(fileList || []).filter((f) => f.type.startsWith("image/"));
+    if (files.length === 0) {
+      setMessage("Chagua picha tu.");
+      return;
+    }
+    if (current.length + files.length > max) {
+      setMessage(`Max ${max} photos. Delete old first.`);
+      return;
+    }
+    setUploading(true);
+    const urls = [];
+    for (const file of files) {
+      try {
+        const url = await uploadToCloudinary(file, folder);
+        urls.push(url);
+      } catch (e) {
+        setMessage("Upload failed, try again.");
+      }
+    }
+    if (urls.length && onAdd) onAdd(urls);
+    setUploading(false);
+  }
+
+  function onDrop(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragging(false);
+    if (disabled || limitReached) return;
+    handleFiles(e.dataTransfer.files);
+  }
+
+  return React.createElement(
+    "div",
+    { className: "mh-dropzone" },
+    React.createElement(
+      "div",
+      { className: "mh-drop-header" },
+      React.createElement("span", null, label || "Picha"),
+      React.createElement("span", { className: "mh-muted" }, `${current.length}/${max} photos`)
+    ),
+    React.createElement(
+      "div",
+      {
+        className: `mh-drop-area ${isDragging ? "dragging" : ""} ${limitReached ? "disabled" : ""}`,
+        onDragOver: (e) => {
+          e.preventDefault();
+          if (!disabled) setDragging(true);
+        },
+        onDragLeave: () => setDragging(false),
+        onDrop,
+        onClick: () => !disabled && inputRef.current && inputRef.current.click(),
+      },
+      uploading ? "Uploading..." : limitReached ? "Max photos reached" : "Drag & drop or click to upload"
+    ),
+    React.createElement("input", {
+      type: "file",
+      accept: "image/*",
+      multiple: max > 1,
+      ref: inputRef,
+      style: { display: "none" },
+      disabled: disabled || limitReached,
+      onChange: (e) => handleFiles(e.target.files),
+    }),
+    message ? React.createElement("p", { className: "mh-muted" }, message) : null,
+    current.length
+      ? React.createElement(
+          "div",
+          { className: "mh-drop-grid" },
+          current.map((url, idx) =>
+            React.createElement(
+              "div",
+              { key: url + idx, className: "mh-drop-thumb" },
+              React.createElement("img", { src: url, alt: `photo-${idx}` }),
+              onRemove
+                ? React.createElement(
+                    "button",
+                    {
+                      className: "mh-btn secondary",
+                      onClick: () => onRemove(idx),
+                    },
+                    "Delete"
+                  )
+                : null
+            )
+          )
+        )
+      : null
+  );
+}
 function SellerDashboard({ categories, db, auth, onBack }) {
   const [loginId, setLoginId] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -343,9 +405,10 @@ function SellerDashboard({ categories, db, auth, onBack }) {
     region: "",
     city: "",
     area: "",
-    photosText: "",
     categories: {},
   });
+  const [shopPhotos, setShopPhotos] = React.useState([]);
+  const [profilePhoto, setProfilePhoto] = React.useState("");
   const [itemForm, setItemForm] = React.useState({
     id: null,
     catId: "",
@@ -377,9 +440,10 @@ function SellerDashboard({ categories, db, auth, onBack }) {
         ...prev,
         ...val,
         phonesText: (val.phones || []).join(", "),
-        photosText: (val.photos || []).join("\n"),
         categories: val.categories || {},
       }));
+      setShopPhotos(val.photos || []);
+      setProfilePhoto(val.profilePhotoUrl || "");
     };
     const itemCb = (snap) => {
       const val = snap.val() || {};
@@ -395,30 +459,39 @@ function SellerDashboard({ categories, db, auth, onBack }) {
     };
   }, [db, user]);
 
+  function showStatus(msg) {
+    setStatus(msg);
+    if (msg) setTimeout(() => setStatus(""), 2500);
+  }
+
   function handleLogin() {
     if (!auth) return;
     const email = loginToEmail(loginId);
     if (!email || !password) {
-      setStatus("Weka phone/email na nenosiri.");
+      showStatus("Weka phone/email na nenosiri.");
       return;
     }
-    setStatus("Signing in...");
+    showStatus("Signing in...");
     auth
       .signInWithEmailAndPassword(email, password)
-      .then(() => setStatus("Signed in"))
+      .then(() => {
+        setPassword("");
+        showStatus("Signed in");
+      })
       .catch(() =>
         auth
           .createUserWithEmailAndPassword(email, password)
-          .then(() => setStatus("Account created, signed in"))
-          .catch((err) =>
-            setStatus(err?.message || "Auth failed. Check password.")
-          )
+          .then(() => {
+            setPassword("");
+            showStatus("Account created, signed in");
+          })
+          .catch((err) => showStatus(err?.message || "Auth failed. Check password."))
       );
   }
 
   async function saveShop() {
     if (!db || !auth || !auth.currentUser) {
-      setStatus("Sign in first.");
+      showStatus("Sign in first.");
       return;
     }
     const uid = auth.currentUser.uid;
@@ -426,11 +499,6 @@ function SellerDashboard({ categories, db, auth, onBack }) {
       .split(",")
       .map((p) => p.trim())
       .filter(Boolean);
-    const photos = (shop.photosText || "")
-      .split(/\r?\n/)
-      .map((p) => p.trim())
-      .filter(Boolean)
-      .slice(0, 5);
     const payload = {
       shopName: shop.shopName || "",
       ownerName: shop.ownerName || "",
@@ -442,25 +510,26 @@ function SellerDashboard({ categories, db, auth, onBack }) {
       city: shop.city || "",
       area: shop.area || "",
       categories: shop.categories || {},
-      photos,
+      photos: shopPhotos.slice(0, 5),
+      profilePhotoUrl: profilePhoto || "",
       updatedAt: Date.now(),
       createdAt: shop.createdAt || Date.now(),
     };
     try {
       await db.ref(`marketinghub/public/shops/${uid}`).set(payload);
-      setStatus("Shop profile saved.");
+      showStatus("Shop profile saved.");
     } catch (err) {
-      setStatus(err?.message || "Failed to save shop.");
+      showStatus(err?.message || "Failed to save shop.");
     }
   }
 
   async function saveItem() {
     if (!db || !auth || !auth.currentUser) {
-      setStatus("Sign in first.");
+      showStatus("Sign in first.");
       return;
     }
     if (!itemForm.title || !itemForm.catId) {
-      setStatus("Weka jina la bidhaa na soko.");
+      showStatus("Weka jina la bidhaa na soko.");
       return;
     }
     const uid = auth.currentUser.uid;
@@ -481,7 +550,7 @@ function SellerDashboard({ categories, db, auth, onBack }) {
     };
     try {
       await ref.set(payload);
-      setStatus("Item saved.");
+      showStatus("Item saved.");
       setItemForm({
         id: null,
         catId: itemForm.catId,
@@ -496,7 +565,7 @@ function SellerDashboard({ categories, db, auth, onBack }) {
         status: "active",
       });
     } catch (err) {
-      setStatus(err?.message || "Failed to save item.");
+      showStatus(err?.message || "Failed to save item.");
     }
   }
 
@@ -516,6 +585,12 @@ function SellerDashboard({ categories, db, auth, onBack }) {
     });
   }
 
+  const signedInLabel = user
+    ? shop.shopName || loginId || user.email || "Seller"
+    : "Not signed in";
+  const shopFolder = user ? `marketinghub/shops/${user.uid}` : "marketinghub/shops/anon";
+  const itemFolder = user ? `marketinghub/items/${user.uid}` : "marketinghub/items/anon";
+
   return React.createElement(
     "div",
     { className: "mh-app-shell" },
@@ -525,21 +600,28 @@ function SellerDashboard({ categories, db, auth, onBack }) {
       React.createElement(
         "div",
         { style: { display: "flex", gap: 8, alignItems: "center" } },
-        React.createElement(
-          "button",
-          { className: "mh-btn secondary", onClick: onBack },
-          "Back"
-        ),
-        React.createElement(
-          "h1",
-          { style: { margin: 0, fontSize: "1.8rem", fontWeight: 800 } },
-          "Seller Dashboard"
-        )
+        React.createElement("button", { className: "mh-btn secondary", onClick: onBack }, "Back"),
+        React.createElement("h1", { style: { margin: 0, fontSize: "1.8rem", fontWeight: 800 } }, "Seller Dashboard")
       ),
       React.createElement(
-        "p",
-        { className: "mh-muted" },
-        "Phone/email + PIN. Usalama kwanza: KYC, mawasiliano, na ukomo wa picha (max 5)."
+        "div",
+        { className: "mh-signed" },
+        user && (profilePhoto || shopPhotos[0]
+          ? React.createElement("img", { className: "mh-avatar", src: profilePhoto || shopPhotos[0], alt: signedInLabel })
+          : React.createElement("div", { className: "mh-avatar placeholder" }, signedInLabel.slice(0, 2).toUpperCase())),
+        React.createElement(
+          "div",
+          null,
+          React.createElement("p", { className: "mh-muted" }, "Signed in as"),
+          React.createElement("strong", null, signedInLabel)
+        ),
+        user
+          ? React.createElement(
+              "button",
+              { className: "mh-btn secondary", onClick: () => auth && auth.signOut() },
+              "Sign out"
+            )
+          : null
       )
     ),
     React.createElement(
@@ -548,48 +630,38 @@ function SellerDashboard({ categories, db, auth, onBack }) {
       React.createElement(
         "div",
         { className: "mh-grid two" },
-        React.createElement(
-          "div",
-          { className: "mh-app-card" },
-          React.createElement("div", { className: "mh-section-title" }, "Seller Login"),
-          React.createElement("input", {
-            className: "mh-input",
-            placeholder: "Phone au Email",
-            value: loginId,
-            onChange: (e) => setLoginId(e.target.value),
-          }),
-          React.createElement("input", {
-            className: "mh-input",
-            type: "password",
-            placeholder: "Password / PIN",
-            value: password,
-            onChange: (e) => setPassword(e.target.value),
-          }),
-          React.createElement(
-            "div",
-            { style: { display: "flex", gap: 10, marginTop: 10 } },
-            React.createElement(
-              "button",
-              { className: "mh-btn", onClick: handleLogin },
-              "Sign in / Create Seller"
+        !user
+          ? React.createElement(
+              "div",
+              { className: "mh-app-card" },
+              React.createElement("div", { className: "mh-section-title" }, "Seller Login"),
+              React.createElement("input", {
+                className: "mh-input",
+                placeholder: "Phone au Email",
+                value: loginId,
+                onChange: (e) => setLoginId(e.target.value),
+              }),
+              React.createElement("input", {
+                className: "mh-input",
+                type: "password",
+                placeholder: "Password / PIN",
+                value: password,
+                onChange: (e) => setPassword(e.target.value),
+              }),
+              React.createElement(
+                "div",
+                { style: { display: "flex", gap: 10, marginTop: 10 } },
+                React.createElement("button", { className: "mh-btn", onClick: handleLogin }, "Sign in / Create Seller")
+              ),
+              status ? React.createElement("p", { className: "mh-muted", style: { marginTop: 6 } }, status) : null
+            )
+          : React.createElement(
+              "div",
+              { className: "mh-app-card" },
+              React.createElement("div", { className: "mh-section-title" }, "Logged in"),
+              React.createElement("p", { className: "mh-muted" }, "You are signed in. Manage shop and items below."),
+              status ? React.createElement("p", { className: "mh-muted" }, status) : null
             ),
-            user
-              ? React.createElement(
-                  "button",
-                  {
-                    className: "mh-btn secondary",
-                    onClick: () => auth && auth.signOut(),
-                  },
-                  "Sign out"
-                )
-              : null
-          ),
-          React.createElement(
-            "p",
-            { className: "mh-muted", style: { marginTop: 6 } },
-            status
-          )
-        ),
         React.createElement(
           "div",
           { className: "mh-app-card" },
@@ -652,11 +724,7 @@ function SellerDashboard({ categories, db, auth, onBack }) {
               onChange: (e) => setShop({ ...shop, area: e.target.value }),
             })
           ),
-          React.createElement(
-            "div",
-            { className: "mh-section-title", style: { marginTop: 10 } },
-            "Soko Categories"
-          ),
+          React.createElement("div", { className: "mh-section-title", style: { marginTop: 10 } }, "Soko Categories"),
           React.createElement(
             "div",
             { className: "mh-chip-row" },
@@ -669,11 +737,8 @@ function SellerDashboard({ categories, db, auth, onBack }) {
                   checked: Boolean(shop.categories?.[cat.id]),
                   onChange: (e) => {
                     const next = { ...(shop.categories || {}) };
-                    if (e.target.checked) {
-                      next[cat.id] = true;
-                    } else {
-                      delete next[cat.id];
-                    }
+                    if (e.target.checked) next[cat.id] = true;
+                    else delete next[cat.id];
                     setShop({ ...shop, categories: next });
                   },
                 }),
@@ -681,19 +746,27 @@ function SellerDashboard({ categories, db, auth, onBack }) {
               )
             )
           ),
-          React.createElement(
-            "label",
-            { className: "mh-label" },
-            "Photo URLs (max 5, one per line)"
-          ),
-          React.createElement("textarea", {
-            className: "mh-textarea",
-            value: shop.photosText,
-            onChange: (e) => setShop({ ...shop, photosText: e.target.value }),
+          React.createElement(PhotoDropzone, {
+            label: "Profile picture (optional)",
+            max: 1,
+            value: profilePhoto ? [profilePhoto] : [],
+            onAdd: (urls) => setProfilePhoto(urls[0]),
+            onRemove: () => setProfilePhoto(""),
+            folder: `${shopFolder}`,
+            disabled: !user,
+          }),
+          React.createElement(PhotoDropzone, {
+            label: "Shop photos",
+            max: 5,
+            value: shopPhotos,
+            onAdd: (urls) => setShopPhotos((prev) => [...prev, ...urls].slice(0, 5)),
+            onRemove: (idx) => setShopPhotos((prev) => prev.filter((_, i) => i !== idx)),
+            folder: `${shopFolder}`,
+            disabled: !user,
           }),
           React.createElement(
             "button",
-            { className: "mh-btn", style: { marginTop: 12 }, onClick: saveShop },
+            { className: "mh-btn", style: { marginTop: 12 }, onClick: saveShop, disabled: !user },
             "Save Shop Profile"
           )
         )
@@ -708,27 +781,16 @@ function SellerDashboard({ categories, db, auth, onBack }) {
           React.createElement(
             "div",
             { className: "mh-grid" },
-            React.createElement(
-              "label",
-              { className: "mh-label" },
-              "Soko / Category"
-            ),
+            React.createElement("label", { className: "mh-label" }, "Soko / Category"),
             React.createElement(
               "select",
               {
                 className: "mh-select",
                 value: itemForm.catId,
-                onChange: (e) =>
-                  setItemForm({ ...itemForm, catId: e.target.value }),
+                onChange: (e) => setItemForm({ ...itemForm, catId: e.target.value }),
               },
               React.createElement("option", { value: "" }, "Select"),
-              categories.map((cat) =>
-                React.createElement(
-                  "option",
-                  { key: cat.id, value: cat.id },
-                  cat.nameSw || cat.nameEn
-                )
-              )
+              categories.map((cat) => React.createElement("option", { key: cat.id, value: cat.id }, cat.nameSw || cat.nameEn))
             ),
             React.createElement("input", {
               className: "mh-input",
@@ -740,8 +802,7 @@ function SellerDashboard({ categories, db, auth, onBack }) {
               className: "mh-input",
               placeholder: "Vehicle model (optional)",
               value: itemForm.vehicleModel,
-              onChange: (e) =>
-                setItemForm({ ...itemForm, vehicleModel: e.target.value }),
+              onChange: (e) => setItemForm({ ...itemForm, vehicleModel: e.target.value }),
             }),
             React.createElement(
               "div",
@@ -751,20 +812,16 @@ function SellerDashboard({ categories, db, auth, onBack }) {
                 type: "number",
                 placeholder: "Price",
                 value: itemForm.price,
-                onChange: (e) =>
-                  setItemForm({ ...itemForm, price: e.target.value }),
+                onChange: (e) => setItemForm({ ...itemForm, price: e.target.value }),
               }),
               React.createElement(
                 "select",
                 {
                   className: "mh-select",
                   value: itemForm.currency,
-                  onChange: (e) =>
-                    setItemForm({ ...itemForm, currency: e.target.value }),
+                  onChange: (e) => setItemForm({ ...itemForm, currency: e.target.value }),
                 },
-                ["TZS", "KES", "USD"].map((c) =>
-                  React.createElement("option", { key: c, value: c }, c)
-                )
+                ["TZS", "KES", "USD"].map((c) => React.createElement("option", { key: c, value: c }, c))
               )
             ),
             React.createElement(
@@ -774,55 +831,46 @@ function SellerDashboard({ categories, db, auth, onBack }) {
                 className: "mh-input",
                 placeholder: "Unit (pcs, set, bag...)",
                 value: itemForm.unit,
-                onChange: (e) =>
-                  setItemForm({ ...itemForm, unit: e.target.value }),
+                onChange: (e) => setItemForm({ ...itemForm, unit: e.target.value }),
               }),
               React.createElement(
                 "select",
                 {
                   className: "mh-select",
                   value: itemForm.status,
-                  onChange: (e) =>
-                    setItemForm({ ...itemForm, status: e.target.value }),
+                  onChange: (e) => setItemForm({ ...itemForm, status: e.target.value }),
                 },
                 React.createElement("option", { value: "active" }, "Active"),
                 React.createElement("option", { value: "inactive" }, "Inactive")
               )
             ),
-            React.createElement("input", {
-              className: "mh-input",
-              placeholder: "Photo URL (optional)",
-              value: itemForm.photoUrl,
-              onChange: (e) =>
-                setItemForm({ ...itemForm, photoUrl: e.target.value }),
+            React.createElement(PhotoDropzone, {
+              label: "Item photo (optional)",
+              max: 1,
+              value: itemForm.photoUrl ? [itemForm.photoUrl] : [],
+              onAdd: (urls) => setItemForm({ ...itemForm, photoUrl: urls[0] }),
+              onRemove: () => setItemForm({ ...itemForm, photoUrl: "" }),
+              folder: `${itemFolder}`,
+              disabled: !user,
             }),
             React.createElement("textarea", {
               className: "mh-textarea",
               placeholder: "Notes (stock, fitment, brand, etc.)",
               value: itemForm.notes,
-              onChange: (e) =>
-                setItemForm({ ...itemForm, notes: e.target.value }),
+              onChange: (e) => setItemForm({ ...itemForm, notes: e.target.value }),
             }),
             React.createElement(
               "button",
-              { className: "mh-btn", onClick: saveItem },
+              { className: "mh-btn", onClick: saveItem, disabled: !user },
               itemForm.id ? "Update Item" : "Save Item"
             )
           ),
           React.createElement(
             "div",
             { className: "mh-items-table" },
-            React.createElement(
-              "div",
-              { className: "mh-section-title" },
-              "Your items"
-            ),
+            React.createElement("div", { className: "mh-section-title" }, "Your items"),
             myItems.length === 0
-              ? React.createElement(
-                  "p",
-                  { className: "mh-muted" },
-                  "No items yet."
-                )
+              ? React.createElement("p", { className: "mh-muted" }, "No items yet.")
               : React.createElement(
                   "ul",
                   { className: "mh-list" },
@@ -835,11 +883,7 @@ function SellerDashboard({ categories, db, auth, onBack }) {
                         null,
                         React.createElement("strong", null, item.title || "Item"),
                         " ",
-                        React.createElement(
-                          "span",
-                          { className: "mh-tag" },
-                          item.catId || "-"
-                        ),
+                        React.createElement("span", { className: "mh-tag" }, item.catId || "-"),
                         React.createElement(
                           "span",
                           { className: "mh-tag" },
@@ -851,10 +895,7 @@ function SellerDashboard({ categories, db, auth, onBack }) {
                         { style: { display: "flex", gap: 8 } },
                         React.createElement(
                           "button",
-                          {
-                            className: "mh-btn secondary",
-                            onClick: () => startEditItem(item),
-                          },
+                          { className: "mh-btn secondary", onClick: () => startEditItem(item) },
                           "Edit"
                         )
                       )
@@ -867,7 +908,6 @@ function SellerDashboard({ categories, db, auth, onBack }) {
     )
   );
 }
-
 function MarketingHubAppShell() {
   const { hasFb, db, auth } = useFirebase();
   const [view, setView] = React.useState({ page: "home", catId: null, shopId: null });
@@ -878,13 +918,7 @@ function MarketingHubAppShell() {
   const [isAdmin, setIsAdmin] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [homeSearch, setHomeSearch] = React.useState("");
-  const [catFilters, setCatFilters] = React.useState({
-    q: "",
-    country: "",
-    region: "",
-    city: "",
-    sort: "recent",
-  });
+  const [catFilters, setCatFilters] = React.useState({ q: "", country: "", region: "", city: "", sort: "recent" });
   const [shopSearch, setShopSearch] = React.useState("");
   const [status, setStatus] = React.useState("");
 
@@ -929,10 +963,7 @@ function MarketingHubAppShell() {
       const val = snap.val() || {};
       const map = {};
       Object.entries(val).forEach(([sellerId, items]) => {
-        map[sellerId] = Object.entries(items || {}).map(([id, v]) => ({
-          id,
-          ...v,
-        }));
+        map[sellerId] = Object.entries(items || {}).map(([id, v]) => ({ id, ...v }));
       });
       setItemsBySeller(map);
     });
@@ -945,25 +976,17 @@ function MarketingHubAppShell() {
 
   const selectedCategory = categories.find((c) => c.id === view.catId);
   const selectedShop = shops.find((s) => s.id === view.shopId);
-  const itemsForSelectedShop = selectedShop
-    ? itemsBySeller[selectedShop.id] || []
-    : [];
+  const itemsForSelectedShop = selectedShop ? itemsBySeller[selectedShop.id] || [] : [];
 
   function categoryStats(catId) {
     const catShops = shops.filter((s) => shopMatchesCategory(s, catId));
-    const locations = unique(
-      catShops.map((s) => [s.country, s.region, s.city].filter(Boolean).join(" / "))
-    );
+    const locations = unique(catShops.map((s) => [s.country, s.region, s.city].filter(Boolean).join(" / ")));
     let itemsCount = 0;
     catShops.forEach((s) => {
       const items = itemsBySeller[s.id] || [];
       itemsCount += items.filter((i) => i.catId === catId).length;
     });
-    return {
-      shops: catShops.length,
-      items: itemsCount,
-      locations: locations.length,
-    };
+    return { shops: catShops.length, items: itemsCount, locations: locations.length };
   }
 
   async function seedCategories() {
@@ -996,11 +1019,7 @@ function MarketingHubAppShell() {
             "div",
             null,
             React.createElement("p", { className: "mh-pill" }, "MarketingHub - Real Market"),
-            React.createElement(
-              "h1",
-              null,
-              "Soko Directory kwa kila biashara"
-            ),
+            React.createElement("h1", null, "Soko Directory kwa kila biashara"),
             React.createElement(
               "p",
               { className: "mh-muted" },
@@ -1009,17 +1028,10 @@ function MarketingHubAppShell() {
             React.createElement(
               "div",
               { className: "mh-hero-actions" },
+              React.createElement("button", { className: "mh-btn", onClick: () => setView({ page: "seller" }) }, "Seller / Muuzaji"),
               React.createElement(
                 "button",
-                { className: "mh-btn", onClick: () => setView({ page: "seller" }) },
-                "Seller / Muuzaji"
-              ),
-              React.createElement(
-                "button",
-                {
-                  className: "mh-btn secondary",
-                  onClick: () => setStatus("Save Quote coming soon (local memory)"),
-                },
+                { className: "mh-btn secondary", onClick: () => setStatus("Save Quote coming soon (local memory)") },
                 "Save Quote (coming soon)"
               )
             )
@@ -1027,11 +1039,7 @@ function MarketingHubAppShell() {
           React.createElement(
             "div",
             { className: "mh-hero-panel" },
-            React.createElement(
-              "div",
-              { className: "mh-section-title" },
-              "Enter as buyer"
-            ),
+            React.createElement("div", { className: "mh-section-title" }, "Enter as buyer"),
             React.createElement(
               "p",
               { className: "mh-muted" },
@@ -1044,15 +1052,9 @@ function MarketingHubAppShell() {
               onChange: (e) => setHomeSearch(e.target.value),
             }),
             isAdmin && categories.length === 0
-              ? React.createElement(
-                  "button",
-                  { className: "mh-btn", onClick: seedCategories },
-                  "Initialize default categories"
-                )
+              ? React.createElement("button", { className: "mh-btn", onClick: seedCategories }, "Initialize default categories")
               : null,
-            status
-              ? React.createElement("p", { className: "mh-muted" }, status)
-              : null
+            status ? React.createElement("p", { className: "mh-muted" }, status) : null
           )
         )
       ),
@@ -1076,6 +1078,7 @@ function MarketingHubAppShell() {
       )
     );
   }
+
   function renderCategory() {
     const cat = selectedCategory;
     if (!cat) return renderHome();
@@ -1091,11 +1094,8 @@ function MarketingHubAppShell() {
     const catItems = filteredShops.flatMap((shop) =>
       (itemsBySeller[shop.id] || []).filter((i) => i.catId === cat.id && i.status !== "inactive")
     );
-    if (catFilters.sort === "cheap") {
-      catItems.sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
-    } else {
-      catItems.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    }
+    if (catFilters.sort === "cheap") catItems.sort((a, b) => Number(a.price || 0) - Number(b.price || 0));
+    else catItems.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     return React.createElement(
       "div",
       { className: "mh-app-shell" },
@@ -1105,19 +1105,11 @@ function MarketingHubAppShell() {
         React.createElement(
           "div",
           { className: "mh-breadcrumb" },
-          React.createElement(
-            "button",
-            { className: "mh-btn secondary", onClick: () => setView({ page: "home" }) },
-            "Home"
-          ),
+          React.createElement("button", { className: "mh-btn secondary", onClick: () => setView({ page: "home" }) }, "Home"),
           React.createElement("span", null, " / "),
           React.createElement("strong", null, cat.nameSw || cat.nameEn)
         ),
-        React.createElement(
-          "p",
-          { className: "mh-muted" },
-          "Buyer mode: tafuta shops, piga simu au WhatsApp bila login."
-        ),
+        React.createElement("p", { className: "mh-muted" }, "Buyer mode: tafuta shops, piga simu au WhatsApp bila login."),
         React.createElement(
           "div",
           { className: "mh-filters", style: { marginTop: 12 } },
@@ -1191,12 +1183,13 @@ function MarketingHubAppShell() {
       .filter((i) => !view.catId || i.catId === view.catId)
       .filter((i) =>
         shopSearch
-          ? (i.title || "").toLowerCase().includes(shopSearch.toLowerCase()) ||
-            (i.notes || "").toLowerCase().includes(shopSearch.toLowerCase())
+          ? (i.title || "").toLowerCase().includes(shopSearch.toLowerCase()) || (i.notes || "").toLowerCase().includes(shopSearch.toLowerCase())
           : true
       )
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     const waLink = heroWhatsAppLink(shop);
+    const gallery = shop.photos || [];
+    const cover = getCoverPhoto(shop);
     return React.createElement(
       "div",
       { className: "mh-app-shell" },
@@ -1219,45 +1212,32 @@ function MarketingHubAppShell() {
           { className: "mh-shop-profile" },
           React.createElement(
             "div",
-            null,
-            React.createElement("h2", null, shop.shopName || "Shop"),
+            { className: "mh-shop-id" },
+            cover
+              ? React.createElement("img", { className: "mh-avatar", src: cover, alt: shop.shopName || "Shop" })
+              : React.createElement("div", { className: "mh-avatar placeholder" }, (shop.shopName || "Shop").slice(0, 2).toUpperCase()),
             React.createElement(
-              "p",
-              { className: "mh-muted" },
-              [shop.country, shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
-            ),
-            shop.lipaNumber
-              ? React.createElement(
-                  "p",
-                  { className: "mh-muted" },
-                  `Lipa number: ${shop.lipaNumber}`
-                )
-              : null
+              "div",
+              null,
+              React.createElement("h2", null, shop.shopName || "Shop"),
+              React.createElement(
+                "p",
+                { className: "mh-muted" },
+                [shop.country, shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
+              ),
+              shop.lipaNumber ? React.createElement("p", { className: "mh-muted" }, `Lipa number: ${shop.lipaNumber}`) : null
+            )
           ),
           React.createElement(
             "div",
             { className: "mh-shop-actions" },
             shop.phones?.[0]
-              ? React.createElement(
-                  "a",
-                  { className: "mh-btn secondary", href: `tel:${shop.phones[0]}` },
-                  "Call"
-                )
+              ? React.createElement("a", { className: "mh-btn secondary", href: `tel:${shop.phones[0]}` }, "Call")
               : null,
             shop.phones?.[0]
-              ? React.createElement(
-                  "a",
-                  { className: "mh-btn secondary", href: `sms:${shop.phones[0]}` },
-                  "SMS"
-                )
+              ? React.createElement("a", { className: "mh-btn secondary", href: `sms:${shop.phones[0]}` }, "SMS")
               : null,
-            waLink
-              ? React.createElement(
-                  "a",
-                  { className: "mh-btn", href: waLink, target: "_blank" },
-                  "WhatsApp"
-                )
-              : null
+            waLink ? React.createElement("a", { className: "mh-btn", href: waLink, target: "_blank" }, "WhatsApp") : null
           )
         ),
         React.createElement("input", {
@@ -1271,6 +1251,18 @@ function MarketingHubAppShell() {
       React.createElement(
         "main",
         { className: "mh-main" },
+        gallery.length
+          ? React.createElement(
+              "div",
+              { className: "mh-app-card" },
+              React.createElement("div", { className: "mh-section-title" }, "Shop gallery"),
+              React.createElement(
+                "div",
+                { className: "mh-drop-grid" },
+                gallery.map((url, idx) => React.createElement("div", { key: url + idx, className: "mh-drop-thumb" }, React.createElement("img", { src: url, alt: `shop-photo-${idx}` })))
+              )
+            )
+          : null,
         React.createElement("div", { className: "mh-app-card" }, ItemsTable({ items }))
       )
     );
@@ -1280,21 +1272,12 @@ function MarketingHubAppShell() {
     return React.createElement(
       "div",
       { className: "mh-app-shell" },
-      React.createElement(
-        "main",
-        { className: "mh-main" },
-        React.createElement("p", null, "Firebase not detected. Please load firebase.js.")
-      )
+      React.createElement("main", { className: "mh-main" }, React.createElement("p", null, "Firebase not detected. Please load firebase.js."))
     );
   }
 
   if (view.page === "seller") {
-    return React.createElement(SellerDashboard, {
-      categories,
-      db,
-      auth,
-      onBack: () => setView({ page: "home" }),
-    });
+    return React.createElement(SellerDashboard, { categories, db, auth, onBack: () => setView({ page: "home" }) });
   }
   if (view.page === "category") return renderCategory();
   if (view.page === "shop") return renderShop();
