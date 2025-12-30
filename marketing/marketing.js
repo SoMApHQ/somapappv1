@@ -96,6 +96,12 @@ function shopMatchesCategory(shop, catId) {
   return false;
 }
 
+function shopHasItemInCategory(itemsBySeller, sellerId, catId) {
+  if (!sellerId || !catId) return false;
+  const items = itemsBySeller?.[sellerId] || [];
+  return items.some((i) => i.catId === catId && i.status !== "inactive");
+}
+
 function unique(array) {
   return Array.from(new Set(array.filter(Boolean)));
 }
@@ -1195,7 +1201,9 @@ function MarketingHubAppShell() {
   const itemsForSelectedShop = selectedShop ? itemsBySeller[selectedShop.id] || [] : [];
 
   function categoryStats(catId) {
-    const catShops = shops.filter((s) => shopMatchesCategory(s, catId));
+    const catShops = shops.filter(
+      (s) => shopMatchesCategory(s, catId) || shopHasItemInCategory(itemsBySeller, s.id, catId)
+    );
     const locations = unique(catShops.map((s) => [s.country, s.region, s.city].filter(Boolean).join(" / ")));
     let itemsCount = 0;
     catShops.forEach((s) => {
@@ -1298,7 +1306,9 @@ function MarketingHubAppShell() {
   function renderCategory() {
     const cat = selectedCategory;
     if (!cat) return renderHome();
-    const shopsForCat = shops.filter((s) => shopMatchesCategory(s, cat.id));
+    const shopsForCat = shops.filter(
+      (s) => shopMatchesCategory(s, cat.id) || shopHasItemInCategory(itemsBySeller, s.id, cat.id)
+    );
     const filteredShops = shopsForCat.filter((s) => {
       const text = `${s.shopName} ${s.ownerName} ${s.region} ${s.city} ${s.area}`.toLowerCase();
       if (catFilters.q && !text.includes(catFilters.q.toLowerCase())) return false;
