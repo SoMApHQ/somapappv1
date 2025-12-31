@@ -917,6 +917,53 @@
               </a>
             </div>
           </article>
+          <!-- PARENT REFERRALS -->
+          <article class="card" id="parentReferralCard">
+            <h4 class="title text-lg font-extrabold m-0">
+              Invite Other Parents
+            </h4>
+            <p class="muted text-sm mt-1">
+              Share this code to help others join this school.
+            </p>
+
+            <!-- Referral code + copy -->
+            <div class="mt-3 flex items-center gap-3">
+              <div
+                id="parentReferralCode"
+                class="px-4 py-2 rounded-lg bg-black/40 border border-white/10 text-sky-300 font-mono text-sm"
+              >
+                ---
+              </div>
+              <button id="copyReferralBtn" class="btn-ghost text-sm">
+                <i class="fas fa-copy mr-1"></i> Copy
+              </button>
+            </div>
+
+            <!-- Referral link -->
+            <div class="mt-3">
+              <p class="muted text-xs mb-1">Referral link:</p>
+              <input
+                id="parentReferralLink"
+                readonly
+                class="w-full px-3 py-2 rounded-lg bg-black/40 border border-white/10 text-xs text-slate-300"
+                value=""
+              />
+            </div>
+
+            <hr class="divider my-4" />
+
+            <h4 class="title text-sm font-bold">
+              Students Joined Using My Referral
+            </h4>
+            <div id="parentReferralList" class="mt-2 flex flex-col gap-2">
+              <div class="muted text-sm">No referred students yet.</div>
+            </div>
+
+            <p class="muted text-xs mt-3">
+              Students who join using your referral will appear after admin
+              approval.
+            </p>
+          </article>
 
           <!-- QUICK ACTIONS -->
           <article class="card">
@@ -1088,6 +1135,63 @@
           c.includes("grade 7")
         );
       };
+   function generateReferralCode(phone) {
+  const clean = phone.replace(/\D/g, "").slice(-6);
+  return "SOMAP-" + clean + "-" + Math.random().toString(36).slice(2, 6).toUpperCase();
+}
+
+async function ensureParentReferralCode() {
+  const codeEl = document.getElementById("parentReferralCode");
+  const linkEl = document.getElementById("parentReferralLink");
+  const copyBtn = document.getElementById("copyReferralBtn");
+
+  const parentPhone = normalizePhone(
+    currentStudent?.primaryParentContact ||
+    localStorage.getItem("parentPhone")
+  );
+
+  if (!parentPhone) return;
+
+  const snap = await schoolRef("parents")
+    .orderByChild("phone")
+    .equalTo(parentPhone)
+    .once("value");
+
+  let parentKey, parent;
+
+  if (snap.exists()) {
+    parentKey = Object.keys(snap.val())[0];
+    parent = snap.val()[parentKey];
+  } else {
+    parentKey = schoolRef("parents").push().key;
+    parent = { phone: parentPhone, createdAt: Date.now() };
+    await schoolRef(`parents/${parentKey}`).set(parent);
+  }
+
+  if (!parent.referralCode) {
+    parent.referralCode = generateReferralCode(parentPhone);
+    await schoolRef(`parents/${parentKey}`).update({
+      referralCode: parent.referralCode,
+    });
+  }
+
+  if (codeEl) codeEl.textContent = parent.referralCode;
+
+  const joinUrl =
+    location.origin +
+    "/join.html?ref=" +
+    encodeURIComponent(parent.referralCode);
+
+  if (linkEl) linkEl.value = joinUrl;
+
+  if (copyBtn) {
+    copyBtn.onclick = async () => {
+      await navigator.clipboard.writeText(joinUrl);
+      Swal.fire("Copied", "Referral link copied", "success");
+    };
+  }
+}
+
 
       // Refs
       const studentNameEl = q("#studentName");
@@ -1771,10 +1875,9 @@
 
         const rawPhone = localStorage.getItem("parentPhone");
 
+        // NEVER block legacy behavior
         if (!rawPhone) {
-          const legacyKey = localStorage.getItem("studentKey");
-          if (legacyKey) return legacyKey;
-          return null;
+          return localStorage.getItem("studentKey") || null;
         }
 
         const parentPhone = normalizePhone(rawPhone);
@@ -1844,6 +1947,8 @@
       })();
 
       async function showParentDashboard() {
+        if (!requireStudentKey()) return;
+
         if (!currentStudent) {
           const s = await schoolRef(`students/${currentStudentKey}`).once(
             "value"
@@ -1900,6 +2005,9 @@
 
         renderAttendanceChart();
         renderScoresChart();
+        await ensureParentReferralCode();
+        await loadParentReferredStudents();
+
       }
 
       // Calculate local payments
@@ -2330,6 +2438,60 @@
           gradStatusEl.textContent = state.toUpperCase();
         }
       } // Attendance loader
+      async function loadParentReferredStudents() {
+        const listEl = document.getElementById("parentReferralList");
+        const codeEl = document.getElementById("parentReferralCode");
+        if (!listEl || !codeEl) return;
+
+        const parentPhone = normalizePhone(localStorage.getItem("parentPhone"));
+        if (!parentPhone) {
+          listEl.innerHTML =
+            '<div class="muted text-sm">Parent phone not available.</div>';
+          return;
+        }
+
+        // Show referral code (if exists in parents node)
+        try {
+          const pSnap = await schoolRef("parents")
+            .orderByChild("phone")
+            .equalTo(parentPhone)
+            .once("value");
+
+          if (pSnap.exists()) {
+            const parent = Object.values(pSnap.val())[0];
+            if (parent?.referralCode) {
+              codeEl.textContent = `Referral code: ${parent.referralCode}`;
+            }
+          }
+        } catch {}
+
+        // Load referred students
+        const snap = await schoolRef(`parentReferrals/${parentPhone}`).once(
+          "value"
+        );
+        if (!snap.exists()) {
+          listEl.innerHTML =
+            '<div class="muted text-sm">No students referred yet.</div>';
+          return;
+        }
+        const entries = Object.values(snap.val()).sort(
+          (a, b) => (b.joinedAt || 0) - (a.joinedAt || 0)
+        );
+
+        listEl.innerHTML = entries
+          .map(
+            (r) => `
+      <div class="glass bg-white/5 border border-white/10 rounded-lg p-3">
+        <div class="font-semibold text-white">${r.studentName}</div>
+        <div class="muted text-xs">
+          ${r.classLevel} • ${r.academicYear}
+        </div>
+      </div>
+    `
+          )
+          .join("");
+      }
+
       async function loadAttendanceForStudent(admNo) {
         statAttendancePct.textContent = "Calculating...";
         try {
