@@ -82,6 +82,7 @@
 <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
 <script src="../firebase.js"></script>
+<script src="../js/finance_dedupe.js"></script>
 
 <script>
 (async function(){
@@ -417,6 +418,60 @@
       originalTimestamp: P.timestamp || P.approvedAt || null,
       status: 'PENDING'
     };
+
+    const studentAdm = S.admissionNumber || studentId;
+    const identityCandidate = {
+      ...paymentPayload,
+      year: normalizedYear,
+      studentAdm,
+      paymentDate: paymentPayload.timestamp,
+      sourceModule: 'School Fees'
+    };
+
+    const duplicateApproved = window.SOMAP_FINANCE?.isDuplicateInLedger
+      ? await window.SOMAP_FINANCE.isDuplicateInLedger(
+          db,
+          `financeLedgers/${normalizedYear}/${studentId}/payments`,
+          identityCandidate,
+          normalizedYear,
+          studentAdm
+        )
+      : false;
+    if (duplicateApproved) {
+      toast('THIS PAYMENT IS ALREADY APPROVED IN THE LEDGER. REJECTING DUPLICATE.', 2600);
+      return;
+    }
+
+    let duplicatePending = false;
+    const targetIdentity = window.SOMAP_FINANCE?.buildIdentity
+      ? window.SOMAP_FINANCE.buildIdentity(identityCandidate, normalizedYear)
+      : null;
+    if (targetIdentity) {
+      const pendingSnap = await db.ref('approvalsPending').once('value');
+      if (pendingSnap.exists()) {
+        pendingSnap.forEach((child) => {
+          const val = child.val();
+          if (!val) return;
+          const status = String(val.status || 'PENDING').toUpperCase();
+          if (status !== 'PENDING') return;
+          const compareCandidate = {
+            ...val,
+            year: val.forYear || normalizedYear,
+            studentAdm: val.studentAdm || val.admissionNumber || val.studentId,
+            paymentDate: val.datePaid || val.timestamp,
+            refCode: val.paymentReferenceCode || val.referenceCode,
+            amount: Number(val.amountPaidNow || val.amount || 0),
+            sourceModule: val.sourceModule || 'School Fees'
+          };
+          const pendingIdentity = window.SOMAP_FINANCE.buildIdentity(compareCandidate, normalizedYear);
+          if (pendingIdentity === targetIdentity) duplicatePending = true;
+        });
+      }
+    }
+    if (duplicatePending) {
+      toast('THIS HAS ALREADY BEEN QUEUED FOR APPROVAL. REJECTING DUPLICATE.', 2600);
+      return;
+    }
 
     const queueCountsKey = String(normalizedYear);
     let queueAttemptsForYear = 1;

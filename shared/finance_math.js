@@ -73,6 +73,26 @@
 
   function clamp(n){ return Math.max(0, Math.round(Number(n) || 0)); }
   function fmtNumber(n){ return Number(n) || 0; }
+
+  const financeDedupe = global.SOMAP_FINANCE || {};
+  function dedupePayments(paymentsSource, workingYear, studentRef){
+    if (financeDedupe.dedupePaymentMap) {
+      return financeDedupe.dedupePaymentMap(paymentsSource, workingYear, studentRef);
+    }
+    const seen = new Set();
+    const clean = {};
+    Object.entries(paymentsSource || {}).forEach(([key, value]) => {
+      if (!value || typeof value !== 'object') return;
+      const amount = Number(value.amount || value.paidAmount || 0);
+      const ref = String(value.referenceCode || value.ref || '').trim().toUpperCase();
+      const ts = String(value.timestamp || value.date || value.paymentDate || '');
+      const idKey = `${workingYear}|${studentRef}|${amount}|${ref}|${ts}`;
+      if (seen.has(idKey)) return;
+      seen.add(idKey);
+      clean[key] = value;
+    });
+    return clean;
+  }
   function todayYMD(targetYear){
     const now = new Date();
     const y = Number(targetYear);
@@ -463,6 +483,12 @@ function buildFinanceStudents(
 
       if (isMonthlyPlan) paymentPlan = 'Malipo kwa mwezi';
 
+      const admissionNumber =
+        enrollment.admissionNumber ||
+        enrollment.admissionNo ||
+        base.admissionNumber ||
+        id;
+
     const explicitStudentFee = coerceFeeValue(studentFeeOverride);
 
     let baseFeeCandidate =
@@ -508,7 +534,8 @@ function buildFinanceStudents(
       if (!Object.keys(paymentsSource || {}).length && base.payments) {
         paymentsSource = base.payments;
       }
-      const payments = normalizePayments(paymentsSource, targetYear);
+      const dedupedPayments = dedupePayments(paymentsSource, targetYear, admissionNumber || id);
+      const payments = normalizePayments(dedupedPayments, targetYear);
 
       const parentContact =
         enrollment.parentPhone ||
@@ -539,7 +566,7 @@ function buildFinanceStudents(
         financeYear: targetYear,
         academicYear: targetYear,
         primaryParentContact: parentContact || base.primaryParentContact,
-        admissionNumber: enrollment.admissionNumber || enrollment.admissionNo || base.admissionNumber || id,
+        admissionNumber: admissionNumber || id,
         hasYearData,
         isGraduated: classLevel === 'GRADUATED',
       };

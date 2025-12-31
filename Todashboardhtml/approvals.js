@@ -24,6 +24,7 @@
     fridaymoney: 'Friday Money',
     joining: 'Joining Applications',
   };
+  const financeDedupe = window.SOMAP_FINANCE || {};
 
   if (!window.firebase || !window.db) {
     console.error('Approvals: Firebase not initialised. Ensure firebase.js is loaded before approvals.js');
@@ -708,6 +709,59 @@
     });
   }
 
+  function buildFinanceIdentityCandidate(record, targetYear) {
+    const paymentData = record.modulePayload?.payment || {};
+    const refCode =
+      record.paymentReferenceCode ||
+      paymentData.referenceCode ||
+      paymentData.reference ||
+      paymentData.refCode;
+    const studentAdm =
+      record.studentAdm ||
+      record.admissionNumber ||
+      record.modulePayload?.studentKey ||
+      record.studentId;
+    const year = Number(targetYear || record.forYear || state.selectedYear);
+    return {
+      ...paymentData,
+      amount: Number(paymentData.amount || record.amountPaidNow || 0),
+      studentAdm,
+      year,
+      paymentDate: paymentData.timestamp || record.datePaid || record.createdAt,
+      sourceModule: 'School Fees',
+      refCode,
+      referenceCode: refCode,
+    };
+  }
+
+  async function rejectDuplicateApproval(record, reason) {
+    const approvalId = record.approvalId;
+    if (!approvalId) return;
+    const updates = {};
+    updates[P(`approvalsPending/${approvalId}/status`)] = 'REJECTED_DUPLICATE';
+    updates[P(`approvalsPending/${approvalId}/rejectedReason`)] = reason || 'Duplicate payment detected';
+    updates[P(`approvalsPending/${approvalId}/rejectedAt`)] = firebase.database.ServerValue.TIMESTAMP;
+    updates[P(`approvalsPending/${approvalId}/rejectedBy`)] = actorEmail();
+    await firebase.database().ref().update(updates);
+    await moveApprovalToHistory(
+      { ...record, status: 'REJECTED_DUPLICATE' },
+      'rejected_duplicate'
+    );
+  }
+
+  async function isFinanceDuplicate(record, targetYear) {
+    if (!financeDedupe.isDuplicateInLedger) return false;
+    const studentKey =
+      record.modulePayload?.studentKey ||
+      record.studentId ||
+      record.studentAdm ||
+      record.admissionNumber;
+    if (!studentKey) return false;
+    const candidate = buildFinanceIdentityCandidate(record, targetYear);
+    const ledgerPath = P(`financeLedgers/${targetYear}/${studentKey}/payments`);
+    return financeDedupe.isDuplicateInLedger(db, ledgerPath, candidate, targetYear, studentKey);
+  }
+
   function buildFinanceLedgerPayload(record, targetYear, options = {}) {
     const paymentData = record.modulePayload?.payment || {};
     const timestamp = Number(
@@ -796,6 +850,19 @@
     record.approvedBy = record.approvedBy || actorEmail();
     showLoader(true);
     try {
+      const needsFinanceCheck = record.source === 'Finance Reclassifier' || record.sourceModule === 'finance';
+      if (needsFinanceCheck) {
+        const duplicate = await isFinanceDuplicate(record, targetYear);
+        if (duplicate) {
+          await rejectDuplicateApproval(
+            record,
+            'Same student, year, module, amount, reference and date already approved in ledger.'
+          );
+          toast('THIS STUDENT AND DETAILS HAVE ALREADY BEEN APPROVED. DUPLICATE REJECTED.', 'warning');
+          hideDetailModal();
+          return;
+        }
+      }
       if (record.source === 'Finance Reclassifier') {
         await commitReclassifiedFinancePayment(record, targetYear);
       } else {
@@ -1185,18 +1252,11 @@
   }
 
   async function computeFinanceSummary() {
-    const snap = await db.ref('students').once('value');
-    const students = snap.val() || {};
-    let required = 0;
-    let approved = 0;
-    Object.values(students).forEach((student) => {
-      const fee = Number(student.feePerYear || student.totalFee || student.fees || 0);
-      if (!Number.isNaN(fee)) required += fee;
-      const payments = Object.values(student.payments || {});
-      const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
-      approved += totalPaid;
-    });
-    const balance = Math.max(0, required - approved - state.summary.finance.pendingAmount);
+    if (!window.SomapFinance) return;
+    const totals = await window.SomapFinance.loadSchoolTotals(state.selectedYear);
+    const required = Number(totals?.due || 0);
+    const approved = Number(totals?.collected || 0);
+    const balance = Math.max(0, required - approved);
     updateSummaryCard('finance', { required, approved, balance });
   }
 
