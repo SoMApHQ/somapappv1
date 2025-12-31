@@ -917,6 +917,24 @@
               </a>
             </div>
           </article>
+          <!-- PARENT REFERRALS -->
+          <article class="card" id="parentReferralCard">
+            <h4 class="title text-lg font-extrabold m-0">My Referrals</h4>
+            <p class="muted text-sm mt-1">
+              Students joined using your referral code
+            </p>
+
+            <div
+              id="parentReferralCode"
+              class="mt-3 text-sm font-mono text-sky-300"
+            >
+              Referral code: —
+            </div>
+
+            <div id="parentReferralList" class="mt-3 flex flex-col gap-2">
+              <div class="muted text-sm">No referrals yet.</div>
+            </div>
+          </article>
 
           <!-- QUICK ACTIONS -->
           <article class="card">
@@ -1771,10 +1789,9 @@
 
         const rawPhone = localStorage.getItem("parentPhone");
 
+        // NEVER block legacy behavior
         if (!rawPhone) {
-          const legacyKey = localStorage.getItem("studentKey");
-          if (legacyKey) return legacyKey;
-          return null;
+          return localStorage.getItem("studentKey") || null;
         }
 
         const parentPhone = normalizePhone(rawPhone);
@@ -1844,6 +1861,8 @@
       })();
 
       async function showParentDashboard() {
+        if (!requireStudentKey()) return;
+
         if (!currentStudent) {
           const s = await schoolRef(`students/${currentStudentKey}`).once(
             "value"
@@ -1900,6 +1919,7 @@
 
         renderAttendanceChart();
         renderScoresChart();
+        await loadParentReferredStudents();
       }
 
       // Calculate local payments
@@ -2330,6 +2350,60 @@
           gradStatusEl.textContent = state.toUpperCase();
         }
       } // Attendance loader
+      async function loadParentReferredStudents() {
+        const listEl = document.getElementById("parentReferralList");
+        const codeEl = document.getElementById("parentReferralCode");
+        if (!listEl || !codeEl) return;
+
+        const parentPhone = normalizePhone(localStorage.getItem("parentPhone"));
+        if (!parentPhone) {
+          listEl.innerHTML =
+            '<div class="muted text-sm">Parent phone not available.</div>';
+          return;
+        }
+
+        // Show referral code (if exists in parents node)
+        try {
+          const pSnap = await schoolRef("parents")
+            .orderByChild("phone")
+            .equalTo(parentPhone)
+            .once("value");
+
+          if (pSnap.exists()) {
+            const parent = Object.values(pSnap.val())[0];
+            if (parent?.referralCode) {
+              codeEl.textContent = `Referral code: ${parent.referralCode}`;
+            }
+          }
+        } catch {}
+
+        // Load referred students
+        const snap = await schoolRef(`parentReferrals/${parentPhone}`).once(
+          "value"
+        );
+        if (!snap.exists()) {
+          listEl.innerHTML =
+            '<div class="muted text-sm">No students referred yet.</div>';
+          return;
+        }
+        const entries = Object.values(snap.val()).sort(
+          (a, b) => (b.joinedAt || 0) - (a.joinedAt || 0)
+        );
+
+        listEl.innerHTML = entries
+          .map(
+            (r) => `
+      <div class="glass bg-white/5 border border-white/10 rounded-lg p-3">
+        <div class="font-semibold text-white">${r.studentName}</div>
+        <div class="muted text-xs">
+          ${r.classLevel} • ${r.academicYear}
+        </div>
+      </div>
+    `
+          )
+          .join("");
+      }
+
       async function loadAttendanceForStudent(admNo) {
         statAttendancePct.textContent = "Calculating...";
         try {
