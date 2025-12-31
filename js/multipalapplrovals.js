@@ -1,213 +1,277 @@
-// js/multipalapplrovals.js
-// Duplicate approvals cleaner + bulk approve helper for approvals.html
+// multipalapplrovals.js
+// Detect and clean multiple/duplicate payments across approvalsPending and financeLedgers.
 
 (function () {
-  const db = window.db || (window.firebase?.database ? window.firebase.database() : null);
-  const btnDuplicates = document.getElementById('btnMultiDuplicates');
-  const badge = document.getElementById('multiBadge');
-  const btnApproveAll = document.getElementById('btnApproveAll');
+  // -----------------------------
+  // UI hooks (matches approvals.html)
+  // -----------------------------
+  const UI = {
+    trigger: document.getElementById('btnMultiDuplicates'),
+    badge: document.getElementById('multiBadge'),
+    approveAll: document.getElementById('btnApproveAll'),
+  };
 
+  // Bail early if the page doesn't have the controls
+  if (!UI.trigger || !UI.badge) {
+    console.warn('[multipalapplrovals] toolbar elements not found; skipping init.');
+    return;
+  }
+
+  // -----------------------------
+  // Firebase + context helpers
+  // -----------------------------
+  const db = window.db || (window.firebase?.database ? window.firebase.database() : null);
   if (!db) {
-    console.warn('multipalapplrovals: Firebase db not available.');
+    console.warn('[multipalapplrovals] Firebase db not available.');
     return;
   }
 
   const P = (subPath) => (window.SOMAP && typeof window.SOMAP.P === 'function' ? window.SOMAP.P(subPath) : subPath);
+
   const getWorkingYear = () => {
     const ctx = window.somapYearContext;
     if (ctx && typeof ctx.getSelectedYear === 'function') return ctx.getSelectedYear();
+    if (window.currentWorkingYear) return window.currentWorkingYear;
+    if (window.currentFinanceYear) return window.currentFinanceYear;
     return new Date().getFullYear();
   };
 
-  const safeUpper = (value) => (value == null ? '' : String(value).trim().toUpperCase());
-  const safeLower = (value) => (value == null ? '' : String(value).trim().toLowerCase());
-  const safeStr = (value) => (value == null ? '' : String(value).trim());
-
-  const fmtCurrency = (amount) => {
-    const numeric = Number(amount) || 0;
-    return `TSh ${numeric.toLocaleString('en-TZ')}`;
+  // -----------------------------
+  // Normalizers
+  // -----------------------------
+  const safeUpper = (v) => (v == null ? '' : String(v).trim().toUpperCase());
+  const safeStr = (v) => (v == null ? '' : String(v).trim());
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
   };
 
-  const resolveAmount = (record) => Number(
-    record?.amountPaidNow ||
-    record?.amount ||
-    record?.claimedAmount ||
-    record?.paidAmount ||
-    record?.allocation ||
-    record?.modulePayload?.payment?.amount ||
-    0
+  const resolveYear = (record, fallback) => {
+    const explicit =
+      record?.forYear ||
+      record?.academicYear ||
+      record?.financeYear ||
+      record?.year ||
+      record?.targetYear;
+    if (explicit) return Number(explicit);
+    const ts = Number(
+      record?.paymentDate ||
+      record?.datePaid ||
+      record?.createdAt ||
+      record?.timestamp ||
+      record?.txDate
+    );
+    if (Number.isFinite(ts) && ts > 0) {
+      const d = new Date(ts);
+      if (Number.isFinite(d.getFullYear())) return d.getFullYear();
+    }
+    return Number(fallback || new Date().getFullYear());
+  };
+
+  const resolveAmount = (r) => num(
+    r?.amountPaidNow ||
+    r?.amount ||
+    r?.claimedAmount ||
+    r?.paidAmount ||
+    r?.allocation ||
+    r?.value ||
+    r?.modulePayload?.payment?.amount
   );
 
-  const resolveDate = (record) => (
-    record?.paymentDate ||
-    record?.datePaid ||
-    record?.createdAt ||
-    record?.modulePayload?.payment?.timestamp ||
-    record?.timestamp ||
+  const resolveDate = (r) => (
+    r?.paymentDate ||
+    r?.datePaid ||
+    r?.createdAt ||
+    r?.timestamp ||
+    r?.modulePayload?.payment?.timestamp ||
     ''
   );
 
-  const resolveYear = (record, fallback) => {
-    const fallbackYear = fallback || new Date().getFullYear();
-    const explicitYear = record?.forYear || record?.academicYear || record?.financeYear || record?.year;
-    if (explicitYear) return Number(explicitYear);
-    const dateValue = resolveDate(record);
-    const stamp = Number(dateValue);
-    if (Number.isFinite(stamp) && stamp > 0) {
-      const d = new Date(stamp);
-      const year = d.getFullYear();
-      if (Number.isFinite(year)) return year;
-    }
-    return Number(fallbackYear);
-  };
+  const resolveRef = (r) => (
+    r?.paymentReferenceCode ||
+    r?.referenceCode ||
+    r?.refCode ||
+    r?.receipt ||
+    r?.bankRef ||
+    r?.mpesaRef ||
+    r?.modulePayload?.payment?.referenceCode ||
+    r?.modulePayload?.payment?.reference ||
+    'N/A'
+  );
 
-  const buildIdentity = (record, fallbackYear) => {
-    if (!record) return '';
-    const year = resolveYear(record, fallbackYear);
-    const student = safeUpper(
-      record.studentAdm ||
-      record.admissionNo ||
-      record.admissionNumber ||
-      record.studentId ||
-      record.modulePayload?.studentKey ||
-      ''
-    );
-    const name = safeUpper(record.studentName || record.fullName || record.name);
-    const amount = resolveAmount(record);
-    const date = safeStr(resolveDate(record));
-    const method = safeUpper(
-      record.paymentMethod ||
-      record.method ||
-      record.modulePayload?.payment?.method ||
-      ''
-    );
-    const ref = safeUpper(
-      record.paymentReferenceCode ||
-      record.referenceCode ||
-      record.refCode ||
-      record.receipt ||
-      record.bankRef ||
-      record.mpesaRef ||
-      record.modulePayload?.payment?.referenceCode ||
-      record.modulePayload?.payment?.reference ||
-      'N/A'
-    );
-    const paidBy = safeUpper(
-      record.paidBy ||
-      record.modulePayload?.payment?.paidBy ||
-      ''
-    );
-    const contact = safeStr(
-      record.payerContact ||
-      record.modulePayload?.payment?.payerContact ||
-      ''
-    );
-    const moduleName = safeUpper(record.sourceModule || record.module || 'FINANCE');
-    return [year, student, name, moduleName, amount, date, method, ref, paidBy, contact].join('|');
-  };
+  const resolveMethod = (r) => (
+    r?.paymentMethod ||
+    r?.method ||
+    r?.modulePayload?.payment?.method ||
+    ''
+  );
 
-  const normalizeStatus = (value) => {
-    const val = safeLower(value);
-    if (!val) return 'pending';
-    if (val.includes('reject')) return 'rejected';
-    if (val.includes('approve')) return 'approved';
-    if (val.includes('pending')) return 'pending';
-    return val;
-  };
+  // -----------------------------
+  // Identity builders
+  // -----------------------------
+  const buildStrictKey = (p, year) => [
+    year,
+    safeUpper(p.studentAdm),
+    safeUpper(p.studentName),
+    safeUpper(p.className),
+    resolveAmount(p),
+    safeStr(resolveDate(p)),
+    safeUpper(resolveMethod(p)),
+    safeUpper(resolveRef(p)),
+    safeUpper(p.paidBy),
+    safeUpper(p.payerContact),
+  ].join('|');
 
-  const inferYearMatch = (record, workingYear) => String(resolveYear(record, workingYear)) === String(workingYear);
+  const buildLooseKey = (p, year) => [
+    year,
+    safeUpper(p.studentAdm),
+    resolveAmount(p),
+    safeStr(resolveDate(p)),
+    safeUpper(resolveRef(p)),
+  ].join('|');
 
-  async function fetchCandidates(workingYear) {
-    const records = [];
+  // -----------------------------
+  // Data collectors
+  // -----------------------------
+  async function fetchApprovals(year) {
+    const snap = await db.ref(P('approvalsPending')).once('value');
+    if (!snap.exists()) return [];
 
-    const pendingSnap = await db.ref(P('approvalsPending')).once('value');
-    if (pendingSnap.exists()) {
-      pendingSnap.forEach((child) => {
-        const value = child.val() || {};
-        if (!inferYearMatch(value, workingYear)) return;
-        records.push({
-          id: child.key,
-          source: 'pending',
-          data: { ...value, approvalId: child.key },
-        });
+    const list = [];
+    snap.forEach((child) => {
+      const raw = child.val() || {};
+      const recYear = resolveYear(raw, year);
+      if (recYear !== Number(year)) return;
+      list.push({
+        id: child.key,
+        source: 'approval',
+        year: recYear,
+        studentKey: raw.modulePayload?.studentKey || raw.studentId || raw.studentAdm || '',
+        path: P(`approvalsPending/${child.key}`),
+        studentAdm: raw.studentAdm || raw.admissionNumber || raw.adm || '',
+        studentName: raw.studentName || raw.name || '',
+        className: raw.className || raw.class || '',
+        amount: resolveAmount(raw),
+        paymentDate: resolveDate(raw),
+        method: resolveMethod(raw),
+        reference: resolveRef(raw),
+        paidBy: raw.paidBy || raw.recordedBy || raw.modulePayload?.payment?.paidBy || '',
+        payerContact: raw.payerContact || raw.modulePayload?.payment?.payerContact || '',
+        status: raw.status || 'pending',
+        raw,
       });
-    }
-
-    const historySnap = await db.ref(P('approvalsHistory')).once('value');
-    if (historySnap.exists()) {
-      historySnap.forEach((yearNode) => {
-        if (String(yearNode.key) !== String(workingYear)) return;
-        yearNode.forEach((monthNode) => {
-          monthNode.forEach((entry) => {
-            const value = entry.val() || {};
-            records.push({
-              id: entry.key,
-              source: 'history',
-              historyYear: yearNode.key,
-              historyMonth: monthNode.key,
-              data: { ...value, approvalId: entry.key },
-            });
-          });
-        });
-      });
-    }
-
-    return records;
+    });
+    return list;
   }
 
-  function groupDuplicates(records, workingYear) {
-    const groups = new Map();
-    records.forEach((entry) => {
-      const key = buildIdentity(entry.data, workingYear);
+  async function fetchLedger(year) {
+    const snap = await db.ref(P(`financeLedgers/${year}`)).once('value');
+    if (!snap.exists()) return [];
+
+    const list = [];
+    snap.forEach((studentNode) => {
+      const studentKey = studentNode.key;
+      const paymentsNode = studentNode.child('payments');
+      const payments = paymentsNode.exists() ? paymentsNode.val() : studentNode.val();
+      const basePath = paymentsNode.exists() ? `${studentKey}/payments` : `${studentKey}`;
+
+      Object.entries(payments || {}).forEach(([payKey, payment]) => {
+        if (!payment || typeof payment !== 'object') return;
+        list.push({
+          id: payKey,
+          source: 'ledger',
+          year: resolveYear(payment, year),
+          studentKey,
+          path: P(`financeLedgers/${year}/${basePath}/${payKey}`),
+          studentAdm: payment.studentAdm || studentKey,
+          studentName: payment.studentName || payment.name || '',
+          className: payment.className || '',
+          amount: resolveAmount(payment),
+          paymentDate: resolveDate(payment),
+          method: resolveMethod(payment),
+          reference: resolveRef(payment),
+          paidBy: payment.paidBy || '',
+          payerContact: payment.payerContact || '',
+          status: payment.status || 'approved',
+          raw: payment,
+        });
+      });
+    });
+    return list;
+  }
+
+  // -----------------------------
+  // Grouping
+  // -----------------------------
+  function groupDuplicates(entries, year) {
+    const strictMap = new Map();
+    const looseMap = new Map();
+    const inStrict = new Set();
+
+    entries.forEach((p) => {
+      const key = buildStrictKey(p, year);
       if (!key) return;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(entry);
+      const bucket = strictMap.get(key) || [];
+      bucket.push(p);
+      strictMap.set(key, bucket);
     });
 
-    const flatRows = [];
-    let duplicateCount = 0;
-
-    groups.forEach((list, key) => {
-      if (list.length <= 1) return;
-      const sorted = [...list].sort((a, b) => Number(a.data.datePaid || a.data.createdAt || 0) - Number(b.data.datePaid || b.data.createdAt || 0));
-      sorted.forEach((row, index) => {
-        if (index > 0) duplicateCount += 1;
-        flatRows.push({
-          ...row,
-          identityKey: key,
-          groupSize: list.length,
-          defaultDelete: index > 0,
-        });
-      });
+    const groups = [];
+    strictMap.forEach((bucket, key) => {
+      if (bucket.length > 1) {
+        groups.push({ id: `STRICT|${key}`, type: 'STRICT', payments: bucket });
+        bucket.forEach((p) => inStrict.add(`${p.source}:${p.path}`));
+      }
     });
 
-    return { flatRows, duplicateCount, groupCount: groups.size };
+    entries.forEach((p) => {
+      const uid = `${p.source}:${p.path}`;
+      if (inStrict.has(uid)) return;
+      const key = buildLooseKey(p, year);
+      if (!key) return;
+      const bucket = looseMap.get(key) || [];
+      bucket.push(p);
+      looseMap.set(key, bucket);
+    });
+
+    looseMap.forEach((bucket, key) => {
+      if (bucket.length > 1) {
+        groups.push({ id: `LOOSE|${key}`, type: 'LOOSE', payments: bucket });
+      }
+    });
+
+    return groups;
   }
 
-  let overlay = null;
-  let overlayTableBody = null;
-  let currentRows = [];
+  function countExtras(groups) {
+    return groups.reduce((sum, g) => (g.payments.length > 1 ? sum + (g.payments.length - 1) : sum), 0);
+  }
 
-  function closeOverlay() {
-    if (overlay) {
-      overlay.remove();
-      overlay = null;
-      overlayTableBody = null;
-      currentRows = [];
-    }
+  // -----------------------------
+  // Overlay UI (reuse existing styling)
+  // -----------------------------
+  let overlay = null;
+  let overlayBody = null;
+  let currentGroups = [];
+  let flatRows = [];
+
+  function fmtCurrency(value) {
+    const n = resolveAmount({ amount: value });
+    return `TSh ${n.toLocaleString('en-TZ')}`;
   }
 
   function ensureOverlay() {
-    if (overlay) return overlay;
+    if (overlay) return;
+
     overlay = document.createElement('div');
     overlay.id = 'multi-approvals-overlay';
     overlay.style.position = 'fixed';
     overlay.style.inset = '0';
     overlay.style.background = 'rgba(0,0,0,0.55)';
-    overlay.style.zIndex = '9999';
     overlay.style.display = 'flex';
     overlay.style.alignItems = 'center';
     overlay.style.justifyContent = 'center';
+    overlay.style.zIndex = '9999';
     overlay.style.padding = '1rem';
 
     const panel = document.createElement('div');
@@ -216,24 +280,23 @@
     panel.style.width = 'min(1100px, 98vw)';
     panel.style.maxHeight = '90vh';
     panel.style.borderRadius = '16px';
-    panel.style.boxShadow = '0 20px 60px rgba(0,0,0,0.25)';
     panel.style.display = 'flex';
     panel.style.flexDirection = 'column';
-    panel.style.overflow = 'hidden';
+    panel.style.boxShadow = '0 20px 60px rgba(0,0,0,0.25)';
     overlay.appendChild(panel);
 
     const header = document.createElement('div');
     header.style.display = 'flex';
-    header.style.alignItems = 'center';
     header.style.justifyContent = 'space-between';
-    header.style.padding = '14px 18px';
+    header.style.alignItems = 'center';
+    header.style.padding = '12px 16px';
     header.style.borderBottom = '1px solid #e2e8f0';
     panel.appendChild(header);
 
     const title = document.createElement('div');
     title.innerHTML = `
-      <div style="font-size:1rem;font-weight:700;">Multiple Payment Entries</div>
-      <div style="font-size:0.85rem;color:#475569;">Same student + amount + date + method + reference will appear here. Tick the extra copies to delete from approvals and finance ledgers.</div>
+      <div style="font-weight:700;">Multiple / Duplicate Payments</div>
+      <div style="font-size:0.9rem;color:#475569;">STRICT: all fields match. LOOSE: same student + amount + date + reference.</div>
     `;
     header.appendChild(title);
 
@@ -263,15 +326,13 @@
     headerBtns.appendChild(closeBtn);
 
     closeBtn.addEventListener('click', closeOverlay);
+    deleteBtn.addEventListener('click', handleDeleteSelected);
 
     const summary = document.createElement('div');
     summary.id = 'multiSummary';
-    summary.style.padding = '10px 18px';
-    summary.style.borderBottom = '1px solid #e2e8f0';
+    summary.style.padding = '10px 16px';
     summary.style.background = '#f8fafc';
-    summary.style.fontSize = '0.9rem';
-    summary.style.display = 'flex';
-    summary.style.gap = '1rem';
+    summary.style.borderBottom = '1px solid #e2e8f0';
     panel.appendChild(summary);
 
     const wrapper = document.createElement('div');
@@ -286,30 +347,36 @@
 
     const thead = document.createElement('thead');
     thead.innerHTML = `
-      <tr style="background:#f1f5f9;font-size:0.85rem;text-align:left;">
+      <tr style="background:#f1f5f9;text-align:left;font-size:0.85rem;">
         <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Delete?</th>
         <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Student</th>
         <th style="padding:10px;border-bottom:1px solid #e2e8f0;">ADM</th>
         <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Amount</th>
         <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Date</th>
         <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Method</th>
-        <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Reference</th>
+        <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Ref</th>
         <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Paid By</th>
         <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Contact</th>
-        <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Module</th>
-        <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Status</th>
-        <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Group</th>
+        <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Source</th>
+        <th style="padding:10px;border-bottom:1px solid #e2e8f0;">Key</th>
       </tr>
     `;
     table.appendChild(thead);
 
-    overlayTableBody = document.createElement('tbody');
-    table.appendChild(overlayTableBody);
-
-    deleteBtn.addEventListener('click', handleDeleteSelected);
+    overlayBody = document.createElement('tbody');
+    table.appendChild(overlayBody);
 
     document.body.appendChild(overlay);
-    return overlay;
+  }
+
+  function closeOverlay() {
+    if (overlay) {
+      overlay.remove();
+      overlay = null;
+      overlayBody = null;
+      currentGroups = [];
+      flatRows = [];
+    }
   }
 
   function renderSummary(rows) {
@@ -319,92 +386,85 @@
       summary.textContent = 'No duplicate payments detected for this year.';
       return;
     }
-    const totalExtras = rows.filter((r) => r.defaultDelete).length;
-    const affectedStudents = new Set(rows.map((r) => safeUpper(r.data.studentAdm || r.data.studentId || r.data.studentName || '')));
-    summary.textContent = `${totalExtras} duplicate entries selected by default · ${affectedStudents.size} students affected`;
+    const extras = rows.filter((r) => r.defaultDelete).length;
+    const students = new Set(rows.map((r) => safeUpper(r.studentAdm || r.studentName || '')));
+    summary.textContent = `${extras} duplicates pre-selected • ${students.size} students affected`;
   }
 
-  function renderOverlayRows(rows) {
+  function renderRows(groups) {
     ensureOverlay();
-    currentRows = rows;
-    if (!overlayTableBody) return;
-    overlayTableBody.innerHTML = '';
+    if (!overlayBody) return;
+    overlayBody.innerHTML = '';
 
-    if (!rows.length) {
+    flatRows = [];
+    groups.forEach((g) => {
+      g.payments.forEach((p, idx) => {
+        flatRows.push({
+          ...p,
+          groupId: g.id,
+          keyType: g.type,
+          defaultDelete: idx > 0,
+        });
+      });
+    });
+
+    if (!flatRows.length) {
       const tr = document.createElement('tr');
       const td = document.createElement('td');
-      td.colSpan = 12;
-      td.style.padding = '18px';
+      td.colSpan = 11;
+      td.style.padding = '16px';
       td.style.textAlign = 'center';
-      td.textContent = 'No multiple payment entries found. Great!';
+      td.textContent = 'No multiple payment entries found.';
       tr.appendChild(td);
-      overlayTableBody.appendChild(tr);
-      renderSummary(rows);
+      overlayBody.appendChild(tr);
+      renderSummary(flatRows);
       return;
     }
 
-    rows.forEach((row, index) => {
-      const p = row.data || {};
+    flatRows.forEach((row, idx) => {
       const tr = document.createElement('tr');
       tr.style.borderBottom = '1px solid #e2e8f0';
-      tr.dataset.index = String(index);
 
-      const addCell = (html) => {
+      const cbTd = document.createElement('td');
+      cbTd.style.padding = '10px';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'multi-delete-checkbox';
+      cb.dataset.index = String(idx);
+      cb.checked = !!row.defaultDelete;
+      cbTd.appendChild(cb);
+      tr.appendChild(cbTd);
+
+      const addCell = (text) => {
         const td = document.createElement('td');
         td.style.padding = '10px';
         td.style.fontSize = '0.9rem';
-        td.innerHTML = html;
+        td.textContent = text;
         tr.appendChild(td);
       };
 
-      const checkboxCell = document.createElement('td');
-      checkboxCell.style.padding = '10px';
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.className = 'multi-delete-checkbox';
-      checkbox.checked = !!row.defaultDelete;
-      checkbox.dataset.index = String(index);
-      checkboxCell.appendChild(checkbox);
-      tr.appendChild(checkboxCell);
+      addCell(row.studentName || '--');
+      addCell(row.studentAdm || '--');
+      addCell(fmtCurrency(row.amount));
+      addCell(row.paymentDate || '--');
+      addCell(resolveMethod(row) || '--');
+      addCell(resolveRef(row) || '--');
+      addCell(row.paidBy || '--');
+      addCell(row.payerContact || '--');
+      addCell(row.source === 'approval' ? 'Approvals' : 'Ledger');
+      addCell(row.keyType || '');
 
-      addCell(`<div style="font-weight:700;">${p.studentName || '--'}</div><div style="color:#475569;font-size:0.8rem;">${p.studentAdm || ''}</div>`);
-      addCell(p.studentAdm || '--');
-      addCell(fmtCurrency(resolveAmount(p)));
-      addCell(p.paymentDate || p.datePaid || p.createdAt || '--');
-      addCell(p.paymentMethod || p.method || p.modulePayload?.payment?.method || '--');
-      addCell(p.paymentReferenceCode || p.referenceCode || p.receipt || p.bankRef || p.mpesaRef || '—');
-      addCell(p.paidBy || p.modulePayload?.payment?.paidBy || '—');
-      addCell(p.payerContact || p.modulePayload?.payment?.payerContact || '—');
-      addCell(p.sourceModule || p.module || 'finance');
-      addCell(normalizeStatus(p.status));
-      addCell(`${row.groupSize}x`);
-
-      overlayTableBody.appendChild(tr);
+      overlayBody.appendChild(tr);
     });
 
-    renderSummary(rows);
+    renderSummary(flatRows);
   }
 
-  async function loadAndRender() {
-    const year = getWorkingYear();
-    const records = await fetchCandidates(year);
-    const { flatRows, duplicateCount } = groupDuplicates(records, year);
-    updateBadge(duplicateCount);
-    renderOverlayRows(flatRows);
-    return { duplicateCount };
-  }
-
-  function updateBadge(count) {
-    if (!badge) return;
-    badge.textContent = Number(count || 0);
-    badge.style.display = 'inline-flex';
-    if (btnDuplicates) {
-      btnDuplicates.style.display = count ? 'inline-flex' : 'inline-flex';
-    }
-  }
-
+  // -----------------------------
+  // Delete
+  // -----------------------------
   async function handleDeleteSelected() {
-    if (!currentRows.length) {
+    if (!flatRows.length) {
       alert('No duplicates loaded.');
       return;
     }
@@ -416,9 +476,9 @@
     const selected = [];
     checkboxes.forEach((cb) => {
       if (cb.checked) {
-        const idx = Number(cb.dataset.index || -1);
-        if (Number.isInteger(idx) && idx >= 0 && idx < currentRows.length) {
-          selected.push(currentRows[idx]);
+        const idx = Number(cb.dataset.index);
+        if (Number.isInteger(idx) && idx >= 0 && idx < flatRows.length) {
+          selected.push(flatRows[idx]);
         }
       }
     });
@@ -428,96 +488,53 @@
       return;
     }
 
-    if (!confirm('Delete selected duplicate payments from approvals and finance ledgers? This cannot be undone.')) {
+    if (!confirm(`Delete ${selected.length} payment record(s)? This removes them from approvals or finance ledgers for the current year.`)) {
       return;
     }
 
-    const workingYear = getWorkingYear();
     const updates = {};
-    const identityKeys = new Set();
-
     selected.forEach((row) => {
-      identityKeys.add(row.identityKey);
-      if (row.source === 'pending') {
-        updates[P(`approvalsPending/${row.id}`)] = null;
-      } else if (row.source === 'history') {
-        updates[P(`approvalsHistory/${row.historyYear}/${row.historyMonth}/${row.id}`)] = null;
-      }
+      updates[row.path] = null;
     });
 
     try {
-      if (Object.keys(updates).length) {
-        await db.ref().update(updates);
-      }
-      await purgeFinanceLedger(identityKeys, workingYear);
-      alert('Selected duplicates removed. Refreshing list...');
-      const { flatRows, duplicateCount } = groupDuplicates(await fetchCandidates(workingYear), workingYear);
-      updateBadge(duplicateCount);
-      renderOverlayRows(flatRows);
+      await db.ref().update(updates);
+      alert('Selected duplicates removed. Rescanning...');
+      await scanData();
+      renderRows(currentGroups);
     } catch (err) {
-      console.error('multipalapplrovals: delete failed', err);
+      console.error('[multipalapplrovals] delete failed', err);
       alert('Failed to delete some entries. Check console for details.');
     }
   }
 
-  async function purgeFinanceLedger(identityKeys, workingYear) {
-    if (!identityKeys || !identityKeys.size) return;
-    const ledgerSnap = await db.ref(P(`financeLedgers/${workingYear}`)).once('value');
-    if (!ledgerSnap.exists()) return;
-
-    const updates = {};
-    ledgerSnap.forEach((studentNode) => {
-      const studentKey = studentNode.key;
-      const paymentsNode = studentNode.child('payments');
-      const payments = paymentsNode.exists() ? paymentsNode.val() : studentNode.val();
-      const basePath = paymentsNode.exists()
-        ? `${studentKey}/payments`
-        : `${studentKey}`;
-
-      Object.entries(payments || {}).forEach(([payKey, payment]) => {
-        const decorated = {
-          ...payment,
-          studentAdm: payment?.studentAdm || payment?.studentId || payment?.admissionNo || studentKey,
-          sourceModule: payment?.module || payment?.sourceModule || 'finance',
-          amountPaidNow: payment?.amount,
-          paymentMethod: payment?.method,
-          paymentReferenceCode: payment?.referenceCode || payment?.refCode || payment?.receipt,
-          paidBy: payment?.paidBy,
-          payerContact: payment?.payerContact,
-          paymentDate: payment?.timestamp || payment?.paymentDate || payment?.date,
-          year: payment?.forYear || payment?.academicYear || payment?.financeYear || workingYear,
-        };
-        const idKey = buildIdentity(decorated, workingYear);
-        if (identityKeys.has(idKey)) {
-          updates[P(`financeLedgers/${workingYear}/${basePath}/${payKey}`)] = null;
-        }
-      });
-    });
-
-    if (Object.keys(updates).length) {
-      await db.ref().update(updates);
-    }
+  // -----------------------------
+  // Scan + badge
+  // -----------------------------
+  async function scanData() {
+    const year = getWorkingYear();
+    const approvals = await fetchApprovals(year);
+    const ledger = await fetchLedger(year);
+    const all = [...approvals, ...ledger];
+    currentGroups = groupDuplicates(all, year);
+    updateBadge(countExtras(currentGroups));
+    return currentGroups;
   }
 
-  async function initBadge() {
-    try {
-      const year = getWorkingYear();
-      const records = await fetchCandidates(year);
-      const { duplicateCount } = groupDuplicates(records, year);
-      updateBadge(duplicateCount);
-    } catch (err) {
-      console.warn('multipalapplrovals: failed to init badge', err);
-    }
+  function updateBadge(count) {
+    UI.badge.textContent = Number(count || 0);
   }
 
+  // -----------------------------
+  // Approve-all hook (reuses SomapApprovals API)
+  // -----------------------------
   async function handleApproveAllClick() {
-    if (!btnApproveAll) return;
     const api = window.SomapApprovals || {};
     if (!api.approveMany || !api.getPendingList) {
-      alert('Approve-all hook not ready yet. Ensure approvals.js loaded.');
+      alert('Approve-all not ready. Ensure approvals.js loaded.');
       return;
     }
-    const pending = (api.getPendingList() || []).filter((r) => normalizeStatus(r.status) === 'pending');
+    const pending = (api.getPendingList() || []).filter((r) => (r.status || 'pending').toLowerCase() === 'pending');
     if (!pending.length) {
       alert('No pending approvals to approve.');
       return;
@@ -525,30 +542,32 @@
     if (!confirm(`Approve all ${pending.length} pending payments? Make sure duplicates are cleaned first.`)) {
       return;
     }
-    btnApproveAll.disabled = true;
-    const originalText = btnApproveAll.textContent;
-    btnApproveAll.textContent = 'Approving...';
+    UI.approveAll.disabled = true;
+    const original = UI.approveAll.textContent;
+    UI.approveAll.textContent = 'Approving...';
     try {
       const result = await api.approveMany(pending);
-      alert(`Approved ${result.processedCount} payments. ${result.failureCount || 0} failed (see console if any).`);
+      alert(`Approved ${result.processedCount} payments. ${result.failureCount || 0} failed (see console).`);
     } catch (err) {
-      console.error('multipalapplrovals: approve-all failed', err);
+      console.error('[multipalapplrovals] approve-all failed', err);
       alert('Approve-all failed. Check console.');
     } finally {
-      btnApproveAll.disabled = false;
-      btnApproveAll.textContent = originalText;
+      UI.approveAll.disabled = false;
+      UI.approveAll.textContent = original;
     }
   }
 
-  function wireButtons() {
-    if (btnDuplicates) {
-      btnDuplicates.addEventListener('click', loadAndRender);
-    }
-    if (btnApproveAll) {
-      btnApproveAll.addEventListener('click', handleApproveAllClick);
-    }
+  // -----------------------------
+  // Wire up
+  // -----------------------------
+  UI.trigger.addEventListener('click', async () => {
+    await scanData();
+    renderRows(currentGroups);
+  });
+  if (UI.approveAll) {
+    UI.approveAll.addEventListener('click', handleApproveAllClick);
   }
 
-  wireButtons();
-  if (badge) initBadge();
+  // Initial badge load (silent)
+  scanData().catch((err) => console.warn('[multipalapplrovals] initial scan failed', err));
 })();
