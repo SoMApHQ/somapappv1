@@ -1,5 +1,5 @@
 // multipalapplrovals.js
-// Detect and clean multiple/duplicate payments across approvalsPending and financeLedgers.
+// Detect and clean multiple/duplicate payments across approvals (pending + history) and financeLedgers.
 
 (function () {
   // -----------------------------
@@ -11,7 +11,6 @@
     approveAll: document.getElementById('btnApproveAll'),
   };
 
-  // Bail early if the page doesn't have the controls
   if (!UI.trigger || !UI.badge) {
     console.warn('[multipalapplrovals] toolbar elements not found; skipping init.');
     return;
@@ -133,7 +132,7 @@
   // -----------------------------
   // Data collectors
   // -----------------------------
-  async function fetchApprovals(year) {
+  async function fetchApprovalsPending(year) {
     const snap = await db.ref(P('approvalsPending')).once('value');
     if (!snap.exists()) return [];
 
@@ -144,7 +143,7 @@
       if (recYear !== Number(year)) return;
       list.push({
         id: child.key,
-        source: 'approval',
+        source: 'pending',
         year: recYear,
         studentKey: raw.modulePayload?.studentKey || raw.studentId || raw.studentAdm || '',
         path: P(`approvalsPending/${child.key}`),
@@ -159,6 +158,39 @@
         payerContact: raw.payerContact || raw.modulePayload?.payment?.payerContact || '',
         status: raw.status || 'pending',
         raw,
+      });
+    });
+    return list;
+  }
+
+  async function fetchApprovalsHistory(year) {
+    const snap = await db.ref(P('approvalsHistory')).once('value');
+    if (!snap.exists()) return [];
+    const list = [];
+    const yearNode = snap.child(String(year));
+    if (!yearNode.exists()) return list;
+    yearNode.forEach((monthNode) => {
+      const month = monthNode.key;
+      monthNode.forEach((entry) => {
+        const raw = entry.val() || {};
+        list.push({
+          id: entry.key,
+          source: 'history',
+          year,
+          month,
+          path: P(`approvalsHistory/${year}/${month}/${entry.key}`),
+          studentAdm: raw.studentAdm || raw.admissionNumber || raw.adm || '',
+          studentName: raw.studentName || raw.name || '',
+          className: raw.className || raw.class || '',
+          amount: resolveAmount(raw),
+          paymentDate: resolveDate(raw),
+          method: resolveMethod(raw),
+          reference: resolveRef(raw),
+          paidBy: raw.paidBy || raw.recordedBy || '',
+          payerContact: raw.payerContact || '',
+          status: raw.status || raw.finalStatus || 'approved',
+          raw,
+        });
       });
     });
     return list;
@@ -248,7 +280,7 @@
   }
 
   // -----------------------------
-  // Overlay UI (reuse existing styling)
+  // Overlay UI
   // -----------------------------
   let overlay = null;
   let overlayBody = null;
@@ -451,7 +483,12 @@
       addCell(resolveRef(row) || '--');
       addCell(row.paidBy || '--');
       addCell(row.payerContact || '--');
-      addCell(row.source === 'approval' ? 'Approvals' : 'Ledger');
+      const sourceLabel = row.source === 'pending'
+        ? 'Approvals (pending)'
+        : row.source === 'history'
+          ? 'Approvals (approved)'
+          : 'Ledger';
+      addCell(sourceLabel);
       addCell(row.keyType || '');
 
       overlayBody.appendChild(tr);
@@ -513,9 +550,10 @@
   // -----------------------------
   async function scanData() {
     const year = getWorkingYear();
-    const approvals = await fetchApprovals(year);
+    const pending = await fetchApprovalsPending(year);
+    const history = await fetchApprovalsHistory(year);
     const ledger = await fetchLedger(year);
-    const all = [...approvals, ...ledger];
+    const all = [...pending, ...history, ...ledger];
     currentGroups = groupDuplicates(all, year);
     updateBadge(countExtras(currentGroups));
     return currentGroups;
