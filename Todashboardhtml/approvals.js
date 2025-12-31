@@ -1418,6 +1418,41 @@
     if (card.balance) card.balance.textContent = formatCurrency(balance);
   }
 
+  async function approveMany(records = []) {
+    const failures = [];
+    for (let i = 0; i < records.length; i += 1) {
+      const record = records[i];
+      if (!record) continue;
+      try {
+        // processApproval already stamps the year, dedupes finance and writes ledgers
+        // so we reuse it to keep behaviour identical to single approve.
+        // eslint-disable-next-line no-await-in-loop
+        await processApproval(record);
+      } catch (err) {
+        console.error('Approvals: bulk approve failed for', record?.approvalId || record, err);
+        failures.push({ record, err });
+      }
+    }
+    return {
+      processedCount: records.length - failures.length,
+      failureCount: failures.length,
+      failures,
+    };
+  }
+
+  function getPendingList() {
+    return Array.isArray(state.pendingList) ? [...state.pendingList] : [];
+  }
+
+  // Expose a tiny public surface for helper scripts (bulk approve / duplicate cleaner)
+  window.SomapApprovals = Object.assign(window.SomapApprovals || {}, {
+    approveRecord: (record) => processApproval(record),
+    approveMany,
+    getPendingList,
+    refresh: loadAllData,
+    getSelectedYear: () => state.selectedYear,
+  });
+
   function init() {
     attachListeners();
     auth.onAuthStateChanged(async (user) => {
