@@ -108,8 +108,7 @@
   // -----------------------------
   // Identity builders
   // -----------------------------
-  const buildStrictKey = (p, year) => [
-    year,
+  const buildStrictKey = (p) => [
     safeUpper(p.studentAdm),
     safeUpper(p.studentName),
     safeUpper(p.className),
@@ -121,8 +120,7 @@
     safeUpper(p.payerContact),
   ].join('|');
 
-  const buildLooseKey = (p, year) => [
-    year,
+  const buildLooseKey = (p) => [
     safeUpper(p.studentAdm),
     resolveAmount(p),
     safeStr(resolveDate(p)),
@@ -140,7 +138,6 @@
     snap.forEach((child) => {
       const raw = child.val() || {};
       const recYear = resolveYear(raw, year);
-      if (recYear !== Number(year)) return;
       list.push({
         id: child.key,
         source: 'pending',
@@ -235,13 +232,13 @@
   // -----------------------------
   // Grouping
   // -----------------------------
-  function groupDuplicates(entries, year) {
+  function groupDuplicates(entries) {
     const strictMap = new Map();
     const looseMap = new Map();
     const inStrict = new Set();
 
     entries.forEach((p) => {
-      const key = buildStrictKey(p, year);
+      const key = buildStrictKey(p);
       if (!key) return;
       const bucket = strictMap.get(key) || [];
       bucket.push(p);
@@ -259,7 +256,7 @@
     entries.forEach((p) => {
       const uid = `${p.source}:${p.path}`;
       if (inStrict.has(uid)) return;
-      const key = buildLooseKey(p, year);
+      const key = buildLooseKey(p);
       if (!key) return;
       const bucket = looseMap.get(key) || [];
       bucket.push(p);
@@ -554,7 +551,7 @@
     const history = await fetchApprovalsHistory(year);
     const ledger = await fetchLedger(year);
     const all = [...pending, ...history, ...ledger];
-    currentGroups = groupDuplicates(all, year);
+    currentGroups = groupDuplicates(all);
     updateBadge(countExtras(currentGroups));
     return currentGroups;
   }
