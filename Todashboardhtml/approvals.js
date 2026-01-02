@@ -42,7 +42,6 @@
     filterMonth: document.getElementById('filterMonth'),
     filterSearch: document.getElementById('filterSearch'),
     pendingBody: document.getElementById('pendingBody'),
-    approveAllBtn: document.getElementById('btnApproveAll'),
     historyList: document.getElementById('historyList'),
     historyEmpty: document.getElementById('historyEmpty'),
     historyMonth: document.getElementById('historyMonth'),
@@ -358,11 +357,6 @@
     if (yearContext?.onYearChanged) {
       yearContext.onYearChanged(handleYearChange);
     }
-    if (els.approveAllBtn) {
-      els.approveAllBtn.addEventListener('click', () => {
-        approveAllVisible();
-      });
-    }
   }
   function loadAllData() {
     showLoader(true);
@@ -395,13 +389,24 @@
     state.unsubPending = () => ref.off('value', handler);
   }
 
-  function filterPendingList() {
+  function renderPendingTable() {
+    if (!els.pendingBody) return;
+    if (!state.pendingList.length) {
+      els.pendingBody.innerHTML = `
+        <tr>
+          <td colspan="9" class="py-12 text-center text-sm text-slate-400">
+            No pending approvals &mdash; accountants must submit payments first.
+          </td>
+        </tr>`;
+      return;
+    }
+
     const monthFilter = state.filters.month;
     const moduleFilter = state.filters.module;
     const search = state.filters.search;
-    const selectedYear = state.selectedYear;
 
-    return state.pendingList.filter((row) => {
+    const selectedYear = state.selectedYear;
+    const filtered = state.pendingList.filter((row) => {
       const matchesModule = !moduleFilter || row.sourceModule === moduleFilter;
       const matchesSearch = !search
         || (row.studentName || '').toLowerCase().includes(search)
@@ -421,21 +426,6 @@
       const matchesYear = !recordYear || recordYear === selectedYear;
       return matchesModule && matchesSearch && matchesMonth && matchesYear;
     });
-  }
-
-  function renderPendingTable() {
-    if (!els.pendingBody) return;
-    if (!state.pendingList.length) {
-      els.pendingBody.innerHTML = `
-        <tr>
-          <td colspan="9" class="py-12 text-center text-sm text-slate-400">
-            No pending approvals &mdash; accountants must submit payments first.
-          </td>
-        </tr>`;
-      return;
-    }
-
-    const filtered = filterPendingList();
 
     if (!filtered.length) {
       els.pendingBody.innerHTML = `
@@ -902,10 +892,13 @@
       if (needsFinanceCheck) {
         const duplicate = await isFinanceDuplicate(record, targetYear);
         if (duplicate) {
-          toast('Duplicate detected: this payment is already in the finance ledger. Not approving again.', 'warning');
-          const dupErr = new Error('Duplicate finance payment');
-          dupErr.code = 'DUPLICATE_FINANCE';
-          throw dupErr;
+          await rejectDuplicateApproval(
+            record,
+            'Same student, year, module, amount, reference and date already approved in ledger.'
+          );
+          toast('THIS STUDENT AND DETAILS HAVE ALREADY BEEN APPROVED. DUPLICATE REJECTED.', 'warning');
+          hideDetailModal();
+          return;
         }
       }
       if (record.source === 'Finance Reclassifier') {
@@ -1461,49 +1454,6 @@
     if (card.required) card.required.textContent = formatCurrency(required);
     if (card.approved) card.approved.textContent = formatCurrency(approved);
     if (card.balance) card.balance.textContent = formatCurrency(balance);
-  }
-
-  async function approveAllVisible() {
-    if (!els.approveAllBtn) return;
-    if (els.approveAllBtn.dataset.busy === '1') return;
-
-    const candidates = filterPendingList();
-    if (!candidates.length) {
-      toast('No pending approvals match the current filters.', 'info');
-      return;
-    }
-
-    els.approveAllBtn.dataset.busy = '1';
-    const originalLabel = els.approveAllBtn.innerHTML;
-    els.approveAllBtn.classList.add('opacity-60', 'cursor-not-allowed');
-    els.approveAllBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Approving...';
-    els.approveAllBtn.disabled = true;
-
-    try {
-      const unique = [];
-      const seen = new Set();
-      candidates.forEach((rec) => {
-        const key = rec.approvalId || JSON.stringify([rec.studentAdm, rec.amountPaidNow, rec.createdAt || rec.datePaid || '']);
-        if (seen.has(key)) return;
-        seen.add(key);
-        unique.push(rec);
-      });
-      const result = await approveMany(unique);
-      const msg = `Approved ${result.processedCount} record(s).${result.failureCount ? ` ${result.failureCount} failed.` : ''}`;
-      toast(msg, result.failureCount ? 'warning' : 'success');
-    } catch (err) {
-      console.error('Approvals: bulk approve failed', err);
-      toast(err?.message || 'Bulk approval failed', 'danger');
-    } finally {
-      // Leave the button disabled momentarily to prevent double-click spam; it will re-enable after data refresh.
-      setTimeout(() => {
-        if (!els.approveAllBtn) return;
-        els.approveAllBtn.dataset.busy = '0';
-        els.approveAllBtn.classList.remove('opacity-60', 'cursor-not-allowed');
-        els.approveAllBtn.innerHTML = originalLabel;
-        els.approveAllBtn.disabled = false;
-      }, 1200);
-    }
   }
 
   async function approveMany(records = []) {
