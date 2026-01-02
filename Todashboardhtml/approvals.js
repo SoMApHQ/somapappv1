@@ -902,13 +902,10 @@
       if (needsFinanceCheck) {
         const duplicate = await isFinanceDuplicate(record, targetYear);
         if (duplicate) {
-          await rejectDuplicateApproval(
-            record,
-            'Same student, year, module, amount, reference and date already approved in ledger.'
-          );
-          toast('THIS STUDENT AND DETAILS HAVE ALREADY BEEN APPROVED. DUPLICATE REJECTED.', 'warning');
-          hideDetailModal();
-          return;
+          toast('Duplicate detected: this payment is already in the finance ledger. Not approving again.', 'warning');
+          const dupErr = new Error('Duplicate finance payment');
+          dupErr.code = 'DUPLICATE_FINANCE';
+          throw dupErr;
         }
       }
       if (record.source === 'Finance Reclassifier') {
