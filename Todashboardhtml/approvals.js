@@ -688,9 +688,47 @@
     approveSelectedRecord();
   }
 
-  function approveSelectedRecord() {
+  async function hasDuplicateInHistory(record) {
+    if (!financeDedupe.buildFinancePaymentFingerprint) return false;
+    const year = Number(
+      record.forYear ||
+      record.academicYear ||
+      record.year ||
+      state.selectedYear ||
+      getContextYear()
+    );
+    const fingerprint = financeDedupe.buildFinancePaymentFingerprint(record, year);
+    if (!fingerprint) return false;
+    try {
+      const historySnap = await db.ref(P('approvalsHistory')).child(String(year)).once('value');
+      const months = historySnap.val() || {};
+      const exists = Object.values(months).some((monthNode) => (
+        Object.values(monthNode || {}).some((entry) => {
+          const fp = financeDedupe.buildFinancePaymentFingerprint(entry, year);
+          return fp === fingerprint;
+        })
+      ));
+      return exists;
+    } catch (err) {
+      console.warn('Approvals: history duplicate check failed', err);
+      return false;
+    }
+  }
+
+  async function approveSelectedRecord() {
     const record = state.selectedRecord;
     if (!record) return;
+
+    const duplicateExists = await hasDuplicateInHistory(record);
+    if (duplicateExists) {
+      Swal.fire({
+        icon: 'error',
+        title: 'Duplicate payment',
+        text: 'This payment has already been approved earlier. It cannot be approved twice.',
+      });
+      return;
+    }
+
     Swal.fire({
       icon: 'question',
       title: 'Approve payment?',

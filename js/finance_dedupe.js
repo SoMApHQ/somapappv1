@@ -4,8 +4,12 @@
   const root = (global.SOMAP_FINANCE = global.SOMAP_FINANCE || {});
 
   function normalizeRef(raw) {
-    if (raw == null) return "N/A";
-    return String(raw).trim().toUpperCase();
+    if (!raw) return '';
+    const cleaned = String(raw).trim().toUpperCase();
+    if (['N/A', 'NA', 'NONE', 'NO', '-', 'NIL', '0'].includes(cleaned)) {
+      return '';
+    }
+    return cleaned.replace(/\s+/g, '');
   }
 
   function coerceAmount(p) {
@@ -200,6 +204,93 @@
   }
 
   root.normalizeRef = normalizeRef;
+  root.buildFinancePaymentFingerprint = function buildFinancePaymentFingerprint(
+    record,
+    fallbackYear
+  ) {
+    if (!record) return '';
+
+    const year =
+      Number(
+        record.forYear ||
+          record.year ||
+          record.academicYear ||
+          fallbackYear ||
+          0
+      ) || 0;
+
+    const amount =
+      Number(record.amount || record.amountClaimed || record.total || 0) || 0;
+
+    const dateRaw = String(
+      record.paymentDate ||
+        record.date ||
+        record.paidOn ||
+        record.timestamp ||
+        record.datePaid ||
+        ''
+    ).slice(0, 10);
+
+    const method = String(
+      record.method || record.paymentMethod || 'UNKNOWN'
+    )
+      .trim()
+      .toUpperCase();
+
+    const ref = normalizeRef(
+      record.referenceCode ||
+        record.paymentReferenceCode ||
+        record.refCode ||
+        record.paymentRef ||
+        record.reference ||
+        record.ref ||
+        ''
+    );
+
+    const paidBy = String(
+      record.paidBy || record.payerName || record.recordedBy || ''
+    )
+      .trim()
+      .toUpperCase();
+
+    const payerContact = String(
+      record.payerContact ||
+        record.contactOfPayer ||
+        record.parentContact ||
+        ''
+    ).trim();
+
+    const studentAdm = String(record.studentAdm || record.adm || '').trim();
+    const studentName = String(record.studentName || record.name || '')
+      .trim()
+      .toUpperCase();
+    const classLabel = String(
+      record.classLabel || record.className || record.class || ''
+    )
+      .trim()
+      .toUpperCase();
+
+    const src = String(record.sourceModule || record.module || 'FINANCE')
+      .trim()
+      .toUpperCase();
+
+    const note = String(record.note || record.notes || '').trim();
+
+    return [
+      year,
+      studentAdm,
+      studentName,
+      classLabel,
+      amount,
+      method,
+      ref,
+      dateRaw,
+      paidBy,
+      payerContact,
+      src,
+      note,
+    ].join('|');
+  };
   root.buildIdentity = buildIdentity;
   root.aggregateLedgerSnapshot = aggregateLedgerSnapshot;
   root.dedupePaymentMap = dedupePaymentMap;
