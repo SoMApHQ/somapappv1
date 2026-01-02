@@ -1181,6 +1181,50 @@ function buildFinanceStudents(
     }
   };
 
+  // Expose a summary getter so child iframes (payment.html) can stay in sync with the finance table.
+  window.__finance_getStudentFinanceSummary = async function (year, studentIdOrAdm) {
+    const targetYear = String(year || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
+    const identifier = String(studentIdOrAdm || '').trim();
+    if (!identifier) return null;
+    try {
+      const dataset = await loadFinanceStudentsForYearCached(targetYear);
+      let student = dataset[identifier];
+      if (!student) {
+        const matchKey = Object.keys(dataset).find((key) => {
+          const entry = dataset[key] || {};
+          return String(entry.admissionNumber || entry.admissionNo || key).trim() === identifier;
+        });
+        if (matchKey) student = dataset[matchKey];
+      }
+      if (!student) return null;
+
+      const prevFinanceYear = financeYear;
+      const prevActiveYear = activeYear;
+      try {
+        financeYear = targetYear;
+        activeYear = targetYear;
+        const fin = computeStudentFinancials(student);
+        const baseFee = Math.max(0, Number(student.baseFee || student.feePerYear || 0));
+        const carry = Math.max(0, Number(student.carryAmount || 0));
+        const totalDue = Math.max(0, baseFee + carry);
+        return {
+          due: totalDue,
+          baseFee,
+          carry,
+          paid: Math.max(0, Number(fin.paidAmount || 0)),
+          balance: Math.max(0, Number(fin.balance || 0)),
+          credit: Math.max(0, Number(fin.credit || 0)),
+        };
+      } finally {
+        financeYear = prevFinanceYear;
+        activeYear = prevActiveYear;
+      }
+    } catch (err) {
+      console.warn('Finance: summary export failed', err?.message || err);
+      return null;
+    }
+  };
+
   // ====== SPEED FIX: placeholder breakdown row (no iframe yet) ======
   function breakdownRowHTML(id) {
     return `

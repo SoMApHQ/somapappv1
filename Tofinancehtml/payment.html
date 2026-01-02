@@ -245,6 +245,26 @@
       }
 
       async function loadApprovedSummary(studentKey, year) {
+        // 1) Prefer the finance page's live summary if we're in an iframe with the parent loaded.
+        try {
+          if (window.parent && typeof window.parent.__finance_getStudentFinanceSummary === 'function') {
+            const live = await window.parent.__finance_getStudentFinanceSummary(year, studentKey);
+            if (live) {
+              return {
+                feeTotal: live.due,
+                paidTotal: live.paid,
+                balanceTotal: live.balance,
+                baseFee: live.baseFee,
+                carry: live.carry,
+                credit: live.credit,
+              };
+            }
+          }
+        } catch (err) {
+          console.warn('installment breakdown: parent summary lookup failed', err?.message || err);
+        }
+
+        // 2) Otherwise, use the shared helper (may fall back to ledger math).
         if (!financeCore || typeof financeCore.loadStudentYearSummary !== 'function') return null;
         try {
           return await financeCore.loadStudentYearSummary(studentKey, year);
@@ -682,6 +702,7 @@
               summary.totalDue ??
               summary.total ??
               summary.finance?.feePerYear ??
+              summary.baseFee ??
               0
             )
           : 0;
@@ -700,6 +721,9 @@
               summary.balance ??
               summary.outstanding ??
               summary.finance?.balance ??
+              (summary.feeTotal != null && summary.paidTotal != null
+                ? Number(summary.feeTotal) - Number(summary.paidTotal)
+                : NaN) ??
               0
             )
           : NaN;
