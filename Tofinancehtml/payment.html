@@ -9,6 +9,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../shared/finance_math.js"></script>
+  <script src="../js/finance_core.js"></script>
   <script src="../somapappv1multischool/js/yearContext.js"></script>
   <script src="../somapappv1multischool/js/context.js"></script>
 
@@ -141,6 +142,7 @@
       const db = (() => { try { return firebase.database(); } catch { return null; }})();
       const P = (subPath) => (window.SOMAP && typeof SOMAP.P === 'function') ? SOMAP.P(subPath) : subPath;
       const ref = (subPath) => db.ref(P(subPath));
+      const financeCore = window.SOMAP_FINANCE || {};
 
       const mount = (html) => {
         const el = document.getElementById('breakdownContent');
@@ -240,6 +242,84 @@
           normalized[key] = payload;
         });
         return normalized;
+      }
+
+      async function loadApprovedSummary(studentKey, year) {
+        // 1) Prefer the finance page's live summary if we're in an iframe with the parent loaded.
+        try {
+          if (window.parent && typeof window.parent.__finance_getStudentFinanceSummary === 'function') {
+            const live = await window.parent.__finance_getStudentFinanceSummary(year, studentKey);
+            if (live) {
+              return {
+                feeTotal: live.due,
+                paidTotal: live.paid,
+                balanceTotal: live.balance,
+                baseFee: live.baseFee,
+                carry: live.carry,
+                credit: live.credit,
+              };
+            }
+          }
+        } catch (err) {
+          console.warn('installment breakdown: parent summary lookup failed', err?.message || err);
+        }
+
+        // 2) Otherwise, use the shared helper (may fall back to ledger math).
+        if (!financeCore || typeof financeCore.loadStudentYearSummary !== 'function') return null;
+        try {
+          return await financeCore.loadStudentYearSummary(studentKey, year);
+        } catch (err) {
+          console.warn('installment breakdown: summary load failed', err?.message || err);
+          return null;
+        }
+      }
+
+      function buildBreakdownFromSummary(scheduleItems, feeForYear, paidTotal) {
+        const items = Array.isArray(scheduleItems) ? scheduleItems : [];
+        const paid = Math.max(0, Number(paidTotal) || 0);
+        const fee = Math.max(0, Number(feeForYear) || 0);
+        let remainingPaid = paid;
+        const now = nowTS();
+
+        const rows = items.map((it) => {
+          const expected = Math.max(0, Number(it.amount) || 0);
+          const allocate = Math.min(expected, remainingPaid);
+          remainingPaid -= allocate;
+
+          let status = 'Pending';
+          if (allocate >= expected) status = 'Cleared';
+          else if (now > it.toTS) status = allocate > 0 ? 'Partially Paid (Overdue)' : 'Overdue';
+          else if (allocate > 0) status = 'Partially Paid';
+
+          return {
+            label: it.label,
+            expected,
+            allocated: allocate,
+            remaining: Math.max(0, expected - allocate),
+            status,
+            fromTS: it.fromTS,
+            toTS: it.toTS,
+          };
+        });
+
+        const allocatedTotalRaw = rows.reduce((s, r) => s + r.allocated, 0);
+        const usedForFee = Math.min(allocatedTotalRaw, fee);
+        const expectedToDate = rows
+          .filter((r) => Number(r.toTS || 0) > 0 && Number(r.toTS || 0) < now)
+          .reduce((s, r) => s + r.expected, 0);
+        const paidConsumedToDate = Math.min(expectedToDate, allocatedTotalRaw);
+        const debtTillNow = Math.max(0, expectedToDate - paidConsumedToDate);
+        const remainingForYear = Math.max(0, fee - usedForFee);
+        const credit = Math.max(0, paid - fee);
+
+        return {
+          rows,
+          allocated: usedForFee,
+          paidTotal: paid,
+          remainingForYear,
+          credit,
+          debtTillNow,
+        };
       }
 
       // ---- installment configs (DISCOUNTS REMOVED) ----
@@ -604,7 +684,6 @@
         schedule.items = Array.isArray(schedule?.items) ? schedule.items : [];
         sortScheduleItems(schedule.items);
         const planDisplay = schedule.planName || student.paymentPlan || '';
-        const allocation = allocatePayments(schedule, student);
         const hasYearData = Boolean(student.hasYearData);
         const admissionForLookup = student.admissionNumber || studentId;
         const prevCarry = hasYearData ? await fetchPrevYearCarry(admissionForLookup) : 0;
@@ -615,19 +694,68 @@
           : Math.max(0, Number(student.feePerYear || 0) - dbCarry);
         const totalDueWithCarry = hasYearData ? inferredBaseFee + effectiveCarry : 0;
 
-        const totalsExpRaw = schedule.items.reduce((s, it) => s + it.amount, 0);
-        const totalsPaidRaw = schedule.items.reduce((s, it) => s + it.paidAllocated, 0);
-
-        const totalsExp = hasYearData ? totalsExpRaw : 0;
-        const totalsPaid = hasYearData ? totalsPaidRaw : 0;
-        const totalPaidAll = hasYearData ? allocation.totalPaid : 0;
-        const rem = hasYearData ? Math.max(0, totalsExp - totalsPaid) : 0;
-        const remainingWithCarry = hasYearData
-          ? Math.max(rem, totalDueWithCarry - totalPaidAll)
+        const summary = hasYearData ? await loadApprovedSummary(studentId, targetYearStr) : null;
+        const summaryFee = summary
+          ? Number(
+              summary.feeTotal ??
+              summary.fee ??
+              summary.totalDue ??
+              summary.total ??
+              summary.finance?.feePerYear ??
+              summary.baseFee ??
+              0
+            )
           : 0;
-        const debtValue = hasYearData ? allocation.debtTillNow : 0;
-        const debtWithCarry = hasYearData ? Math.max(0, debtValue + prevCarry) : 0;
-        const creditValue = hasYearData ? allocation.credit : 0;
+        const summaryPaid = summary
+          ? Number(
+              summary.paidTotal ??
+              summary.paid ??
+              summary.collected ??
+              summary.finance?.paidAmount ??
+              0
+            )
+          : 0;
+        const summaryBalanceRaw = summary
+          ? Number(
+              summary.balanceTotal ??
+              summary.balance ??
+              summary.outstanding ??
+              summary.finance?.balance ??
+              (summary.feeTotal != null && summary.paidTotal != null
+                ? Number(summary.feeTotal) - Number(summary.paidTotal)
+                : NaN) ??
+              0
+            )
+          : NaN;
+
+        const feeForYear = hasYearData
+          ? Math.max(0, summaryFee || totalDueWithCarry)
+          : 0;
+
+        const breakdown = hasYearData
+          ? buildBreakdownFromSummary(schedule.items, feeForYear, summaryPaid)
+          : { rows: [], allocated: 0, paidTotal: 0, remainingForYear: 0, credit: 0, debtTillNow: 0 };
+
+        if (summary && breakdown.paidTotal !== summaryPaid) {
+          console.warn('[Installment Breakdown] Mismatch between summary and computed totals', {
+            summaryPaid,
+            breakdownPaid: breakdown.paidTotal,
+            studentId,
+            year: targetYearStr,
+          });
+          breakdown.paidTotal = summaryPaid;
+        }
+
+        const totalsPaid = hasYearData ? breakdown.allocated : 0;
+        const totalPaidAll = hasYearData ? breakdown.paidTotal : 0;
+        const remainingWithCarry = hasYearData
+          ? (Number.isFinite(summaryBalanceRaw) && summaryBalanceRaw >= 0
+              ? Math.max(0, summaryBalanceRaw)
+              : breakdown.remainingForYear)
+          : 0;
+        const debtWithCarry = hasYearData ? breakdown.debtTillNow : 0;
+        const creditValue = hasYearData ? breakdown.credit : 0;
+        const totalFeeDisplay = hasYearData ? (feeForYear || totalDueWithCarry) : 0;
 
         const prevYearLabel = targetYear - 1;
         const carryParts = [];
@@ -637,26 +765,27 @@
           ? `<span class="mr-3">Carry Forward (${prevYearLabel}+): ${carryParts.join(' + ')}</span>`
           : '';
 
-        const rows = hasYearData && schedule.items.length
-          ? schedule.items.map(it => {
-              const remaining = Math.max(0, it.amount - it.paidAllocated);
-              const win = new Date(it.fromTS).toLocaleDateString() + ' - ' + new Date(it.toTS).toLocaleDateString();
-              const statusClass = it.status === 'Cleared'
+        const rows = hasYearData && breakdown.rows.length
+          ? breakdown.rows.map(r => {
+              const win = (r.fromTS && r.toTS)
+                ? `${new Date(r.fromTS).toLocaleDateString()} - ${new Date(r.toTS).toLocaleDateString()}`
+                : '';
+              const statusClass = r.status === 'Cleared'
                 ? 'status-cleared'
-                : (it.status.includes('Overdue') ? 'status-overdue' : 'status-partial');
+                : (String(r.status || '').includes('Overdue') ? 'status-overdue' : 'status-partial');
               return `
                 <tr>
-                  <td class="p-1 border text-center">${it.label}</td>
-                  <td class="p-1 border text-right">${fmt(it.amount)}</td>
-                  <td class="p-1 border text-right">${fmt(it.paidAllocated)}</td>
-                  <td class="p-1 border text-right">${fmt(remaining)}</td>
-                  <td class="p-1 border text-center"><span class="status-pill ${statusClass}">${it.status}</span></td>
+                  <td class="p-1 border text-center">${r.label}</td>
+                  <td class="p-1 border text-right">${fmt(r.expected)}</td>
+                  <td class="p-1 border text-right">${fmt(r.allocated)}</td>
+                  <td class="p-1 border text-right">${fmt(r.remaining)}</td>
+                  <td class="p-1 border text-center"><span class="status-pill ${statusClass}">${r.status}</span></td>
                   <td class="p-1 border text-center">${win}</td>
                 </tr>`;
             }).join('')
           : '';
 
-        const tableSection = hasYearData && schedule.items.length
+        const tableSection = hasYearData && breakdown.rows.length
           ? `
             <div class="overflow-auto border rounded">
               <table class="min-w-full text-xs">
@@ -702,7 +831,7 @@
                   data-base-fee="${inferredBaseFee}"
                   data-base-value="${inferredBaseFee}"
                   data-initial-carry="${effectiveCarry}"
-                >${fmt(totalDueWithCarry)}</strong>
+                >${fmt(totalFeeDisplay)}</strong>
               </span>
               <span data-cf-base-fee>Base: <strong>${fmt(inferredBaseFee)}</strong></span>
               <span data-cf-carry-slot>${carryTag || ''}</span>
@@ -717,7 +846,7 @@
                   data-base-value="${remainingWithCarry}"
                   data-initial-carry="${effectiveCarry}"
                   data-total-paid="${totalPaidAll}"
-                  data-rem-base="${rem}"
+                  data-rem-base="${remainingWithCarry}"
                 >${fmt(remainingWithCarry)}</strong>
               </span>
               <span data-cf-debt>Debt till now: <strong>${fmt(debtWithCarry)}</strong></span>
