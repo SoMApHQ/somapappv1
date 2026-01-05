@@ -389,6 +389,65 @@
   const registerBtn = document.getElementById('registerBtn');
   const cancelEditBtn = document.getElementById('cancelEditBtn');
   const modalTitle = document.getElementById('modalTitle');
+  /* =========================================================
+   JOIN APPROVAL → ADMISSION PREFILL HOOK
+   ========================================================= */
+(function preloadFromJoinApproval() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("from") !== "joinApproval") return;
+
+  const raw = sessionStorage.getItem("somap_pending_admission");
+  if (!raw) return;
+
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch (e) {
+    console.warn("Invalid join approval payload");
+    return;
+  }
+
+  const { student, parent, academicYear, referral, approvalKey } = payload;
+
+  // Open modal in CREATE mode
+  clearForm();
+  openModal();
+
+  /* ---- Student basic info ---- */
+  if (student) {
+    document.getElementById("firstName").value = student.firstName || "";
+    document.getElementById("lastName").value  = student.lastName || "";
+    document.getElementById("classLevel").value = student.classLevel || "";
+    document.getElementById("schoolName").value = student.schoolName || "";
+  }
+
+  /* ---- Academic year ---- */
+  if (academicYear) {
+    document.getElementById("academicYear").value = academicYear;
+  }
+
+  /* ---- Parent info ---- */
+  if (parent) {
+    document.getElementById("primaryParentName").value =
+      parent.name || "";
+    document.getElementById("primaryParentContact").value =
+      parent.phone || "";
+  }
+
+  /* ---- Admission number ---- */
+  document.getElementById("admissionNumber").value =
+    `AUTO-${Date.now()}`;
+
+  /* ---- Hidden referral + approval context ---- */
+  window.__SOMAP_REFERRAL__ = referral || null;
+  window.__SOMAP_APPROVAL_KEY__ = approvalKey || null;
+
+  // Trigger validation after prefill
+  checkFormValidity();
+
+  console.log("Admission prefilled from join approval", payload);
+})();
+
 
   // Debug: Check if elements are found
   if (!openModalBtn) console.error('openRegistrationModal button not found');
@@ -728,6 +787,78 @@
           studentData.medicalDocsUrl = await uploadMaybe("medicalDocsUpload", "medicalDocs", newKey, null);
           await newRef.set({ createdAt: firebase.database.ServerValue.TIMESTAMP, ...studentData });
           await syncFinanceAfterUpsert(newKey, studentData);
+          /* =========================================================
+   REFERRAL PERSISTENCE (FROM JOIN APPROVAL)
+   ========================================================= */
+if (window.__SOMAP_REFERRAL__?.code) {
+  try {
+    const refCode = window.__SOMAP_REFERRAL__.code;
+
+    // Resolve referral owner (parent)
+    const parentSnap = await schoolRef("parents")
+      .orderByChild("referralCode")
+      .equalTo(refCode)
+      .once("value");
+
+    if (parentSnap.exists()) {
+      const parentId = Object.keys(parentSnap.val())[0];
+      const parent = parentSnap.val()[parentId] || {};
+
+      const parentPhone =
+        String(parent.phone || parent.parentPhone || "")
+          .replace(/\D/g, "");
+
+      // 1️⃣ Store referral on student record
+      await schoolRef(`students/${newKey}/referral`).set({
+        code: refCode,
+        referredBy: {
+          parentId,
+          name: parent.name || null,
+          phone: parentPhone || null
+        },
+        source: "parent",
+        resolvedAt: Date.now()
+      });
+
+      // 2️⃣ Add student under parent referrals (parents.html expects this)
+      if (parentPhone) {
+        await schoolRef(`parentReferrals/${parentPhone}/${newKey}`).set({
+          studentName:
+            studentData.firstName + " " + studentData.lastName,
+          classLevel: studentData.classLevel,
+          academicYear: studentData.academicYear,
+          joinedAt: Date.now(),
+          source: "parent"
+        });
+      }
+    }
+  } catch (err) {
+    console.warn("Referral persistence failed:", err);
+  }
+}
+
+/* =========================================================
+   CLOSE JOIN APPROVAL LOOP (MARK ADMITTED)
+   ========================================================= */
+if (window.__SOMAP_APPROVAL_KEY__) {
+  try {
+    await schoolRef(
+      `joinApprovalsPending/${window.__SOMAP_APPROVAL_KEY__}`
+    ).update({
+      status: "admitted",
+      studentId: newKey,
+      admittedAt: Date.now()
+    });
+  } catch (err) {
+    console.warn("Failed to update join approval status:", err);
+  }
+
+  // Cleanup temporary context
+  sessionStorage.removeItem("somap_pending_admission");
+  window.__SOMAP_REFERRAL__ = null;
+  window.__SOMAP_APPROVAL_KEY__ = null;
+}
+
           // Bridge: if this student came from a joining application, mark it admitted and drop from queue
           if (window.JoiningService && window.currentJoiningAppToAdmit) {
             const { applicationId, year } = window.currentJoiningAppToAdmit;

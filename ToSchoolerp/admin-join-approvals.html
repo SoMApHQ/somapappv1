@@ -9,8 +9,10 @@
   <script src="https://cdn.tailwindcss.com"></script>
 
   <!-- Icons -->
-  <link rel="stylesheet"
-        href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"/>
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
+  />
 
   <!-- Firebase -->
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
@@ -77,21 +79,16 @@
       }[m]));
     }
 
-    function openDoc(url) {
-      window.open(url, "_blank");
-    }
-
     /* ---------------- Load Join Requests ---------------- */
     db.ref("joinApprovalsPending").on("value", snap => {
       const data = snap.val() || {};
       listEl.innerHTML = "";
 
-      const entries = Object.entries(data)
-        .filter(([_, r]) =>
-          r &&
-          r.approvalType === "JOIN_REQUEST" &&
-          r.status === "pending"
-        );
+      const entries = Object.entries(data).filter(([_, r]) =>
+        r &&
+        r.approvalType === "JOIN_REQUEST" &&
+        r.status === "pending"
+      );
 
       if (!entries.length) {
         listEl.innerHTML = `
@@ -106,7 +103,7 @@
         const student = r.studentSnapshot || {};
         const parent = r.parentSnapshot || {};
         const docs = r.documents || {};
-        const channel = r.source?.channel || "public";
+        const referral = r.referral || null;
 
         listEl.innerHTML += `
           <div class="card p-4">
@@ -124,21 +121,28 @@
                 <p class="text-sm text-slate-600">
                   Parent: ${esc(parent.name)} (${esc(parent.phone)})
                 </p>
-                <span class="inline-block mt-2 px-2 py-0.5 rounded text-xs
-                  ${channel === "parent-referral"
-                    ? "bg-indigo-100 text-indigo-700"
-                    : "bg-slate-200 text-slate-700"}">
-                  ${esc(channel)}
-                </span>
+
+                ${
+                  referral?.code
+                    ? `<p class="text-xs mt-1 text-indigo-600">
+                         <i class="fas fa-link mr-1"></i>
+                         Referred (Code: ${esc(referral.code)})
+                       </p>`
+                    : `<p class="text-xs mt-1 text-slate-400 italic">
+                         Direct / Public Join
+                       </p>`
+                }
               </div>
 
               <div class="flex gap-2">
-                <button class="px-3 py-1 text-sm rounded bg-green-600 text-white"
-                        onclick="approveRequest('${id}')">
+                <button
+                  class="px-3 py-1 text-sm rounded bg-green-600 text-white"
+                  onclick="approveRequest('${id}')">
                   Approve
                 </button>
-                <button class="px-3 py-1 text-sm rounded bg-red-600 text-white"
-                        onclick="rejectRequest('${id}')">
+                <button
+                  class="px-3 py-1 text-sm rounded bg-red-600 text-white"
+                  onclick="rejectRequest('${id}')">
                   Reject
                 </button>
               </div>
@@ -150,7 +154,7 @@
                 ${docs.passportPhotoUrl ? `<a href="${docs.passportPhotoUrl}" target="_blank" class="text-indigo-600 underline">Passport</a>` : ""}
                 ${docs.birthCertUrl ? `<a href="${docs.birthCertUrl}" target="_blank" class="text-indigo-600 underline">Birth Cert</a>` : ""}
                 ${docs.reportCardUrl ? `<a href="${docs.reportCardUrl}" target="_blank" class="text-indigo-600 underline">Report Card</a>` : ""}
-                ${docs.joiningLetterUrl ? `<a href="${docs.joiningLetterUrl}" target="_blank" class="text-indigo-600 underline">Joining Form</a>` : ""}
+                ${docs.joiningLetterUrl ? `<a href="${docs.joiningLetterUrl}" target="_blank" class="text-indigo-600 underline">Joining Letter</a>` : ""}
                 ${docs.medicalDocsUrl ? `<a href="${docs.medicalDocsUrl}" target="_blank" class="text-indigo-600 underline">Medical</a>` : ""}
               </div>
             </div>
@@ -160,22 +164,43 @@
     });
 
     /* ---------------- Actions ---------------- */
+
     async function approveRequest(id) {
-      const ok = await Swal.fire({
+      const confirm = await Swal.fire({
         title: "Approve join request?",
-        text: "This will allow admission of the student.",
+        text: "This will open the admission form with details pre-filled.",
         icon: "question",
         showCancelButton: true,
-        confirmButtonText: "Approve",
+        confirmButtonText: "Approve & Continue",
       });
-      if (!ok.isConfirmed) return;
 
+      if (!confirm.isConfirmed) return;
+
+      const snap = await db.ref(`joinApprovalsPending/${id}`).once("value");
+      if (!snap.exists()) return;
+
+      const r = snap.val();
+
+      // Store data temporarily for admission.html
+      sessionStorage.setItem(
+        "somap_pending_admission",
+        JSON.stringify({
+          approvalKey: id,
+          student: r.studentSnapshot,
+          parent: r.parentSnapshot,
+          academicYear: r.academicYear,
+          referral: r.referral || null
+        })
+      );
+
+      // Mark approved-for-admission
       await db.ref(`joinApprovalsPending/${id}`).update({
-        status: "approved",
+        status: "approved_for_admission",
         approvedAt: Date.now(),
       });
 
-      Swal.fire("Approved", "Request approved.", "success");
+      // Redirect to admission page
+      window.location.href = "admission.html?from=joinApproval";
     }
 
     async function rejectRequest(id) {
@@ -186,6 +211,7 @@
         showCancelButton: true,
         confirmButtonText: "Reject",
       });
+
       if (!ok.isConfirmed) return;
 
       await db.ref(`joinApprovalsPending/${id}`).update({
