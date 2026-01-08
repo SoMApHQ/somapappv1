@@ -36,7 +36,7 @@
   </div>
 
   <script type="module">
-    import { resolveEffectiveInstallments } from '../js/financeplans.js';
+    import { resolveEffectiveFinance, resolveEffectiveInstallments, getPlan } from '../js/financeplans.js';
     (function () {
       const SOMAP_DEFAULT_YEAR = 2025;
       const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
@@ -53,9 +53,12 @@
       // ---- Parent scope detection ----
       const q = new URL(location.href).searchParams;
       const isParentScope = (q.get('scope')||'').toLowerCase() === 'parent';
-      const targetYearNum = Number(q.get('year') || SOMAP_DEFAULT_YEAR);
+      const contextYearNum = Number(window.somapYearContext?.getSelectedYear?.());
+      const targetYearNum = Number(q.get('year') || (Number.isFinite(contextYearNum) ? contextYearNum : SOMAP_DEFAULT_YEAR));
       const targetYear = Number.isFinite(targetYearNum) ? targetYearNum : SOMAP_DEFAULT_YEAR;
       const targetYearStr = String(targetYear);
+      const anchorYear = Number.isFinite(targetYear) ? Math.max(SOMAP_DEFAULT_YEAR, targetYear - 1) : SOMAP_DEFAULT_YEAR;
+      const anchorYearStr = String(anchorYear);
       const CARRY_FORWARD_START_YEAR = 2025;
 
       const carryForwardCache = new Map();
@@ -865,7 +868,7 @@
       if (!studentId) { err('Error: No student ID provided in URL.'); return; }
       Promise.all([
         ref(`students/${studentId}`).once('value'),
-        ref(`enrollments/${SOMAP_DEFAULT_YEAR}/${studentId}`).once('value'),
+        ref(`enrollments/${anchorYearStr}/${studentId}`).once('value'),
         ref(`enrollments/${targetYearStr}/${studentId}`).once('value'),
         ref(`feesStructure/${targetYearStr}`).once('value'),
         ref(`studentOverrides/${targetYearStr}/${studentId}`).once('value'),
@@ -910,27 +913,43 @@
             }
           }
 
-          const baseClass =
-            anchor.className ||
-            anchor.classLevel ||
-            baseStudent.classLevel ||
-            baseStudent.class ||
-            enrollment.className ||
-            enrollment.classLevel ||
-            '';
-          const deltaYears = targetYear - SOMAP_DEFAULT_YEAR;
+          const enrollmentHasData = Object.keys(enrollment).length > 0;
+          const anchorHasData = Object.keys(anchor).length > 0;
+          const baseClass = enrollmentHasData
+            ? (enrollment.className || enrollment.classLevel || enrollment.class || '')
+            : (anchor.className || anchor.classLevel || anchor.class || baseStudent.classLevel || baseStudent.class || '');
+          const deltaYears = enrollmentHasData ? 0 : (targetYear - (anchorHasData ? anchorYear : targetYear));
           const classLevel = shiftClass(baseClass, deltaYears);
-          const classDefaults = classFees[classLevel] || classFees[baseClass] || {};
-          const resolvedPlanId = override.planId || classDefaults.defaultPlanId || null;
-          const resolvedPlan = resolvedPlanId ? plans[resolvedPlanId] : null;
 
+          let effectiveFinance = null;
+          try {
+            effectiveFinance = await resolveEffectiveFinance(studentId, classLevel, { year: targetYearStr, anchorClass: baseClass });
+          } catch (effErr) {
+            console.warn('resolveEffectiveFinance error', effErr?.message || effErr);
+          }
+
+          const classDefaults = effectiveFinance?.classCfg || classFees[classLevel] || classFees[baseClass] || {};
+          const resolvedPlanId = effectiveFinance?.planId || override.planId || classDefaults.defaultPlanId || null;
+          let resolvedPlan = null;
+          if (resolvedPlanId) {
+            try {
+              resolvedPlan = await getPlan(resolvedPlanId, { year: targetYearStr });
+            } catch (planErr) {
+              console.warn('Plan lookup failed', planErr?.message || planErr);
+            }
+            if (!resolvedPlan && plans[resolvedPlanId]) resolvedPlan = plans[resolvedPlanId];
+          }
+
+          const effectiveFeeValue = Number(effectiveFinance?.fee);
           const baseFeeCandidate =
-            override.feePerYear ??
-            classDefaults.feePerYear ??
-            baseStudent.feePerYear ??
-            baseStudent.feeDue ??
-            baseStudent.requiredFee ??
-            0;
+            (Number.isFinite(effectiveFeeValue) && effectiveFeeValue > 0)
+              ? effectiveFeeValue
+              : (override.feePerYear ??
+                classDefaults.feePerYear ??
+                baseStudent.feePerYear ??
+                baseStudent.feeDue ??
+                baseStudent.requiredFee ??
+                0);
           const baseFee = Math.max(0, Math.round(Number(baseFeeCandidate) || 0));
           const carryAmount = Math.max(0, Number(carry.amount ?? carry.balance ?? 0));
           const effectiveFee = Math.max(0, baseFee + carryAmount);
@@ -959,6 +978,8 @@
 
           const planName =
             (resolvedPlan && resolvedPlan.name) ||
+            effectiveFinance?.planOverride?.planName ||
+            effectiveFinance?.planOverride?.name ||
             override.planName ||
             override.paymentPlan ||
             enrollment.planName ||
@@ -966,6 +987,12 @@
             classDefaults.defaultPlan ||
             baseStudent.paymentPlan ||
             '6-instalments';
+
+          const effectiveOverride = {
+            ...override,
+            ...(effectiveFinance?.planOverride || {}),
+            ...(effectiveFinance?.feeOverride || {}),
+          };
 
           const prepared = {
             ...baseStudent,
@@ -982,13 +1009,13 @@
           };
 
           // Attach custom schedule or plan schedule for builder to use
-          if (Array.isArray(override.customSchedule) && override.customSchedule.length) {
-            prepared._customSchedule = override.customSchedule;
+          if (Array.isArray(effectiveOverride.customSchedule) && effectiveOverride.customSchedule.length) {
+            prepared._customSchedule = effectiveOverride.customSchedule;
           } else if (resolvedPlan && Array.isArray(resolvedPlan.schedule)) {
             prepared._planSchedule = resolvedPlan.schedule; // [{label, from, to, weight}]
           }
 
-          await render(prepared, classDefaults, override);
+          await render(prepared, classDefaults, effectiveOverride);
         })
         .catch(e => { console.error(e); err('Error loading student data.'); });
 
