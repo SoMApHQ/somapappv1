@@ -240,6 +240,17 @@
         box-sizing: border-box;
       }
     }
+    body.pdf-capture{
+      width: 210mm;
+      background:#fff;
+      color:#0f172a;
+    }
+    body.pdf-capture .receipt-sheet{
+      width: 190mm;
+      min-height: 277mm;
+      margin: 0 auto;
+      box-sizing: border-box;
+    }
   </style>
 
   <script>
@@ -1715,12 +1726,15 @@
       if (!state.activeApproval) return;
       const canvasEl = document.getElementById('receiptCanvas');
       if (!canvasEl) return;
+      document.body.classList.add('pdf-capture');
       const summaryScrollEl = canvasEl.querySelector('.summary-scroll');
       const summaryTableEl = canvasEl.querySelector('.summary-table');
       const originalSummaryOverflow = summaryScrollEl?.style.overflow;
       const originalSummaryMaxWidth = summaryScrollEl?.style.maxWidth;
       const originalSummaryWidth = summaryScrollEl?.style.width;
       const originalTableWidth = summaryTableEl?.style.width;
+      const originalCanvasWidth = canvasEl.style.width;
+      const originalCanvasMaxWidth = canvasEl.style.maxWidth;
       if (summaryScrollEl){
         summaryScrollEl.style.overflow = 'visible';
         summaryScrollEl.style.maxWidth = '100%';
@@ -1729,6 +1743,8 @@
       if (summaryTableEl){
         summaryTableEl.style.width = '100%';
       }
+      canvasEl.style.width = '210mm';
+      canvasEl.style.maxWidth = '210mm';
       const originalScroll = canvasEl.style.scrollBehavior;
       canvasEl.style.scrollBehavior = 'auto';
       const canvas = await html2canvas(canvasEl, {
@@ -1739,6 +1755,8 @@
         windowHeight: canvasEl.scrollHeight
       });
       canvasEl.style.scrollBehavior = originalScroll;
+      canvasEl.style.width = originalCanvasWidth || '';
+      canvasEl.style.maxWidth = originalCanvasMaxWidth || '';
       if (summaryScrollEl){
         summaryScrollEl.style.overflow = originalSummaryOverflow || '';
         summaryScrollEl.style.maxWidth = originalSummaryMaxWidth || '';
@@ -1747,20 +1765,31 @@
       if (summaryTableEl){
         summaryTableEl.style.width = originalTableWidth || '';
       }
+      document.body.classList.remove('pdf-capture');
       const imgData = canvas.toDataURL('image/png');
       const pdf = new jspdf.jsPDF('p','pt','a4');
       const margin = 12;
       const pageWidth = pdf.internal.pageSize.getWidth();
       const pageHeight = pdf.internal.pageSize.getHeight();
-      let imgWidth = pageWidth - margin * 2;
-      let imgHeight = canvas.height * (imgWidth / canvas.width);
-      if (imgHeight > pageHeight - margin * 2){
-        imgHeight = pageHeight - margin * 2;
-        imgWidth = canvas.width * (imgHeight / canvas.height);
+      const imgWidth = pageWidth - margin * 2;
+      const imgHeight = canvas.height * (imgWidth / canvas.width);
+      const pageContentHeight = pageHeight - margin * 2;
+      if (imgHeight <= pageContentHeight){
+        const offsetX = (pageWidth - imgWidth) / 2;
+        const offsetY = (pageHeight - imgHeight) / 2;
+        pdf.addImage(imgData,'PNG', offsetX, offsetY, imgWidth, imgHeight);
+      } else {
+        let remainingHeight = imgHeight;
+        let position = margin;
+        pdf.addImage(imgData, 'PNG', margin, position, imgWidth, imgHeight);
+        remainingHeight -= pageContentHeight;
+        while (remainingHeight > 0){
+          pdf.addPage();
+          position = margin - (imgHeight - remainingHeight);
+          pdf.addImage(imgData, 'PNG', margin, position, imgWidth, imgHeight);
+          remainingHeight -= pageContentHeight;
+        }
       }
-      const offsetX = (pageWidth - imgWidth) / 2;
-      const offsetY = (pageHeight - imgHeight) / 2;
-      pdf.addImage(imgData,'PNG', offsetX, offsetY, imgWidth, imgHeight);
       const receiptNo = formatReceiptNumber(state.activeApproval) || state.activeApproval.id || `receipt_${Date.now()}`;
       const safeReceipt = receiptNo.replace(/[^A-Za-z0-9_-]/g,'');
       const receiptYear = state.activeApproval?.receiptYear || state.year || SOMAP_DEFAULT_YEAR;
