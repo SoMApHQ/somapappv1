@@ -16,11 +16,17 @@ const listEl = document.getElementById("approvalsList");
 /* ---------------- State ---------------- */
 let allRequests = {};
 let currentTab = "pending";
+let searchTerm = "";
 
 /* ---------------- Tabs ---------------- */
-document.querySelectorAll(".tab-btn").forEach(btn => {
+document.getElementById("searchInput").addEventListener("input", (e) => {
+  searchTerm = e.target.value.toLowerCase().trim();
+  render();
+});
+
+document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn").forEach(b => {
+    document.querySelectorAll(".tab-btn").forEach((b) => {
       b.classList.remove("bg-indigo-600", "text-white");
       b.classList.add("bg-slate-200");
     });
@@ -31,7 +37,7 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
 });
 
 /* ---------------- Load Data ---------------- */
-db.ref("joinApprovalsPending").on("value", snap => {
+db.ref("joinApprovalsPending").on("value", (snap) => {
   allRequests = snap.val() || {};
   updateCounts();
   render();
@@ -41,11 +47,28 @@ db.ref("joinApprovalsPending").on("value", snap => {
 function render() {
   listEl.innerHTML = "";
 
-  const entries = Object.entries(allRequests).filter(([_, r]) =>
-    r &&
-    r.approvalType === "JOIN_REQUEST" &&
-    r.status === currentTab
-  );
+  const entries = Object.entries(allRequests).filter(([_, r]) => {
+    if (!r) return false;
+
+    // status + approval type check
+    if (
+      r.status !== currentTab ||
+      (r.approvalType && r.approvalType !== "JOIN_REQUEST")
+    )
+      return false;
+
+    // search by student name
+    if (searchTerm) {
+      const student = r.studentSnapshot || {};
+      const fullName = `${student.firstName || ""} ${
+        student.lastName || ""
+      }`.toLowerCase();
+
+      return fullName.includes(searchTerm);
+    }
+
+    return true;
+  });
 
   if (!entries.length) {
     listEl.innerHTML = `<p class="text-slate-500">No records.</p>`;
@@ -59,8 +82,13 @@ function render() {
 
 /* ---------------- Counts ---------------- */
 function updateCounts() {
-  const pending = Object.values(allRequests)
-    .filter(r => r?.status === "pending").length;
+  const pending = Object.values(allRequests).filter(
+    (r) =>
+      r &&
+      r.status === "pending" &&
+      (!r.approvalType || r.approvalType === "JOIN_REQUEST")
+  ).length;
+
   document.getElementById("count-pending").textContent = pending;
 }
 
@@ -80,17 +108,20 @@ async function approveRequest(id) {
 
   const r = snap.val();
 
-  sessionStorage.setItem("somap_pending_admission", JSON.stringify({
-    approvalKey: id,
-    student: r.studentSnapshot,
-    parent: r.parentSnapshot,
-    academicYear: r.academicYear,
-    referral: r.referral || null
-  }));
+  sessionStorage.setItem(
+    "somap_pending_admission",
+    JSON.stringify({
+      approvalKey: id,
+      student: r.studentSnapshot,
+      parent: r.parentSnapshot,
+      academicYear: r.academicYear,
+      referral: r.referral || null,
+    })
+  );
 
   await db.ref(`joinApprovalsPending/${id}`).update({
     status: "approved_for_admission",
-    approvedAt: Date.now()
+    approvedAt: Date.now(),
   });
 
   window.location.href = "admission.html?from=joinApproval";
@@ -109,7 +140,7 @@ async function rejectRequest(id) {
   await db.ref(`joinApprovalsPending/${id}`).update({
     status: "rejected",
     rejectionReason: ok.value || null,
-    rejectedAt: Date.now()
+    rejectedAt: Date.now(),
   });
 
   Swal.fire("Rejected", "Request rejected.", "success");
