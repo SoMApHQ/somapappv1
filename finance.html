@@ -143,7 +143,7 @@
     <!-- Expenses -->
     <div class="bg-white rounded shadow p-4 mt-6">
       <h2 class="text-lg font-semibold text-indigo-700 mb-3">Expenses</h2>
-      <form id="expenseForm" class="grid md:grid-cols-4 gap-3 mb-4">
+      <form id="expenseForm" class="grid md:grid-cols-5 gap-3 mb-4">
         <select id="expenseCategory" required class="p-2 border rounded">
           <option value="">Select Category</option>
           <option>FOOD</option>
@@ -169,6 +169,7 @@
         </select>
         <input id="expenseDescription" type="text" placeholder="Description" required class="p-2 border rounded">
         <input id="expenseAmount" type="number" min="1" placeholder="Amount" required class="p-2 border rounded">
+        <input id="expenseDate" type="date" required class="p-2 border rounded">
         <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded">Add Expense</button>
       </form>
       <div class="flex items-center gap-2 mb-3">
@@ -1464,22 +1465,30 @@ function buildFinanceStudents(
   async function loadExpenses(year = activeYear) {
     try {
       const targetYear = String(year || activeYear);
-      let snap = await schoolRef(`expenses/${targetYear}`).once('value');
-      let raw = snap.val();
-      if (!raw || (typeof raw === 'object' && !Object.keys(raw).length)) {
-        snap = await schoolRef('expenses').once('value');
-        raw = snap.val();
-      }
+      const snap = await schoolRef(`expenses/${targetYear}`).once('value');
+      const raw = snap.val() || {};
+      // Year-scoped only: do NOT fall back to unscoped /expenses, otherwise year switching shows wrong data.
+      const expenseValues = Array.isArray(raw) ? raw.filter(Boolean) : Object.values(raw || {});
       expenseTableBody.innerHTML = '';
       let total = 0;
-      Object.values(raw || {}).forEach(exp => {
+      if (!expenseValues.length) {
+        expenseTableBody.innerHTML = `
+          <tr>
+            <td colspan="4" class="p-2 border text-center text-slate-500">No expenses for ${targetYear} yet.</td>
+          </tr>
+        `;
+      }
+      expenseValues.forEach(exp => {
         total += Number(exp.amount) || 0;
+        const dateLabel = exp.timestamp
+          ? new Date(exp.timestamp).toLocaleDateString()
+          : (exp.date || '');
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td class="p-2 border">${exp.category || ''}</td>
           <td class="p-2 border">${exp.description || ''}</td>
           <td class="p-2 border text-right">${fmt(exp.amount)}</td>
-          <td class="p-2 border">${exp.timestamp ? new Date(exp.timestamp).toLocaleDateString() : ''}</td>
+          <td class="p-2 border">${dateLabel}</td>
         `;
         expenseTableBody.appendChild(tr);
       });
@@ -1501,6 +1510,35 @@ function buildFinanceStudents(
       console.error('Error loading expenses:', err);
       alert('Error loading expenses: ' + err.message);
     }
+  }
+
+  if (expenseForm) {
+    expenseForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const category = (document.getElementById('expenseCategory')?.value || '').trim();
+      const description = (document.getElementById('expenseDescription')?.value || '').trim();
+      const amount = Number(document.getElementById('expenseAmount')?.value || 0);
+      const date = (document.getElementById('expenseDate')?.value || '').trim();
+
+      if (!category || !description || !amount || !date) {
+        alert('Fill all fields');
+        return;
+      }
+
+      const year = String(activeYear || yearContext?.getSelectedYear?.() || new Date().getFullYear());
+      const timestamp = new Date(`${date}T00:00:00`).getTime();
+      await schoolRef(`expenses/${year}`).push({
+        category,
+        description,
+        amount,
+        date,
+        timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
+        createdAt: Date.now(),
+      });
+
+      expenseForm.reset();
+      await loadExpenses(year);
+    });
   }
 
   async function refreshFinanceData(year = activeYear) {
