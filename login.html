@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SoMAp — Login</title>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+
+  <!-- reCAPTCHA -->
+  <script src="https://www.google.com/recaptcha/api.js" async defer></script>
+
+  <!-- SweetAlert -->
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+</head>
+
+<body class="min-h-screen bg-gradient-to-br from-blue-500 to-purple-600 flex flex-col">
+
+  <!-- HEADER -->
+  <header class="bg-white shadow sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+      <span class="font-bold text-indigo-600">SoMAp</span>
+      <select id="langSelect" class="border rounded px-2 py-1 text-sm">
+        <option value="en">English</option>
+        <option value="sw">Swahili</option>
+      </select>
+    </div>
+  </header>
+
+  <!-- MAIN -->
+  <main class="flex-1 flex items-center justify-center px-4 py-10">
+    <div class="w-full max-w-xl space-y-6">
+
+      <!-- STAFF -->
+      <section class="bg-white rounded-xl shadow p-6">
+        <h2 class="text-xl font-bold text-center mb-4" data-i18n="staffTitle">
+          Staff Login
+        </h2>
+
+        <div class="g-recaptcha mb-4"
+          data-sitekey="6LekDsorAAAAAOkhrg-3PKJCHEpBN1HYQQzca83x"></div>
+
+        <button id="googleLogin"
+          class="w-full flex items-center justify-center gap-3 px-4 py-3 bg-gray-100 rounded-lg font-semibold">
+          <img src="https://developers.google.com/identity/images/g-logo.png" class="h-5">
+          <span data-i18n="googleBtn">Sign in with Google</span>
+        </button>
+      </section>
+
+      <!-- PARENT -->
+      <section class="bg-white rounded-xl shadow p-6">
+        <h2 class="text-xl font-bold text-center mb-4" data-i18n="parentTitle">
+          Parent Login
+        </h2>
+
+        <form id="parentForm" class="space-y-3">
+          <input id="childNames" required class="w-full border rounded px-3 py-2"
+            data-i18n-placeholder="childNames">
+          <input id="parentPhone" required class="w-full border rounded px-3 py-2"
+            data-i18n-placeholder="parentPhone">
+          <button class="w-full bg-green-600 text-white py-2 rounded font-semibold"
+            data-i18n="parentBtn">
+            Login as Parent
+          </button>
+        </form>
+
+        <p id="parentError" class="hidden text-red-600 text-sm mt-2 text-center"></p>
+      </section>
+
+      <!-- WORKER -->
+      <section class="bg-white rounded-xl shadow p-6">
+        <h2 class="text-xl font-bold text-center mb-4" data-i18n="workerTitle">
+          Worker Login
+        </h2>
+
+        <form id="workerForm" class="space-y-3">
+          <input id="workerName" required class="w-full border rounded px-3 py-2"
+            data-i18n-placeholder="workerName">
+          <input id="workerPhone" required class="w-full border rounded px-3 py-2"
+            data-i18n-placeholder="workerPhone">
+          <button class="w-full bg-indigo-600 text-white py-2 rounded font-semibold"
+            data-i18n="workerBtn">
+            Login as Worker
+          </button>
+        </form>
+
+        <p id="workerError" class="hidden text-red-600 text-sm mt-2 text-center"></p>
+      </section>
+
+    </div>
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="bg-gray-900 text-gray-300 text-center py-4">
+    © <span id="year"></span> SoMAp
+  </footer>
+
+<script>
+/* =================== CORE =================== */
+document.getElementById("year").textContent = new Date().getFullYear();
+
+/* MULTISCHOOL */
+window.SOMAP = {
+  getActiveSchool() {
+    return localStorage.getItem("somap.school") || "default";
+  },
+  setActiveSchool(id) {
+    localStorage.setItem("somap.school", id);
+  },
+  P(path) {
+    const s = this.getActiveSchool();
+    return (!s || s === "default") ? path : `schools/${s}/${path}`;
+  }
+};
+const params = new URLSearchParams(location.search);
+if (params.get("s")) SOMAP.setActiveSchool(params.get("s"));
+
+/* FIREBASE */
+firebase.initializeApp({
+  apiKey: "AIzaSyBhONntRE_aRsU0y1YcPZzWud3CBfwH_a8",
+  authDomain: "somaptestt.firebaseapp.com",
+  databaseURL: "https://somaptestt-default-rtdb.firebaseio.com",
+  projectId: "somaptestt"
+});
+const auth = firebase.auth();
+const db = firebase.database();
+
+/* HELPERS */
+function normalizePhone(phone) {
+  if (!phone) return "";
+  phone = phone.trim().replace(/[\s-()]/g, "");
+  if (/^0\d{9}$/.test(phone)) return "+255" + phone.slice(1);
+  if (phone.startsWith("+")) return phone;
+  if (/^255\d{9}$/.test(phone)) return "+" + phone;
+  return phone;
+}
+
+function namesMatch(studentData, input) {
+  const parts = input.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
+  if (parts.length < 2) return false;
+
+  for (const st of Object.values(studentData)) {
+    const full = `${st.firstName||""} ${st.middleName||""} ${st.lastName||""}`.toLowerCase();
+    let hits = 0;
+    parts.forEach(p => { if (full.includes(p)) hits++; });
+    if (hits >= 2) return true;
+  }
+  return false;
+}
+
+/* STAFF */
+googleLogin.onclick = async () => {
+  if (!grecaptcha.getResponse()) {
+    Swal.fire("Verify", "Complete CAPTCHA", "warning");
+    return;
+  }
+  await auth.signInWithPopup(new firebase.auth.GoogleAuthProvider());
+};
+
+/* AUTH STATE (DEVICE AUTO LOGIN RESTORED) */
+auth.onAuthStateChanged(async (user) => {
+  if (user?.uid) {
+    const dev = await db.ref(`devices/${user.uid}/workerId`).once("value");
+    if (dev.exists()) {
+      localStorage.setItem("role", "worker");
+      localStorage.setItem("workerId", dev.val());
+      sessionStorage.setItem("workerDashboardActive", "true");
+      location.href = "workershtml/workersdashboard.html";
+      return;
+    }
+  }
+
+  if (!user?.email) return;
+  const key = user.email.replace(/\./g, "_");
+  const snap = await db.ref(SOMAP.P("users/" + key)).once("value");
+  const role = snap.val()?.role;
+
+  if (role === "admin") location.href = "dashboard.html";
+  else if (role === "teacher") location.href = "staff.html";
+  else if (role === "accountant") location.href = "mhasibu.html";
+});
+
+/* PARENT LOGIN (FULL OLD LOGIC) */
+parentForm.onsubmit = async (e) => {
+  e.preventDefault();
+  const namesInput = childNames.value.trim().toLowerCase();
+  const normalizedPhone = normalizePhone(parentPhone.value);
+  const names = namesInput.split(/\s+/).filter(Boolean);
+  parentError.classList.add("hidden");
+
+  const snap = await db.ref(SOMAP.P("students")).once("value");
+  let found = null;
+
+  snap.forEach(s => {
+    const st = s.val();
+    const full = `${st.firstName||""} ${st.middleName||""} ${st.lastName||""}`.toLowerCase();
+    const normalizedDbPhone = normalizePhone(
+      st.parentPhone || st.parentContact || ""
+    );
+    if (names.every(n => full.includes(n)) && normalizedDbPhone === normalizedPhone) {
+      found = s.key;
+    }
+  });
+
+  if (found) {
+    localStorage.setItem("role", "parent");
+    localStorage.setItem("studentKey", found);
+    location.href = "parent.html";
+    return;
+  }
+
+  const year = new Date().getFullYear();
+  const pre = await db.ref(`/schools/Socrates School Preform one/${year}/students`)
+    .orderByChild("parentContact")
+    .equalTo(normalizedPhone)
+    .once("value");
+
+  if (pre.exists() && namesMatch(pre.val(), namesInput)) {
+    localStorage.setItem("role", "parent");
+    localStorage.setItem("preformParent", "true");
+    localStorage.setItem("studentKey", Object.keys(pre.val())[0]);
+    Swal.fire("Welcome", "Preform One Access", "success");
+    setTimeout(() => location.href = "preformonehtml/prefoneparent.html", 900);
+    return;
+  }
+
+  parentError.textContent = "No matching student found";
+  parentError.classList.remove("hidden");
+};
+
+/* WORKER */
+workerForm.onsubmit = async (e) => {
+  e.preventDefault();
+  const name = workerName.value.trim().toUpperCase();
+  const phone = workerPhone.value.trim();
+  workerError.classList.add("hidden");
+
+  const snap = await db.ref(SOMAP.P("workers")).once("value");
+  let found = null;
+
+  snap.forEach(w => {
+    const p = w.val().profile || {};
+    if (p.fullNameUpper === name && p.phone === phone) found = w.key;
+  });
+
+  if (!found) {
+    workerError.textContent = "Worker not found";
+    workerError.classList.remove("hidden");
+    return;
+  }
+
+  localStorage.setItem("role", "worker");
+  localStorage.setItem("workerId", found);
+  location.href = "workershtml/workersdashboard.html";
+};
+
+/* QUICK PARENT TOAST */
+(function(){
+  if (localStorage.getItem("role") !== "parent") return;
+  if (!localStorage.getItem("studentKey")) return;
+  const t = document.createElement("div");
+  t.style.cssText =
+    "position:fixed;right:12px;bottom:12px;background:#111;color:#fff;padding:10px 14px;border-radius:10px;z-index:9999;font-size:13px";
+  t.innerHTML =
+    `Signed in as parent — <a href="parent.html" style="color:#60a5fa">Open dashboard</a>`;
+  document.body.appendChild(t);
+  setTimeout(()=>t.remove(),7000);
+})();
+</script>
+
+<script>
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/service-worker.js");
+}
+</script>
+
+</body>
+</html>
