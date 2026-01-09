@@ -31,15 +31,22 @@ const TEMPLATE_BY_ROLE = {
 };
 
 /**
- * Calculate salary breakdown: 1/3 as "other", 2/3 as "salary"
- * NSSF applies only to "salary" portion
+ * Calculate salary breakdown.
+ * - If passed a number, splits 2/3 salary + 1/3 other.
+ * - If passed terms, uses roleSalary + responsibilityAllowance.
+ * NSSF applies only to role salary.
  */
-export function calculateSalaryBreakdown(baseSalary) {
-  const base = Number(baseSalary) || 0;
-  const other = Math.round(base / 3);
-  const salary = base - other;
-  const nssfEmployee = Math.round(salary * 0.10);
-  const nssfEmployer = Math.round(salary * 0.10);
+export function calculateSalaryBreakdown(baseSalaryOrTerms) {
+  const isTerms = baseSalaryOrTerms && typeof baseSalaryOrTerms === 'object';
+  const roleSalary = isTerms ? Number(baseSalaryOrTerms.roleSalary || 0) : 0;
+  const allowance = isTerms ? Number(baseSalaryOrTerms.responsibilityAllowance || 0) : 0;
+  const base = isTerms ? roleSalary + allowance : Number(baseSalaryOrTerms) || 0;
+  const other = isTerms ? allowance : Math.round(base / 3);
+  const salary = isTerms ? roleSalary : base - other;
+  const nssfEmployeePercent = isTerms ? Number(baseSalaryOrTerms.nssfEmployeePercent ?? 0.10) : 0.10;
+  const nssfEmployerPercent = isTerms ? Number(baseSalaryOrTerms.nssfEmployerPercent ?? 0.10) : 0.10;
+  const nssfEmployee = Math.round(salary * nssfEmployeePercent);
+  const nssfEmployer = Math.round(salary * nssfEmployerPercent);
   const nssfTotal = nssfEmployee + nssfEmployer;
   const netSalary = salary - nssfEmployee + other;
   
@@ -495,8 +502,25 @@ function roleLabel(role) {
   return labels[(role || '').toLowerCase()] || role || 'Worker';
 }
 
-export function buildContractHtml(profile, { language, signatureUrl = '' }) {
-  const breakdown = calculateSalaryBreakdown(profile.baseSalary || 0);
+function buildSpecialAgreementHtml(agreement, language) {
+  if (!agreement || !agreement.text) return '';
+  const lang = agreement.lang === 'sw' ? 'sw' : 'en';
+  const heading = lang === 'sw'
+    ? 'Makubaliano Maalum'
+    : 'Special Agreement';
+  const note = lang !== language
+    ? (lang === 'sw' ? '(Kiswahili)' : '(English)')
+    : '';
+  return `
+<div style="margin: 24px 0; padding: 16px; border: 1px solid #e2e8f0; border-radius: 10px; background: rgba(79, 70, 229, 0.05);">
+  <h3 style="margin: 0 0 8px; font-size: 13pt; color: #4f46e5;">${heading} ${note}</h3>
+  <p style="margin: 0; white-space: pre-wrap;">${agreement.text}</p>
+</div>`;
+}
+
+export function buildContractHtml(profile, { language, signatureUrl = '', terms = null, specialAgreement = null } = {}) {
+  const hasTerms = terms && (Number(terms.roleSalary) || Number(terms.responsibilityAllowance));
+  const breakdown = calculateSalaryBreakdown(hasTerms ? terms : (profile.baseSalary || 0));
   const role = (profile.role || '').toLowerCase();
   
   const templateData = {
@@ -507,14 +531,17 @@ export function buildContractHtml(profile, { language, signatureUrl = '' }) {
     signatureUrl
   };
   
+  const agreementHtml = buildSpecialAgreementHtml(specialAgreement, language);
   // Try to get full contract template
   const customTemplate = getContractTemplate(role, language);
   if (customTemplate) {
-    return typeof customTemplate === 'function' ? customTemplate(templateData) : customTemplate;
+    const html = typeof customTemplate === 'function' ? customTemplate(templateData) : customTemplate;
+    return agreementHtml ? `${html}${agreementHtml}` : html;
   }
   
   // Fallback to simple template
-  return buildSimpleContractHtml(templateData, language);
+  const simpleHtml = buildSimpleContractHtml(templateData, language);
+  return agreementHtml ? `${simpleHtml}${agreementHtml}` : simpleHtml;
 }
 
 function buildSimpleContractHtml({ fullName, roleLabel, baseSalary, salary, other, nssfEmployee, nssfEmployer, nssfTotal, netSalary, signatureUrl }, language) {
