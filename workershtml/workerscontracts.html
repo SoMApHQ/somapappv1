@@ -634,8 +634,20 @@
     return `schools/${state.schoolId}/years/${state.year}`;
   }
 
+  function isLegacySchool() {
+    return state.schoolId === 'socrates-school' || state.schoolId === 'default';
+  }
+
+  function legacyYearRoot() {
+    return `years/${state.year}`;
+  }
+
   function workerRef() {
     return db.ref(`${yearRoot()}/workers/${state.workerId}`);
+  }
+
+  function legacyWorkerRef() {
+    return db.ref(`${legacyYearRoot()}/workers/${state.workerId}`);
   }
 
   function contractRef() {
@@ -643,10 +655,11 @@
   }
 
   async function loadData() {
-    const [workerSnap, contractSnap] = await Promise.all([
-      workerRef().once('value'),
-      contractRef().once('value')
-    ]);
+    let workerSnap = await workerRef().once('value');
+    if (!workerSnap.exists() && isLegacySchool()) {
+      workerSnap = await legacyWorkerRef().once('value');
+    }
+    const contractSnap = await contractRef().once('value');
 
     const workerData = workerSnap.val() || {};
     state.profile = workerData.profile || {};
@@ -676,6 +689,11 @@
     document.getElementById('statPhone').textContent = profile.phone || '-';
 
     const statusLabel = document.getElementById('statusLabel');
+    const hasProfile = Boolean(profile.fullNameUpper || profile.firstName || profile.lastName);
+    if (!hasProfile) {
+      statusLabel.innerHTML = '<span class="status-badge status-pending">Profile missing for this year</span>';
+      return;
+    }
     const status = state.signing?.status || 'draft';
     const labelMap = {
       approved: 'Approved',
@@ -729,7 +747,13 @@
   }
 
   function renderContract() {
-    const html = buildContractHtml(state.profile || {}, {
+    const profile = state.profile || {};
+    const hasProfile = Boolean(profile.fullNameUpper || profile.firstName || profile.lastName);
+    if (!hasProfile) {
+      document.getElementById('contractViewer').innerHTML = '<p style="text-align: center; color: var(--gray);">No worker profile found for this year.</p>';
+      return;
+    }
+    const html = buildContractHtml(profile, {
       language: state.selectedLanguage,
       signatureUrl: state.signing?.signatureUrl || '',
       terms: state.terms || {},
