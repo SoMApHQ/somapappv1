@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mkataba | Contract</title>
   <link rel="stylesheet" href="../css/workers.css">
-  <script src="../somapappv1multischool/js/context.js"></script>
+  <script type="module" src="../somapappv1multischool/js/context.js"></script>
   <script src="../Todashboardhtml/yearContext.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
@@ -571,6 +571,14 @@
 
   const db = firebase.database();
   const storage = firebase.storage();
+  const school = SOMAP.getSchool();
+  if (!school || !school.id) {
+    window.location.href = '../somapappv1multischool/multischool.html';
+    throw new Error('No school selected for multi-school context');
+  }
+  const schoolRef = (path) => db.ref(SOMAP.P(path));
+  const LEGACY_WORKERS_YEAR = '2025';
+  const legacyFriendly = school.id === 'socrates-school' || school.id === 'default';
 
   const schoolNameEl = document.getElementById('schoolNameDisplay');
   const yearSelectEl = document.getElementById('yearSelect');
@@ -608,11 +616,6 @@
   }
 
   function initSchoolContext() {
-    const school = (window.SOMAP && SOMAP.getSchool && SOMAP.getSchool()) || null;
-    if (!school || !school.id) {
-      window.location.href = '../somapappv1multischool/multischool.html';
-      throw new Error('No school selected for multi-school context');
-    }
     state.schoolId = school.id;
     state.schoolName = school.name || school.id;
     if (schoolNameEl) schoolNameEl.textContent = state.schoolName;
@@ -631,53 +634,61 @@
   }
 
   function yearRoot() {
-    return `schools/${state.schoolId}/years/${state.year}`;
-  }
-
-  function isLegacySchool() {
-    return state.schoolId === 'socrates-school' || state.schoolId === 'default';
-  }
-
-  function legacyYearRoot() {
     return `years/${state.year}`;
   }
 
   function workerRef() {
-    return db.ref(`${yearRoot()}/workers/${state.workerId}`);
-  }
-
-  function legacyWorkerRef() {
-    return db.ref(`${legacyYearRoot()}/workers/${state.workerId}`);
-  }
-
-  function legacyRootWorkerRef() {
-    return db.ref(`workers/${state.workerId}`);
+    return schoolRef(`${yearRoot()}/workers/${state.workerId}`);
   }
 
   function contractRef() {
-    return db.ref(`${yearRoot()}/workersContracts/${state.workerId}`);
+    return schoolRef(`${yearRoot()}/workersContracts/${state.workerId}`);
+  }
+
+  async function scopedOrSocratesLegacyYear(scopedSubPath, legacyPath, legacyYear) {
+    const scopedSnap = await schoolRef(scopedSubPath).once('value');
+    if (scopedSnap.exists()) return scopedSnap;
+    if (legacyFriendly && String(somapYearContext.getSelectedYear()) === String(legacyYear)) {
+      const legacySnap = await db.ref(legacyPath).once('value');
+      if (legacySnap.exists()) return legacySnap;
+    }
+    return scopedSnap;
+  }
+
+  function injectSpecialAgreementClause(html, agreement) {
+    if (!agreement || !agreement.text) return html;
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+    const positionHeading = headings.find(h => /position/i.test(h.textContent || ''));
+    if (!positionHeading) return html;
+    const clause = doc.createElement('p');
+    const label = doc.createElement('strong');
+    label.textContent = '2.1 Special Agreement:';
+    clause.appendChild(label);
+    clause.appendChild(doc.createTextNode(` ${agreement.text}`));
+    const afterEl = positionHeading.nextElementSibling;
+    if (afterEl && afterEl.tagName.toLowerCase() === 'p') {
+      afterEl.after(clause);
+    } else {
+      positionHeading.after(clause);
+    }
+    return doc.body.innerHTML;
   }
 
   async function loadData() {
-    let workerSnap = await workerRef().once('value');
-    if (!workerSnap.exists() && isLegacySchool()) {
-      workerSnap = await legacyWorkerRef().once('value');
-    }
-    if (!workerSnap.exists() && isLegacySchool()) {
-      workerSnap = await legacyRootWorkerRef().once('value');
-    }
+    const workerSnap = await scopedOrSocratesLegacyYear(
+      `${yearRoot()}/workers/${state.workerId}`,
+      `workers/${state.workerId}`,
+      LEGACY_WORKERS_YEAR
+    );
     const contractSnap = await contractRef().once('value');
 
     const workerData = workerSnap.val() || {};
-    if (isLegacySchool() && state.year !== '2025' && (!workerData.profile || !workerData.profile.fullNameUpper)) {
-      const yearCtx = window.somapYearContext || null;
-      yearCtx?.setSelectedYear?.('2025', { manual: false, forceDispatch: true });
-      return;
-    }
     state.profile = workerData.profile || {};
 
     const contractData = contractSnap.val() || {};
-    state.terms = contractData.terms || {};
+    state.terms = workerData.contract?.terms || {};
     state.signing = contractData.signing || {};
 
     state.selectedLanguage = defaultContractLanguage(state.profile.role);
@@ -769,9 +780,10 @@
       language: state.selectedLanguage,
       signatureUrl: state.signing?.signatureUrl || '',
       terms: state.terms || {},
-      specialAgreement: state.terms?.specialAgreement || null
+      specialAgreement: null
     });
-    document.getElementById('contractViewer').innerHTML = html;
+    const withClause = injectSpecialAgreementClause(html, state.terms?.specialAgreement || null);
+    document.getElementById('contractViewer').innerHTML = withClause;
     syncLanguageButtons();
   }
 
