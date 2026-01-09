@@ -281,9 +281,11 @@
   const carrySelectedBtn = $('carrySelectedBtn');
   let workersData = [];
   let carryCandidates = [];
+  let legacyWorkerIdSet = new Set();
   let currentEditingWorkerId = '';
   let currentEditingDocs = {};
   let skipResetHandler = false;
+  let isSaving = false;
   let currentYear = (window.somapYearContext && somapYearContext.getSelectedYear && somapYearContext.getSelectedYear()) || String(new Date().getFullYear());
   let currentWorkersSource = 'scoped';
   let legacyWorkersYear = '';
@@ -419,8 +421,6 @@
       const tr = document.createElement('tr');
       tr.dataset.workerId = worker.id;
       tr.dataset.source = worker.source || 'scoped';
-      const isLegacy = worker.source === 'legacy';
-      const deleteAttrs = isLegacy ? 'disabled title="Data ya Socrates (legacy) ni read-only"' : '';
       tr.innerHTML = `
         <td class="photo-cell">${photoHtml}</td>
         <td>${getDisplayName(profile)}</td>
@@ -430,7 +430,7 @@
         <td>${statusText}</td>
         <td class="actions-cell">
           <button type="button" class="workers-btn secondary" data-action="edit" data-worker-id="${worker.id}">Edit</button>
-          <button type="button" class="workers-btn secondary" data-action="delete" data-worker-id="${worker.id}" ${deleteAttrs}>Delete</button>
+          <button type="button" class="workers-btn secondary" data-action="delete" data-worker-id="${worker.id}">Delete</button>
         </td>`;
       tb.appendChild(tr);
     });
@@ -473,13 +473,19 @@
     if (focusField) focusField.focus();
   }
 
-  async function deleteWorker(workerId){
-    if (currentWorkersSource === 'legacy'){
-      alert('Data ya Socrates (legacy) ni ya kusoma tu. Tafadhali hifadhi tena kwenye mwaka uliochaguliwa ili urekebishe.');
-      return;
-    }
+  async function deleteWorker(worker){
+    const workerId = worker?.id;
+    if (!workerId) return;
     try{
-      await schoolRef(`years/${currentYear}/workers/${workerId}`).remove();
+      if (worker.source === 'legacy'){
+        await schoolRef(`years/${currentYear}/workersLegacyDeletes/${workerId}`).set(true);
+        await schoolRef(`years/${currentYear}/workers/${workerId}`).remove();
+      }else{
+        await schoolRef(`years/${currentYear}/workers/${workerId}`).remove();
+        if (legacyWorkerIdSet.has(workerId)){
+          await schoolRef(`years/${currentYear}/workersLegacyDeletes/${workerId}`).set(true);
+        }
+      }
       if (currentEditingWorkerId === workerId){
         currentEditingWorkerId = '';
         currentEditingDocs = {};
@@ -507,7 +513,7 @@
     if (btn.dataset.action==='delete'){
       if (!confirm('Una hakika unataka kufuta mfanyakazi huyu?')) return;
       currentWorkersSource = worker.source || 'scoped';
-      await deleteWorker(workerId);
+      await deleteWorker(worker);
     }
   });
 
@@ -596,17 +602,52 @@
   async function loadWorkers(){
     try{
       currentWorkersSource = 'scoped';
-      const { snap, source } = await scopedOrSocratesLegacy(`years/${currentYear}/workers`, 'workers');
+      legacyWorkerIdSet = new Set();
       const rows = [];
-      (snap && snap.forEach) && snap.forEach(ch=>{
-        const v = ch.val()||{};
-        rows.push({
-          id: ch.key,
-          profile: v.profile||{},
-          docs: v.docs||{},
-          source
+      if (legacyFriendlyId && currentYear === legacyWorkersYear){
+        const [scopedSnap, legacySnap, legacyDeleteSnap] = await Promise.all([
+          schoolRef(`years/${currentYear}/workers`).get(),
+          db.ref('workers').get(),
+          schoolRef(`years/${currentYear}/workersLegacyDeletes`).get()
+        ]);
+        const legacyDeletes = new Set();
+        legacyDeleteSnap.forEach(ch=>legacyDeletes.add(ch.key));
+        const scopedMap = new Map();
+        scopedSnap.forEach(ch=>{
+          const v = ch.val()||{};
+          scopedMap.set(ch.key, {
+            id: ch.key,
+            profile: v.profile||{},
+            docs: v.docs||{},
+            source: 'scoped'
+          });
         });
-      });
+        legacySnap.forEach(ch=>{
+          const legacyId = ch.key;
+          if (legacyDeletes.has(legacyId)) return;
+          legacyWorkerIdSet.add(legacyId);
+          if (scopedMap.has(legacyId)) return;
+          const v = ch.val()||{};
+          rows.push({
+            id: legacyId,
+            profile: v.profile||{},
+            docs: v.docs||{},
+            source: 'legacy'
+          });
+        });
+        scopedMap.forEach(worker=>rows.push(worker));
+      }else{
+        const scopedSnap = await schoolRef(`years/${currentYear}/workers`).get();
+        scopedSnap.forEach(ch=>{
+          const v = ch.val()||{};
+          rows.push({
+            id: ch.key,
+            profile: v.profile||{},
+            docs: v.docs||{},
+            source: 'scoped'
+          });
+        });
+      }
       rows.sort((a,b)=>{
         const nameA = (a.profile?.fullNameUpper||'').toUpperCase();
         const nameB = (b.profile?.fullNameUpper||'').toUpperCase();
@@ -749,10 +790,11 @@
     const phoneKey = normalizePhoneValue(phone);
     const docKey = normalizeDocValue(nidaOrPassport);
     if (!phoneKey && !docKey) return null;
-    const snap = await schoolRef(`years/${currentYear}/workers`).get();
-    if (!snap.exists()) return null;
     let duplicate = null;
-    snap.forEach(ch=>{
+    const scopedSnap = await schoolRef(`years/${currentYear}/workers`).get();
+    const scopedIds = new Set();
+    scopedSnap.forEach(ch=>{
+      scopedIds.add(ch.key);
       if (duplicate) return;
       if (ch.key === workerId) return;
       const profile = ch.val()?.profile || {};
@@ -762,6 +804,27 @@
         duplicate = { id: ch.key, profile };
       }
     });
+    if (duplicate) return duplicate;
+    if (legacyFriendlyId && currentYear === legacyWorkersYear){
+      const [legacySnap, legacyDeleteSnap] = await Promise.all([
+        db.ref('workers').get(),
+        schoolRef(`years/${currentYear}/workersLegacyDeletes`).get()
+      ]);
+      const legacyDeletes = new Set();
+      legacyDeleteSnap.forEach(ch=>legacyDeletes.add(ch.key));
+      legacySnap.forEach(ch=>{
+        if (duplicate) return;
+        if (ch.key === workerId) return;
+        if (legacyDeletes.has(ch.key)) return;
+        if (scopedIds.has(ch.key)) return;
+        const profile = ch.val()?.profile || {};
+        const existingPhone = normalizePhoneValue(profile.phone);
+        const existingDoc = normalizeDocValue(profile.nidaOrPassport);
+        if ((phoneKey && existingPhone && phoneKey === existingPhone) || (docKey && existingDoc && docKey === existingDoc)){
+          duplicate = { id: ch.key, profile };
+        }
+      });
+    }
     return duplicate;
   }
 
@@ -779,6 +842,9 @@
 
   formEl.addEventListener('submit', async (e)=>{
     e.preventDefault();
+    if (isSaving) return;
+    isSaving = true;
+    try{
     const fd = new FormData(e.currentTarget);
 
     const firstName = (fd.get('firstName')||'').trim();
@@ -875,6 +941,9 @@
     }catch(err){
       console.error(err);
       alert('Imeshindikana kuhifadhi. Angalia Cloudinary preset / intaneti / RTDB path.');
+    }
+    }finally{
+      isSaving = false;
     }
   });
 
