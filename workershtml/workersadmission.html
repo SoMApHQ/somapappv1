@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+ï»¿<!DOCTYPE html>
 <html lang="sw">
 <head>
   <meta charset="UTF-8" />
@@ -44,6 +44,11 @@
     .school-year{margin:0;color:#4b5563;font-size:.95rem}
     .year-selector label{display:grid;gap:6px;font-weight:600}
     .year-selector select{min-width:140px}
+    .carry-list{display:grid;gap:8px;max-height:260px;overflow:auto;border:1px solid #e5e7eb;border-radius:10px;padding:10px;background:#f9fafb}
+    .carry-item{display:flex;gap:10px;align-items:flex-start;background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:8px}
+    .carry-item__meta{display:grid;gap:2px}
+    .carry-item__name{font-weight:600;color:#111827}
+    .carry-item__meta small{color:#6b7280}
   </style>
 </head>
 <body>
@@ -65,7 +70,7 @@
     </div>
     <h1>Usajili wa Mfanyakazi Mpya</h1>
     <p class="workers-card__subtitle">
-      Jaza kila sehemu ? weka picha mbili (ID & Passport) ? bonyeza “Hifadhi Mfanyakazi”.
+      Jaza kila sehemu - weka picha mbili (ID & Passport) - bonyeza "Hifadhi Mfanyakazi".
     </p>
   </header>
 
@@ -181,6 +186,22 @@
     <p id="saveStatus" class="workers-form-status" aria-live="polite"></p>
   </form>
 
+  <section id="carryWorkersSection" class="workers-card" style="display:none;">
+    <header class="workers-card__header">
+      <h2>Hamisha Wafanyakazi</h2>
+      <p class="workers-card__subtitle">Hamisha kutoka mwaka wa <span id="carryFromYear"></span> kwenda <span id="carryToYear"></span> ikiwa mwaka huu uko tupu.</p>
+    </header>
+    <div class="workers-card__content">
+      <p id="carryWorkersNotice" class="workers-card__subtitle"></p>
+      <div class="workers-card__actions">
+        <button type="button" class="workers-btn" id="carryAllBtn">Nakili Wote</button>
+        <button type="button" class="workers-btn secondary" id="carrySelectedBtn">Nakili Walioteuliwa</button>
+      </div>
+      <div id="carryWorkersList" class="carry-list"></div>
+      <p id="carryWorkersStatus" class="workers-form-status" aria-live="polite"></p>
+    </div>
+  </section>
+
   <section>
     <h2 class="workers-section-title">Wafanyakazi Walio Sajiliwa</h2>
     <p id="workerCount" class="workers-section-count" aria-live="polite"></p>
@@ -250,17 +271,33 @@
   const statusEl = document.getElementById('saveStatus');
   const workerTableContainer = $('workerTable');
   const workerCountEl = $('workerCount');
+  const carrySectionEl = $('carryWorkersSection');
+  const carryFromYearEl = $('carryFromYear');
+  const carryToYearEl = $('carryToYear');
+  const carryNoticeEl = $('carryWorkersNotice');
+  const carryListEl = $('carryWorkersList');
+  const carryStatusEl = $('carryWorkersStatus');
+  const carryAllBtn = $('carryAllBtn');
+  const carrySelectedBtn = $('carrySelectedBtn');
   let workersData = [];
+  let carryCandidates = [];
   let currentEditingWorkerId = '';
   let currentEditingDocs = {};
   let skipResetHandler = false;
   let currentYear = (window.somapYearContext && somapYearContext.getSelectedYear && somapYearContext.getSelectedYear()) || String(new Date().getFullYear());
   let currentWorkersSource = 'scoped';
+  let legacyWorkersYear = '';
 
   function setStatus(message='', isError=false){
     if (!statusEl) return;
     statusEl.textContent = message;
     statusEl.classList.toggle('error', isError);
+  }
+
+  function setCarryStatus(message='', isError=false){
+    if (!carryStatusEl) return;
+    carryStatusEl.textContent = message;
+    carryStatusEl.classList.toggle('error', isError);
   }
 
   function setField(name, value){
@@ -284,6 +321,8 @@
   renderRoleDocs();
 
   function isTZWorkerPhone(p){ return /^\+2550\d{9}$/.test(String(p||'').trim()); }
+  function normalizePhoneValue(p){ return String(p||'').replace(/\s+/g,'').trim(); }
+  function normalizeDocValue(p){ return String(p||'').replace(/\s+/g,'').trim().toUpperCase(); }
   function normalizeThreeNames(s){
     const t = String(s||'').replace(/\s+/g,' ').trim().toUpperCase().split(' ');
     if (t.length!==3) throw new Error('Majina lazima yawe MATATU (mf. JOHN DOE JUNIOR)');
@@ -308,6 +347,7 @@
 
   function updateYearUI(){
     if (yearDisplayEl) yearDisplayEl.textContent = `Mwaka wa masomo: ${currentYear}`;
+    if (carryToYearEl) carryToYearEl.textContent = currentYear;
   }
 
   function attachYearSelector(){
@@ -526,7 +566,7 @@
   async function scopedOrSocratesLegacy(scopedSubPath, legacyPath){
     const scopedSnap = await schoolRef(scopedSubPath).get();
     if (scopedSnap.exists()) return { snap: scopedSnap, source:'scoped' };
-    if (legacyFriendlyId){
+    if (legacyFriendlyId && currentYear === legacyWorkersYear){
       const legacySnap = await db.ref(legacyPath).get();
       if (legacySnap.exists()) return { snap: legacySnap, source:'legacy' };
     }
@@ -574,11 +614,155 @@
       });
       workersData = rows;
       renderWorkersTable(rows);
+      refreshCarryWorkersUI();
     }catch(e){
       console.error('Load workers error:', e);
       workersData = [];
       renderWorkersTable([]);
+      refreshCarryWorkersUI();
     }
+  }
+
+  function getLegacyWorkersYear(){
+    const key = 'somap_workers_legacy_year';
+    const systemYear = new Date().getFullYear();
+    const defaultYear = String(systemYear - 1);
+    let stored = localStorage.getItem(key);
+    if (!stored || Number(stored) >= systemYear){
+      localStorage.setItem(key, defaultYear);
+      stored = defaultYear;
+    }
+    return stored;
+  }
+
+  async function refreshCarryWorkersUI(){
+    if (!carrySectionEl) return;
+    const previousYear = String(Number(currentYear) - 1);
+    if (carryFromYearEl) carryFromYearEl.textContent = previousYear;
+    if (carryToYearEl) carryToYearEl.textContent = currentYear;
+    carryCandidates = [];
+    setCarryStatus('');
+
+    try{
+      const targetSnap = await schoolRef(`years/${currentYear}/workers`).get();
+      const targetEmpty = !targetSnap.exists();
+      if (!targetEmpty){
+        carrySectionEl.style.display = 'none';
+        return;
+      }
+      const prevSnap = await schoolRef(`years/${previousYear}/workers`).get();
+      if (!prevSnap.exists()){
+        carrySectionEl.style.display = 'block';
+        carryNoticeEl.textContent = `Hakuna wafanyakazi wa mwaka ${previousYear} wa kuhamisha.`;
+        carryListEl.innerHTML = '';
+        return;
+      }
+      const rows = [];
+      prevSnap.forEach(ch=>{
+        const v = ch.val()||{};
+        rows.push({
+          id: ch.key,
+          profile: v.profile||{},
+          docs: v.docs||{},
+          contract: v.contract||{}
+        });
+      });
+      rows.sort((a,b)=>{
+        const nameA = (a.profile?.fullNameUpper||'').toUpperCase();
+        const nameB = (b.profile?.fullNameUpper||'').toUpperCase();
+        return nameA.localeCompare(nameB,'sw-TZ');
+      });
+      carryCandidates = rows;
+      carrySectionEl.style.display = 'block';
+      carryNoticeEl.textContent = `Chagua wafanyakazi wa mwaka ${previousYear} au nakili wote.`;
+      carryListEl.innerHTML = '';
+      rows.forEach(worker=>{
+        const wrapper = document.createElement('label');
+        wrapper.className = 'carry-item';
+        wrapper.innerHTML = `
+          <input type="checkbox" data-worker-id="${worker.id}">
+          <span class="carry-item__meta">
+            <span class="carry-item__name">${getDisplayName(worker.profile)}</span>
+            <small>${worker.profile?.role || ''} - ${worker.profile?.phone || ''} - ${worker.profile?.nidaOrPassport || ''}</small>
+          </span>`;
+        carryListEl.appendChild(wrapper);
+      });
+    }catch(err){
+      console.error('Carry UI load failed', err);
+      carrySectionEl.style.display = 'none';
+    }
+  }
+
+  async function copyWorkersToCurrentYear({ selectedOnly }){
+    if (!carryCandidates.length) return alert('Hakuna wafanyakazi wa kuhamisha.');
+    setCarryStatus('Inanakili...', false);
+    try{
+      const targetSnap = await schoolRef(`years/${currentYear}/workers`).get();
+      if (targetSnap.exists()){
+        setCarryStatus('Mwaka huu tayari una wafanyakazi. Haiwezi kuhamisha.', true);
+        return;
+      }
+      const selectedIds = selectedOnly
+        ? Array.from(carryListEl.querySelectorAll('input[type="checkbox"]:checked')).map(el=>el.dataset.workerId)
+        : carryCandidates.map(w=>w.id);
+      if (!selectedIds.length) return alert('Chagua angalau mfanyakazi mmoja.');
+      const selectedSet = new Set(selectedIds);
+      const previousYear = String(Number(currentYear) - 1);
+      const updates = {};
+      const seenPhones = new Set();
+      const seenDocs = new Set();
+      carryCandidates.forEach(worker=>{
+        if (!selectedSet.has(worker.id)) return;
+        const phoneKey = normalizePhoneValue(worker.profile?.phone);
+        const docKey = normalizeDocValue(worker.profile?.nidaOrPassport);
+        if ((phoneKey && seenPhones.has(phoneKey)) || (docKey && seenDocs.has(docKey))){
+          return;
+        }
+        if (phoneKey) seenPhones.add(phoneKey);
+        if (docKey) seenDocs.add(docKey);
+        updates[worker.id] = {
+          profile: worker.profile||{},
+          docs: worker.docs||{},
+          contract: worker.contract||{},
+          carriedFromYear: previousYear,
+          carriedAt: Date.now()
+        };
+      });
+      if (!Object.keys(updates).length){
+        setCarryStatus('Hakuna wafanyakazi wa kuhamisha baada ya kuondoa marudio.', true);
+        return;
+      }
+      await schoolRef(`years/${currentYear}/workers`).update(updates);
+      setCarryStatus('Imekamilika kuhamisha.', false);
+      loadWorkers();
+      refreshCarryWorkersUI();
+    }catch(err){
+      console.error('Copy workers failed', err);
+      setCarryStatus('Imeshindikana kuhamisha. Jaribu tena.', true);
+    }
+  }
+
+  if (carryAllBtn) carryAllBtn.addEventListener('click', ()=>copyWorkersToCurrentYear({ selectedOnly:false }));
+  if (carrySelectedBtn) carrySelectedBtn.addEventListener('click', ()=>copyWorkersToCurrentYear({ selectedOnly:true }));
+
+  async function findDuplicateWorkerInYear(workerId, phone, nidaOrPassport){
+    const phoneKey = normalizePhoneValue(phone);
+    const docKey = normalizeDocValue(nidaOrPassport);
+    if (!phoneKey && !docKey) return null;
+    const snap = await schoolRef(`years/${currentYear}/workers`).get();
+    if (!snap.exists()) return null;
+    let duplicate = null;
+    snap.forEach(ch=>{
+      if (duplicate) return;
+      if (ch.key === workerId) return;
+      const profile = ch.val()?.profile || {};
+      const existingPhone = normalizePhoneValue(profile.phone);
+      const existingDoc = normalizeDocValue(profile.nidaOrPassport);
+      if ((phoneKey && existingPhone && phoneKey === existingPhone) || (docKey && existingDoc && docKey === existingDoc)){
+        duplicate = { id: ch.key, profile };
+      }
+    });
+    return duplicate;
   }
 
   formEl.addEventListener('reset', ()=>{
@@ -613,6 +797,11 @@
     const isEditing = Boolean(currentEditingWorkerId);
     const workerId = isEditing ? currentEditingWorkerId : schoolRef(`years/${currentYear}/workers`).push().key;
     const baseHint = `w_${workerId}_${Date.now()}`;
+    const duplicate = await findDuplicateWorkerInYear(workerId, phone, fd.get('nidaOrPassport'));
+    if (duplicate){
+      const dupName = getDisplayName(duplicate.profile);
+      return alert(`Mfanyakazi tayari yupo kwa mwaka huu. Mfano: ${dupName}`);
+    }
 
     const idPhoto = fd.get('idPhoto');
     const passportPhoto = fd.get('passportPhoto');
@@ -690,6 +879,7 @@
   });
 
   loadSchoolLogo();
+  legacyWorkersYear = getLegacyWorkersYear();
   runRolloverIfNeeded(currentYear).catch(err=>console.error('Rollover error', err));
   loadWorkers();
 </script>
