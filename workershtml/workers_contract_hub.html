@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Workers Contract Hub | Headteacher</title>
   <link rel="stylesheet" href="../css/workers.css">
-  <script src="../somapappv1multischool/js/context.js"></script>
+  <script type="module" src="../somapappv1multischool/js/context.js"></script>
   <script src="../Todashboardhtml/yearContext.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
@@ -201,7 +201,7 @@
           <textarea id="specialAgreement" placeholder="Add any special agreement text..."></textarea>
         </div>
         <div class="actions">
-          <button class="workers-btn" id="saveTermsBtn">Save Terms</button>
+          <button class="workers-btn" id="saveTermsBtn" type="button">Save Terms</button>
           <button class="workers-btn secondary" id="generateDraftBtn">Generate Draft PDF</button>
           <button class="workers-btn secondary" id="approveBtn" disabled>Approve Signed PDF</button>
         </div>
@@ -214,10 +214,18 @@
   <script type="module">
     import { defaultContractLanguage, buildContractHtml } from './modules/workers_contracts.js';
     import { ensureHtml2Pdf } from './modules/workers_ui.js';
-    import { toast } from './modules/workers_helpers.js';
+    import { toast, ensureAnonymousAuth } from './modules/workers_helpers.js';
 
     const db = firebase.database();
     const storage = firebase.storage();
+    const school = SOMAP.getSchool();
+    if (!school || !school.id) {
+      window.location.href = '../somapappv1multischool/multischool.html';
+      throw new Error('No school selected for multi-school context');
+    }
+    const schoolRef = (path) => db.ref(SOMAP.P(path));
+    const LEGACY_WORKERS_YEAR = '2025';
+    const legacyFriendly = school.id === 'socrates-school' || school.id === 'default';
 
     const schoolNameEl = document.getElementById('schoolNameDisplay');
     const yearSelectEl = document.getElementById('yearSelect');
@@ -251,15 +259,13 @@
       initSchoolContext();
       initYearContext();
       attachListeners();
+      ensureAnonymousAuth().catch(err => {
+        console.warn('Anonymous auth failed', err);
+      });
       loadWorkers();
     }
 
     function initSchoolContext() {
-      const school = (window.SOMAP && SOMAP.getSchool && SOMAP.getSchool()) || null;
-      if (!school || !school.id) {
-        window.location.href = '../somapappv1multischool/multischool.html';
-        throw new Error('No school selected for multi-school context');
-      }
       state.schoolId = school.id;
       state.schoolName = school.name || school.id;
       if (schoolNameEl) schoolNameEl.textContent = state.schoolName;
@@ -273,8 +279,7 @@
       yearCtx?.attachYearDropdown?.(yearSelectEl);
       yearCtx?.onYearChanged?.((yr) => {
         state.year = String(yr);
-        resetSelection();
-        loadWorkers();
+        reloadWorkersAndClearForm();
       });
     }
 
@@ -294,43 +299,55 @@
       approveBtn.addEventListener('click', approveSignedPdf);
     }
 
-    function yearRoot() {
-      return `schools/${state.schoolId}/years/${state.year}`;
+    function workersRef(year) {
+      return schoolRef(`years/${year}/workers`);
     }
 
-    function isLegacySchool() {
-      return state.schoolId === 'socrates-school' || state.schoolId === 'default';
+    function contractRef(workerId, year) {
+      return schoolRef(`years/${year}/workersContracts/${workerId}`);
     }
 
-    function legacyYearRoot() {
-      return `years/${state.year}`;
+    function workerContractTermsRef(workerId, year) {
+      return schoolRef(`years/${year}/workers/${workerId}/contract/terms`);
     }
 
-    function workersRef() {
-      return db.ref(`${yearRoot()}/workers`);
+    async function scopedOrSocratesLegacyYear(scopedSubPath, legacyPath, legacyYear) {
+      const scopedSnap = await schoolRef(scopedSubPath).once('value');
+      if (scopedSnap.exists()) return scopedSnap;
+      if (legacyFriendly && String(somapYearContext.getSelectedYear()) === String(legacyYear)) {
+        const legacySnap = await db.ref(legacyPath).once('value');
+        if (legacySnap.exists()) return legacySnap;
+      }
+      return scopedSnap;
     }
 
-    function legacyWorkersRef() {
-      return db.ref(`${legacyYearRoot()}/workers`);
-    }
-
-    function legacyRootWorkersRef() {
-      return db.ref('workers');
-    }
-
-    function contractRef(workerId) {
-      return db.ref(`${yearRoot()}/workersContracts/${workerId}`);
+    function workerHasProfile(data) {
+      const profile = data?.profile || {};
+      return Boolean(profile.fullNameUpper || profile.firstName || profile.lastName);
     }
 
     async function loadWorkers() {
       try {
         workerSelectEl.innerHTML = '<option value="">-- Choose worker --</option>';
-        let snap = await workersRef().once('value');
-        if (!snap.exists() && isLegacySchool()) {
-          snap = await legacyWorkersRef().once('value');
-        }
-        if (!snap.exists() && isLegacySchool()) {
-          snap = await legacyRootWorkersRef().once('value');
+        const year = state.year;
+        let snap = await scopedOrSocratesLegacyYear(
+          `years/${year}/workers`,
+          'workers',
+          LEGACY_WORKERS_YEAR
+        );
+        if (legacyFriendly && String(year) === LEGACY_WORKERS_YEAR) {
+          let hasProfile = false;
+          snap.forEach(child => {
+            if (workerHasProfile(child.val())) {
+              hasProfile = true;
+            }
+          });
+          if (!hasProfile) {
+            const legacySnap = await db.ref('workers').once('value');
+            if (legacySnap.exists()) {
+              snap = legacySnap;
+            }
+          }
         }
         const rows = [];
         snap.forEach(child => {
@@ -361,13 +378,38 @@
       }
     }
 
+    function injectSpecialAgreementClause(html, agreement) {
+      if (!agreement || !agreement.text) return html;
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+      const positionHeading = headings.find(h => /position/i.test(h.textContent || ''));
+      if (!positionHeading) return html;
+      const clause = doc.createElement('p');
+      const label = doc.createElement('strong');
+      label.textContent = '2.1 Special Agreement:';
+      clause.appendChild(label);
+      clause.appendChild(doc.createTextNode(` ${agreement.text}`));
+      const afterEl = positionHeading.nextElementSibling;
+      if (afterEl && afterEl.tagName.toLowerCase() === 'p') {
+        afterEl.after(clause);
+      } else {
+        positionHeading.after(clause);
+      }
+      return doc.body.innerHTML;
+    }
+
     async function loadContractData() {
       if (!state.selectedWorkerId) return;
       try {
-        const snap = await contractRef(state.selectedWorkerId).once('value');
-        const data = snap.val() || {};
-        state.terms = data.terms || {};
-        state.signing = data.signing || {};
+        const year = state.year;
+        const [termsSnap, signingSnap] = await Promise.all([
+          workerContractTermsRef(state.selectedWorkerId, year).once('value'),
+          contractRef(state.selectedWorkerId, year).once('value')
+        ]);
+        state.terms = termsSnap.val() || {};
+        const signingData = signingSnap.val() || {};
+        state.signing = signingData.signing || {};
         populateWorkerMeta();
         populateForm();
         refreshStatus();
@@ -448,9 +490,15 @@
       }
       const payload = collectTermsPayload();
       try {
-        await contractRef(state.selectedWorkerId).child('terms').set(payload);
+        const profile = state.selectedWorker?.profile || {};
+        const totalSalary = Number(profile.baseSalary || 0);
+        const expectedTotal = Number(payload.roleSalary || 0) + Number(payload.responsibilityAllowance || 0);
+        if (totalSalary && expectedTotal !== totalSalary) {
+          toast('Warning: Role + allowance does not match total salary.', 'warning');
+        }
+        await workerContractTermsRef(state.selectedWorkerId, state.year).set(payload);
         state.terms = payload;
-        toast('Terms saved.', 'success');
+        toast('Saved successfully.', 'success');
         return payload;
       } catch (err) {
         console.error('Save terms error:', err);
@@ -473,14 +521,15 @@
           language,
           signatureUrl: '',
           terms: payload,
-          specialAgreement: payload.specialAgreement || null
+          specialAgreement: null
         });
+        const contractHtml = injectSpecialAgreementClause(html, payload.specialAgreement || null);
 
         await ensureHtml2Pdf();
         const wrapper = document.createElement('div');
         wrapper.style.position = 'fixed';
         wrapper.style.top = '-9999px';
-        wrapper.innerHTML = html;
+        wrapper.innerHTML = contractHtml;
         document.body.appendChild(wrapper);
 
         const pdfBlob = await window.html2pdf().set({
@@ -497,7 +546,7 @@
         await storageRef.put(pdfBlob, { contentType: 'application/pdf' });
         const url = await storageRef.getDownloadURL();
 
-        await contractRef(state.selectedWorkerId).child('signing').update({
+        await contractRef(state.selectedWorkerId, state.year).child('signing').update({
           draftPdfUrl: url,
           status: 'draft'
         });
@@ -519,7 +568,7 @@
       }
       const actor = localStorage.getItem('workerId') || firebase.auth().currentUser?.uid || '';
       try {
-        await contractRef(state.selectedWorkerId).child('signing').update({
+        await contractRef(state.selectedWorkerId, state.year).child('signing').update({
           status: 'approved',
           approvedAt: Date.now(),
           approvedBy: actor
@@ -548,6 +597,11 @@
       linkRowEl.innerHTML = '';
       approveBtn.disabled = true;
       statusEl.textContent = 'Select a worker to manage contracts.';
+    }
+
+    function reloadWorkersAndClearForm() {
+      resetSelection();
+      loadWorkers();
     }
   </script>
 </body>
