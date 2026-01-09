@@ -235,7 +235,7 @@
     chooseStatus.textContent = `School selected: ${schoolId}. Redirecting to login...`;
     
     setTimeout(() => {
-      window.location.href = '../login.html?login=1';
+      window.location.href = '/login.html?login=1';
     }, 900);
   }
 
