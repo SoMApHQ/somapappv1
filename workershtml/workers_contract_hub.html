@@ -321,15 +321,34 @@
       return scopedSnap;
     }
 
+    function workerHasProfile(data) {
+      const profile = data?.profile || {};
+      return Boolean(profile.fullNameUpper || profile.firstName || profile.lastName);
+    }
+
     async function loadWorkers() {
       try {
         workerSelectEl.innerHTML = '<option value="">-- Choose worker --</option>';
         const year = state.year;
-        const snap = await scopedOrSocratesLegacyYear(
+        let snap = await scopedOrSocratesLegacyYear(
           `years/${year}/workers`,
           'workers',
           LEGACY_WORKERS_YEAR
         );
+        if (legacyFriendly && String(year) === LEGACY_WORKERS_YEAR) {
+          let hasProfile = false;
+          snap.forEach(child => {
+            if (workerHasProfile(child.val())) {
+              hasProfile = true;
+            }
+          });
+          if (!hasProfile) {
+            const legacySnap = await db.ref('workers').once('value');
+            if (legacySnap.exists()) {
+              snap = legacySnap;
+            }
+          }
+        }
         const rows = [];
         snap.forEach(child => {
           const data = child.val() || {};
@@ -357,6 +376,27 @@
         console.error('Load workers error:', err);
         toast('Failed to load workers.', 'error');
       }
+    }
+
+    function injectSpecialAgreementClause(html, agreement) {
+      if (!agreement || !agreement.text) return html;
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+      const positionHeading = headings.find(h => /position/i.test(h.textContent || ''));
+      if (!positionHeading) return html;
+      const clause = doc.createElement('p');
+      const label = doc.createElement('strong');
+      label.textContent = '2.1 Special Agreement:';
+      clause.appendChild(label);
+      clause.appendChild(doc.createTextNode(` ${agreement.text}`));
+      const afterEl = positionHeading.nextElementSibling;
+      if (afterEl && afterEl.tagName.toLowerCase() === 'p') {
+        afterEl.after(clause);
+      } else {
+        positionHeading.after(clause);
+      }
+      return doc.body.innerHTML;
     }
 
     async function loadContractData() {
@@ -481,14 +521,15 @@
           language,
           signatureUrl: '',
           terms: payload,
-          specialAgreement: payload.specialAgreement || null
+          specialAgreement: null
         });
+        const contractHtml = injectSpecialAgreementClause(html, payload.specialAgreement || null);
 
         await ensureHtml2Pdf();
         const wrapper = document.createElement('div');
         wrapper.style.position = 'fixed';
         wrapper.style.top = '-9999px';
-        wrapper.innerHTML = html;
+        wrapper.innerHTML = contractHtml;
         document.body.appendChild(wrapper);
 
         const pdfBlob = await window.html2pdf().set({
