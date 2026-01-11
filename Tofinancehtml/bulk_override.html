@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Bulk Fee Override · SoMAp</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+
+  <!-- Excel -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body { background:#020617; color:#f8fafc; font-family:Inter,system-ui; }
+    .card { background:rgba(15,23,42,.85); border:1px solid rgba(148,163,184,.25); }
+  </style>
+</head>
+
+<body class="p-6">
+
+<!-- ACCESS GUARD -->
+<script>
+(() => {
+  if (localStorage.getItem('role') !== 'admin') {
+    alert('Admins only');
+    location.href = '../dashboard.html';
+  }
+})();
+</script>
+
+<h1 class="text-2xl font-bold mb-2">Bulk Fee Override</h1>
+<p class="text-slate-400 mb-6">
+  Upload Excel → Preview → Confirm → Save (Safe mode)
+</p>
+
+<div class="card rounded-xl p-6 max-w-3xl">
+  <div class="grid md:grid-cols-2 gap-4 mb-4">
+
+    <div>
+      <label class="block text-sm mb-1">Academic Year</label>
+      <select id="yearSelect" class="w-full rounded p-2 text-black">
+        <option>2025</option>
+        <option>2026</option>
+      </select>
+    </div>
+
+    <div>
+      <label class="block text-sm mb-1">Upload Excel (.xlsx)</label>
+      <input type="file" id="excelFile" accept=".xlsx"
+        class="block w-full text-sm text-slate-300
+        file:mr-4 file:py-2 file:px-4 file:rounded
+        file:border-0 file:bg-sky-600 file:text-white hover:file:bg-sky-700">
+    </div>
+
+  </div>
+
+  <div class="text-sm text-slate-400">
+    Required columns: <b>class</b>, <b>feeType</b>, <b>amount</b>
+  </div>
+</div>
+
+<!-- PREVIEW -->
+<div id="previewBox" class="mt-8 hidden">
+  <h2 class="text-xl font-semibold mb-3">Preview (Nothing saved yet)</h2>
+  <div id="previewList" class="space-y-2"></div>
+</div>
+
+<!-- CONFIRM -->
+<div id="confirmSection" class="mt-6 hidden">
+  <label class="flex items-center gap-2 mb-3">
+    <input type="checkbox" id="confirmCheck" />
+    <span class="text-sm text-slate-300">
+      I confirm these overrides are correct
+    </span>
+  </label>
+
+  <button id="confirmSaveBtn" disabled
+    class="px-6 py-2 rounded bg-emerald-600 font-semibold
+           opacity-50 cursor-not-allowed">
+    Confirm & Save Overrides
+  </button>
+</div>
+
+<script>
+/* ---------- FIREBASE INIT ---------- */
+if (!firebase.apps.length) {
+  firebase.initializeApp({
+    apiKey: "AIzaSyBhONntRE_aRsU0y1YcPZzWud3CBfwH_a8",
+    databaseURL: "https://somaptestt-default-rtdb.firebaseio.com"
+  });
+}
+
+const auth = firebase.auth();
+const db = firebase.database();
+
+/* ---------- SCHOOL CONTEXT ---------- */
+const schoolId =
+  (window.SOMAP && SOMAP.getSchoolId && SOMAP.getSchoolId()) ||
+  localStorage.getItem('somap.currentSchoolId');
+
+if (!schoolId) {
+  alert('School context missing');
+  location.href = '../dashboard.html';
+}
+
+/* ---------- EXCEL PARSE ---------- */
+let excelOverrides = [];
+
+document.getElementById('excelFile').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = evt => {
+    const data = new Uint8Array(evt.target.result);
+    const wb = XLSX.read(data, { type: 'array' });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+    if (!rows.length) {
+      alert('Empty Excel');
+      return;
+    }
+
+    const required = ['class','feeType','amount'];
+    const missing = required.filter(c => !(c in rows[0]));
+    if (missing.length) {
+      alert('Missing columns: ' + missing.join(', '));
+      return;
+    }
+
+    excelOverrides = rows
+      .map((r,i)=>({
+        row:i+2,
+        className:String(r.class).trim(),
+        feeType:String(r.feeType).toLowerCase().trim(),
+        amount:Number(r.amount)
+      }))
+      .filter(r => r.className && r.feeType && r.amount > 0);
+
+    renderPreview();
+  };
+
+  reader.readAsArrayBuffer(file);
+});
+
+/* ---------- PREVIEW ---------- */
+function renderPreview() {
+  const box = document.getElementById('previewBox');
+  const list = document.getElementById('previewList');
+  list.innerHTML = '';
+
+  if (!excelOverrides.length) {
+    list.innerHTML = '<div class="text-red-400">No valid rows</div>';
+    box.classList.remove('hidden');
+    return;
+  }
+
+  excelOverrides.forEach(o => {
+    const div = document.createElement('div');
+    div.className = 'p-3 rounded bg-slate-800 border border-slate-600';
+    div.innerHTML = `
+      <b>${o.className}</b>
+      <div class="text-sm text-slate-300">
+        ${o.feeType.toUpperCase()} → TSh ${o.amount.toLocaleString()}
+      </div>`;
+    list.appendChild(div);
+  });
+
+  box.classList.remove('hidden');
+  document.getElementById('confirmSection').classList.remove('hidden');
+}
+
+/* ---------- CONFIRM ENABLE ---------- */
+const confirmCheck = document.getElementById('confirmCheck');
+const confirmSaveBtn = document.getElementById('confirmSaveBtn');
+
+confirmCheck.addEventListener('change', () => {
+  confirmSaveBtn.disabled = !confirmCheck.checked;
+  confirmSaveBtn.classList.toggle('opacity-50', !confirmCheck.checked);
+  confirmSaveBtn.classList.toggle('cursor-not-allowed', !confirmCheck.checked);
+});
+
+/* ---------- SAVE ---------- */
+confirmSaveBtn.addEventListener('click', async () => {
+  if (!confirmCheck.checked) return;
+
+  const user = auth.currentUser;
+  if (!user) return alert('Not authenticated');
+
+  if (!confirm('Save overrides? Existing payments are NOT touched.')) return;
+
+  const year = document.getElementById('yearSelect').value;
+  const ref = db.ref(`feeOverrides/${schoolId}/${year}`);
+
+  const batch = {};
+  excelOverrides.forEach(o => {
+    const id = ref.push().key;
+    batch[id] = {
+      class: o.className,
+      feeType: o.feeType,
+      amount: o.amount,
+      source: 'excel',
+      createdBy: user.email,
+      createdAt: Date.now()
+    };
+  });
+
+  await ref.update(batch);
+
+  confirmSaveBtn.disabled = true;
+  confirmSaveBtn.textContent = 'Saved ✓';
+  alert(`Saved ${excelOverrides.length} overrides`);
+});
+</script>
+
+</body>
+</html>
