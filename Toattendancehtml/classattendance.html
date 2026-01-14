@@ -771,6 +771,23 @@
             return null;
           }
         }
+        async function loadFinanceForYear(year) {
+          if (!db || !year) return {};
+
+          try {
+            const snap = await db.ref(`finance/${year}/studentFees`).get();
+            if (!snap.exists()) return {};
+
+            return snap.val() || {};
+          } catch (e) {
+            console.error(
+              "Failed to load studentFees for year",
+              year,
+              e.message
+            );
+            return {};
+          }
+        }
 
         async function loadStudentsFromDb() {
           if (!db) return [];
@@ -888,11 +905,18 @@
         }
         function subscribeShiftReports() {
           if (!db) return;
-          if (shiftRef) shiftRef.off(); // ✅ good, keep this
+          if (shiftRef) shiftRef.off(); // keep this
+
           shiftRef = db.ref(SHIFT_REPORT_PATH);
+
           shiftRef.on("value", (snap) => {
-            shiftReports = snap.exists() ? snap.val() : {};
-            renderTable();
+            const next = snap.exists() ? snap.val() : {};
+
+            // 🔹 only re-render if data actually changed
+            if (JSON.stringify(next) !== JSON.stringify(shiftReports)) {
+              shiftReports = next;
+              renderTable();
+            }
           });
         }
 
@@ -923,9 +947,10 @@
         <td>${idx + 1}</td>
         <td>${s.admissionNo || ""}</td>
         <td>${escapeHtml(s.name)}</td>
-        <td>${s.feeDue.toLocaleString()}</td>
-        <td>${s.feePaid.toLocaleString()}</td>
-        <td>${s.balance.toLocaleString()}</td>
+        <td>${Number(s.feeDue || 0).toLocaleString()}</td>
+<td>${Number(s.feePaid || 0).toLocaleString()}</td>
+<td>${Number(s.balance || 0).toLocaleString()}</td>
+
         <td id="chips-${s.id}"></td>
         <td><span id="daily-${s.id}" class="status-pill">—</span></td>
         <td>
@@ -1640,22 +1665,36 @@
               window.somapYearContext?.getSelectedYear?.() ||
               SOMAP_DEFAULT_YEAR;
 
-            await Promise.all(
-              students.map(async (s) => {
-                const finance = await getStudentFinanceForYear(
-                  s.id,
-                  selectedYear
-                );
-                if (finance) {
-                  s.feeDue = finance.feeDue;
-                  s.feePaid = finance.feePaid;
-                  s.balance = finance.balance;
-                }
-              })
+            // 🔥 load ALL student fees at once
+            const financeAll = await loadFinanceForYear(selectedYear);
+
+            // apply finance to students
+            students.forEach((s) => {
+              const f = financeAll[s.id];
+              if (f) {
+                s.feeDue = Number(f.totalFee || f.feeDue || 0);
+                s.feePaid = Number(f.paid || f.feePaid || 0);
+                s.balance =
+                  Number(f.balance || 0) ||
+                  Number(s.feeDue || 0) - Number(s.feePaid || 0);
+              } else {
+                s.feeDue = 0;
+                s.feePaid = 0;
+                s.balance = 0;
+              }
+            });
+
+            console.log(
+              "Finance sample:",
+              students.slice(0, 3).map((s) => ({
+                id: s.id,
+                due: s.feeDue,
+                paid: s.feePaid,
+                bal: s.balance,
+              }))
             );
 
             // render ONCE after all finance loads
-            
 
             if (students.length) break;
             console.warn(
