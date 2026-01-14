@@ -8,6 +8,8 @@
     <!-- Tailwind for quick styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="../Todashboardhtml/yearContext.js"></script>
+    
+
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap"
       rel="stylesheet"
@@ -456,6 +458,9 @@
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
     <script src="../firebase.js"></script>
+    <!-- finance -->
+<script src="js/finance_core.js"></script>
+<script src="js/finance_dedupe.js"></script>
 
     <!-- jsPDF for export -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -518,6 +523,38 @@
         const shiftStudentMeta = document.getElementById("shiftStudentMeta");
         const shiftFormAlert = document.getElementById("shiftFormAlert");
         const shiftSubmitBtn = document.getElementById("shiftSubmitBtn");
+        async function waitForFinanceModule(timeout = 5000) {
+  const start = Date.now();
+  while (typeof window.__finance_getStudentFinanceSummary !== 'function') {
+    if (Date.now() - start > timeout) {
+      throw new Error("Finance module not ready after timeout");
+    }
+    await new Promise(r => setTimeout(r, 50));
+  }
+}
+
+async function attachFinanceToStudents(year, students) {
+  await waitForFinanceModule(); // 🔥 REQUIRED
+
+  await Promise.all(
+    students.map(async (s) => {
+      const key =
+        s.admissionNo ||
+        s.admissionNumber ||
+        s.id;
+
+      if (!key) return;
+
+      const fin = await window.__finance_getStudentFinanceSummary(year, key);
+      if (!fin) return;
+
+      s.feeDue = Number(fin.due || 0);
+      s.feePaid = Number(fin.paid || 0);
+      s.balance = Number(fin.balance || 0);
+    })
+  );
+}
+
         function fmtDate(d) {
           const y = d.getFullYear(),
             m = String(d.getMonth() + 1).padStart(2, "0"),
@@ -753,41 +790,8 @@
           if (j >= CLASS_ORDER.length) return "GRADUATED";
           return CLASS_ORDER[j];
         }
-        async function getStudentFinanceForYear(studentId, year) {
-          if (!db || !studentId || !year) return null;
 
-          try {
-            const snap = await db.ref(`finance/${year}/${studentId}`).get();
-            if (!snap.exists()) return null;
 
-            const f = snap.val() || {};
-            return {
-              feeDue: Number(f.feeDue || f.totalFee || 0),
-              feePaid: Number(f.paid || f.feePaid || 0),
-              balance: Number(f.balance || 0),
-            };
-          } catch (e) {
-            console.warn("Finance read failed:", studentId, e.message);
-            return null;
-          }
-        }
-        async function loadFinanceForYear(year) {
-          if (!db || !year) return {};
-
-          try {
-            const snap = await db.ref(`finance/${year}/studentFees`).get();
-            if (!snap.exists()) return {};
-
-            return snap.val() || {};
-          } catch (e) {
-            console.error(
-              "Failed to load studentFees for year",
-              year,
-              e.message
-            );
-            return {};
-          }
-        }
 
         async function loadStudentsFromDb() {
           if (!db) return [];
@@ -1556,6 +1560,14 @@
             else document.exitFullscreen().catch(() => {});
           });
           setInterval(check3pmAlert, 60 * 1000);
+          document.addEventListener("somap:year-changed", async (e) => {
+  const year = e.detail?.year || SOMAP_DEFAULT_YEAR;
+
+  el("rtState").textContent = "Updating finance...";
+  await attachFinanceToStudents(year, students);
+  renderTable();
+});
+
         }
 
         // ---------- 3PM alert ----------
@@ -1659,80 +1671,73 @@
           if (!db) return;
 
           el("rtState").textContent = "Loading students...";
-          for (let attempt = 1; attempt <= 3; attempt++) {
-            students = await loadStudentsFromDb();
-            const selectedYear =
-              window.somapYearContext?.getSelectedYear?.() ||
-              SOMAP_DEFAULT_YEAR;
+         let loaded = false;
 
-            // 🔥 load ALL student fees at once
-            const financeAll = await loadFinanceForYear(selectedYear);
+for (let attempt = 1; attempt <= 3; attempt++) {
+  students = await loadStudentsFromDb();
 
-            // apply finance to students
-            students.forEach((s) => {
-              const f = financeAll[s.id];
-              if (f) {
-                s.feeDue = Number(f.totalFee || f.feeDue || 0);
-                s.feePaid = Number(f.paid || f.feePaid || 0);
-                s.balance =
-                  Number(f.balance || 0) ||
-                  Number(s.feeDue || 0) - Number(s.feePaid || 0);
-              } else {
-                s.feeDue = 0;
-                s.feePaid = 0;
-                s.balance = 0;
-              }
-            });
+  if (!students.length) {
+    console.warn(
+      `Attempt ${attempt} failed to load students. Retrying...`
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    continue;
+  }
 
-            console.log(
-              "Finance sample:",
-              students.slice(0, 3).map((s) => ({
-                id: s.id,
-                due: s.feeDue,
-                paid: s.feePaid,
-                bal: s.balance,
-              }))
-            );
+  const selectedYear =
+    window.somapYearContext?.getSelectedYear?.() ||
+    SOMAP_DEFAULT_YEAR;
 
-            // render ONCE after all finance loads
+  await attachFinanceToStudents(selectedYear, students);
 
-            if (students.length) break;
-            console.warn(
-              `Attempt ${attempt} failed to load students. Retrying...`
-            );
-            await new Promise((resolve) => setTimeout(resolve, 1000));
-          }
-          if (!students.length) {
-            el("rtState").textContent = "No students found";
-            alert(
-              "No students found in database. Please check Firebase data at /students."
-            );
-            return;
-          }
-          renderTable();
-          populateClassSelect();
-          wireUI();
-          setupShiftModal();
-          subscribeShiftReports();
-          await applyInitialClassSelection();
-          if (!currentClass) {
-            const classes = Array.from(
-              new Set(students.map((s) => s.class))
-            ).filter(Boolean);
-            if (classes.length === 1) {
-              await activateClass(classes[0]);
-            }
-          }
-          if (lockedClassStorage) {
-            el("rtState").textContent = `Locked to ${
-              currentClass || lockedClassStorage
-            }`;
-          } else if (currentClass) {
-            el("rtState").textContent = `Ready · ${currentClass}`;
-          } else {
-            el("rtState").textContent = "Ready";
-          }
-        }
+  console.log(
+    "Finance sample:",
+    students.slice(0, 3).map((s) => ({
+      id: s.id,
+      due: s.feeDue,
+      paid: s.feePaid,
+      bal: s.balance,
+    }))
+  );
+
+  loaded = true;
+  break;
+}
+
+if (!loaded) {
+  el("rtState").textContent = "No students found";
+  alert(
+    "No students found in database. Please check Firebase data at /students."
+  );
+  return;
+}
+
+renderTable();
+populateClassSelect();
+wireUI();
+setupShiftModal();
+subscribeShiftReports();
+await applyInitialClassSelection();
+
+if (!currentClass) {
+  const classes = Array.from(
+    new Set(students.map((s) => s.class))
+  ).filter(Boolean);
+
+  if (classes.length === 1) {
+    await activateClass(classes[0]);
+  }
+}
+
+if (lockedClassStorage) {
+  el("rtState").textContent = `Locked to ${
+    currentClass || lockedClassStorage
+  }`;
+} else if (currentClass) {
+  el("rtState").textContent = `Ready · ${currentClass}`;
+} else {
+  el("rtState").textContent = "Ready";
+}
 
         function populateClassSelect() {
           const baseClasses = Array.from(
