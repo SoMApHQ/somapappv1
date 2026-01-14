@@ -579,28 +579,133 @@
     }
   }
 
-  async function syncFinanceAfterUpsert(studentKey, studentData) {
-    if (!studentKey || !studentData) return;
-    const workingYear = getWorkingYear();
-    const className = studentData.classLevel || studentData.className || '';
-    if (!className) return;
-    try {
-      const classCfg = await readClassConfig(className, { year: workingYear });
-      const defaultFee =
-        classCfg && classCfg.feePerYear !== undefined ? Number(classCfg.feePerYear) : null;
-      const enteredFee = Number(studentData.feePerYear);
-      if (defaultFee !== null && Number.isFinite(enteredFee)) {
-        const sameFee = Math.round(enteredFee) === Math.round(defaultFee);
-        if (sameFee) {
-          await setStudentFeeOverride(studentKey, null, false, { by: 'admissions', year: workingYear });
-        } else {
-          await setStudentFeeOverride(studentKey, enteredFee, true, { by: 'admissions', year: workingYear });
-        }
+async function syncFinanceAfterUpsert(studentKey, studentData) {
+  if (!studentKey || !studentData) return;
+
+  const workingYear = getWorkingYear();
+  const className = studentData.classLevel || studentData.className || '';
+  if (!className) return;
+
+  try {
+    /* =====================================================
+       EXISTING LOGIC — KEEP (fee override decision)
+       ===================================================== */
+    const classCfg = await readClassConfig(className, { year: workingYear });
+    const defaultFee =
+      classCfg && classCfg.feePerYear !== undefined
+        ? Number(classCfg.feePerYear)
+        : null;
+
+    const enteredFee = Number(studentData.feePerYear);
+
+    if (defaultFee !== null && Number.isFinite(enteredFee)) {
+      const sameFee = Math.round(enteredFee) === Math.round(defaultFee);
+      if (sameFee) {
+        await setStudentFeeOverride(
+          studentKey,
+          null,
+          false,
+          { by: 'admissions', year: workingYear }
+        );
+      } else {
+        await setStudentFeeOverride(
+          studentKey,
+          enteredFee,
+          true,
+          { by: 'admissions', year: workingYear }
+        );
       }
+    }
+
+    /* =====================================================
+       NEW LOGIC — PERSIST RESOLVED FEE TO STUDENT RECORD
+       ===================================================== */
+
+    // Resolve the effective fee using finance engine
+    const finance = await resolveEffectiveFinance(
+      studentKey,
+      className,
+      { year: workingYear }
+    );
+
+    const resolvedFee = Number(finance?.fee || 0);
+
+    // Read current student record to preserve paid amounts
+    const snap = await schoolRef(`students/${studentKey}`).once('value');
+    const existing = snap.val() || {};
+
+    const paid =
+      Number(existing.feesPaid) ||
+      Number(existing.feePaid) ||
+      Number(existing.paidAmount) ||
+      0;
+
+    const balance = resolvedFee - paid;
+
+    // Persist canonical values for ALL downstream pages
+    await schoolRef(`students/${studentKey}`).update({
+      feePerYear: resolvedFee,
+      balance: balance,
+      feeResolvedAt: Date.now(),
+      feeResolvedYear: workingYear
+    });
+
+  } catch (err) {
+    console.warn('Finance sync failed', studentKey, err);
+  }
+}
+async function repairAllStudentFeesOnce() {
+  if (!confirm(
+    "This will re-sync fees for ALL students for the selected academic year.\n\n" +
+    "• Payments will NOT be changed\n" +
+    "• Balances will be preserved\n" +
+    "• This should be run ONCE\n\n" +
+    "Proceed?"
+  )) {
+    console.log("Repair cancelled by admin");
+    return;
+  }
+
+  const year = getWorkingYear();
+  console.log("Starting fee repair for academic year:", year);
+
+  const snap = await schoolRef("students").once("value");
+  const students = snap.val() || {};
+
+  let repaired = 0;
+  let skipped = 0;
+
+  for (const [studentKey, studentData] of Object.entries(students)) {
+    if (!studentData) {
+      skipped++;
+      continue;
+    }
+
+    const className = studentData.classLevel || studentData.className;
+    if (!className) {
+      skipped++;
+      continue;
+    }
+
+    try {
+      await syncFinanceAfterUpsert(studentKey, studentData);
+      repaired++;
+      console.log(`✔ Repaired: ${studentKey}`);
     } catch (err) {
-      console.warn('Finance sync failed', studentKey, err);
+      console.warn(`✖ Failed: ${studentKey}`, err);
     }
   }
+
+  alert(
+    `Fee repair completed.\n\n` +
+    `✔ Repaired: ${repaired}\n` +
+    `⚠ Skipped: ${skipped}\n\n` +
+    `You can now remove this script safely.`
+  );
+
+  console.log("Fee repair finished");
+}
+
 
   function attachYearEnrollmentListener(year) {
     if (!db) return;
