@@ -108,16 +108,29 @@ async function approveRequest(id) {
 
   const r = snap.val();
 
-  sessionStorage.setItem(
-    "somap_pending_admission",
-    JSON.stringify({
-      approvalKey: id,
-      student: r.studentSnapshot,
-      parent: r.parentSnapshot,
-      academicYear: r.academicYear,
-      referral: r.referral || null,
-    })
-  );
+ sessionStorage.setItem(
+  "somap_pending_admission",
+  JSON.stringify({
+    approvalKey: id,
+
+    student: {
+      firstName: r.studentSnapshot?.firstName || "",
+      middleName: r.studentSnapshot?.middleName || "",
+      lastName: r.studentSnapshot?.lastName || "",
+      classLevel: r.studentSnapshot?.classLevel || "",
+      gender: r.studentSnapshot?.gender || "",
+      dob: r.studentSnapshot?.dob || "",
+    },
+
+    parent: {
+      name: r.parentSnapshot?.name || "",
+      phone: r.parentSnapshot?.phone || "",
+    },
+
+    academicYear: r.academicYear || "",
+    referral: r.referral || null,
+  })
+);
 
  
 
