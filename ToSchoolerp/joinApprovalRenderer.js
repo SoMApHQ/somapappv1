@@ -1,7 +1,10 @@
 function esc(v) {
   return String(v || "").replace(/[&<>"']/g, m => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;",
-    '"': "&quot;", "'": "&#039;"
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;"
   }[m]));
 }
 
@@ -10,6 +13,7 @@ function renderJoinApprovalCard(id, r) {
   const parent   = r.parentSnapshot || {};
   const docs     = r.documents || {};
   const referral = r.referral || null;
+  const status   = r.status || "unknown";
 
   return `
     <div class="bg-white border rounded-xl p-4">
@@ -18,12 +22,15 @@ function renderJoinApprovalCard(id, r) {
           <h3 class="font-semibold text-lg">
             ${esc(student.firstName)} ${esc(student.lastName)}
           </h3>
+
           <p class="text-sm text-slate-600">
             Class: <b>${esc(student.classLevel)}</b>
           </p>
+
           <p class="text-sm text-slate-600">
             Academic Year: ${esc(r.academicYear)}
           </p>
+
           <p class="text-sm text-slate-600">
             Parent: ${esc(parent.name)} (${esc(parent.phone)})
           </p>
@@ -41,29 +48,35 @@ function renderJoinApprovalCard(id, r) {
         </div>
 
         ${
-          r.status === "pending"
-            ? `<div class="flex gap-2">
-                 <button
-                   class="px-3 py-1 text-sm rounded bg-green-600 text-white"
-                   onclick="approveRequest('${id}')">
-                   Approve
-                 </button>
-                 <button
-                   class="px-3 py-1 text-sm rounded bg-red-600 text-white"
-                   onclick="rejectRequest('${id}')">
-                   Reject
-                 </button>
-               </div>`
-                : `<div class="flex gap-2">
-         <span class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-700">
-           ${esc(r.status.replace(/_/g, " "))}
-         </span>
-         <button
-           class="px-3 py-1 text-sm rounded bg-red-600 text-white"
-           onclick="deleteRequest('${id}')">
-           Delete
-         </button>
-       </div>`
+          status === "pending"
+            ? `
+              <div class="flex gap-2">
+                <button
+                  class="px-3 py-1 text-sm rounded bg-green-600 text-white"
+                  onclick="approveRequest('${id}')">
+                  Approve
+                </button>
+
+                <button
+                  class="px-3 py-1 text-sm rounded bg-red-600 text-white"
+                  onclick="rejectRequest('${id}')">
+                  Reject
+                </button>
+              </div>
+            `
+            : `
+              <div class="flex gap-2 items-center">
+                <span class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-700">
+                  ${esc(status.replace(/_/g, " "))}
+                </span>
+
+                <button
+                  class="px-3 py-1 text-sm rounded bg-red-600 text-white"
+                  onclick="deleteRequest('${id}')">
+                  Delete
+                </button>
+              </div>
+            `
         }
       </div>
 

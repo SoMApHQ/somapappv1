@@ -121,7 +121,7 @@ async function approveRequest(id) {
 
  
 
-  window.location.href = "./admission.html?from=joinApproval";
+  window.location.href = "admission.html?from=joinApproval";
 }
 async function deleteRequest(id) {
   const ok = await Swal.fire({
