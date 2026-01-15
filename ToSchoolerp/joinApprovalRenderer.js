@@ -54,7 +54,16 @@ function renderJoinApprovalCard(id, r) {
                    Reject
                  </button>
                </div>`
-            : ""
+                : `<div class="flex gap-2">
+         <span class="text-xs px-2 py-1 rounded bg-slate-200 text-slate-700">
+           ${esc(r.status.replace(/_/g, " "))}
+         </span>
+         <button
+           class="px-3 py-1 text-sm rounded bg-red-600 text-white"
+           onclick="deleteRequest('${id}')">
+           Delete
+         </button>
+       </div>`
         }
       </div>
 

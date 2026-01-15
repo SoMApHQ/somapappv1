@@ -119,13 +119,26 @@ async function approveRequest(id) {
     })
   );
 
-  await db.ref(`joinApprovalsPending/${id}`).update({
-    status: "approved_for_admission",
-    approvedAt: Date.now(),
+ 
+
+  window.location.href = "./admission.html?from=joinApproval";
+}
+async function deleteRequest(id) {
+  const ok = await Swal.fire({
+    title: "Delete this record?",
+    text: "This will permanently remove this join request.",
+    icon: "warning",
+    showCancelButton: true,
+    confirmButtonText: "Delete",
+    confirmButtonColor: "#dc2626",
   });
 
-  window.location.href = "../admission.html?from=joinApproval";
+  if (!ok.isConfirmed) return;
+
+  await db.ref(`joinApprovalsPending/${id}`).remove();
+  Swal.fire("Deleted", "Join request removed.", "success");
 }
+
 
 async function rejectRequest(id) {
   const ok = await Swal.fire({
