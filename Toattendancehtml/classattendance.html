@@ -8,7 +8,6 @@
     <!-- Tailwind for quick styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="../Todashboardhtml/yearContext.js"></script>
-    
 
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap"
@@ -459,8 +458,6 @@
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
     <script src="../firebase.js"></script>
     <!-- finance -->
-<script src="js/finance_core.js"></script>
-<script src="js/finance_dedupe.js"></script>
 
     <!-- jsPDF for export -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -523,82 +520,7 @@
         const shiftStudentMeta = document.getElementById("shiftStudentMeta");
         const shiftFormAlert = document.getElementById("shiftFormAlert");
         const shiftSubmitBtn = document.getElementById("shiftSubmitBtn");
-async function waitForFinanceModule(timeout = 5000) {
-  const start = Date.now();
-
-  while (
-    typeof window.firebase === "undefined" ||
-    typeof window.firebase.database !== "function" ||
-    !db
-  ) {
-    if (Date.now() - start > timeout) {
-      throw new Error("Firebase not ready for finance");
-    }
-    await new Promise((r) => setTimeout(r, 50));
-  }
-}
-
-async function attachFinanceToStudents(year, students) {
-  await waitForFinanceModule();
-
-  // init cache for year
-  if (!financeCache[year]) {
-    financeCache[year] = {};
-  }
-
-  const yearCache = financeCache[year];
-  let updated = false;
-
-  await Promise.all(
-    students.map(async (s) => {
-      const key =
-        s.admissionNo ||
-        s.admissionNumber ||
-        s.id;
-
-      if (!key) return;
-
-      // ✅ USE CACHE FIRST
-      if (yearCache[key]) {
-        const fin = yearCache[key];
-        s.feeDue = fin.due;
-        s.feePaid = fin.paid;
-        s.balance = fin.balance;
-        return;
-      }
-
-      // ❌ fetch only if missing
-      try {
-       const fin = await getStudentFinanceFromDb(year, key);
-
-
-        const safe = {
-          due: Number(fin?.due || 0),
-          paid: Number(fin?.paid || 0),
-          balance: Number(fin?.balance || 0),
-        };
-
-        // store in cache
-        yearCache[key] = safe;
-
-        s.feeDue = safe.due;
-        s.feePaid = safe.paid;
-        s.balance = safe.balance;
-
-        updated = true;
-      } catch (e) {
-        console.warn("Finance fetch failed for", key);
-      }
-    })
-  );
-
-  // 🔁 re-render only if something actually changed
-  if (updated) {
-    renderTable();
-  }
-}
-
-
+ 
 
         function fmtDate(d) {
           const y = d.getFullYear(),
@@ -836,78 +758,84 @@ async function attachFinanceToStudents(year, students) {
           return CLASS_ORDER[j];
         }
 
+  async function loadStudentsFromDb() {
+  if (!db) return [];
 
+  const tryPaths = ["students", "Students", "StudentsList", "Students_List"];
 
-        async function loadStudentsFromDb() {
-          if (!db) return [];
-          const tryPaths = [
-            "students",
-            "Students",
-            "StudentsList",
-            "Students_List",
-          ];
-          for (const p of tryPaths) {
-            try {
-              const snap = await db.ref(p).get();
-              if (snap.exists()) {
-                const data = snap.val();
-                return Object.keys(data)
-                  .map((k) => {
-                    const s = data[k] || {};
-                    const name =
-                      [s.firstName, s.middleName, s.lastName]
-                        .filter(Boolean)
-                        .join(" ")
-                        .trim() ||
-                      s.name ||
-                      s.fullName ||
-                      "";
-                    const feeDue = 0;
-                    const feePaid = 0;
-                    const balance = 0;
+  for (const p of tryPaths) {
+    try {
+      const snap = await db.ref(p).get();
+      if (!snap.exists()) continue;
 
-                    const status = String(s.status || "").toLowerCase();
-                    if (status === "shifted") return null;
-                    const parentName =
-                      s.primaryParentName ||
-                      s.parentName ||
-                      s.guardianName ||
-                      "";
-                    const parentContact =
-                      s.primaryParentContact ||
-                      s.parentPhone ||
-                      s.parentContact ||
-                      s.guardianContact ||
-                      "";
-                    const selectedYear =
-                      window.somapYearContext?.getSelectedYear?.() ||
-                      SOMAP_DEFAULT_YEAR;
+      const data = snap.val();
 
-                    const delta = Number(selectedYear) - SOMAP_DEFAULT_YEAR;
-                    const baseClass = s.class || s.classLevel || s.grade || "";
-                    return {
-                      id: k,
-                      admissionNo:
-                        s.admissionNumber || s.admNo || s.admissionNo || "",
-                      name,
-                      class: shiftClass(baseClass, delta),
-                      feeDue,
-                      feePaid,
-                      balance,
-                      parentName,
-                      parentContact,
-                      status: status || "active",
-                    };
-                  })
-                  .filter(Boolean);
-              }
-            } catch (e) {
-              console.warn("Failed to load path", p, ":", e.message);
-            }
-          }
-          console.error("No students data found in any path");
-          return [];
-        }
+      return Object.keys(data)
+        .map((k) => {
+          const s = data[k] || {};
+
+          const status = String(s.status || "").toLowerCase();
+          if (status === "shifted") return null;
+
+          const name =
+            [s.firstName, s.middleName, s.lastName]
+              .filter(Boolean)
+              .join(" ")
+              .trim() ||
+            s.name ||
+            s.fullName ||
+            "";
+
+          const parentName =
+            s.primaryParentName ||
+            s.parentName ||
+            s.guardianName ||
+            "";
+
+          const parentContact =
+            s.primaryParentContact ||
+            s.parentPhone ||
+            s.parentContact ||
+            s.guardianContact ||
+            "";
+
+          const selectedYear =
+            window.somapYearContext?.getSelectedYear?.() ||
+            SOMAP_DEFAULT_YEAR;
+
+          const delta = Number(selectedYear) - SOMAP_DEFAULT_YEAR;
+          const baseClass = s.class || s.classLevel || s.grade || "";
+
+          const feeDue = Number(s.feePerYear || 0);
+          const feePaid = Number(s.paidAmount || 0);
+          const balance =
+            s.balance !== undefined
+              ? Number(s.balance)
+              : Math.max(feeDue - feePaid, 0);
+
+          return {
+            id: k,
+            admissionNo:
+              s.admissionNumber || s.admNo || s.admissionNo || "",
+            name,
+            class: shiftClass(baseClass, delta),
+            feeDue,
+            feePaid,
+            balance,
+            parentName,
+            parentContact,
+            status: status || "active",
+          };
+        })
+        .filter(Boolean);
+    } catch (e) {
+      console.warn("Failed to load path", p, e.message);
+    }
+  }
+
+  console.error("No students data found");
+  return [];
+}
 
         // ---------- Attendance CRUD ----------
         async function loadDayAttendance(cls, dateStr) {
@@ -1605,14 +1533,12 @@ async function attachFinanceToStudents(year, students) {
             else document.exitFullscreen().catch(() => {});
           });
           setInterval(check3pmAlert, 60 * 1000);
-  document.addEventListener("somap:year-changed", (e) => {
-  const year = e.detail?.year || SOMAP_DEFAULT_YEAR;
+          document.addEventListener("somap:year-changed", (e) => {
+            const year = e.detail?.year || SOMAP_DEFAULT_YEAR;
 
-  el("rtState").textContent = "Updating finance…";
-  attachFinanceToStudents(year, students); // ❌ no await
-});
-
-
+            el("rtState").textContent = "Updating finance…";
+          
+          });
         }
 
         // ---------- 3PM alert ----------
@@ -1705,112 +1631,110 @@ async function attachFinanceToStudents(year, students) {
             await setAndActivate(classOptions[0].value);
           }
         }
-function populateClassSelect() {
-  const baseClasses = Array.from(
-    new Set(students.map((s) => s.class))
-  ).filter(Boolean);
+        function populateClassSelect() {
+          const baseClasses = Array.from(
+            new Set(students.map((s) => s.class))
+          ).filter(Boolean);
 
-  const options = [];
-  const seen = new Set();
+          const options = [];
+          const seen = new Set();
 
-  const pushOption = (value) => {
-    if (!value) return;
-    const key = canonicalClassKey(value) || normalizeClassName(value);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    options.push(value);
-  };
+          const pushOption = (value) => {
+            if (!value) return;
+            const key = canonicalClassKey(value) || normalizeClassName(value);
+            if (!key || seen.has(key)) return;
+            seen.add(key);
+            options.push(value);
+          };
 
-  baseClasses.forEach(pushOption);
-  pushOption(lockedClassStorage);
-  pushOption(queryClassRaw);
-  pushOption(currentClass);
+          baseClasses.forEach(pushOption);
+          pushOption(lockedClassStorage);
+          pushOption(queryClassRaw);
+          pushOption(currentClass);
 
-  options.sort((a, b) =>
-    a.localeCompare(b, undefined, { sensitivity: "base" })
-  );
+          options.sort((a, b) =>
+            a.localeCompare(b, undefined, { sensitivity: "base" })
+          );
 
-  const sel = el("classSelect");
-  sel.innerHTML =
-    `<option value="">-- Select class --</option>` +
-    options.map((c) => `<option value="${c}">${c}</option>`).join("");
-}
+          const sel = el("classSelect");
+          sel.innerHTML =
+            `<option value="">-- Select class --</option>` +
+            options.map((c) => `<option value="${c}">${c}</option>`).join("");
+        }
 
-       async function init() {
-  const now = new Date();
-  currentDateStr = fmtDate(now);
-  monthKey = toMonthKey(currentDateStr);
-  el("dateInput").value = currentDateStr;
+        async function init() {
+          const now = new Date();
+          currentDateStr = fmtDate(now);
+          monthKey = toMonthKey(currentDateStr);
+          el("dateInput").value = currentDateStr;
 
-  await initializeFirebase();
-  if (!db) return;
+          await initializeFirebase();
+          if (!db) return;
 
-  el("rtState").textContent = "Loading students…";
+          el("rtState").textContent = "Loading students…";
 
-  // 1️⃣ Load students with retry
-  let loaded = false;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    students = await loadStudentsFromDb();
+          // 1️⃣ Load students with retry
+          let loaded = false;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            students = await loadStudentsFromDb();
 
-    if (students.length) {
-      loaded = true;
-      break;
-    }
+            if (students.length) {
+              loaded = true;
+              break;
+            }
 
-    console.warn(`Attempt ${attempt} failed to load students. Retrying…`);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
+            console.warn(
+              `Attempt ${attempt} failed to load students. Retrying…`
+            );
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
 
-  if (!loaded) {
-    el("rtState").textContent = "No students found";
-    alert(
-      "No students found in database. Please check Firebase data at /students."
-    );
-    return;
-  }
+          if (!loaded) {
+            el("rtState").textContent = "No students found";
+            alert(
+              "No students found in database. Please check Firebase data at /students."
+            );
+            return;
+          }
 
-  // 2️⃣ FAST initial render (no finance yet)
-  renderTable();
-  populateClassSelect();
-  wireUI();
-  setupShiftModal();
-  subscribeShiftReports();
-  await applyInitialClassSelection();
+          // 2️⃣ FAST initial render (no finance yet)
+          renderTable();
+          populateClassSelect();
+          wireUI();
+          setupShiftModal();
+          subscribeShiftReports();
+          await applyInitialClassSelection();
 
-  // 3️⃣ Auto-activate single class if needed
-  if (!currentClass) {
-    const classes = Array.from(
-      new Set(students.map((s) => s.class))
-    ).filter(Boolean);
+          // 3️⃣ Auto-activate single class if needed
+          if (!currentClass) {
+            const classes = Array.from(
+              new Set(students.map((s) => s.class))
+            ).filter(Boolean);
 
-    if (classes.length === 1) {
-      await activateClass(classes[0]);
-    }
-  }
+            if (classes.length === 1) {
+              await activateClass(classes[0]);
+            }
+          }
 
-  // 4️⃣ Background finance attach (NON-BLOCKING)
-  const selectedYear =
-    window.somapYearContext?.getSelectedYear?.() ||
-    SOMAP_DEFAULT_YEAR;
+          // 4️⃣ Background finance attach (NON-BLOCKING)
+          const selectedYear =
+            window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR;
 
-  
-  attachFinanceToStudents(selectedYear, students); // 🔥 NOT awaited
 
-  // 5️⃣ Final state text (finance will update later)
-  if (lockedClassStorage) {
-    el("rtState").textContent = `Locked to ${
-      currentClass || lockedClassStorage
-    }`;
-  } else if (currentClass) {
-    el("rtState").textContent = `Ready · ${currentClass}`;
-  } else {
-    el("rtState").textContent = "Ready";
-  }
-}
+          // 5️⃣ Final state text (finance will update later)
+          if (lockedClassStorage) {
+            el("rtState").textContent = `Locked to ${
+              currentClass || lockedClassStorage
+            }`;
+          } else if (currentClass) {
+            el("rtState").textContent = `Ready · ${currentClass}`;
+          } else {
+            el("rtState").textContent = "Ready";
+          }
+        }
 
-await init();
-})();
-
+        await init();
+      })();
     </script>
   </body>
 </html>

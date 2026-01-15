@@ -124,7 +124,7 @@ async function approveRequest(id) {
     approvedAt: Date.now(),
   });
 
-  window.location.href = "admission.html?from=joinApproval";
+  window.location.href = "../admission.html?from=joinApproval";
 }
 
 async function rejectRequest(id) {
