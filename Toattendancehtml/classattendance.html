@@ -513,7 +513,6 @@
         let shiftReports = {};
         let shiftRef = null;
         let currentShiftStudent = null;
-        let financeCache = {}; // Missing in previous version
 
         // ---------- HELPERS ----------
         const el = (id) => document.getElementById(id);
@@ -524,97 +523,81 @@
         const shiftStudentMeta = document.getElementById("shiftStudentMeta");
         const shiftFormAlert = document.getElementById("shiftFormAlert");
         const shiftSubmitBtn = document.getElementById("shiftSubmitBtn");
+async function waitForFinanceModule(timeout = 5000) {
+  const start = Date.now();
 
-/**
- * Bridges the Attendance page to the Finance Core logic
- */
-async function getStudentFinanceFromDb(year, studentKey) {
-  if (window.SOMAP_FINANCE && typeof window.SOMAP_FINANCE.loadStudentYearSummary === 'function') {
-    // Calls the function from your finance_core.js
-    return await window.SOMAP_FINANCE.loadStudentYearSummary(studentKey, year);
+  while (
+    typeof window.firebase === "undefined" ||
+    typeof window.firebase.database !== "function" ||
+    !db
+  ) {
+    if (Date.now() - start > timeout) {
+      throw new Error("Firebase not ready for finance");
+    }
+    await new Promise((r) => setTimeout(r, 50));
   }
-  console.error("Finance Core (finance_core.js) is not loaded correctly.");
-  return null;
 }
 
-/**
- * Fetches finance data for all students currently in the filtered list
- */
-async function attachFinanceToStudents(year, studentsToUpdate) {
-  if (!db || !studentsToUpdate.length) return;
+async function attachFinanceToStudents(year, students) {
+  await waitForFinanceModule();
 
-  // Initialize cache for the specific year if it doesn't exist
-if (!financeCache[year]) financeCache[year] = {};
-const yearCache = financeCache[year];
+  // init cache for year
+  if (!financeCache[year]) {
+    financeCache[year] = {};
+  }
 
-  let hasChanges = false;
+  const yearCache = financeCache[year];
+  let updated = false;
 
   await Promise.all(
-    studentsToUpdate.map(async (s) => {
-      const key = s.admissionNo || s.id;
-// Use the Firebase Unique ID
+    students.map(async (s) => {
+      const key =
+        s.admissionNo ||
+        s.admissionNumber ||
+        s.id;
+
       if (!key) return;
 
-      // Use Cache to prevent redundant Firebase hits
+      // ✅ USE CACHE FIRST
       if (yearCache[key]) {
-        const cached = yearCache[key];
-        s.feeDue = cached.feeTotal;
-        s.feePaid = cached.paidTotal;
-        s.balance = cached.balanceTotal;
+        const fin = yearCache[key];
+        s.feeDue = fin.due;
+        s.feePaid = fin.paid;
+        s.balance = fin.balance;
         return;
       }
 
+      // ❌ fetch only if missing
       try {
-        const finData = await getStudentFinanceFromDb(year, key);
-        if (finData) {
-          // MAP CORE DATA TO STUDENT OBJECT
-          s.feeDue = Number(finData.feeTotal || 0);
-          s.feePaid = Number(finData.paidTotal || 0);
-          s.balance = Number(finData.balanceTotal || 0);
+       const fin = await getStudentFinanceFromDb(year, key);
 
-          // Save to cache for this session
-          yearCache[key] = {
-            feeTotal: s.feeDue,
-            paidTotal: s.feePaid,
-            balanceTotal: s.balance
-          };
-          hasChanges = true;
-        }
+
+        const safe = {
+          due: Number(fin?.due || 0),
+          paid: Number(fin?.paid || 0),
+          balance: Number(fin?.balance || 0),
+        };
+
+        // store in cache
+        yearCache[key] = safe;
+
+        s.feeDue = safe.due;
+        s.feePaid = safe.paid;
+        s.balance = safe.balance;
+
+        updated = true;
       } catch (e) {
-        console.warn(`Finance load failed for ${s.name}:`, e);
+        console.warn("Finance fetch failed for", key);
       }
     })
   );
 
-  // Only re-render if we actually updated some numbers
-  if (hasChanges) {
+  // 🔁 re-render only if something actually changed
+  if (updated) {
     renderTable();
   }
 }
-//
 
-async function updateView() {
-    const selClass = el("classSelect").value;
-    const search = el("searchInput").value.toLowerCase();
-    const selectedYear = window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR;
-
-    // 1. Filter students based on UI inputs
-    filtered = students.filter(s => {
-        const matchClass = !selClass || isSameClass(s.class, selClass);
-        const matchSearch = !search || 
-                           s.name.toLowerCase().includes(search) || 
-                           s.admissionNo.toLowerCase().includes(search);
-        return matchClass && matchSearch;
-    });
-
-    // 2. Initial render (shows names immediately)
-    renderTable();
-
-    // 3. Fetch and attach finance data for these specific students
-    if (filtered.length > 0) {
-        await attachFinanceToStudents(selectedYear, filtered);
-    }
-}
 
 
         function fmtDate(d) {
@@ -987,51 +970,108 @@ async function updateView() {
         }
 
         // ---------- Render UI ----------
- function renderTable() {
-  const tbody = el("attBody");
-  tbody.innerHTML = "";
-  
-  filtered.forEach((s, idx) => {
-    const rec = attendanceCache[s.id] || {};
-    const am = rec.am || "";
-    const pm = rec.pm || "";
-    const daily = rec.daily || deriveDaily(am, pm);
+        function renderTable() {
+          const body = el("attBody");
+          body.innerHTML = "";
+          const q = (el("searchInput").value || "").toLowerCase();
+          const classKey = canonicalClassKey(currentClass);
+          filtered = students
+            .filter((s) =>
+              classKey
+                ? classMatches(currentClass, s.class)
+                : s.class === currentClass
+            )
+            .filter(
+              (s) =>
+                !q ||
+                s.name.toLowerCase().includes(q) ||
+                String(s.admissionNo || "").includes(q)
+            );
+          el("studentCount").textContent = filtered.length;
 
-    // Format numbers for display
-    const feeDue = Number(s.feeDue || 0).toLocaleString();
-    const feePaid = Number(s.feePaid || 0).toLocaleString();
-    const balance = Number(s.balance || 0).toLocaleString();
-    
-    // Logic for Row Color (Optional: Highlight high balance)
-    const balanceColor = (s.balance > 0) ? 'text-red-600 font-bold' : 'text-slate-600';
+          filtered.forEach((s, idx) => {
+            const rec = attendanceCache[s.id] || {};
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+        <td>${idx + 1}</td>
+        <td>${s.admissionNo || ""}</td>
+        <td>${escapeHtml(s.name)}</td>
+        <td>${Number(s.feeDue || 0).toLocaleString()}</td>
+<td>${Number(s.feePaid || 0).toLocaleString()}</td>
+<td>${Number(s.balance || 0).toLocaleString()}</td>
 
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${idx + 1}</td>
-      <td class="text-xs font-mono">${s.admissionNo}</td>
-      <td class="font-semibold">${s.name}</td>
-      
-      <td class="text-slate-600">KES ${feeDue}</td>
-      <td class="text-green-600">KES ${feePaid}</td>
-      <td class="${balanceColor}">KES ${balance}</td>
-      
-      <td>
-        <div class="flex gap-1">
-           <button onclick="updateStatus('${s.id}','am','P')" class="status-chip ${am==='P'?'chip-P':'chip-empty'}">P</button>
-           <button onclick="updateStatus('${s.id}','am','A')" class="status-chip ${am==='A'?'chip-A':'chip-empty'}">A</button>
-           <span class="mx-1 text-slate-300">|</span>
-           <button onclick="updateStatus('${s.id}','pm','P')" class="status-chip ${pm==='P'?'chip-P':'chip-empty'}">P</button>
-           <button onclick="updateStatus('${s.id}','pm','A')" class="status-chip ${pm==='A'?'chip-A':'chip-empty'}">A</button>
-        </div>
-      </td>
-      <td id="daily-${s.id}">${daily}</td>
-      <td>...actions...</td>
-    `;
-    tbody.appendChild(tr);
-  });
-  
-  el("studentCount").textContent = filtered.length;
-}
+        <td id="chips-${s.id}"></td>
+        <td><span id="daily-${s.id}" class="status-pill">—</span></td>
+        <td>
+          <div class="flex gap-2 items-center">
+            <button data-id="${
+              s.id
+            }" class="btn-export text-sm px-2 py-1 border rounded">Export</button>
+            <button data-id="${
+              s.id
+            }" data-action="shift" class="btn-shift hidden" title="Send shift alert to admin">Shift</button>
+          </div>
+          <span id="shift-note-${s.id}" class="shift-note hidden"></span>
+        </td>
+      `;
+            body.appendChild(tr);
+
+            const chipsCell = tr.querySelector(`#chips-${s.id}`);
+            const statuses = ["P", "A", "S", "LE", "MT", "PG"];
+            const amGroup = document.createElement("div");
+            amGroup.className = "flex gap-2 items-center mb-2";
+            const lblAm = document.createElement("div");
+            lblAm.className = "text-xs text-slate-500 mr-2";
+            lblAm.textContent = "AM";
+            amGroup.appendChild(lblAm);
+            statuses.forEach((st) => {
+              const b = document.createElement("div");
+              b.className = "status-chip " + (st ? "chip-" + st : "chip-empty");
+              b.textContent = st;
+              b.title = "AM: " + st;
+              b.dataset.stu = s.id;
+              b.dataset.sess = "am";
+              b.dataset.val = st;
+              b.addEventListener("click", onChipClick);
+              amGroup.appendChild(b);
+            });
+            chipsCell.appendChild(amGroup);
+
+            const pmGroup = document.createElement("div");
+            pmGroup.className = "flex gap-2 items-center";
+            const lblPm = document.createElement("div");
+            lblPm.className = "text-xs text-slate-500 mr-2";
+            lblPm.textContent = "PM";
+            pmGroup.appendChild(lblPm);
+            statuses.forEach((st) => {
+              const b = document.createElement("div");
+              b.className = "status-chip " + (st ? "chip-" + st : "chip-empty");
+              b.textContent = st;
+              b.title = "PM: " + st;
+              b.dataset.stu = s.id;
+              b.dataset.sess = "pm";
+              b.dataset.val = st;
+              b.addEventListener("click", onChipClick);
+              pmGroup.appendChild(b);
+            });
+            chipsCell.appendChild(pmGroup);
+
+            updateRowVisuals(s.id);
+            decorateShiftState(tr, s);
+          });
+
+          document.querySelectorAll(".btn-export").forEach((btn) => {
+            btn.addEventListener("click", () =>
+              exportPdfForStudent(btn.dataset.id)
+            );
+          });
+          document.querySelectorAll('[data-action="shift"]').forEach((btn) => {
+            btn.addEventListener("click", () =>
+              handleShiftClick(btn.dataset.id)
+            );
+          });
+        }
+
         function onChipClick(e) {
           const b = e.currentTarget;
           const stu = b.dataset.stu;
@@ -1524,8 +1564,7 @@ async function updateView() {
             renderTable();
           });
 
-          el("searchInput").addEventListener("input", updateView);
-
+          el("searchInput").addEventListener("input", () => renderTable());
           el("applyQuick").addEventListener("click", () => {
             applyQuick();
             el("saveToast").textContent = "Quick applied";
@@ -1566,12 +1605,12 @@ async function updateView() {
             else document.exitFullscreen().catch(() => {});
           });
           setInterval(check3pmAlert, 60 * 1000);
-document.addEventListener("somap:year-changed", (e) => {
+  document.addEventListener("somap:year-changed", (e) => {
   const year = e.detail?.year || SOMAP_DEFAULT_YEAR;
-  financeCache = {};
-  attachFinanceToStudents(year, filtered.length ? filtered : students);
-});
 
+  el("rtState").textContent = "Updating finance…";
+  attachFinanceToStudents(year, students); // ❌ no await
+});
 
 
         }
@@ -1729,31 +1768,16 @@ function populateClassSelect() {
     );
     return;
   }
-  
-filtered = [...students];
 
-
-  //  FAST initial render (no finance yet)
+  // 2️⃣ FAST initial render (no finance yet)
   renderTable();
   populateClassSelect();
   wireUI();
-  window.addEventListener('somapYearChanged', async (e) => {
-    const newYear = e.detail.year;
-    console.log("Year context changed to:", newYear);
-    
-    // Clear the cache so we don't show old year data
-    financeCache = {}; 
-    
-    // Refresh finance for the students currently in the list
-    // Use 'filtered' if you have it, otherwise 'students'
-    const listToUpdate = (filtered && filtered.length > 0) ? filtered : students;
-    await attachFinanceToStudents(newYear, listToUpdate);
-  });
   setupShiftModal();
   subscribeShiftReports();
   await applyInitialClassSelection();
 
-  // Auto-activate single class if needed
+  // 3️⃣ Auto-activate single class if needed
   if (!currentClass) {
     const classes = Array.from(
       new Set(students.map((s) => s.class))
@@ -1763,7 +1787,6 @@ filtered = [...students];
       await activateClass(classes[0]);
     }
   }
-  
 
   // 4️⃣ Background finance attach (NON-BLOCKING)
   const selectedYear =
@@ -1786,7 +1809,6 @@ filtered = [...students];
 }
 
 await init();
-
 })();
 
     </script>
