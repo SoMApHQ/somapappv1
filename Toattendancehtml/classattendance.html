@@ -458,6 +458,7 @@
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
     <script src="../firebase.js"></script>
     <!-- finance -->
+    <script src="../shared/finance_math.js"></script>
 
     <!-- jsPDF for export -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -510,6 +511,8 @@
         let shiftReports = {};
         let shiftRef = null;
         let currentShiftStudent = null;
+        let currentYear = "";
+        let yearReloadPromise = null;
 
         // ---------- HELPERS ----------
         const el = (id) => document.getElementById(id);
@@ -570,6 +573,11 @@
           return String(str || "")
             .toUpperCase()
             .replace(/[\s\-\._]/g, "");
+        }
+        function normalizeYearValue(year) {
+          const y = Number(year);
+          if (!Number.isFinite(y)) return String(SOMAP_DEFAULT_YEAR);
+          return String(y);
         }
         function canonicalClassKey(str) {
           const api = window.SomapSubjects || {};
@@ -758,84 +766,187 @@
           return CLASS_ORDER[j];
         }
 
-  async function loadStudentsFromDb() {
-  if (!db) return [];
+        function buildEnrollmentIndex(enrollments) {
+          const byId = enrollments || {};
+          const byAdmission = {};
+          Object.entries(enrollments || {}).forEach(([key, value]) => {
+            if (!value || typeof value !== "object") return;
+            const admission =
+              value.admissionNumber || value.admissionNo || value.admNo || "";
+            if (admission && !byAdmission[admission]) {
+              byAdmission[admission] = value;
+            }
+            if (!byId[key]) byId[key] = value;
+          });
+          return { byId, byAdmission };
+        }
+        function lookupEnrollment(index, studentId, admissionNo) {
+          if (!index) return {};
+          if (studentId && index.byId?.[studentId]) return index.byId[studentId];
+          if (admissionNo && index.byId?.[admissionNo])
+            return index.byId[admissionNo];
+          if (admissionNo && index.byAdmission?.[admissionNo])
+            return index.byAdmission[admissionNo];
+          return {};
+        }
 
-  const tryPaths = ["students", "Students", "StudentsList", "Students_List"];
+        async function loadStudentsFromDb(year) {
+          if (!db) return [];
 
-  for (const p of tryPaths) {
-    try {
-      const snap = await db.ref(p).get();
-      if (!snap.exists()) continue;
-
-      const data = snap.val();
-
-      return Object.keys(data)
-        .map((k) => {
-          const s = data[k] || {};
-
-          const status = String(s.status || "").toLowerCase();
-          if (status === "shifted") return null;
-
-          const name =
-            [s.firstName, s.middleName, s.lastName]
-              .filter(Boolean)
-              .join(" ")
-              .trim() ||
-            s.name ||
-            s.fullName ||
-            "";
-
-          const parentName =
-            s.primaryParentName ||
-            s.parentName ||
-            s.guardianName ||
-            "";
-
-          const parentContact =
-            s.primaryParentContact ||
-            s.parentPhone ||
-            s.parentContact ||
-            s.guardianContact ||
-            "";
-
-          const selectedYear =
-            window.somapYearContext?.getSelectedYear?.() ||
-            SOMAP_DEFAULT_YEAR;
-
+          const selectedYear = normalizeYearValue(
+            year ||
+              window.somapYearContext?.getSelectedYear?.() ||
+              SOMAP_DEFAULT_YEAR
+          );
           const delta = Number(selectedYear) - SOMAP_DEFAULT_YEAR;
-          const baseClass = s.class || s.classLevel || s.grade || "";
+          const tryPaths = ["students", "Students", "StudentsList", "Students_List"];
 
-          const feeDue = Number(s.feePerYear || 0);
-          const feePaid = Number(s.paidAmount || 0);
-          const balance =
-            s.balance !== undefined
-              ? Number(s.balance)
-              : Math.max(feeDue - feePaid, 0);
+          const [anchorEnrollSnap, yearEnrollSnap] = await Promise.all([
+            db
+              .ref(`enrollments/${SOMAP_DEFAULT_YEAR}`)
+              .get()
+              .catch(() => null),
+            db.ref(`enrollments/${selectedYear}`).get().catch(() => null),
+          ]);
+          const anchorIndex = buildEnrollmentIndex(
+            anchorEnrollSnap?.exists() ? anchorEnrollSnap.val() : {}
+          );
+          const yearIndex = buildEnrollmentIndex(
+            yearEnrollSnap?.exists() ? yearEnrollSnap.val() : {}
+          );
 
-          return {
-            id: k,
-            admissionNo:
-              s.admissionNumber || s.admNo || s.admissionNo || "",
-            name,
-            class: shiftClass(baseClass, delta),
-            feeDue,
-            feePaid,
-            balance,
-            parentName,
-            parentContact,
-            status: status || "active",
-          };
-        })
-        .filter(Boolean);
-    } catch (e) {
-      console.warn("Failed to load path", p, e.message);
-    }
-  }
+          for (const p of tryPaths) {
+            try {
+              const snap = await db.ref(p).get();
+              if (!snap.exists()) continue;
 
-  console.error("No students data found");
-  return [];
-}
+              const data = snap.val();
+
+              return Object.keys(data)
+                .map((k) => {
+                  const s = data[k] || {};
+
+                  const status = String(s.status || "").toLowerCase();
+                  if (status === "shifted") return null;
+
+                  const name =
+                    [s.firstName, s.middleName, s.lastName]
+                      .filter(Boolean)
+                      .join(" ")
+                      .trim() ||
+                    s.name ||
+                    s.fullName ||
+                    "";
+
+                  const parentName =
+                    s.primaryParentName ||
+                    s.parentName ||
+                    s.guardianName ||
+                    "";
+
+                  const parentContact =
+                    s.primaryParentContact ||
+                    s.parentPhone ||
+                    s.parentContact ||
+                    s.guardianContact ||
+                    "";
+
+                  const admissionNo =
+                    s.admissionNumber || s.admNo || s.admissionNo || "";
+
+                  const anchorEnrollment = lookupEnrollment(
+                    anchorIndex,
+                    k,
+                    admissionNo
+                  );
+                  const yearEnrollment = lookupEnrollment(
+                    yearIndex,
+                    k,
+                    admissionNo
+                  );
+                  const yearClass =
+                    yearEnrollment.className ||
+                    yearEnrollment.classLevel ||
+                    yearEnrollment.class ||
+                    "";
+                  const baseClass =
+                    anchorEnrollment.className ||
+                    anchorEnrollment.classLevel ||
+                    s.class ||
+                    s.classLevel ||
+                    s.grade ||
+                    "";
+
+                  return {
+                    id: k,
+                    admissionNo,
+                    name,
+                    class: yearClass || shiftClass(baseClass, delta),
+                    feeDue: 0,
+                    feePaid: 0,
+                    balance: 0,
+                    parentName,
+                    parentContact,
+                    status: status || "active",
+                  };
+                })
+                .filter(Boolean);
+            } catch (e) {
+              console.warn("Failed to load path", p, e.message);
+            }
+          }
+
+          console.error("No students data found");
+          return [];
+        }
+
+        async function attachFinanceDataForYear(year) {
+          const yearKey = normalizeYearValue(year);
+          if (!window.SomapFinance?.getYearFinanceEntries) return;
+          try {
+            if (window.SomapFinance._clearFinanceCaches) {
+              window.SomapFinance._clearFinanceCaches();
+            }
+            const entries = await window.SomapFinance.getYearFinanceEntries(
+              yearKey
+            );
+            const byAdmission = {};
+            Object.entries(entries || {}).forEach(([_, entry]) => {
+              const student = entry?.student || {};
+              const admission =
+                student.admissionNumber ||
+                student.admissionNo ||
+                entry.admissionNumber ||
+                entry.admissionNo ||
+                "";
+              if (admission) byAdmission[String(admission)] = entry;
+            });
+            students = students.map((s) => {
+              const entry =
+                entries?.[s.id] ||
+                (s.admissionNo
+                  ? byAdmission[String(s.admissionNo)]
+                  : null) ||
+                null;
+              if (!entry) return { ...s, feeDue: 0, feePaid: 0, balance: 0 };
+              const due = Number(
+                entry.due ?? entry.finance?.feePerYear ?? 0
+              );
+              const paid = Number(
+                entry.paid ?? entry.finance?.paidAmount ?? 0
+              );
+              const balance = Number(
+                entry.outstanding ??
+                  entry.finance?.balance ??
+                  Math.max(0, due - paid)
+              );
+              return { ...s, feeDue: due, feePaid: paid, balance };
+            });
+            renderTable();
+          } catch (e) {
+            console.warn("Finance summary load failed", e?.message || e);
+          }
+        }
 
         // ---------- Attendance CRUD ----------
         async function loadDayAttendance(cls, dateStr) {
@@ -1533,12 +1644,22 @@
             else document.exitFullscreen().catch(() => {});
           });
           setInterval(check3pmAlert, 60 * 1000);
-          document.addEventListener("somap:year-changed", (e) => {
-            const year = e.detail?.year || SOMAP_DEFAULT_YEAR;
-
-            el("rtState").textContent = "Updating finance…";
-          
-          });
+          const handleYearChange = (yearValue) => {
+            const nextYear = normalizeYearValue(
+              yearValue || SOMAP_DEFAULT_YEAR
+            );
+            if (nextYear === currentYear) return;
+            reloadForYear(nextYear);
+          };
+          if (window.somapYearContext?.onYearChanged) {
+            window.somapYearContext.onYearChanged(handleYearChange);
+          } else {
+            window.addEventListener("somapYearChanged", (e) => {
+              const yearValue =
+                (e.detail && e.detail.year) || e.detail || SOMAP_DEFAULT_YEAR;
+              handleYearChange(yearValue);
+            });
+          }
         }
 
         // ---------- 3PM alert ----------
@@ -1675,8 +1796,11 @@
 
           // 1️⃣ Load students with retry
           let loaded = false;
+          currentYear = normalizeYearValue(
+            window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR
+          );
           for (let attempt = 1; attempt <= 3; attempt++) {
-            students = await loadStudentsFromDb();
+            students = await loadStudentsFromDb(currentYear);
 
             if (students.length) {
               loaded = true;
@@ -1716,10 +1840,8 @@
             }
           }
 
-          // 4️⃣ Background finance attach (NON-BLOCKING)
-          const selectedYear =
-            window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR;
-
+          // 4 Background finance attach (NON-BLOCKING)
+          attachFinanceDataForYear(currentYear);
 
           // 5️⃣ Final state text (finance will update later)
           if (lockedClassStorage) {
@@ -1727,14 +1849,52 @@
               currentClass || lockedClassStorage
             }`;
           } else if (currentClass) {
-            el("rtState").textContent = `Ready · ${currentClass}`;
+            el("rtState").textContent = `Ready - ${currentClass}`;
           } else {
             el("rtState").textContent = "Ready";
           }
         }
 
+        async function reloadForYear(yearValue) {
+          const targetYear = normalizeYearValue(yearValue);
+          if (yearReloadPromise) return;
+          currentYear = targetYear;
+          el("rtState").textContent = "Reloading year...";
+          yearReloadPromise = (async () => {
+            students = await loadStudentsFromDb(targetYear);
+            populateClassSelect();
+            const fallbackClass =
+              lockedClassStorage || currentClass || queryClassRaw || "";
+            currentClass = fallbackClass;
+            await applyInitialClassSelection();
+            if (!currentClass) renderTable();
+            attachFinanceDataForYear(targetYear);
+          })();
+          await yearReloadPromise;
+          yearReloadPromise = null;
+          if (lockedClassStorage) {
+            el("rtState").textContent = `Locked to ${
+              currentClass || lockedClassStorage
+            }`;
+          } else if (currentClass) {
+            el("rtState").textContent = `Ready - ${currentClass}`;
+          } else {
+            el("rtState").textContent = "Ready";
+          }
+        }
         await init();
       })();
     </script>
   </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
