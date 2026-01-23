@@ -1727,6 +1727,83 @@ function buildFinanceStudents(
   }
   function closePaymentModalFn() { paymentModal.style.display = 'none'; paymentForm.reset(); }
 
+  const LEDGER_ACTION_PASSWORD = 'REHEMam!';
+
+  function confirmLedgerAction(actionLabel) {
+    const input = prompt(`Enter password to ${actionLabel}:`);
+    if (input === null) return false;
+    if (input !== LEDGER_ACTION_PASSWORD) {
+      alert('Incorrect password.');
+      return false;
+    }
+    return true;
+  }
+
+  function parseLedgerTimestampInput(input, fallback) {
+    const raw = String(input || '').trim();
+    if (!raw) return fallback;
+    const normalized = raw.replace(' ', 'T');
+    const ts = Date.parse(normalized);
+    if (!Number.isFinite(ts)) return null;
+    return ts;
+  }
+
+  async function handleLedgerEdit(studentId, paymentId) {
+    if (!confirmLedgerAction('edit this payment')) return;
+    const student = cachedStudents[studentId];
+    if (!student) return alert('Student not found');
+    const payment = student.payments?.[paymentId];
+    if (!payment) return alert('Payment not found');
+
+    const amountInput = prompt('Edit amount (TSh)', payment.amount != null ? String(payment.amount) : '');
+    if (amountInput === null) return;
+    const amount = Number(amountInput);
+    if (!Number.isFinite(amount) || amount < 0) {
+      alert('Enter a valid non-negative amount.');
+      return;
+    }
+    const methodInput = prompt('Edit method', payment.method || '');
+    if (methodInput === null) return;
+    const noteInput = prompt('Edit note', payment.note || '');
+    if (noteInput === null) return;
+    const currentStamp = payment.timestamp ? new Date(payment.timestamp) : null;
+    const defaultStamp = currentStamp ? currentStamp.toISOString().slice(0, 16).replace('T', ' ') : '';
+    const dateInput = prompt('Edit date/time (YYYY-MM-DD or YYYY-MM-DD HH:mm). Leave blank to keep.', defaultStamp);
+    if (dateInput === null) return;
+    const nextTimestamp = parseLedgerTimestampInput(dateInput, payment.timestamp || Date.now());
+    if (nextTimestamp === null) {
+      alert('Invalid date/time format.');
+      return;
+    }
+
+    try {
+      await schoolRef(`financeLedgers/${financeYear}/${studentId}/payments/${paymentId}`).update({
+        amount: Math.round(amount),
+        method: (methodInput || '').trim(),
+        note: (noteInput || '').trim(),
+        timestamp: nextTimestamp,
+      });
+      await refreshFinanceData(financeYear);
+      await openDetailsModal(studentId);
+    } catch (err) {
+      console.error('Failed to edit payment', err);
+      alert('Failed to edit payment: ' + (err?.message || err));
+    }
+  }
+
+  async function handleLedgerDelete(studentId, paymentId) {
+    if (!confirmLedgerAction('delete this payment')) return;
+    if (!confirm('Delete this payment permanently?')) return;
+    try {
+      await schoolRef(`financeLedgers/${financeYear}/${studentId}/payments/${paymentId}`).remove();
+      await refreshFinanceData(financeYear);
+      await openDetailsModal(studentId);
+    } catch (err) {
+      console.error('Failed to delete payment', err);
+      alert('Failed to delete payment: ' + (err?.message || err));
+    }
+  }
+
   async function promptEditYearFee(studentId) {
     if (!db) return alert('Database connection not ready.');
     if (!hasFinanceAdminAccess()) return alert('Not authorized to edit fees.');
@@ -1855,13 +1932,16 @@ function buildFinanceStudents(
       <hr class="my-3"/>
       <h4 class="font-semibold">Payments Ledger</h4>
     `;
-    if (!s.payments) {
+    const paymentEntries = Object.entries(s.payments || {}).filter(([, p]) => p);
+    if (!paymentEntries.length) {
       html += '<div class="text-sm text-gray-500">No payments recorded yet.</div>';
     } else {
-      html += `<div class="overflow-auto"><table class="min-w-full text-xs mt-2"><thead><tr class="table-header"><th class="p-1 border">Date</th><th class="p-1 border">Amount</th><th class="p-1 border">Method</th><th class="p-1 border">Note</th></tr></thead><tbody>`;
-      Object.values(s.payments).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).forEach(p => {
+      const escapeAttr = (value) => String(value).replace(/"/g, '&quot;');
+      html += `<div class="overflow-auto"><table class="min-w-full text-xs mt-2"><thead><tr class="table-header"><th class="p-1 border">Date</th><th class="p-1 border">Amount</th><th class="p-1 border">Method</th><th class="p-1 border">Note</th><th class="p-1 border">Actions</th></tr></thead><tbody>`;
+      paymentEntries.sort((a, b) => (a[1]?.timestamp || 0) - (b[1]?.timestamp || 0)).forEach(([paymentId, p]) => {
         const d = new Date(p.timestamp || 0).toLocaleString();
-        html += `<tr><td class="p-1 border">${d}</td><td class="p-1 border">${fmt(p.amount)}</td><td class="p-1 border">${p.method || ''}</td><td class="p-1 border">${p.note || ''}</td></tr>`;
+        const safeId = escapeAttr(paymentId);
+        html += `<tr><td class="p-1 border">${d}</td><td class="p-1 border">${fmt(p.amount)}</td><td class="p-1 border">${p.method || ''}</td><td class="p-1 border">${p.note || ''}</td><td class="p-1 border"><div class="flex gap-1"><button class="px-2 py-0.5 text-[11px] bg-amber-500 text-white rounded" data-action="edit-payment" data-payment-id="${safeId}">Edit</button><button class="px-2 py-0.5 text-[11px] bg-rose-600 text-white rounded" data-action="delete-payment" data-payment-id="${safeId}">Delete</button></div></td></tr>`;
       });
       html += `</tbody></table></div>`;
     }
@@ -1870,6 +1950,14 @@ function buildFinanceStudents(
       const editBtn = detailsContent.querySelector('[data-action="edit-fee-year"]');
       if (editBtn) editBtn.addEventListener('click', () => promptEditYearFee(id));
     }
+    detailsContent.querySelectorAll('[data-action="edit-payment"]').forEach((btn) => {
+      const paymentId = btn.getAttribute('data-payment-id');
+      btn.addEventListener('click', () => handleLedgerEdit(id, paymentId));
+    });
+    detailsContent.querySelectorAll('[data-action="delete-payment"]').forEach((btn) => {
+      const paymentId = btn.getAttribute('data-payment-id');
+      btn.addEventListener('click', () => handleLedgerDelete(id, paymentId));
+    });
     detailsModal.style.display = 'block';
   }
   function closeDetailsModalFn() { detailsModal.style.display = 'none'; detailsContent.innerHTML = ''; }
