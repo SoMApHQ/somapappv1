@@ -411,9 +411,9 @@
   async function loadStudentsFromDb(year = getSelectedYear()) {
     if (!db) return [];
 
-    // 1) Load base students (current + archive + legacy) from the active school
+    // 1) Load base students from the active school (match student list source)
     const baseMap = {};
-    const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List', 'studentsArchive', 'students_legacy'];
+    const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List'];
     for (const p of tryPaths) {
       try {
         const snap = await schoolRef(p).get();
@@ -463,74 +463,43 @@
     };
 
     const baseStudents = Object.keys(baseMap).map(k => toStudent(k, baseMap[k])).filter(Boolean);
-    const isArchiveSource = (src) => src === 'studentsArchive' || src === 'students_legacy';
     const normalizeAdmission = (value) => String(value || '').trim();
-    const baseById = {};
-    const baseByAdmission = {};
-    baseStudents.forEach(s => {
-      const sid = s.id || '';
-      if (sid) baseById[sid] = s;
-      const adm = normalizeAdmission(s.admissionNo);
-      if (adm && !baseByAdmission[adm]) baseByAdmission[adm] = s;
-    });
 
-    // 2) If enrollments/<year> exists, build roster from it (so 2025 vs 2026 can differ)
+    // 2) Load enrollments for selected year + anchor year
     let enrollmentIndex = {};
+    let anchorIndex = {};
     try {
       const enrollSnap = await schoolRef(`enrollments/${year}`).get();
       if (enrollSnap.exists()) enrollmentIndex = normalizeEnrollments(enrollSnap.val());
     } catch (e) {
       // ignore
     }
-    const enrollmentIds = Object.keys(enrollmentIndex || {});
-    if (enrollmentIds.length) {
-      const roster = [];
-      enrollmentIds.forEach(sid => {
-        const enroll = enrollmentIndex[sid] || {};
-        const admissionKey = normalizeAdmission(
-          enroll.admissionNo || enroll.admissionNumber || enroll.admNo || enroll.admission || sid
-        );
-        const base = baseById[sid] || (admissionKey ? baseByAdmission[admissionKey] : null);
-        if (!base) return;
-        const classLevel = normalizeClassName(
-          enroll.className || enroll.classLevel || enroll.class || enroll.grade ||
-          base.className || base.classLevel || base.class || base.grade ||
-          'Unknown'
-        );
-        if (classLevel === 'GRADUATED') return;
-        roster.push({
-          ...base,
-          class: classLevel,
-          className: classLevel,
-          classLevel
-        });
-      });
-      return roster.length ? roster : baseStudents;
-    }
-
-    // 3) Fallback: if no enrollments for the selected year, use anchor year to shift class + drop graduates
-    let anchorIndex = {};
     try {
       const anchorSnap = await schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).get();
       if (anchorSnap.exists()) anchorIndex = normalizeEnrollments(anchorSnap.val());
     } catch (e) {
       // ignore
     }
-    if (!Object.keys(anchorIndex).length) {
-      const nonArchive = baseStudents.filter(s => !isArchiveSource(s.__source));
-      return nonArchive.length ? nonArchive : baseStudents;
-    }
+
     const deltaYears = Number(year) - SOMAP_DEFAULT_YEAR;
     const roster = baseStudents.reduce((acc, student) => {
-      const anchor = anchorIndex[student.id] || anchorIndex[normalizeAdmission(student.admissionNo)] || {};
-      if (!anchor.className && !anchor.classLevel && !anchor.class && !anchor.grade) {
-        if (isArchiveSource(student.__source)) return acc;
+      const sid = student.id || '';
+      const admissionKey = normalizeAdmission(student.admissionNo);
+      const enroll = enrollmentIndex[sid] || (admissionKey ? enrollmentIndex[admissionKey] : null) || {};
+      let classRaw = enroll.className || enroll.classLevel || enroll.class || enroll.grade || '';
+
+      if (!classRaw) {
+        const anchor = anchorIndex[sid] || (admissionKey ? anchorIndex[admissionKey] : null) || {};
+        const baseClass = anchor.className || anchor.classLevel || anchor.class || anchor.grade ||
+          student.className || student.classLevel || student.class || student.grade || 'Unknown';
+        const shifted = shiftClass(baseClass, deltaYears);
+        if (shifted === 'GRADUATED') return acc;
+        classRaw = shifted;
+      } else if (String(classRaw).trim().toUpperCase() === 'GRADUATED') {
+        return acc;
       }
-      const baseClass = anchor.className || anchor.classLevel || anchor.class || anchor.grade ||
-        student.className || student.classLevel || student.class || student.grade || 'Unknown';
-      const shifted = shiftClass(baseClass, deltaYears);
-      if (shifted === 'GRADUATED') return acc;
-      const classLevel = normalizeClassName(shifted);
+
+      const classLevel = normalizeClassName(classRaw);
       acc.push({
         ...student,
         class: classLevel,
