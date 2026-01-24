@@ -375,6 +375,8 @@
     if (!db) return [];
     const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List'];
     const baseMap = {};
+    const baseByAdmission = {};
+    const normalizeAdmission = (value) => String(value || '').trim();
     const loadFromPath = async (p) => {
       try {
         const snap = await schoolRef(p).get();
@@ -394,7 +396,7 @@
           if (status === 'shifted') return;
           const parentName = s.primaryParentName || s.parentName || s.guardianName || '';
           const parentContact = s.primaryParentContact || s.parentPhone || s.parentContact || s.guardianContact || '';
-          baseMap[k] = {
+          const entry = {
             id: k,
             admissionNo: s.admissionNumber || s.admNo || s.admissionNo || '',
             name,
@@ -408,6 +410,11 @@
             parentContact,
             status: status || 'active'
           };
+          baseMap[k] = entry;
+          const admissionKey = normalizeAdmission(entry.admissionNo);
+          if (admissionKey && !baseByAdmission[admissionKey]) {
+            baseByAdmission[admissionKey] = entry;
+          }
         });
       } catch (e) {
         console.warn('Failed to load path', p, ':', e.message);
@@ -435,19 +442,61 @@
       console.warn('Failed to load enrollments for year', year, e.message);
     }
 
-    const enrollmentIds = Object.keys(enrollments || {});
-    const roster = enrollmentIds.length
-      ? enrollmentIds.map(id => baseMap[id]).filter(Boolean)
-      : Object.values(baseMap);
+    let enrollmentIndex = enrollments || {};
+    let enrollmentIds = Object.keys(enrollmentIndex || {});
+    let roster = [];
+    const buildRosterFromEnrollments = (index) => {
+      const ids = Object.keys(index || {});
+      if (!ids.length) return [];
+      const seen = new Set();
+      const picked = [];
+      ids.forEach(id => {
+        const enroll = index[id] || {};
+        const admissionHint = normalizeAdmission(
+          enroll.admissionNo || enroll.admissionNumber || enroll.admNo || enroll.admission || ''
+        );
+        const admissionKey = admissionHint || normalizeAdmission(id);
+        const student = baseMap[id] || (admissionKey ? baseByAdmission[admissionKey] : null);
+        if (!student || seen.has(student.id)) return;
+        seen.add(student.id);
+        const classLevel = enroll?.className || enroll?.classLevel || enroll?.class || enroll?.grade
+          || student.classLevel || student.class || student.className;
+        if (classLevel) {
+          student.classLevel = classLevel;
+          student.className = classLevel;
+        }
+        picked.push(student);
+      });
+      return picked;
+    };
 
-    roster.forEach(s => {
-      const enroll = enrollments && s ? enrollments[s.id] : null;
-      const classLevel = enroll?.className || s.classLevel || s.class || s.className;
-      if (classLevel) {
-        s.classLevel = classLevel;
-        s.className = classLevel;
+    if (enrollmentIds.length) {
+      roster = buildRosterFromEnrollments(enrollmentIndex);
+      if (!roster.length) {
+        const flattened = {};
+        Object.entries(enrollmentIndex).forEach(([key, value]) => {
+          if (!value || typeof value !== 'object') return;
+          const hasEnrollmentFields = value.className || value.classLevel || value.class || value.grade
+            || value.admissionNo || value.admissionNumber || value.admNo || value.admission;
+          if (hasEnrollmentFields) {
+            flattened[key] = value;
+            return;
+          }
+          Object.entries(value).forEach(([stuId, stuVal]) => {
+            if (!stuVal || typeof stuVal !== 'object') return;
+            flattened[stuId] = flattened[stuId] || {};
+            Object.assign(flattened[stuId], stuVal);
+            if (!flattened[stuId].className && !flattened[stuId].classLevel && !flattened[stuId].class && !flattened[stuId].grade) {
+              flattened[stuId].className = key;
+            }
+          });
+        });
+        roster = buildRosterFromEnrollments(flattened);
       }
-    });
+      if (!roster.length) roster = Object.values(baseMap);
+    } else {
+      roster = Object.values(baseMap);
+    }
 
     return roster;
   }
