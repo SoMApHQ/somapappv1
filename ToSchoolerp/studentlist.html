@@ -253,11 +253,24 @@
       }
       window.currentSchoolId = school.id;
       const schoolRef = (subPath) => db.ref(window.SOMAP.P(subPath));
+      const isSocrates = school.id === 'socrates-school';
       const schoolLabel = document.getElementById('currentSchoolLabel');
       if (schoolLabel) {
         const schoolName = school.name || school.id;
         schoolLabel.textContent = `Current school: ${schoolName}`;
       }
+
+      const pickRefWithLegacy = async (scopedSubPath, legacyPath) => {
+        const scopedRef = schoolRef(scopedSubPath);
+        if (!isSocrates || !legacyPath) return scopedRef;
+        try {
+          const snap = await scopedRef.get();
+          if (snap.exists()) return scopedRef;
+        } catch (err) {
+          console.warn('Scoped read failed; falling back to legacy path.', err);
+        }
+        return db.ref(legacyPath);
+      };
 
       const elements = {
         listBody: document.getElementById('studentListBody'),
@@ -296,6 +309,7 @@
         renderToken: 0,
         yearEnrollRef: null,
         ledgerRef: null,
+        studentsRef: null,
       };
       const queueRender = () => {
         renderAllTables().catch((err) => console.error('Render error', err));
@@ -305,17 +319,17 @@
         if (yearHint) yearHint.textContent = yearStr;
         if (yearSelect && yearSelect.value !== yearStr) yearSelect.value = yearStr;
       };
-      window.somapYearContext?.onYearChanged?.((year) => {
+      window.somapYearContext?.onYearChanged?.(async (year) => {
         const yearStr = String(year || SOMAP_DEFAULT_YEAR);
         updateYearUI(yearStr);
         state.planCache.clear();
-        attachYearListeners(yearStr);
+        await attachYearListeners(yearStr);
         state.latestYear = yearStr;
         queueRender();
       });
       updateYearUI(getWorkingYear());
       if (!state.yearEnrollRef) {
-        attachYearListeners(getWorkingYear());
+        attachYearListeners(getWorkingYear()).catch((err) => console.error('Year listener attach failed', err));
       }
 
       function resolveClassForYear(studentId, fallbackClass, year) {
@@ -358,37 +372,51 @@
         return String(text).replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[m]));
       }
 
-      function attachYearListeners(year) {
+      async function attachYearListeners(year) {
         const yearStr = String(year);
         if (state.yearEnrollRef) state.yearEnrollRef.off();
         if (state.ledgerRef) state.ledgerRef.off();
 
-        state.yearEnrollRef = schoolRef(`enrollments/${yearStr}`);
+        state.yearEnrollRef = await pickRefWithLegacy(`enrollments/${yearStr}`, `enrollments/${yearStr}`);
         state.yearEnrollRef.on('value', (snap) => {
           state.yearEnrollments = snap.val() || {};
           queueRender();
         });
 
-        state.ledgerRef = schoolRef(`financeLedgers/${yearStr}`);
+        state.ledgerRef = await pickRefWithLegacy(`financeLedgers/${yearStr}`, `financeLedgers/${yearStr}`);
         state.ledgerRef.on('value', (snap) => {
           state.ledger = snap.val() || {};
           queueRender();
         });
       }
 
-      schoolRef('students').on('value', (snapshot) => {
-        const raw = snapshot.val() || {};
-        state.students.clear();
-        Object.entries(raw).forEach(([key, value]) => {
-          state.students.set(key, { key, ...(value || {}) });
-        });
-        queueRender();
-      });
+      (async () => {
+        try {
+          state.studentsRef = await pickRefWithLegacy('students', 'students');
+          state.studentsRef.on('value', (snapshot) => {
+            const raw = snapshot.val() || {};
+            state.students.clear();
+            Object.entries(raw).forEach(([key, value]) => {
+              state.students.set(key, { key, ...(value || {}) });
+            });
+            queueRender();
+          });
+        } catch (err) {
+          console.error('Failed to attach students listener', err);
+        }
+      })();
 
-      schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).on('value', (snapshot) => {
-        state.anchorEnrollments = snapshot.val() || {};
-        queueRender();
-      });
+      (async () => {
+        try {
+          const anchorRef = await pickRefWithLegacy(`enrollments/${SOMAP_DEFAULT_YEAR}`, `enrollments/${SOMAP_DEFAULT_YEAR}`);
+          anchorRef.on('value', (snapshot) => {
+            state.anchorEnrollments = snapshot.val() || {};
+            queueRender();
+          });
+        } catch (err) {
+          console.error('Failed to attach anchor enrollment listener', err);
+        }
+      })();
 
       if (elements.classFilter) {
         elements.classFilter.addEventListener('change', queueRender);

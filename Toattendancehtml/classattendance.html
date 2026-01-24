@@ -8,6 +8,7 @@
     <!-- Tailwind for quick styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="../Todashboardhtml/yearContext.js"></script>
+  <script src="../somapappv1multischool/js/context.js"></script>
 
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap"
@@ -253,6 +254,7 @@
           >
             Enter Fullscreen
           </button>
+          <div id="currentSchoolLabel" class="text-xs text-slate-500"></div>
           <div id="rtState" class="text-sm text-slate-500">Connecting…</div>
         </div>
       </div>
@@ -508,6 +510,34 @@
         let attendanceCache = {};
         let monthAttendance = {};
         let db = null;
+        let currentSchool = null;
+        let isSocrates = false;
+
+    // Multi-school helpers (requires ../somapappv1multischool/js/context.js)
+    const P = (path) =>
+      (window.SOMAP && typeof window.SOMAP.P === 'function') ? window.SOMAP.P(path) : path;
+    const schoolRef = (path) => {
+      if (!db) throw new Error('Firebase DB not initialized');
+      return db.ref(P(path));
+    };
+
+    async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
+      const scoped = schoolRef(scopedSubPath);
+      if (!isSocrates || !legacyPath) {
+        return scoped.get();
+      }
+      const snap = await scoped.get();
+      if (snap.exists()) return snap;
+      return db.ref(legacyPath).get();
+    }
+
+    const replaceYearInIsoDate = (iso, year) => {
+      if (!iso || typeof iso !== 'string') return iso;
+      const parts = iso.split('-');
+      if (parts.length !== 3) return iso;
+      parts[0] = String(year);
+      return parts.join('-');
+    };
         let shiftReports = {};
         let shiftRef = null;
         let currentShiftStudent = null;
@@ -802,11 +832,14 @@
           const tryPaths = ["students", "Students", "StudentsList", "Students_List"];
 
           const [anchorEnrollSnap, yearEnrollSnap] = await Promise.all([
-            db
-              .ref(`enrollments/${SOMAP_DEFAULT_YEAR}`)
-              .get()
-              .catch(() => null),
-            db.ref(`enrollments/${selectedYear}`).get().catch(() => null),
+            scopedOrSocratesLegacy(
+              `enrollments/${SOMAP_DEFAULT_YEAR}`,
+              `enrollments/${SOMAP_DEFAULT_YEAR}`
+            ).catch(() => null),
+            scopedOrSocratesLegacy(
+              `enrollments/${selectedYear}`,
+              `enrollments/${selectedYear}`
+            ).catch(() => null),
           ]);
           const anchorIndex = buildEnrollmentIndex(
             anchorEnrollSnap?.exists() ? anchorEnrollSnap.val() : {}
@@ -817,7 +850,7 @@
 
           for (const p of tryPaths) {
             try {
-              const snap = await db.ref(p).get();
+              const snap = await scopedOrSocratesLegacy(p, p);
               if (!snap.exists()) continue;
 
               const data = snap.val();
@@ -967,7 +1000,7 @@
           monthAttendance = {};
           if (!db || !cls) return;
           try {
-            const snap = await db.ref(`attendance/${cls}/${yymm}`).get();
+            const snap = await schoolRef(`attendance/${cls}/${yymm}`).get();
             const d = snap.exists() ? snap.val() : {};
             Object.keys(d).forEach((dateKey) => {
               const byStu = d[dateKey] || {};
@@ -985,7 +1018,7 @@
           const yymm = toMonthKey(dateStr);
           const path = `attendance/${cls}/${yymm}/${dateStr}`;
           try {
-            await db.ref(path).update(attendanceCache);
+            await schoolRef(path).update(attendanceCache);
             saveToastOK("Attendance saved successfully");
           } catch (e) {
             alert("Save failed: " + e.message);
@@ -995,7 +1028,7 @@
           if (!db) return;
           if (shiftRef) shiftRef.off(); // keep this
 
-          shiftRef = db.ref(SHIFT_REPORT_PATH);
+          shiftRef = schoolRef(SHIFT_REPORT_PATH);
 
           shiftRef.on("value", (snap) => {
             const next = snap.exists() ? snap.val() : {};
@@ -1363,7 +1396,7 @@
               };
               try {
                 if (shiftSubmitBtn) shiftSubmitBtn.disabled = true;
-                await db.ref(`${SHIFT_REPORT_PATH}/${student.id}`).set(payload);
+                await schoolRef(`${SHIFT_REPORT_PATH}/${student.id}`).set(payload);
                 setShiftFormMessage(
                   "Shift alert saved. Admin has been notified.",
                   "success"
@@ -1792,6 +1825,18 @@
           await initializeFirebase();
           if (!db) return;
 
+          currentSchool = window.SOMAP?.getSchool?.();
+          if (!currentSchool || !currentSchool.id || !window.SOMAP?.P) {
+            window.location.href = "../somapappv1multischool/multischool.html";
+            return;
+          }
+          isSocrates = currentSchool.id === "socrates-school";
+          const schoolLabel = el("currentSchoolLabel");
+          if (schoolLabel) {
+            const schoolName = currentSchool.name || currentSchool.id;
+            schoolLabel.textContent = `Current school: ${schoolName}`;
+          }
+
           el("rtState").textContent = "Loading students…";
 
           // 1️⃣ Load students with retry
@@ -1799,6 +1844,10 @@
           currentYear = normalizeYearValue(
             window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR
           );
+          // Align date inputs / monthKey to the selected year (keep same month/day)
+          currentDateStr = replaceYearInIsoDate(currentDateStr, currentYear);
+          el("dateInput").value = currentDateStr;
+          monthKey = toMonthKey(currentDateStr);
           for (let attempt = 1; attempt <= 3; attempt++) {
             students = await loadStudentsFromDb(currentYear);
 
@@ -1861,6 +1910,15 @@
           currentYear = targetYear;
           el("rtState").textContent = "Reloading year...";
           yearReloadPromise = (async () => {
+            // Keep the same month/day but switch the year so attendance reads
+            // and month keys align with the selected year.
+            const dEl = el("dateInput");
+            if (dEl) {
+              const base = dEl.value || currentDateStr || fmtDate(new Date());
+              const next = replaceYearInIsoDate(base, targetYear);
+              dEl.value = next;
+              currentDateStr = next;
+            }
             students = await loadStudentsFromDb(targetYear);
             populateClassSelect();
             const fallbackClass =
@@ -1887,6 +1945,7 @@
     </script>
   </body>
 </html>
+
 
 
 
