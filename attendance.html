@@ -211,6 +211,7 @@
   let db = null;
   let shiftReports = {};
   let shiftRef = null;
+  let selectedYear = null;
 
   const currentSchool = window.SOMAP && SOMAP.getSchool();
   if (!currentSchool || !currentSchool.id) {
@@ -231,6 +232,44 @@
     const m = String(d.getMonth()+1).padStart(2,'0');
     const day = String(d.getDate()).padStart(2,'0');
     return `${y}-${m}-${day}`;
+  }
+
+  function getSelectedYear() {
+    return window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
+  }
+
+  function buildDateForSelectedYear(year) {
+    const now = new Date();
+    const candidate = new Date(year, now.getMonth(), now.getDate());
+    if (candidate.getMonth() === now.getMonth()) return candidate;
+    return new Date(year, now.getMonth() + 1, 0);
+  }
+
+  function replaceYearInDateStr(dateStr, year) {
+    if (!dateStr || dateStr.length < 10) return '';
+    return `${year}-${dateStr.slice(5, 10)}`;
+  }
+
+  function applySelectedYearToInputs(year) {
+    const baseDate = buildDateForSelectedYear(year);
+    const baseStr = fmtDate(baseDate);
+    const dateInput = el('registerDate');
+    const fromInput = el('fromDate');
+    const toInput = el('toDate');
+    if (dateInput) {
+      const next = dateInput.value ? replaceYearInDateStr(dateInput.value, year) : baseStr;
+      dateInput.value = next || baseStr;
+    }
+    if (fromInput) {
+      const next = fromInput.value ? replaceYearInDateStr(fromInput.value, year) : baseStr;
+      fromInput.value = next || baseStr;
+    }
+    if (toInput) {
+      const next = toInput.value ? replaceYearInDateStr(toInput.value, year) : baseStr;
+      toInput.value = next || baseStr;
+    }
+    currentDateStr = (dateInput && dateInput.value) ? dateInput.value : baseStr;
+    monthKey = toMonthKey(currentDateStr);
   }
 
   function toMonthKey(dStr){
@@ -332,50 +371,85 @@
     }
   }
 
-  async function loadStudentsFromDb() {
+  async function loadStudentsFromDb(year) {
     if (!db) return [];
     const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List'];
-    for (const p of tryPaths) {
+    const baseMap = {};
+    const loadFromPath = async (p) => {
       try {
         const snap = await schoolRef(p).get();
-        if (snap.exists()) {
-          const data = snap.val();
-          return Object.keys(data).map(k => {
-            const s = data[k] || {};
-            const name = [s.firstName, s.middleName, s.lastName]
-              .filter(Boolean).join(' ').trim()
-              || s.name || (s.fullName || '');
-            const gender = s.gender || s.Gender || s.sex || s.Sex || s.genderType || '';
-            const className = s.className || s.classLevel || s.class || s.grade || 'Unknown';
-            const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || 0);
-            const feePaid = Number(s.feesPaid || s.feePaid || s.paidAmount || 0);
-            const balance = Number(s.balance || (feeDue - feePaid) || 0);
-            const status = String(s.status || '').toLowerCase();
-            if (status === 'shifted') return null;
-            const parentName = s.primaryParentName || s.parentName || s.guardianName || '';
-            const parentContact = s.primaryParentContact || s.parentPhone || s.parentContact || s.guardianContact || '';
-            return {
-              id: k,
-              admissionNo: s.admissionNumber || s.admNo || s.admissionNo || '',
-              name,
-              class: className,
-              className,
-              gender,
-              feeDue,
-              feePaid,
-              balance,
-              parentName,
-              parentContact,
-              status: status || 'active'
-            };
-          }).filter(Boolean);
-        }
+        if (!snap.exists()) return;
+        const data = snap.val() || {};
+        Object.keys(data).forEach(k => {
+          const s = data[k] || {};
+          const name = [s.firstName, s.middleName, s.lastName]
+            .filter(Boolean).join(' ').trim()
+            || s.name || (s.fullName || '');
+          const gender = s.gender || s.Gender || s.sex || s.Sex || s.genderType || '';
+          const className = s.className || s.classLevel || s.class || s.grade || 'Unknown';
+          const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || 0);
+          const feePaid = Number(s.feesPaid || s.feePaid || s.paidAmount || 0);
+          const balance = Number(s.balance || (feeDue - feePaid) || 0);
+          const status = String(s.status || '').toLowerCase();
+          if (status === 'shifted') return;
+          const parentName = s.primaryParentName || s.parentName || s.guardianName || '';
+          const parentContact = s.primaryParentContact || s.parentPhone || s.parentContact || s.guardianContact || '';
+          baseMap[k] = {
+            id: k,
+            admissionNo: s.admissionNumber || s.admNo || s.admissionNo || '',
+            name,
+            class: className,
+            className,
+            gender,
+            feeDue,
+            feePaid,
+            balance,
+            parentName,
+            parentContact,
+            status: status || 'active'
+          };
+        });
       } catch (e) {
         console.warn('Failed to load path', p, ':', e.message);
       }
+    };
+
+    for (const p of tryPaths) {
+      await loadFromPath(p);
+      if (Object.keys(baseMap).length) break;
     }
-    console.error('No students data found in any path');
-    return [];
+
+    await loadFromPath('studentsArchive');
+    await loadFromPath('students_legacy');
+
+    if (!Object.keys(baseMap).length) {
+      console.error('No students data found in any path');
+      return [];
+    }
+
+    let enrollments = {};
+    try {
+      const enrollSnap = await schoolRef(`enrollments/${year}`).get();
+      enrollments = enrollSnap.exists() ? (enrollSnap.val() || {}) : {};
+    } catch (e) {
+      console.warn('Failed to load enrollments for year', year, e.message);
+    }
+
+    const enrollmentIds = Object.keys(enrollments || {});
+    const roster = enrollmentIds.length
+      ? enrollmentIds.map(id => baseMap[id]).filter(Boolean)
+      : Object.values(baseMap);
+
+    roster.forEach(s => {
+      const enroll = enrollments && s ? enrollments[s.id] : null;
+      const classLevel = enroll?.className || s.classLevel || s.class || s.className;
+      if (classLevel) {
+        s.classLevel = classLevel;
+        s.className = classLevel;
+      }
+    });
+
+    return roster;
   }
 
   // ---------- Shift reports ----------
@@ -621,7 +695,7 @@
       };
     }
 
-    const studentData = (students && students.length) ? students : await loadStudentsFromDb();
+    const studentData = (students && students.length) ? students : await loadStudentsFromDb(selectedYear || getSelectedYear());
     const studentIndex = {};
     const classNamesSet = new Set();
 
@@ -676,12 +750,7 @@
     // Present/Absent
     for (const cls of classNames) {
       try {
-        const snap = await db
-          .ref('attendance')
-          .child(cls)
-          .child(monthKeyLocal)
-          .child(targetDate)
-          .get();
+        const snap = await schoolRef(`attendance/${cls}/${monthKeyLocal}/${targetDate}`).get();
         const records = snap.exists() ? snap.val() : {};
         Object.keys(records || {}).forEach(stuId => {
           const record = records[stuId] || {};
@@ -926,7 +995,7 @@
   function setupDailyRegisterControls() {
     const dateInput = el('registerDate');
     const btnLoad = el('btnLoadRegister');
-    const todayIso = fmtDate(new Date());
+    const todayIso = currentDateStr || fmtDate(new Date());
 
     if (dateInput && !dateInput.value) {
       dateInput.value = todayIso;
@@ -970,18 +1039,11 @@
 
   // ---------- Start ----------
   async function init() {
-    const now = new Date();
-    currentDateStr = fmtDate(now);
+    selectedYear = getSelectedYear();
+    const baseDate = buildDateForSelectedYear(selectedYear);
+    currentDateStr = fmtDate(baseDate);
     monthKey = toMonthKey(currentDateStr);
-
-    const fromInput = el('fromDate');
-    const toInput = el('toDate');
-    if (fromInput) fromInput.value = currentDateStr;
-    if (toInput) toInput.value = currentDateStr;
-
-    const dateInput = el('registerDate');
-    const todayIso = fmtDate(now);
-    if (dateInput && !dateInput.value) dateInput.value = todayIso;
+    applySelectedYearToInputs(selectedYear);
 
     const stateEl = el('rtState');
     if (stateEl) stateEl.textContent = 'Connecting...';
@@ -992,7 +1054,7 @@
     if (db) {
       if (stateEl) stateEl.textContent = 'Loading students...';
       for (let attempt = 1; attempt <= 3; attempt++) {
-        students = await loadStudentsFromDb();
+        students = await loadStudentsFromDb(selectedYear);
         if (students.length) break;
         console.warn(`Attempt ${attempt} failed to load students. Retrying...`);
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1008,6 +1070,14 @@
         )).sort((a, b) => classOrderKey(a) - classOrderKey(b));
         currentClass = classes[0] || '';
       }
+      if (students.length && currentClass) {
+        const classNames = new Set(
+          students.map(s => s.class || s.classLevel || s.grade || s.className).filter(Boolean)
+        );
+        if (!classNames.has(currentClass)) {
+          currentClass = Array.from(classNames).sort((a, b) => classOrderKey(a) - classOrderKey(b))[0] || '';
+        }
+      }
     } else {
       console.warn('DB not connected; rendering empty register.');
       if (stateEl) stateEl.textContent = 'Offline';
@@ -1020,6 +1090,23 @@
     subscribeShiftReports();
     renderShiftList();
     await computeAnalytics(currentDateStr);
+
+    window.somapYearContext?.onYearChanged?.(async (year) => {
+      selectedYear = year;
+      applySelectedYearToInputs(year);
+      if (stateEl) stateEl.textContent = 'Loading students...';
+      students = await loadStudentsFromDb(year);
+      filtered = students.slice();
+      if (students.length) {
+        const classNames = new Set(
+          students.map(s => s.class || s.classLevel || s.grade || s.className).filter(Boolean)
+        );
+        currentClass = Array.from(classNames).sort((a, b) => classOrderKey(a) - classOrderKey(b))[0] || '';
+      } else {
+        currentClass = '';
+      }
+      await refreshDailyRegisterUI(currentDateStr);
+    });
   }
 
   await init();
