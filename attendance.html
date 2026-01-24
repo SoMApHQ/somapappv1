@@ -245,27 +245,79 @@
     return new Date(year, now.getMonth() + 1, 0);
   }
 
-  function replaceYearInDateStr(dateStr, year) {
+  function replaceYearInIsoDate(dateStr, year) {
     if (!dateStr || dateStr.length < 10) return '';
     return `${year}-${dateStr.slice(5, 10)}`;
   }
 
-  function applySelectedYearToInputs(year) {
+  function normalizeClassName(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return 'Unknown';
+    const low = raw.toLowerCase();
+    if (low.includes('baby')) return 'Baby';
+    if (low.includes('middle')) return 'Middle';
+    if (low.includes('pre') || low.includes('nursery')) return 'Pre Unit';
+    const match = low.match(/(?:class|std|standard|grade)?\s*([1-7])\b/);
+    if (match) return `Class ${match[1]}`;
+    return raw;
+  }
+
+  function normalizeEnrollments(raw) {
+    if (!raw || typeof raw !== 'object') return {};
+    const normalized = {};
+    Object.entries(raw).forEach(([key, value]) => {
+      if (!value || typeof value !== 'object') {
+        normalized[key] = normalized[key] || {};
+        return;
+      }
+      const hasEnrollmentFields = value.className || value.classLevel || value.class || value.grade
+        || value.admissionNo || value.admissionNumber || value.admNo || value.admission
+        || value.studentId || value.id;
+      if (hasEnrollmentFields) {
+        const entryId = value.id || value.studentId || key;
+        normalized[entryId] = { ...value };
+        return;
+      }
+      Object.entries(value).forEach(([stuId, stuVal]) => {
+        if (!stuVal || typeof stuVal !== 'object') {
+          normalized[stuId] = normalized[stuId] || {};
+          if (key && !normalized[stuId].className) normalized[stuId].className = key;
+          return;
+        }
+        const entry = { ...stuVal };
+        if (!entry.className && !entry.classLevel && !entry.class && !entry.grade) {
+          entry.className = key;
+        }
+        const entryId = entry.id || entry.studentId || stuId;
+        normalized[entryId] = Object.assign(normalized[entryId] || {}, entry);
+      });
+    });
+    return normalized;
+  }
+
+  function applySelectedYearToInputs(year, forceDefaults = false) {
     const baseDate = buildDateForSelectedYear(year);
     const baseStr = fmtDate(baseDate);
+    const firstOfMonth = fmtDate(new Date(baseDate.getFullYear(), baseDate.getMonth(), 1));
     const dateInput = el('registerDate');
     const fromInput = el('fromDate');
     const toInput = el('toDate');
     if (dateInput) {
-      const next = dateInput.value ? replaceYearInDateStr(dateInput.value, year) : baseStr;
+      const next = forceDefaults
+        ? baseStr
+        : (dateInput.value ? replaceYearInIsoDate(dateInput.value, year) : baseStr);
       dateInput.value = next || baseStr;
     }
     if (fromInput) {
-      const next = fromInput.value ? replaceYearInDateStr(fromInput.value, year) : baseStr;
-      fromInput.value = next || baseStr;
+      const next = forceDefaults
+        ? firstOfMonth
+        : (fromInput.value ? replaceYearInIsoDate(fromInput.value, year) : firstOfMonth);
+      fromInput.value = next || firstOfMonth;
     }
     if (toInput) {
-      const next = toInput.value ? replaceYearInDateStr(toInput.value, year) : baseStr;
+      const next = forceDefaults
+        ? baseStr
+        : (toInput.value ? replaceYearInIsoDate(toInput.value, year) : baseStr);
       toInput.value = next || baseStr;
     }
     currentDateStr = (dateInput && dateInput.value) ? dateInput.value : baseStr;
@@ -331,7 +383,7 @@
   }
 
   function classOrderKey(name){
-    const n = String(name || '').toLowerCase();
+    const n = normalizeClassName(name).toLowerCase();
     if (!n) return Number.MAX_SAFE_INTEGER;
     if (n.includes('baby')) return 0;
     if (n.includes('middle')) return 1;
@@ -388,7 +440,9 @@
             .filter(Boolean).join(' ').trim()
             || s.name || (s.fullName || '');
           const gender = s.gender || s.Gender || s.sex || s.Sex || s.genderType || '';
-          const className = s.className || s.classLevel || s.class || s.grade || 'Unknown';
+          const className = normalizeClassName(
+            s.className || s.classLevel || s.class || s.grade || 'Unknown'
+          );
           const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || 0);
           const feePaid = Number(s.feesPaid || s.feePaid || s.paidAmount || 0);
           const balance = Number(s.balance || (feeDue - feePaid) || 0);
@@ -442,39 +496,6 @@
       console.warn('Failed to load enrollments for year', year, e.message);
     }
 
-    const normalizeEnrollments = (raw) => {
-      if (!raw || typeof raw !== 'object') return {};
-      const normalized = {};
-      Object.entries(raw).forEach(([key, value]) => {
-        if (!value || typeof value !== 'object') {
-          normalized[key] = normalized[key] || {};
-          return;
-        }
-        const hasEnrollmentFields = value.className || value.classLevel || value.class || value.grade
-          || value.admissionNo || value.admissionNumber || value.admNo || value.admission
-          || value.studentId || value.id;
-        if (hasEnrollmentFields) {
-          const entryId = value.id || value.studentId || key;
-          normalized[entryId] = { ...value };
-          return;
-        }
-        Object.entries(value).forEach(([stuId, stuVal]) => {
-          if (!stuVal || typeof stuVal !== 'object') {
-            normalized[stuId] = normalized[stuId] || {};
-            if (key && !normalized[stuId].className) normalized[stuId].className = key;
-            return;
-          }
-          const entry = { ...stuVal };
-          if (!entry.className && !entry.classLevel && !entry.class && !entry.grade) {
-            entry.className = key;
-          }
-          const entryId = entry.id || entry.studentId || stuId;
-          normalized[entryId] = Object.assign(normalized[entryId] || {}, entry);
-        });
-      });
-      return normalized;
-    };
-
     const enrollmentIndex = normalizeEnrollments(enrollments || {});
     const enrollmentIds = Object.keys(enrollmentIndex || {});
     let roster = [];
@@ -492,14 +513,25 @@
         const classLevel = enroll?.className || enroll?.classLevel || enroll?.class || enroll?.grade
           || student.classLevel || student.class || student.className;
         if (classLevel) {
-          student.classLevel = classLevel;
-          student.className = classLevel;
-          student.class = classLevel;
+          const normalizedClass = normalizeClassName(classLevel);
+          student.classLevel = normalizedClass;
+          student.className = normalizedClass;
+          student.class = normalizedClass;
         }
         roster.push(student);
       });
     } else {
-      roster = Object.values(baseMap);
+      roster = Object.values(baseMap).map(student => {
+        const normalizedClass = normalizeClassName(
+          student.classLevel || student.class || student.className
+        );
+        return {
+          ...student,
+          classLevel: normalizedClass,
+          className: normalizedClass,
+          class: normalizedClass
+        };
+      });
     }
 
     return roster;
@@ -753,7 +785,7 @@
     const classNamesSet = new Set();
 
     (studentData || []).forEach(s => {
-      const className = s.className || s.classLevel || s.class || s.grade || '';
+      const className = normalizeClassName(s.className || s.classLevel || s.class || s.grade || '');
       if (!className) return;
       const gender = normalizeGender(s.gender || s.sex || s.genderType);
       const studentId = s.id || s.studentId || s.studentID || s.admissionNo || s.admissionNumber || s.admission || '';
@@ -1099,7 +1131,7 @@
     const baseDate = buildDateForSelectedYear(selectedYear);
     currentDateStr = fmtDate(baseDate);
     monthKey = toMonthKey(currentDateStr);
-    applySelectedYearToInputs(selectedYear);
+    applySelectedYearToInputs(selectedYear, true);
 
     const stateEl = el('rtState');
     if (stateEl) stateEl.textContent = 'Connecting...';
@@ -1149,7 +1181,7 @@
 
     window.somapYearContext?.onYearChanged?.(async (year) => {
       selectedYear = year;
-      applySelectedYearToInputs(year);
+      applySelectedYearToInputs(year, false);
       // Update currentDateStr from the date input after year change
       const dateInput = el('registerDate');
       if (dateInput && dateInput.value) {
