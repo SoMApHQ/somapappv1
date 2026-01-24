@@ -254,6 +254,7 @@
           >
             Enter Fullscreen
           </button>
+          <div id="currentSchoolLabel" class="text-xs text-slate-500"></div>
           <div id="rtState" class="text-sm text-slate-500">Connecting…</div>
         </div>
       </div>
@@ -509,6 +510,8 @@
         let attendanceCache = {};
         let monthAttendance = {};
         let db = null;
+        let currentSchool = null;
+        let isSocrates = false;
 
     // Multi-school helpers (requires ../somapappv1multischool/js/context.js)
     const P = (path) =>
@@ -517,6 +520,16 @@
       if (!db) throw new Error('Firebase DB not initialized');
       return db.ref(P(path));
     };
+
+    async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
+      const scoped = schoolRef(scopedSubPath);
+      if (!isSocrates || !legacyPath) {
+        return scoped.get();
+      }
+      const snap = await scoped.get();
+      if (snap.exists()) return snap;
+      return db.ref(legacyPath).get();
+    }
 
     const replaceYearInIsoDate = (iso, year) => {
       if (!iso || typeof iso !== 'string') return iso;
@@ -819,11 +832,14 @@
           const tryPaths = ["students", "Students", "StudentsList", "Students_List"];
 
           const [anchorEnrollSnap, yearEnrollSnap] = await Promise.all([
-            db
-              .ref(`enrollments/${SOMAP_DEFAULT_YEAR}`)
-              .get()
-              .catch(() => null),
-            schoolRef(`enrollments/${selectedYear}`).get().catch(() => null),
+            scopedOrSocratesLegacy(
+              `enrollments/${SOMAP_DEFAULT_YEAR}`,
+              `enrollments/${SOMAP_DEFAULT_YEAR}`
+            ).catch(() => null),
+            scopedOrSocratesLegacy(
+              `enrollments/${selectedYear}`,
+              `enrollments/${selectedYear}`
+            ).catch(() => null),
           ]);
           const anchorIndex = buildEnrollmentIndex(
             anchorEnrollSnap?.exists() ? anchorEnrollSnap.val() : {}
@@ -834,7 +850,7 @@
 
           for (const p of tryPaths) {
             try {
-              const snap = await schoolRef(p).get();
+              const snap = await scopedOrSocratesLegacy(p, p);
               if (!snap.exists()) continue;
 
               const data = snap.val();
@@ -1809,6 +1825,18 @@
           await initializeFirebase();
           if (!db) return;
 
+          currentSchool = window.SOMAP?.getSchool?.();
+          if (!currentSchool || !currentSchool.id || !window.SOMAP?.P) {
+            window.location.href = "../somapappv1multischool/multischool.html";
+            return;
+          }
+          isSocrates = currentSchool.id === "socrates-school";
+          const schoolLabel = el("currentSchoolLabel");
+          if (schoolLabel) {
+            const schoolName = currentSchool.name || currentSchool.id;
+            schoolLabel.textContent = `Current school: ${schoolName}`;
+          }
+
           el("rtState").textContent = "Loading students…";
 
           // 1️⃣ Load students with retry
@@ -1917,6 +1945,7 @@
     </script>
   </body>
 </html>
+
 
 
 

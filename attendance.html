@@ -51,6 +51,7 @@
         </select>
       </label>
       <button id="btnFullscreen" class="px-3 py-1 rounded-md border bg-slate-100">Enter Fullscreen</button>
+      <div id="currentSchoolLabel" class="text-xs text-slate-500"></div>
       <div id="rtState" class="text-sm text-slate-500">Connecting...</div>
     </div>
   </div>
@@ -212,14 +213,21 @@
   let db = null;
   let shiftReports = {};
   let shiftRef = null;
-
-  const currentSchool = window.SOMAP && SOMAP.getSchool();
-  if (!currentSchool || !currentSchool.id) {
-    window.location.href = "somapappv1multischool/multischool.html";
-  }
+  let currentSchool = null;
+  let isSocrates = false;
 
   function schoolRef(subPath) {
     return db.ref(SOMAP.P(subPath));
+  }
+
+  async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
+    const scoped = schoolRef(scopedSubPath);
+    if (!isSocrates || !legacyPath) {
+      return scoped.get();
+    }
+    const snap = await scoped.get();
+    if (snap.exists()) return snap;
+    return db.ref(legacyPath).get();
   }
 
   // ---------- HELPERS ----------
@@ -416,7 +424,7 @@
     const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List'];
     for (const p of tryPaths) {
       try {
-        const snap = await schoolRef(p).get();
+        const snap = await scopedOrSocratesLegacy(p, p);
         if (!snap.exists()) continue;
         const data = snap.val() || {};
         Object.keys(data).forEach(k => {
@@ -469,13 +477,13 @@
     let enrollmentIndex = {};
     let anchorIndex = {};
     try {
-      const enrollSnap = await schoolRef(`enrollments/${year}`).get();
+      const enrollSnap = await scopedOrSocratesLegacy(`enrollments/${year}`, `enrollments/${year}`);
       if (enrollSnap.exists()) enrollmentIndex = normalizeEnrollments(enrollSnap.val());
     } catch (e) {
       // ignore
     }
     try {
-      const anchorSnap = await schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).get();
+      const anchorSnap = await scopedOrSocratesLegacy(`enrollments/${SOMAP_DEFAULT_YEAR}`, `enrollments/${SOMAP_DEFAULT_YEAR}`);
       if (anchorSnap.exists()) anchorIndex = normalizeEnrollments(anchorSnap.val());
     } catch (e) {
       // ignore
@@ -812,12 +820,7 @@
     // Present/Absent
     for (const cls of classNames) {
       try {
-        const snap = await db
-          .ref('attendance')
-          .child(cls)
-          .child(monthKeyLocal)
-          .child(targetDate)
-          .get();
+        const snap = await schoolRef(`attendance/${cls}/${monthKeyLocal}/${targetDate}`).get();
         const records = snap.exists() ? snap.val() : {};
         Object.keys(records || {}).forEach(stuId => {
           const record = records[stuId] || {};
@@ -1131,6 +1134,18 @@
 
     await initializeFirebase();
     if (stateEl) stateEl.textContent = db ? 'Connected' : 'No DB';
+
+    currentSchool = window.SOMAP?.getSchool?.();
+    if (!currentSchool || !currentSchool.id || !window.SOMAP?.P) {
+      window.location.href = 'somapappv1multischool/multischool.html';
+      return;
+    }
+    isSocrates = currentSchool.id === 'socrates-school';
+    const schoolLabel = el('currentSchoolLabel');
+    if (schoolLabel) {
+      const schoolName = currentSchool.name || currentSchool.id;
+      schoolLabel.textContent = `Current school: ${schoolName}`;
+    }
 
     if (db) {
       if (stateEl) stateEl.textContent = 'Loading students...';
