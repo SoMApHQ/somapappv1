@@ -199,6 +199,7 @@
   const SCHOOL_DAY_CUTOFF_HOUR = 15;
   const HOLIDAYS = ['01-01','04-07','04-26','05-01','07-07','08-08','10-14','12-09','12-25','12-26'];
   const MOVABLE = ['2025-03-29','2025-04-01','2025-04-10','2025-04-11','2025-06-16'];
+  const SOMAP_DEFAULT_YEAR = 2025;
 
   // ---------- STATE ----------
   let students = [];
@@ -246,6 +247,31 @@
     const m = low.match(/class\s*(\d+)/) || low.match(/\b(\d+)\b/);
     if (m) return `Class ${parseInt(m[1], 10)}`;
     return s.replace(/\s+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  };
+
+  const CLASS_ORDER = [
+    'Baby Class',
+    'Middle Class',
+    'Pre Unit Class',
+    'Class 1',
+    'Class 2',
+    'Class 3',
+    'Class 4',
+    'Class 5',
+    'Class 6',
+    'Class 7'
+  ];
+
+  const shiftClass = (baseClass, deltaYears) => {
+    const normalized = normalizeClassName(baseClass);
+    const idx = CLASS_ORDER.findIndex(
+      c => c.toLowerCase() === normalized.toLowerCase()
+    );
+    if (idx < 0) return normalized || 'Unknown';
+    const next = idx + Number(deltaYears || 0);
+    if (next < 0) return 'Pre-Admission';
+    if (next >= CLASS_ORDER.length) return 'GRADUATED';
+    return CLASS_ORDER[next];
   };
 
   const normalizeEnrollments = (raw) => {
@@ -397,7 +423,9 @@
           const s = data[k] || {};
           const status = String(s.status || '').toLowerCase();
           if (status === 'shifted') return;
-          baseMap[k] = Object.assign(baseMap[k] || {}, s);
+          const existing = baseMap[k] || {};
+          const source = existing.__source || p;
+          baseMap[k] = Object.assign({}, existing, s, { __source: source });
         });
       } catch (e) {
         // ignore missing paths
@@ -429,11 +457,22 @@
         balance,
         parentName,
         parentContact,
-        status: status || 'active'
+        status: status || 'active',
+        __source: s.__source || ''
       };
     };
 
     const baseStudents = Object.keys(baseMap).map(k => toStudent(k, baseMap[k])).filter(Boolean);
+    const isArchiveSource = (src) => src === 'studentsArchive' || src === 'students_legacy';
+    const normalizeAdmission = (value) => String(value || '').trim();
+    const baseById = {};
+    const baseByAdmission = {};
+    baseStudents.forEach(s => {
+      const sid = s.id || '';
+      if (sid) baseById[sid] = s;
+      const adm = normalizeAdmission(s.admissionNo);
+      if (adm && !baseByAdmission[adm]) baseByAdmission[adm] = s;
+    });
 
     // 2) If enrollments/<year> exists, build roster from it (so 2025 vs 2026 can differ)
     let enrollmentIndex = {};
@@ -444,31 +483,62 @@
       // ignore
     }
     const enrollmentIds = Object.keys(enrollmentIndex || {});
-    if (!enrollmentIds.length) return baseStudents;
+    if (enrollmentIds.length) {
+      const roster = [];
+      enrollmentIds.forEach(sid => {
+        const enroll = enrollmentIndex[sid] || {};
+        const admissionKey = normalizeAdmission(
+          enroll.admissionNo || enroll.admissionNumber || enroll.admNo || enroll.admission || sid
+        );
+        const base = baseById[sid] || (admissionKey ? baseByAdmission[admissionKey] : null);
+        if (!base) return;
+        const classLevel = normalizeClassName(
+          enroll.className || enroll.classLevel || enroll.class || enroll.grade ||
+          base.className || base.classLevel || base.class || base.grade ||
+          'Unknown'
+        );
+        if (classLevel === 'GRADUATED') return;
+        roster.push({
+          ...base,
+          class: classLevel,
+          className: classLevel,
+          classLevel
+        });
+      });
+      return roster.length ? roster : baseStudents;
+    }
 
-    const baseById = {};
-    baseStudents.forEach(s => {
-      const sid = s.id || '';
-      if (sid) baseById[sid] = s;
-    });
-
-    const roster = [];
-    enrollmentIds.forEach(sid => {
-      const base = baseById[sid];
-      if (!base) return;
-      const enroll = enrollmentIndex[sid] || {};
-      const classLevel = normalizeClassName(
-        enroll.className || enroll.classLevel || enroll.class || enroll.grade ||
-        base.className || base.classLevel || base.class || base.grade ||
-        'Unknown'
-      );
-      roster.push({
-        ...base,
+    // 3) Fallback: if no enrollments for the selected year, use anchor year to shift class + drop graduates
+    let anchorIndex = {};
+    try {
+      const anchorSnap = await schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).get();
+      if (anchorSnap.exists()) anchorIndex = normalizeEnrollments(anchorSnap.val());
+    } catch (e) {
+      // ignore
+    }
+    if (!Object.keys(anchorIndex).length) {
+      const nonArchive = baseStudents.filter(s => !isArchiveSource(s.__source));
+      return nonArchive.length ? nonArchive : baseStudents;
+    }
+    const deltaYears = Number(year) - SOMAP_DEFAULT_YEAR;
+    const roster = baseStudents.reduce((acc, student) => {
+      const anchor = anchorIndex[student.id] || anchorIndex[normalizeAdmission(student.admissionNo)] || {};
+      if (!anchor.className && !anchor.classLevel && !anchor.class && !anchor.grade) {
+        if (isArchiveSource(student.__source)) return acc;
+      }
+      const baseClass = anchor.className || anchor.classLevel || anchor.class || anchor.grade ||
+        student.className || student.classLevel || student.class || student.grade || 'Unknown';
+      const shifted = shiftClass(baseClass, deltaYears);
+      if (shifted === 'GRADUATED') return acc;
+      const classLevel = normalizeClassName(shifted);
+      acc.push({
+        ...student,
         class: classLevel,
         className: classLevel,
         classLevel
       });
-    });
+      return acc;
+    }, []);
 
     return roster.length ? roster : baseStudents;
   }
