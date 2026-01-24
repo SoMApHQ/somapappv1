@@ -1,4 +1,4 @@
-﻿<!doctype html>
+﻿﻿<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
@@ -211,7 +211,6 @@
   let db = null;
   let shiftReports = {};
   let shiftRef = null;
-  let selectedYear = null;
 
   const currentSchool = window.SOMAP && SOMAP.getSchool();
   if (!currentSchool || !currentSchool.id) {
@@ -223,6 +222,56 @@
   }
 
   // ---------- HELPERS ----------
+  // Year context helpers (wired to Todashboardhtml/yearContext.js)
+  const getSelectedYear = () =>
+    (window.somapYearContext && typeof window.somapYearContext.getSelectedYear === 'function')
+      ? window.somapYearContext.getSelectedYear()
+      : new Date().getFullYear();
+
+  const replaceYearInIsoDate = (iso, year) => {
+    if (!iso || typeof iso !== 'string') return iso;
+    const parts = iso.split('-');
+    if (parts.length !== 3) return iso;
+    parts[0] = String(year);
+    return parts.join('-');
+  };
+
+  const normalizeClassName = (name) => {
+    const s = String(name || '').trim();
+    if (!s) return 'Unknown';
+    const low = s.toLowerCase();
+    if (low.includes('baby')) return 'Baby Class';
+    if (low.includes('middle')) return 'Middle Class';
+    if (low.includes('pre') || low.includes('nursery') || low.includes('unit')) return 'Pre Unit Class';
+    const m = low.match(/class\s*(\d+)/) || low.match(/\b(\d+)\b/);
+    if (m) return `Class ${parseInt(m[1], 10)}`;
+    return s.replace(/\s+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  };
+
+  const normalizeEnrollments = (raw) => {
+    if (!raw || typeof raw !== 'object') return {};
+    const normalized = {};
+    Object.entries(raw).forEach(([key, value]) => {
+      // Case A: already keyed by studentId
+      if (value && typeof value === 'object' && (value.studentId || value.id || value.className || value.classLevel || value.class || value.grade)) {
+        const entryId = value.id || value.studentId || key;
+        normalized[entryId] = { ...value };
+        return;
+      }
+      // Case B: grouped by className => { className: { studentId: {..} } }
+      if (value && typeof value === 'object') {
+        Object.entries(value).forEach(([stuId, stuVal]) => {
+          const entry = (stuVal && typeof stuVal === 'object') ? { ...stuVal } : {};
+          if (!entry.className && !entry.classLevel && !entry.class && !entry.grade) {
+            entry.className = key;
+          }
+          const entryId = entry.id || entry.studentId || stuId;
+          normalized[entryId] = Object.assign(normalized[entryId] || {}, entry);
+        });
+      }
+    });
+    return normalized;
+  };
   const el = id => document.getElementById(id);
   const shiftListBody = el('shiftListBody');
   const shiftAlertsCount = el('shiftAlertsCount');
@@ -232,96 +281,6 @@
     const m = String(d.getMonth()+1).padStart(2,'0');
     const day = String(d.getDate()).padStart(2,'0');
     return `${y}-${m}-${day}`;
-  }
-
-  function getSelectedYear() {
-    return window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
-  }
-
-  function buildDateForSelectedYear(year) {
-    const now = new Date();
-    const candidate = new Date(year, now.getMonth(), now.getDate());
-    if (candidate.getMonth() === now.getMonth()) return candidate;
-    return new Date(year, now.getMonth() + 1, 0);
-  }
-
-  function replaceYearInIsoDate(dateStr, year) {
-    if (!dateStr || dateStr.length < 10) return '';
-    return `${year}-${dateStr.slice(5, 10)}`;
-  }
-
-  function normalizeClassName(value) {
-    const raw = String(value || '').trim();
-    if (!raw) return 'Unknown';
-    const low = raw.toLowerCase();
-    if (low.includes('baby')) return 'Baby';
-    if (low.includes('middle')) return 'Middle';
-    if (low.includes('pre') || low.includes('nursery')) return 'Pre Unit';
-    const match = low.match(/(?:class|std|standard|grade)?\s*([1-7])\b/);
-    if (match) return `Class ${match[1]}`;
-    return raw;
-  }
-
-  function normalizeEnrollments(raw) {
-    if (!raw || typeof raw !== 'object') return {};
-    const normalized = {};
-    Object.entries(raw).forEach(([key, value]) => {
-      if (!value || typeof value !== 'object') {
-        normalized[key] = normalized[key] || {};
-        return;
-      }
-      const hasEnrollmentFields = value.className || value.classLevel || value.class || value.grade
-        || value.admissionNo || value.admissionNumber || value.admNo || value.admission
-        || value.studentId || value.id;
-      if (hasEnrollmentFields) {
-        const entryId = value.id || value.studentId || key;
-        normalized[entryId] = { ...value };
-        return;
-      }
-      Object.entries(value).forEach(([stuId, stuVal]) => {
-        if (!stuVal || typeof stuVal !== 'object') {
-          normalized[stuId] = normalized[stuId] || {};
-          if (key && !normalized[stuId].className) normalized[stuId].className = key;
-          return;
-        }
-        const entry = { ...stuVal };
-        if (!entry.className && !entry.classLevel && !entry.class && !entry.grade) {
-          entry.className = key;
-        }
-        const entryId = entry.id || entry.studentId || stuId;
-        normalized[entryId] = Object.assign(normalized[entryId] || {}, entry);
-      });
-    });
-    return normalized;
-  }
-
-  function applySelectedYearToInputs(year, forceDefaults = false) {
-    const baseDate = buildDateForSelectedYear(year);
-    const baseStr = fmtDate(baseDate);
-    const firstOfMonth = fmtDate(new Date(baseDate.getFullYear(), baseDate.getMonth(), 1));
-    const dateInput = el('registerDate');
-    const fromInput = el('fromDate');
-    const toInput = el('toDate');
-    if (dateInput) {
-      const next = forceDefaults
-        ? baseStr
-        : (dateInput.value ? replaceYearInIsoDate(dateInput.value, year) : baseStr);
-      dateInput.value = next || baseStr;
-    }
-    if (fromInput) {
-      const next = forceDefaults
-        ? firstOfMonth
-        : (fromInput.value ? replaceYearInIsoDate(fromInput.value, year) : firstOfMonth);
-      fromInput.value = next || firstOfMonth;
-    }
-    if (toInput) {
-      const next = forceDefaults
-        ? baseStr
-        : (toInput.value ? replaceYearInIsoDate(toInput.value, year) : baseStr);
-      toInput.value = next || baseStr;
-    }
-    currentDateStr = (dateInput && dateInput.value) ? dateInput.value : baseStr;
-    monthKey = toMonthKey(currentDateStr);
   }
 
   function toMonthKey(dStr){
@@ -383,7 +342,7 @@
   }
 
   function classOrderKey(name){
-    const n = normalizeClassName(name).toLowerCase();
+    const n = String(name || '').toLowerCase();
     if (!n) return Number.MAX_SAFE_INTEGER;
     if (n.includes('baby')) return 0;
     if (n.includes('middle')) return 1;
@@ -423,118 +382,95 @@
     }
   }
 
-  async function loadStudentsFromDb(year) {
+  async function loadStudentsFromDb(year = getSelectedYear()) {
     if (!db) return [];
-    const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List'];
+
+    // 1) Load base students (current + archive + legacy) from the active school
     const baseMap = {};
-    const baseByAdmission = {};
-    const normalizeAdmission = (value) => String(value || '').trim();
-    const loadFromPath = async (p) => {
+    const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List', 'studentsArchive', 'students_legacy'];
+    for (const p of tryPaths) {
       try {
         const snap = await schoolRef(p).get();
-        if (!snap.exists()) return;
+        if (!snap.exists()) continue;
         const data = snap.val() || {};
         Object.keys(data).forEach(k => {
           const s = data[k] || {};
-          const name = [s.firstName, s.middleName, s.lastName]
-            .filter(Boolean).join(' ').trim()
-            || s.name || (s.fullName || '');
-          const gender = s.gender || s.Gender || s.sex || s.Sex || s.genderType || '';
-          const className = normalizeClassName(
-            s.className || s.classLevel || s.class || s.grade || 'Unknown'
-          );
-          const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || 0);
-          const feePaid = Number(s.feesPaid || s.feePaid || s.paidAmount || 0);
-          const balance = Number(s.balance || (feeDue - feePaid) || 0);
           const status = String(s.status || '').toLowerCase();
           if (status === 'shifted') return;
-          const parentName = s.primaryParentName || s.parentName || s.guardianName || '';
-          const parentContact = s.primaryParentContact || s.parentPhone || s.parentContact || s.guardianContact || '';
-          const entry = {
-            id: k,
-            admissionNo: s.admissionNumber || s.admNo || s.admissionNo || '',
-            name,
-            class: className,
-            className,
-            gender,
-            feeDue,
-            feePaid,
-            balance,
-            parentName,
-            parentContact,
-            status: status || 'active'
-          };
-          baseMap[k] = entry;
-          const admissionKey = normalizeAdmission(entry.admissionNo);
-          if (admissionKey && !baseByAdmission[admissionKey]) {
-            baseByAdmission[admissionKey] = entry;
-          }
+          baseMap[k] = Object.assign(baseMap[k] || {}, s);
         });
       } catch (e) {
-        console.warn('Failed to load path', p, ':', e.message);
+        // ignore missing paths
       }
+    }
+
+    const toStudent = (id, raw) => {
+      const s = raw || {};
+      const name = [s.firstName, s.middleName, s.lastName]
+        .filter(Boolean).join(' ').trim()
+        || s.name || s.fullName || '';
+      const gender = s.gender || s.Gender || s.sex || s.Sex || s.genderType || '';
+      const className = s.className || s.classLevel || s.class || s.grade || 'Unknown';
+      const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || 0);
+      const feePaid = Number(s.feesPaid || s.feePaid || s.paidAmount || 0);
+      const balance = Number(s.balance || (feeDue - feePaid) || 0);
+      const status = String(s.status || '').toLowerCase();
+      const parentName = s.primaryParentName || s.parentName || s.guardianName || '';
+      const parentContact = s.primaryParentContact || s.parentPhone || s.parentContact || s.guardianContact || '';
+      return {
+        id: s.id || id,
+        admissionNo: s.admissionNumber || s.admNo || s.admissionNo || '',
+        name,
+        class: className,
+        className,
+        gender,
+        feeDue,
+        feePaid,
+        balance,
+        parentName,
+        parentContact,
+        status: status || 'active'
+      };
     };
 
-    for (const p of tryPaths) {
-      await loadFromPath(p);
-      if (Object.keys(baseMap).length) break;
-    }
+    const baseStudents = Object.keys(baseMap).map(k => toStudent(k, baseMap[k])).filter(Boolean);
 
-    await loadFromPath('studentsArchive');
-    await loadFromPath('students_legacy');
-
-    if (!Object.keys(baseMap).length) {
-      console.error('No students data found in any path');
-      return [];
-    }
-
-    let enrollments = {};
+    // 2) If enrollments/<year> exists, build roster from it (so 2025 vs 2026 can differ)
+    let enrollmentIndex = {};
     try {
       const enrollSnap = await schoolRef(`enrollments/${year}`).get();
-      enrollments = enrollSnap.exists() ? (enrollSnap.val() || {}) : {};
+      if (enrollSnap.exists()) enrollmentIndex = normalizeEnrollments(enrollSnap.val());
     } catch (e) {
-      console.warn('Failed to load enrollments for year', year, e.message);
+      // ignore
     }
-
-    const enrollmentIndex = normalizeEnrollments(enrollments || {});
     const enrollmentIds = Object.keys(enrollmentIndex || {});
-    let roster = [];
-    if (enrollmentIds.length) {
-      const seen = new Set();
-      enrollmentIds.forEach(id => {
-        const enroll = enrollmentIndex[id] || {};
-        const admissionHint = normalizeAdmission(
-          enroll.admissionNo || enroll.admissionNumber || enroll.admNo || enroll.admission || ''
-        );
-        const admissionKey = admissionHint || normalizeAdmission(id);
-        const student = baseMap[id] || (admissionKey ? baseByAdmission[admissionKey] : null);
-        if (!student || seen.has(student.id)) return;
-        seen.add(student.id);
-        const classLevel = enroll?.className || enroll?.classLevel || enroll?.class || enroll?.grade
-          || student.classLevel || student.class || student.className;
-        if (classLevel) {
-          const normalizedClass = normalizeClassName(classLevel);
-          student.classLevel = normalizedClass;
-          student.className = normalizedClass;
-          student.class = normalizedClass;
-        }
-        roster.push(student);
-      });
-    } else {
-      roster = Object.values(baseMap).map(student => {
-        const normalizedClass = normalizeClassName(
-          student.classLevel || student.class || student.className
-        );
-        return {
-          ...student,
-          classLevel: normalizedClass,
-          className: normalizedClass,
-          class: normalizedClass
-        };
-      });
-    }
+    if (!enrollmentIds.length) return baseStudents;
 
-    return roster;
+    const baseById = {};
+    baseStudents.forEach(s => {
+      const sid = s.id || '';
+      if (sid) baseById[sid] = s;
+    });
+
+    const roster = [];
+    enrollmentIds.forEach(sid => {
+      const base = baseById[sid];
+      if (!base) return;
+      const enroll = enrollmentIndex[sid] || {};
+      const classLevel = normalizeClassName(
+        enroll.className || enroll.classLevel || enroll.class || enroll.grade ||
+        base.className || base.classLevel || base.class || base.grade ||
+        'Unknown'
+      );
+      roster.push({
+        ...base,
+        class: classLevel,
+        className: classLevel,
+        classLevel
+      });
+    });
+
+    return roster.length ? roster : baseStudents;
   }
 
   // ---------- Shift reports ----------
@@ -780,12 +716,14 @@
       };
     }
 
-    const studentData = (students && students.length) ? students : await loadStudentsFromDb(selectedYear || getSelectedYear());
+    const selYear = getSelectedYear();
+    const studentData = await loadStudentsFromDb(selYear);
+    students = studentData;
     const studentIndex = {};
     const classNamesSet = new Set();
 
     (studentData || []).forEach(s => {
-      const className = normalizeClassName(s.className || s.classLevel || s.class || s.grade || '');
+      const className = s.className || s.classLevel || s.class || s.grade || '';
       if (!className) return;
       const gender = normalizeGender(s.gender || s.sex || s.genderType);
       const studentId = s.id || s.studentId || s.studentID || s.admissionNo || s.admissionNumber || s.admission || '';
@@ -835,7 +773,12 @@
     // Present/Absent
     for (const cls of classNames) {
       try {
-        const snap = await schoolRef(`attendance/${cls}/${monthKeyLocal}/${targetDate}`).get();
+        const snap = await db
+          .ref('attendance')
+          .child(cls)
+          .child(monthKeyLocal)
+          .child(targetDate)
+          .get();
         const records = snap.exists() ? snap.val() : {};
         Object.keys(records || {}).forEach(stuId => {
           const record = records[stuId] || {};
@@ -1080,8 +1023,7 @@
   function setupDailyRegisterControls() {
     const dateInput = el('registerDate');
     const btnLoad = el('btnLoadRegister');
-    // Use currentDateStr which is already set to the selected year's date
-    const todayIso = currentDateStr || fmtDate(new Date());
+    const todayIso = fmtDate(new Date());
 
     if (dateInput && !dateInput.value) {
       dateInput.value = todayIso;
@@ -1089,8 +1031,6 @@
 
     const reload = async () => {
       const val = (dateInput && dateInput.value) ? dateInput.value : todayIso;
-      currentDateStr = val; // Update currentDateStr when date changes
-      monthKey = toMonthKey(val);
       await refreshDailyRegisterUI(val);
     };
 
@@ -1127,11 +1067,25 @@
 
   // ---------- Start ----------
   async function init() {
-    selectedYear = getSelectedYear();
-    const baseDate = buildDateForSelectedYear(selectedYear);
-    currentDateStr = fmtDate(baseDate);
+    // Build a "today" date, but in the SELECTED year (keep month/day)
+    const selectedYear = getSelectedYear();
+    const baseNow = new Date();
+    baseNow.setFullYear(selectedYear);
+    currentDateStr = fmtDate(baseNow);
     monthKey = toMonthKey(currentDateStr);
-    applySelectedYearToInputs(selectedYear, true);
+
+    const fromInput = el('fromDate');
+    const toInput = el('toDate');
+    const archivedInput = el('archivedDay');
+    const registerDateInput = el('registerDate');
+
+    const startOfMonth = new Date(baseNow.getFullYear(), baseNow.getMonth(), 1);
+    const startStr = fmtDate(startOfMonth);
+
+    if (fromInput && !fromInput.value) fromInput.value = startStr;
+    if (toInput && !toInput.value) toInput.value = currentDateStr;
+    if (archivedInput && !archivedInput.value) archivedInput.value = currentDateStr;
+    if (registerDateInput && !registerDateInput.value) registerDateInput.value = currentDateStr;
 
     const stateEl = el('rtState');
     if (stateEl) stateEl.textContent = 'Connecting...';
@@ -1142,7 +1096,7 @@
     if (db) {
       if (stateEl) stateEl.textContent = 'Loading students...';
       for (let attempt = 1; attempt <= 3; attempt++) {
-        students = await loadStudentsFromDb(selectedYear);
+        students = await loadStudentsFromDb(getSelectedYear());
         if (students.length) break;
         console.warn(`Attempt ${attempt} failed to load students. Retrying...`);
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1158,14 +1112,6 @@
         )).sort((a, b) => classOrderKey(a) - classOrderKey(b));
         currentClass = classes[0] || '';
       }
-      if (students.length && currentClass) {
-        const classNames = new Set(
-          students.map(s => s.class || s.classLevel || s.grade || s.className).filter(Boolean)
-        );
-        if (!classNames.has(currentClass)) {
-          currentClass = Array.from(classNames).sort((a, b) => classOrderKey(a) - classOrderKey(b))[0] || '';
-        }
-      }
     } else {
       console.warn('DB not connected; rendering empty register.');
       if (stateEl) stateEl.textContent = 'Offline';
@@ -1179,28 +1125,23 @@
     renderShiftList();
     await computeAnalytics(currentDateStr);
 
-    window.somapYearContext?.onYearChanged?.(async (year) => {
-      selectedYear = year;
-      applySelectedYearToInputs(year, false);
-      // Update currentDateStr from the date input after year change
-      const dateInput = el('registerDate');
-      if (dateInput && dateInput.value) {
-        currentDateStr = dateInput.value;
+    // React to Year dropdown changes
+    if (window.somapYearContext && typeof window.somapYearContext.onYearChanged === 'function') {
+      window.somapYearContext.onYearChanged(async (year) => {
+        const ids = ['fromDate', 'toDate', 'archivedDay', 'registerDate'];
+        ids.forEach((id) => {
+          const input = el(id);
+          if (input && input.value) input.value = replaceYearInIsoDate(input.value, year);
+        });
+        currentDateStr = replaceYearInIsoDate(currentDateStr, year) || currentDateStr;
         monthKey = toMonthKey(currentDateStr);
-      }
-      if (stateEl) stateEl.textContent = 'Loading students...';
-      students = await loadStudentsFromDb(year);
-      filtered = students.slice();
-      if (students.length) {
-        const classNames = new Set(
-          students.map(s => s.class || s.classLevel || s.grade || s.className).filter(Boolean)
-        );
-        currentClass = Array.from(classNames).sort((a, b) => classOrderKey(a) - classOrderKey(b))[0] || '';
-      } else {
-        currentClass = '';
-      }
-      await refreshDailyRegisterUI(currentDateStr);
-    });
+        // Reload roster + analytics + daily register for the new year
+        students = await loadStudentsFromDb(year);
+        filtered = students.slice();
+        await computeAnalytics(currentDateStr);
+        await computeDailyRegisterStats(el('registerDate')?.value || currentDateStr);
+      });
+    }
   }
 
   await init();
