@@ -50,6 +50,10 @@
     .carry-item__meta{display:grid;gap:2px}
     .carry-item__name{font-weight:600;color:#111827}
     .carry-item__meta small{color:#6b7280}
+    .transfer-toolbar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin:.25rem 0 .5rem}
+    .transfer-toolbar__hint{color:#6b7280;font-size:.9rem;margin:0}
+    .transfer-select-cell{width:44px;text-align:center;vertical-align:middle}
+    .transfer-select-cell input[type="checkbox"]{width:18px;height:18px;cursor:pointer}
   </style>
 </head>
 <body>
@@ -205,6 +209,12 @@
 
   <section>
     <h2 class="workers-section-title">Wafanyakazi Walio Sajiliwa</h2>
+    <div class="transfer-toolbar">
+      <button type="button" class="workers-btn" id="transferSelectedBtn">Hamisha Walioteuliwa kwenda <span id="transferTargetYear"></span></button>
+      <button type="button" class="workers-btn secondary" id="transferClearBtn">Futa Uteuzi</button>
+      <p class="transfer-toolbar__hint">Walioteuliwa wataongezwa mwaka ujao, lakini wataendelea kuonekana mwaka huu.</p>
+    </div>
+    <p id="transferStatus" class="workers-form-status" aria-live="polite"></p>
     <p id="workerCount" class="workers-section-count" aria-live="polite"></p>
     <div id="workerTable"></div>
   </section>
@@ -280,6 +290,10 @@
   const carryStatusEl = $('carryWorkersStatus');
   const carryAllBtn = $('carryAllBtn');
   const carrySelectedBtn = $('carrySelectedBtn');
+  const transferSelectedBtn = $('transferSelectedBtn');
+  const transferClearBtn = $('transferClearBtn');
+  const transferStatusEl = $('transferStatus');
+  const transferTargetYearEl = $('transferTargetYear');
   let workersData = [];
   let carryCandidates = [];
   let legacyWorkerIdSet = new Set();
@@ -290,6 +304,7 @@
   let currentYear = (window.somapYearContext && somapYearContext.getSelectedYear && somapYearContext.getSelectedYear()) || String(new Date().getFullYear());
   let currentWorkersSource = 'scoped';
   let legacyWorkersYear = '';
+  let transferSelection = new Set();
 
   function setStatus(message='', isError=false){
     if (!statusEl) return;
@@ -301,6 +316,12 @@
     if (!carryStatusEl) return;
     carryStatusEl.textContent = message;
     carryStatusEl.classList.toggle('error', isError);
+  }
+
+  function setTransferStatus(message='', isError=false){
+    if (!transferStatusEl) return;
+    transferStatusEl.textContent = message;
+    transferStatusEl.classList.toggle('error', isError);
   }
 
   function setField(name, value){
@@ -351,6 +372,7 @@
   function updateYearUI(){
     if (yearDisplayEl) yearDisplayEl.textContent = `Mwaka wa masomo: ${currentYear}`;
     if (carryToYearEl) carryToYearEl.textContent = currentYear;
+    if (transferTargetYearEl) transferTargetYearEl.textContent = String(Number(currentYear) + 1);
   }
 
   function attachYearSelector(){
@@ -383,6 +405,33 @@
     return parts.join(' ') || '-';
   }
 
+  function updateTransferSelectAllState(){
+    const selectAll = workerTableContainer.querySelector('#transferSelectAll');
+    if (!selectAll) return;
+    const selectableIds = workersData.map(w=>w.id);
+    if (!selectableIds.length){
+      selectAll.checked = false;
+      selectAll.indeterminate = false;
+      return;
+    }
+    let selectedCount = 0;
+    selectableIds.forEach(id=>{
+      if (transferSelection.has(id)) selectedCount += 1;
+    });
+    if (selectedCount === 0){
+      selectAll.checked = false;
+      selectAll.indeterminate = false;
+      return;
+    }
+    if (selectedCount === selectableIds.length){
+      selectAll.checked = true;
+      selectAll.indeterminate = false;
+      return;
+    }
+    selectAll.checked = false;
+    selectAll.indeterminate = true;
+  }
+
   function renderWorkersTable(rows){
     workerTableContainer.innerHTML = '';
     workerCountEl.textContent = rows.length
@@ -401,6 +450,7 @@
     const tbl = document.createElement('table'); tbl.className='workers-table';
     tbl.innerHTML = `
       <thead><tr>
+        <th class="transfer-select-cell"><input type="checkbox" id="transferSelectAll" aria-label="Chagua wote"></th>
         <th>Picha</th>
         <th>Jina Kamili</th>
         <th>Jukumu</th>
@@ -422,7 +472,9 @@
       const tr = document.createElement('tr');
       tr.dataset.workerId = worker.id;
       tr.dataset.source = worker.source || 'scoped';
+      const checkedAttr = transferSelection.has(worker.id) ? 'checked' : '';
       tr.innerHTML = `
+        <td class="transfer-select-cell"><input type="checkbox" data-transfer-select="true" data-worker-id="${worker.id}" aria-label="Chagua ${getDisplayName(profile)}" ${checkedAttr}></td>
         <td class="photo-cell">${photoHtml}</td>
         <td>${getDisplayName(profile)}</td>
         <td>${profile.role||''}</td>
@@ -436,6 +488,7 @@
       tb.appendChild(tr);
     });
     workerTableContainer.appendChild(tbl);
+    updateTransferSelectAllState();
   }
 
   function populateForm(worker){
@@ -504,6 +557,8 @@
   }
 
   workerTableContainer.addEventListener('click', async (event)=>{
+    const selectToggle = event.target.closest('input[type="checkbox"][data-transfer-select]');
+    if (selectToggle) return;
     const btn = event.target.closest('button[data-action]');
     if (!btn) return;
     const workerId = btn.dataset.workerId;
@@ -518,6 +573,29 @@
       currentWorkersSource = worker.source || 'scoped';
       await deleteWorker(worker);
     }
+  });
+
+  workerTableContainer.addEventListener('change', (event)=>{
+    const selectAll = event.target.closest('#transferSelectAll');
+    if (selectAll){
+      if (selectAll.checked){
+        workersData.forEach(worker=>transferSelection.add(worker.id));
+      }else{
+        workersData.forEach(worker=>transferSelection.delete(worker.id));
+      }
+      renderWorkersTable(workersData);
+      return;
+    }
+    const checkbox = event.target.closest('input[type="checkbox"][data-transfer-select]');
+    if (!checkbox) return;
+    const workerId = checkbox.dataset.workerId;
+    if (!workerId) return;
+    if (checkbox.checked){
+      transferSelection.add(workerId);
+    }else{
+      transferSelection.delete(workerId);
+    }
+    updateTransferSelectAllState();
   });
 
   function normalizeClassKey(value=''){
@@ -593,6 +671,8 @@
     try{
       currentWorkersSource = 'scoped';
       legacyWorkerIdSet = new Set();
+      transferSelection = new Set();
+      setTransferStatus('');
       const rows = [];
       const { snap, source } = await scopedOrSocratesLegacy(`years/${currentYear}/workers`, 'workers');
       currentWorkersSource = source;
@@ -602,6 +682,7 @@
           id: ch.key,
           profile: v.profile||{},
           docs: v.docs||{},
+          contract: v.contract||{},
           source
         });
       });
@@ -618,6 +699,77 @@
       workersData = [];
       renderWorkersTable([]);
       refreshCarryWorkersUI();
+    }
+  }
+
+  async function transferWorkersToNextYear({ selectedOnly } = { selectedOnly: true }){
+    if (!workersData.length){
+      alert('Hakuna wafanyakazi wa kuhamisha.');
+      return;
+    }
+    const targetYear = String(Number(currentYear) + 1);
+    const idsToTransfer = selectedOnly
+      ? workersData.filter(w=>transferSelection.has(w.id)).map(w=>w.id)
+      : workersData.map(w=>w.id);
+    if (!idsToTransfer.length){
+      alert('Chagua angalau mfanyakazi mmoja.');
+      return;
+    }
+
+    setTransferStatus(`Inahamisha kwenda ${targetYear}...`, false);
+    try{
+      const targetRef = schoolRef(`years/${targetYear}/workers`);
+      const targetSnap = await targetRef.get();
+      const existingPhoneSet = new Set();
+      const existingDocSet = new Set();
+      targetSnap.forEach(ch=>{
+        const profile = ch.val()?.profile || {};
+        const phoneKey = normalizePhoneValue(profile.phone);
+        const docKey = normalizeDocValue(profile.nidaOrPassport);
+        if (phoneKey) existingPhoneSet.add(phoneKey);
+        if (docKey) existingDocSet.add(docKey);
+      });
+
+      const selectedSet = new Set(idsToTransfer);
+      const updates = {};
+      let skipped = 0;
+      let prepared = 0;
+
+      workersData.forEach(worker=>{
+        if (!selectedSet.has(worker.id)) return;
+        const phoneKey = normalizePhoneValue(worker.profile?.phone);
+        const docKey = normalizeDocValue(worker.profile?.nidaOrPassport);
+        if ((phoneKey && existingPhoneSet.has(phoneKey)) || (docKey && existingDocSet.has(docKey))){
+          skipped += 1;
+          return;
+        }
+        if (phoneKey) existingPhoneSet.add(phoneKey);
+        if (docKey) existingDocSet.add(docKey);
+        updates[worker.id] = {
+          profile: worker.profile || {},
+          docs: worker.docs || {},
+          contract: worker.contract || {},
+          carriedFromYear: currentYear,
+          carriedAt: Date.now()
+        };
+        prepared += 1;
+      });
+
+      if (!prepared){
+        setTransferStatus(`Hakuna mpya wa kuhamisha kwenda ${targetYear} (wapo tayari au marudio).`, true);
+        return;
+      }
+
+      await targetRef.update(updates);
+      transferSelection = new Set();
+      renderWorkersTable(workersData);
+      const summary = skipped
+        ? `Imehamisha ${prepared}. Imeruka ${skipped} (wapo tayari au marudio).`
+        : `Imehamisha ${prepared} kwenda ${targetYear}.`;
+      setTransferStatus(summary, false);
+    }catch(err){
+      console.error('Transfer to next year failed', err);
+      setTransferStatus('Imeshindikana kuhamisha. Jaribu tena.', true);
     }
   }
 
@@ -742,6 +894,12 @@
 
   if (carryAllBtn) carryAllBtn.addEventListener('click', ()=>copyWorkersToCurrentYear({ selectedOnly:false }));
   if (carrySelectedBtn) carrySelectedBtn.addEventListener('click', ()=>copyWorkersToCurrentYear({ selectedOnly:true }));
+  if (transferSelectedBtn) transferSelectedBtn.addEventListener('click', ()=>transferWorkersToNextYear({ selectedOnly:true }));
+  if (transferClearBtn) transferClearBtn.addEventListener('click', ()=>{
+    transferSelection = new Set();
+    renderWorkersTable(workersData);
+    setTransferStatus('');
+  });
 
   async function findDuplicateWorkerInYear(workerId, phone, nidaOrPassport){
     const phoneKey = normalizePhoneValue(phone);
