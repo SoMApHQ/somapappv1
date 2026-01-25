@@ -15,6 +15,77 @@ import {
 
 const { createElement: h, useEffect, useMemo, useState } = React;
 
+const db = firebase.database();
+const school = window.SOMAP?.getSchool?.();
+if (!school || !school.id) {
+  window.location.href = '../somapappv1multischool/multischool.html';
+}
+const schoolRef = (subPath) => db.ref(SOMAP.P(subPath));
+const getYear = () => window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
+
+async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
+  const scopedSnap = await schoolRef(scopedSubPath).once('value');
+  if (scopedSnap.exists()) return scopedSnap;
+  const isSocrates = ['socrates-school', 'default', 'socrates'].includes(school?.id);
+  if (isSocrates) {
+    const legacySnap = await db.ref(legacyPath).once('value');
+    if (legacySnap.exists()) return legacySnap;
+  }
+  return scopedSnap;
+}
+
+function normalizeClassKey(value = '') {
+  return String(value || '').replace(/\s+/g, '').toLowerCase();
+}
+
+function getPromotedClassName(current = '') {
+  const key = normalizeClassKey(current);
+  const ladder = {
+    baby: 'Middle',
+    middle: 'Preunit',
+    preunit: 'Class1',
+    class1: 'Class2',
+    class2: 'Class3',
+    class3: 'Class4',
+    class4: 'Class5',
+    class5: 'Class6',
+    class6: 'Class7',
+    class7: 'Graduated/Archive'
+  };
+  return ladder[key] || current || '';
+}
+
+async function runRolloverIfNeeded(targetYear) {
+  if (!targetYear) return;
+  const flagRef = schoolRef(`meta/rolloverDone/${targetYear}`);
+  const flagSnap = await flagRef.get();
+  if (flagSnap.exists()) return;
+
+  const previousYear = String(Number(targetYear) - 1);
+  const srcSnap = await schoolRef(`years/${previousYear}/students`).get();
+  const existingDestSnap = await schoolRef(`years/${targetYear}/students`).get();
+  const existingIds = new Set();
+  existingDestSnap.forEach(ch => existingIds.add(ch.key));
+  if (srcSnap.exists()) {
+    const updates = {};
+    srcSnap.forEach(ch => {
+      if (existingIds.has(ch.key)) return;
+      const student = ch.val() || {};
+      const nextClass = getPromotedClassName(student.class || student.className || '');
+      updates[ch.key] = {
+        ...student,
+        class: nextClass,
+        className: nextClass,
+        rolledOverFrom: previousYear
+      };
+    });
+    if (Object.keys(updates).length) {
+      await schoolRef(`years/${targetYear}/students`).update(updates);
+    }
+  }
+  await flagRef.set(true);
+}
+
 const statusLabels = {
   pending: 'Bado hujatoa ripoti leo.',
   ok: 'Ripoti imehifadhiwa',
@@ -30,7 +101,7 @@ function safeNumber(value) {
 function getWorkerSession() {
   const workerId = localStorage.getItem('workerId') || sessionStorage.getItem('workerId') || '';
   const workerRole = localStorage.getItem('workerRole') || sessionStorage.getItem('workerRole') || '';
-  const schoolId = localStorage.getItem('schoolId') || window.currentSchoolId || '';
+  const schoolId = school?.id || '';
   return { workerId, workerRole, schoolId };
 }
 
@@ -67,6 +138,7 @@ function App() {
   const today = todayYMD();
   const [reportDate, setReportDate] = useState(today);
   const [workerSession, setWorkerSession] = useState(getWorkerSession());
+  const [currentYear, setCurrentYear] = useState(String(getYear()));
   const [students, setStudents] = useState({});
   const [registerStats, setRegisterStats] = useState({
     classNames: [],
@@ -122,7 +194,7 @@ function App() {
     if (!workerSession.workerId) return;
     loadExistingReport(reportDate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reportDate, workerSession.workerId, kitchenItems]);
+  }, [reportDate, workerSession.workerId, kitchenItems, currentYear]);
 
   useEffect(() => {
     if (!reportDate) return;
@@ -130,6 +202,28 @@ function App() {
     loadRegister(reportDate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reportDate, students]);
+
+  useEffect(() => {
+    const yearSelect = document.getElementById('yearSelect');
+    if (window.somapYearContext && yearSelect) {
+      somapYearContext.attachYearDropdown(yearSelect);
+      const systemYear = String(new Date().getFullYear());
+      const selected = String(somapYearContext.getSelectedYear?.() || systemYear);
+      if (Number(selected) < Number(systemYear)) {
+        somapYearContext.resetToCurrentYear?.();
+      }
+      somapYearContext.onYearChanged((y) => {
+        setCurrentYear(String(y));
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!workerSession.workerId) return;
+    runRolloverIfNeeded(currentYear).catch(err => console.error('Rollover error', err));
+    loadBootstrap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentYear]);
 
   useEffect(() => {
     const breakfast = safeNumber(headcount.breakfast);
@@ -172,13 +266,13 @@ function App() {
   async function loadBootstrap() {
     try {
       setRegisterLoading(true);
-      await ensureKitchenSeeded({ schoolId: workerSession.schoolId, yearLike: reportDate });
+      await ensureKitchenSeeded({ schoolId: workerSession.schoolId, yearLike: currentYear });
 
       const [studentsMap, items, rules, kItems] = await Promise.all([
-        loadStudents(workerSession.schoolId),
+        loadStudents(workerSession.schoolId, currentYear),
         fetchInventoryItems(workerSession.schoolId),
         loadLogicRules(workerSession.schoolId),
-        listKitchenItems({ schoolId: workerSession.schoolId, yearLike: reportDate })
+        listKitchenItems({ schoolId: workerSession.schoolId, yearLike: currentYear })
       ]);
       setStudents(studentsMap);
       setInventoryItems(items);
@@ -194,32 +288,24 @@ function App() {
     }
   }
 
-  async function loadStudents(schoolId) {
-    const paths = schoolId
-      ? [`schools/${schoolId}/students`, 'students', 'Students']
-      : ['students', 'Students'];
-    for (const path of paths) {
-      const snap = await firebase.database().ref(path).once('value').catch(() => null);
-      if (snap && snap.exists()) {
-        const raw = snap.val() || {};
-        const normalized = {};
-        Object.entries(raw).forEach(([id, data]) => {
-          normalized[id] = normalizeStudent(id, data);
-        });
-        return normalized;
-      }
+  async function loadStudents(schoolId, yearKey) {
+    const scopedPath = `years/${yearKey}/students`;
+    const snap = await scopedOrSocratesLegacy(scopedPath, 'students').catch(() => null);
+    if (snap && snap.exists()) {
+      const raw = snap.val() || {};
+      const normalized = {};
+      Object.entries(raw).forEach(([id, data]) => {
+        normalized[id] = normalizeStudent(id, data);
+      });
+      return normalized;
     }
     return {};
   }
 
-  async function loadAttendance(dateKey, schoolId) {
-    const paths = schoolId
-      ? [`schools/${schoolId}/attendance_students/${dateKey}`, `attendance_students/${dateKey}`]
-      : [`attendance_students/${dateKey}`];
-    for (const path of paths) {
-      const snap = await firebase.database().ref(path).once('value').catch(() => null);
-      if (snap && snap.exists()) return snap.val() || {};
-    }
+  async function loadAttendance(dateKey, schoolId, yearKey) {
+    const scopedPath = `years/${yearKey}/attendance_students/${dateKey}`;
+    const snap = await scopedOrSocratesLegacy(scopedPath, `attendance_students/${dateKey}`).catch(() => null);
+    if (snap && snap.exists()) return snap.val() || {};
     return {};
   }
 
@@ -227,7 +313,7 @@ function App() {
     setRegisterLoading(true);
     setRegisterError('');
     try {
-      const attendance = await loadAttendance(dateKey, workerSession.schoolId);
+      const attendance = await loadAttendance(dateKey, workerSession.schoolId, currentYear);
       const stats = buildRegisterStats(studentMap, attendance);
       setRegisterStats(stats);
     } catch (err) {
@@ -306,11 +392,11 @@ function App() {
     try {
       // Load yesterday
       const yesterday = new Date(new Date(dateKey).getTime() - 86400000).toISOString().split('T')[0];
-      const prevRef = firebase.database().ref(`roles/cook/daily/${yesterday}/${workerSession.workerId}/kitchenInventory`);
+      const prevRef = schoolRef(`years/${currentYear}/workerRoles/cook/daily/${yesterday}/${workerSession.workerId}/kitchenInventory`);
       const prevSnap = await prevRef.once('value').catch(() => null);
       setKitchenYesterday(prevSnap?.val() || {});
 
-      const ref = firebase.database().ref(`roles/cook/daily/${dateKey}/${workerSession.workerId}`);
+      const ref = schoolRef(`years/${currentYear}/workerRoles/cook/daily/${dateKey}/${workerSession.workerId}`);
       const snap = await ref.once('value');
       if (snap.exists()) {
         const data = snap.val();
@@ -373,15 +459,11 @@ function App() {
   }
 
   function inventoryPath() {
-    return workerSession.schoolId
-      ? `schools/${workerSession.schoolId}/inventory/items`
-      : 'inventory/items';
+    return `years/${currentYear}/workers_inventory/items`;
   }
 
   function logicPath() {
-    return workerSession.schoolId
-      ? `schools/${workerSession.schoolId}/kitchen_logic/rules`
-      : 'kitchen_logic/rules';
+    return `years/${currentYear}/kitchen_logic/rules`;
   }
 
   function scrollToSection(sectionId) {
@@ -584,7 +666,7 @@ function App() {
         workerRole: workerSession.workerRole || 'cook',
         workerId: workerSession.workerId
       };
-      await firebase.database().ref(`roles/cook/daily/${reportDate}/${workerSession.workerId}`).set(payload);
+      await schoolRef(`years/${currentYear}/workerRoles/cook/daily/${reportDate}/${workerSession.workerId}`).set(payload);
       setExistingReport(payload);
       setReportStatus(payload.status);
       setHeadcountLocked(true);
@@ -610,7 +692,7 @@ function App() {
       return;
     }
     try {
-      const ref = firebase.database().ref(inventoryPath()).push();
+      const ref = schoolRef(inventoryPath()).push();
       await ref.set({
         name: newItem.name,
         unit: newItem.unit || '',
@@ -633,7 +715,7 @@ function App() {
       return;
     }
     try {
-      const ref = firebase.database().ref(`${logicPath()}/${newRule.itemId}`);
+      const ref = schoolRef(`${logicPath()}/${newRule.itemId}`);
       await ref.set({
         perChild: Number(newRule.perChild || 0),
         unit: newRule.unit || '',
@@ -834,9 +916,16 @@ function App() {
     h('header', { className: 'workers-page-header' }, [
       h('div', null, [
         h('h1', null, 'Ripoti ya Chakula ya Leo'),
+        h('p', { className: 'workers-card__subtitle' }, `Shule: ${school?.name || school?.id || ''} · Mwaka: ${currentYear}`),
         h('p', { className: 'workers-card__subtitle' }, 'Weka takwimu za rejesta, menyu, na matumizi ya jikoni. Idadi ya wanafunzi hujazwa kiotomatiki.'),
       ]),
-      statusBadge(reportStatus)
+      h('div', { className: 'workers-card__toolbar' }, [
+        h('label', { className: 'workers-chip' }, [
+          'Mwaka ',
+          h('select', { id: 'yearSelect' })
+        ]),
+        statusBadge(reportStatus)
+      ])
     ]),
 
     renderQuickCards(),
