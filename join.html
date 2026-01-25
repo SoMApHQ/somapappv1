@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -8,7 +8,6 @@
     <!-- Tailwind -->
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <!-- Icons -->
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
@@ -23,6 +22,7 @@
 
     <!-- School context -->
     <script src="somapappv1multischool/js/context.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 
     <style>
       body {
@@ -57,6 +57,14 @@
         border-radius: 0.75rem;
         font-weight: 700;
       }
+      textarea {
+        background: #020617;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        border-radius: 0.5rem;
+        padding: 0.6rem;
+        color: #fff;
+        width: 100%;
+      }
     </style>
   </head>
 
@@ -69,9 +77,8 @@
             id="langSwitcher"
             class="bg-slate-900 border border-slate-600 rounded-md px-3 py-1 text-sm"
           >
-          <option value="sw">Kiswahili</option>  
-          <option value="en">English</option>
-            
+            <option value="sw">Kiswahili</option>
+            <option value="en">English</option>
           </select>
         </div>
 
@@ -137,6 +144,34 @@
               <label data-i18n="academic_year"></label
               ><input id="academicYear" value="2026" required />
             </div>
+          </div>
+          <div>
+            <label>Gender *</label>
+            <select id="gender" required>
+              <option value="">Select</option>
+              <option>Male</option>
+              <option>Female</option>
+            </select>
+          </div>
+
+          <div>
+            <label>Date of Birth *</label>
+            <input type="date" id="dob" required />
+          </div>
+
+          <div>
+            <label>Birth Certificate Number *</label>
+            <input id="birthCertNumber" />
+          </div>
+
+          <div class="md:col-span-2">
+            <label>Residential Address *</label>
+            <textarea id="residentialAddress"></textarea>
+          </div>
+
+          <div class="md:col-span-2">
+            <label>Health Problem (optional)</label>
+            <textarea id="healthProblem"></textarea>
           </div>
         </section>
 
@@ -215,25 +250,6 @@
               />
             </div>
 
-            <!-- Joining Form -->
-            <div>
-              <label data-i18n="doc_joining"
-                >Completed School Joining Form *</label
-              >
-              <p
-                class="text-xs text-slate-400 mb-1"
-                data-i18n="doc_joining_help"
-              >
-                Download, fill, sign, and upload the official school form
-              </p>
-              <input
-                type="file"
-                id="joiningLetter"
-                accept="image/*,application/pdf"
-                required
-              />
-            </div>
-
             <!-- Medical -->
             <div class="md:col-span-2">
               <label data-i18n="doc_medical"
@@ -285,6 +301,150 @@
         referralCode.value = refParam;
         referralCode.readOnly = true;
       }
+      /* ===== FILE UPLOAD HELPER ===== */
+      async function uploadFile(inputId, folder, joinId) {
+        const el = document.getElementById(inputId);
+        if (!el || !el.files.length) return null;
+
+        const fd = new FormData();
+        fd.append("file", el.files[0]);
+        fd.append("upload_preset", "somap_unsigned");
+        fd.append("folder", `joinRequests/${joinId}/${folder}`);
+
+        const res = await fetch(
+          "https://api.cloudinary.com/v1_1/dg7vnrkgd/auto/upload",
+          { method: "POST", body: fd },
+        );
+        const json = await res.json();
+        return json.secure_url || null;
+      }
+
+      function calcAge(dob) {
+        if (!dob) return "";
+        const diff = Date.now() - new Date(dob).getTime();
+        return Math.floor(diff / (1000 * 60 * 60 * 24 * 365.25));
+      }
+
+      /* ===== ANNEX PDF GENERATOR (GLOBAL) ===== */
+      async function generateAnnexJoiningPDF(documents) {
+        const officialPdfBytes = await fetch(
+          "assets/Socrates_School_Joining_Form.pdf",
+        ).then((res) => res.arrayBuffer());
+
+        const officialPdf = await PDFLib.PDFDocument.load(officialPdfBytes);
+        const newPdf = await PDFLib.PDFDocument.create();
+
+        const officialPages = await newPdf.copyPages(
+          officialPdf,
+          officialPdf.getPageIndices(),
+        );
+        officialPages.forEach((p) => newPdf.addPage(p));
+
+        const annexPage = newPdf.addPage([595, 842]);
+        const font = await newPdf.embedFont(PDFLib.StandardFonts.Helvetica);
+        // Load school logo
+        const logoBytes = await fetch("assets/school_logo.png").then((r) =>
+          r.arrayBuffer(),
+        );
+        const logoImage = await newPdf.embedPng(logoBytes);
+        // Draw logo top-left
+        annexPage.drawImage(logoImage, {
+          x: 250,
+          y: 780,
+          width: 100,
+          height: 100,
+        });
+
+        function write(text, x, y, size = 11) {
+          annexPage.drawText(String(text || ""), { x, y, size, font });
+        }
+
+        const fullName = `${firstName.value} ${lastName.value}`;
+        const age = calcAge(dob.value);
+
+        write("SOCRATES PRE AND PRIMARY SCHOOL", 150, 810, 14);
+        write("AUTOMATED ADMISSION ANNEX (SoMAp)", 150, 790, 12);
+
+        write("1. MAELEZO YA MWANAFUNZI", 50, 740, 12);
+        write(`Jina: ${fullName}`, 50, 710);
+        write(`Jinsia: ${gender.value}`, 50, 690);
+        write(`Umri: ${age}`, 50, 670);
+        write(`Darasa: ${classLevel.value}`, 50, 650);
+        write(`Makazi: ${residentialAddress.value}`, 50, 630);
+        write(`Birth Cert No: ${birthCertNumber.value}`, 50, 610);
+        write(`Afya: ${healthProblem.value || "Hakuna"}`, 50, 590);
+
+        // Student Passport Photo (PNG + JPG safe)
+        if (documents.passportPhotoUrl) {
+          const imgBytes = await fetch(documents.passportPhotoUrl).then((r) =>
+            r.arrayBuffer(),
+          );
+          let img;
+
+          try {
+            img = await newPdf.embedJpg(imgBytes);
+          } catch {
+            img = await newPdf.embedPng(imgBytes);
+          }
+
+          annexPage.drawImage(img, { x: 400, y: 650, width: 120, height: 120 });
+        }
+        if (documents.passportPhotoUrl) {
+          const imgBytes = await fetch(documents.passportPhotoUrl).then((r) =>
+            r.arrayBuffer(),
+          );
+          let img;
+          try {
+            img = await newPdf.embedJpg(imgBytes);
+          } catch {
+            img = await newPdf.embedPng(imgBytes);
+          }
+
+          annexPage.drawImage(img, { x: 400, y: 650, width: 120, height: 120 });
+        }
+
+        write("2. MAELEZO YA MZAZI / MLEZI", 50, 540, 12);
+        write(`Jina: ${parentName.value}`, 50, 510);
+        write(`Simu: ${parentPhone.value}`, 50, 490);
+
+        write("3. KIAPO CHA MZAZI / MLEZI", 50, 450, 12);
+        annexPage.drawText(
+          `Mimi mzazi/mlezi wa ${fullName} nimeridhia mwanangu kujiunga na shule ya Socrates Pre and Primary School.`,
+          { x: 50, y: 420, size: 11, font, maxWidth: 500 },
+        );
+
+        write("Jina: ____________________", 50, 360);
+        write("Sahihi: ____________________", 50, 330);
+        write("Tarehe: ____________________", 50, 300);
+
+        const pdfBytes = await newPdf.save();
+        const blob = new Blob([pdfBytes], { type: "application/pdf" });
+
+        // Auto-download for parent
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = `Socrates_Joining_Form_${fullName}.pdf`;
+        link.click();
+
+        // Return blob for upload
+        return blob;
+      }
+      /* ===== Upload Generated PDF to Cloudinary ===== */
+      async function uploadGeneratedPdf(pdfBlob, joinId) {
+        const fd = new FormData();
+        fd.append("file", pdfBlob);
+        fd.append("upload_preset", "somap_unsigned");
+        fd.append("folder", `joinRequests/${joinId}/generatedForm`);
+
+        const res = await fetch(
+          "https://api.cloudinary.com/v1_1/dg7vnrkgd/auto/upload",
+          { method: "POST", body: fd },
+        );
+
+        const json = await res.json();
+        return json.secure_url;
+      }
+
       /* Submit */
       joinForm.addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -297,30 +457,24 @@
           const joinRef = db.ref("joinApprovalsPending").push();
           const joinId = joinRef.key;
 
-          async function uploadFile(inputId, folder) {
-            const el = document.getElementById(inputId);
-            if (!el || !el.files.length) return null;
-
-            const fd = new FormData();
-            fd.append("file", el.files[0]);
-            fd.append("upload_preset", "somap_unsigned");
-            fd.append("folder", `joinRequests/${joinId}/${folder}`);
-
-            const res = await fetch(
-              "https://api.cloudinary.com/v1_1/dg7vnrkgd/auto/upload",
-              { method: "POST", body: fd }
-            );
-            const json = await res.json();
-            return json.secure_url || null;
-          }
-
           const documents = {
-            passportPhotoUrl: await uploadFile("passportPhoto", "passport"),
-            birthCertUrl: await uploadFile("birthCert", "birthCert"),
-            reportCardUrl: await uploadFile("reportCard", "reportCard"),
-            joiningLetterUrl: await uploadFile("joiningLetter", "joiningForm"),
-            medicalDocsUrl: await uploadFile("medicalDocs", "medical"),
+            passportPhotoUrl: await uploadFile(
+              "passportPhoto",
+              "passport",
+              joinId,
+            ),
+            birthCertUrl: await uploadFile("birthCert", "birthCert", joinId),
+            reportCardUrl: await uploadFile("reportCard", "reportCard", joinId),
+            medicalDocsUrl: await uploadFile("medicalDocs", "medical", joinId),
           };
+
+          // Generate + upload official joining PDF
+          const generatedPdfBlob = await generateAnnexJoiningPDF(documents);
+          const joiningPdfUrl = await uploadGeneratedPdf(
+            generatedPdfBlob,
+            joinId,
+          );
+          documents.generatedJoiningFormUrl = joiningPdfUrl;
 
           await joinRef.set({
             approvalType: "JOIN_REQUEST",
@@ -330,6 +484,11 @@
             studentSnapshot: {
               firstName: firstName.value.trim(),
               lastName: lastName.value.trim(),
+              gender: gender.value,
+              dob: dob.value,
+              birthCertNumber: birthCertNumber.value.trim(),
+              residentialAddress: residentialAddress.value.trim(),
+              healthProblem: healthProblem.value.trim(),
               classLevel: classLevel.value,
             },
 
@@ -338,10 +497,11 @@
               phone: parentPhone.value.trim(),
             },
 
+            // ✅ REFERRAL LOGIC UNTOUCHED
             referral: referralCode.value
               ? {
                   code: referralCode.value.trim(),
-                  referredByParentId: null, // resolved during admin approval
+                  referredByParentId: null,
                   resolved: false,
                 }
               : null,
@@ -356,12 +516,13 @@
             createdAt: Date.now(),
             updatedAt: Date.now(),
           });
-          joinForm.reset();
+
+          setTimeout(() => joinForm.reset(), 2000);
 
           Swal.fire(
             "Submitted",
-            "Application sent for approval.",
-            "success"
+            "Application sent. Official joining form downloaded.",
+            "success",
           ).then(() => location.reload());
         } catch (err) {
           console.error(err);
@@ -375,11 +536,11 @@
         en: {
           title: "Student Admission Request",
           subtitle:
-  "Welcome! Please complete the form below to initiate the admission process. Submitted applications will be reviewed by the school, and further guidance will be provided accordingly.",
+            "Welcome! Please complete the form below to initiate the admission process. Submitted applications will be reviewed by the school, and further guidance will be provided accordingly.",
 
           download_title: "Download School Joining Form",
           download_note:
-            "Download, fill manually, then upload the completed form below.",
+            "The system will automatically generate the official joining form after submission.",
           download_btn: "Download School Form",
           student_details: "Student Details",
           parent_details: "Parent / Guardian",
@@ -412,8 +573,8 @@
         },
         sw: {
           title: "Ombi la Kujiunga na Shule",
-         subtitle:
-  "Karibu! Tafadhali jaza fomu hii kuanzisha mchakato wa udahili. Maombi yaliyowasilishwa yatapitiwa na shule, na maelekezo zaidi yatatolewa kadri inavyohitajika.",
+          subtitle:
+            "Karibu! Tafadhali jaza fomu hii kuanzisha mchakato wa udahili. Maombi yaliyowasilishwa yatapitiwa na shule, na maelekezo zaidi yatatolewa kadri inavyohitajika.",
 
           download_title: "Pakua Fomu ya Kujiunga",
           download_note: "Pakua, jaza, kisha pakia fomu.",
