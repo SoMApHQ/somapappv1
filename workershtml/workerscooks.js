@@ -392,20 +392,9 @@ function App() {
   }
 
   async function loadStudents(schoolId, yearKey) {
-    const scopedPath = `years/${yearKey}/students`;
-    const snap = await scopedOrSocratesLegacy(scopedPath, 'students').catch(() => null);
-    if (snap && snap.exists()) {
-      const raw = snap.val() || {};
-      const normalized = {};
-      Object.entries(raw).forEach(([id, data]) => {
-        normalized[id] = normalizeStudent(id, data);
-      });
-      return normalized;
-    }
-    const baseSnap = await scopedOrSocratesLegacy('students', 'students').catch(() => null);
-    if (!baseSnap || !baseSnap.exists()) return {};
-    const baseStudents = baseSnap.val() || {};
     const selectedYear = String(yearKey || SOMAP_DEFAULT_YEAR);
+    const baseSnap = await scopedOrSocratesLegacy('students', 'students').catch(() => null);
+    const baseStudents = baseSnap?.exists() ? baseSnap.val() || {} : {};
     const deltaYears = Number(selectedYear) - SOMAP_DEFAULT_YEAR;
     const [yearEnrollSnap, anchorEnrollSnap] = await Promise.all([
       scopedOrSocratesLegacy(`enrollments/${selectedYear}`, `enrollments/${selectedYear}`).catch(() => null),
@@ -433,7 +422,20 @@ function App() {
       const className = normalizeClassName(classRaw);
       normalized[id] = normalizeStudent(id, { ...data, className, class: className, grade: className, admissionNo });
     });
-    return normalized;
+
+    if (Object.keys(normalized).length) return normalized;
+
+    const scopedPath = `years/${yearKey}/students`;
+    const snap = await scopedOrSocratesLegacy(scopedPath, 'students').catch(() => null);
+    if (snap && snap.exists()) {
+      const raw = snap.val() || {};
+      const fallback = {};
+      Object.entries(raw).forEach(([id, data]) => {
+        fallback[id] = normalizeStudent(id, data);
+      });
+      return fallback;
+    }
+    return {};
   }
 
   async function loadAttendance(dateKey, schoolId, yearKey) {
