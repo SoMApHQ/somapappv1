@@ -53,6 +53,16 @@ db.ref("parents").on("value", snap => {
 
   render(); // 
 });
+function updateCounts() {
+  const pending = Object.values(allRequests).filter(
+    (r) =>
+      r &&
+      r.status === "pending" &&
+      (!r.approvalType || r.approvalType === "JOIN_REQUEST")
+  ).length;
+
+  document.getElementById("count-pending").textContent = pending;
+}
 
 /* ---------------- Load Data ---------------- */
 db.ref("joinApprovalsPending").on("value", (snap) => {
@@ -107,17 +117,8 @@ entries.forEach(([id, r]) => {
 });
 
 
-/* ---------------- Counts ---------------- */
-function updateCounts() {
-  const pending = Object.values(allRequests).filter(
-    (r) =>
-      r &&
-      r.status === "pending" &&
-      (!r.approvalType || r.approvalType === "JOIN_REQUEST")
-  ).length;
 
-  document.getElementById("count-pending").textContent = pending;
-}
+
 
 /* ---------------- Actions ---------------- */
 async function approveRequest(id) {
