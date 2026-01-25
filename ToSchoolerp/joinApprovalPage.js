@@ -65,7 +65,7 @@ db.ref("joinApprovalsPending").on("value", (snap) => {
 function render() {
   listEl.innerHTML = "";
 
-  const entries = Object.entries(allRequests).filter(([_, r]) => {
+  const entries = Object.entries(allRequests).filter(([_, r]) => {  
     if (!r) return false;
 
     // status + approval type check
@@ -93,15 +93,17 @@ function render() {
     return;
   }
 
- entries.forEach(([id, r]) => {
+entries.forEach(([id, r]) => {
+  const safeRecord = { ...r };
+
   if (r.referral?.code && parentReferralMap[r.referral.code]) {
-    r.referral = {
+    safeRecord.referral = {
       ...r.referral,
       ...parentReferralMap[r.referral.code]
     };
   }
 
-  listEl.innerHTML += renderJoinApprovalCard(id, r);
+  listEl.innerHTML += renderJoinApprovalCard(id, safeRecord);
 });
 
 
