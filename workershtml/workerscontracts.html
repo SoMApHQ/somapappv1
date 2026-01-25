@@ -595,7 +595,6 @@
     buildContractHtml,
     calculateSalaryBreakdown
   } from './modules/workers_contracts.js';
-  import { ensureHtml2Pdf } from './modules/workers_ui.js';
 
   const db = firebase.database();
   const storage = firebase.storage();
@@ -605,8 +604,6 @@
     throw new Error('No school selected for multi-school context');
   }
   const schoolRef = (path) => db.ref(SOMAP.P(path));
-  const LEGACY_WORKERS_YEAR = '2025';
-  const legacyFriendly = school.id === 'socrates-school' || school.id === 'default';
 
   const schoolNameEl = document.getElementById('schoolNameDisplay');
   const yearSelectEl = document.getElementById('yearSelect');
@@ -620,7 +617,7 @@
     terms: {},
     signing: {},
     selectedLanguage: 'en',
-    localDraftGenerated: false
+    draftOpened: false
   };
 
   init();
@@ -636,6 +633,7 @@
 
       initSchoolContext();
       initYearContext();
+      updateDraftOpenedFromStorage();
       await loadData();
       setupLanguageHandlers();
     } catch (err) {
@@ -658,6 +656,7 @@
     yearCtx?.attachYearDropdown?.(yearSelectEl);
     yearCtx?.onYearChanged?.((yr) => {
       state.year = String(yr);
+      updateDraftOpenedFromStorage();
       loadData();
     });
   }
@@ -670,19 +669,43 @@
     return schoolRef(`${yearRoot()}/workers/${state.workerId}`);
   }
 
-  function contractRef() {
-    return schoolRef(`${yearRoot()}/workersContracts/${state.workerId}`);
+  function termsRef() {
+    return schoolRef(`${yearRoot()}/workersContractTerms/${state.workerId}`);
+  }
+
+  function signingRef() {
+    return schoolRef(`${yearRoot()}/workersContractSigning/${state.workerId}`);
+  }
+
+  function isSocratesSchool() {
+    const schoolCtx = SOMAP.getSchool();
+    const schoolId = schoolCtx?.id || '';
+    return schoolId === 'socrates-school' || schoolId === 'default' || /socrates/i.test(schoolId);
+  }
+
+  function draftFlagKey() {
+    return `draftOpened:${state.schoolId}:${state.year}:${state.workerId}`;
+  }
+
+  function updateDraftOpenedFromStorage() {
+    if (!state.schoolId || !state.year || !state.workerId) return;
+    state.draftOpened = localStorage.getItem(draftFlagKey()) === '1';
+  }
+
+  function markDraftOpened() {
+    localStorage.setItem(draftFlagKey(), '1');
+    state.draftOpened = true;
   }
 
   async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
-    const scopedSnap = await schoolRef(scopedSubPath).once('value');
-    if (scopedSnap.exists()) return scopedSnap;
-    const isSocrates = ['socrates-school', 'default', 'socrates'].includes(school?.id);
-    if (isSocrates) {
-      const legacySnap = await db.ref(legacyPath).once('value');
-      if (legacySnap.exists()) return legacySnap;
-    }
-    return scopedSnap;
+    const schoolCtx = SOMAP.getSchool();
+    const schoolId = schoolCtx?.id || "";
+    const scopedSnap = await db.ref(SOMAP.P(scopedSubPath)).get();
+    if (scopedSnap.exists()) return scopedSnap.val();
+    const isSocrates = (schoolId === "socrates-school" || schoolId === "default" || /socrates/i.test(schoolId));
+    if (!isSocrates) return null;
+    const legacySnap = await db.ref(legacyPath).get();
+    return legacySnap.exists() ? legacySnap.val() : null;
   }
 
   function profileHasIdentity(profile) {
@@ -695,12 +718,13 @@
     const doc = parser.parseFromString(html, 'text/html');
     const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'));
 
-    const sectionTwoHeadings = headings.filter(h => /^\s*2\./i.test(h.textContent || ''));
-    const preferredHeading = sectionTwoHeadings.find(h =>
-      /(position|place of work|mahali pa ajira)/i.test(h.textContent || '')
-    );
-    const anchorHeading = preferredHeading || sectionTwoHeadings[0] || null;
+    const anchorHeading = headings.find(h => /^\s*2\./i.test(h.textContent || '')) || null;
     if (!anchorHeading) return html;
+
+    const anchorText = (anchorHeading.textContent || '').toLowerCase();
+    const alreadyInserted = /2\(b\)\s+(special agreement|makubaliano maalum)/i.test(doc.body.textContent || '') ||
+      anchorText.includes('2(b)');
+    if (alreadyInserted) return html;
 
     const clauseWrap = doc.createElement('div');
     clauseWrap.style.margin = '12px 0 0';
@@ -720,9 +744,17 @@
     clause.appendChild(doc.createTextNode(` ${agreement.text}`));
     clauseWrap.appendChild(clause);
 
-    const afterEl = anchorHeading.nextElementSibling;
-    if (afterEl) {
-      afterEl.after(clauseWrap);
+    const following = [];
+    let cursor = anchorHeading.nextElementSibling;
+    while (cursor) {
+      following.push(cursor);
+      if (/^\s*3\./i.test(cursor.textContent || '')) break;
+      cursor = cursor.nextElementSibling;
+    }
+
+    const firstParagraph = following.find(el => el.tagName === 'P') || null;
+    if (firstParagraph) {
+      firstParagraph.after(clauseWrap);
     } else {
       anchorHeading.after(clauseWrap);
     }
@@ -730,27 +762,36 @@
   }
 
   async function loadData() {
-    const scopedSnap = await scopedOrSocratesLegacy(
+    updateDraftOpenedFromStorage();
+    const workerData = await scopedOrSocratesLegacy(
       `${yearRoot()}/workers/${state.workerId}`,
       `workers/${state.workerId}`
-    );
-    const contractSnap = await contractRef().once('value');
+    ) || {};
+    const [termsData, signingData] = await Promise.all([
+      scopedOrSocratesLegacy(
+        `${yearRoot()}/workersContractTerms/${state.workerId}`,
+        `workersContractTerms/${state.workerId}`
+      ),
+      scopedOrSocratesLegacy(
+        `${yearRoot()}/workersContractSigning/${state.workerId}`,
+        `workersContracts/${state.workerId}`
+      )
+    ]);
 
-    const scopedData = scopedSnap.val() || {};
-    let legacyData = null;
-    if (!profileHasIdentity(scopedData.profile) && legacyFriendly && String(state.year) === LEGACY_WORKERS_YEAR) {
-      const legacySnap = await db.ref(`workers/${state.workerId}`).once('value');
-      if (legacySnap.exists()) {
-        legacyData = legacySnap.val() || {};
-      }
+    let resolvedProfile = workerData.profile || {};
+    if (!profileHasIdentity(resolvedProfile) && isSocratesSchool()) {
+      const legacySnap = await db.ref(`workers/${state.workerId}`).get();
+      resolvedProfile = legacySnap.exists() ? (legacySnap.val()?.profile || {}) : {};
     }
-    state.profile = profileHasIdentity(scopedData.profile)
-      ? scopedData.profile
-      : (legacyData?.profile || {});
+    state.profile = resolvedProfile;
 
-    const contractData = contractSnap.val() || {};
-    state.terms = scopedData.contract?.terms || legacyData?.contract?.terms || {};
-    state.signing = contractData.signing || {};
+    let resolvedTerms = termsData;
+    if (!resolvedTerms && isSocratesSchool()) {
+      const legacyTermsSnap = await db.ref(`workers/${state.workerId}/contract/terms`).get();
+      resolvedTerms = legacyTermsSnap.exists() ? legacyTermsSnap.val() : null;
+    }
+    state.terms = resolvedTerms || {};
+    state.signing = signingData?.signing || {};
 
     state.selectedLanguage = defaultContractLanguage(state.profile.role);
 
@@ -785,7 +826,13 @@
       worker_uploaded: 'Pending Approval',
       draft: 'Draft Ready'
     };
-    statusLabel.innerHTML = `<span class="status-badge status-${status === 'approved' ? 'accepted' : 'pending'}">${labelMap[status] || 'Draft'}</span>`;
+    const draftHint = state.draftOpened
+      ? 'Draft opened'
+      : 'Open draft before signing';
+    statusLabel.innerHTML = `
+      <span class="status-badge status-${status === 'approved' ? 'accepted' : 'pending'}">${labelMap[status] || 'Draft'}</span>
+      <span style="margin-left: 8px; color: var(--gray); font-weight: 600;">${draftHint}</span>
+    `;
   }
 
   function renderSalaryBreakdown() {
@@ -858,72 +905,65 @@
   function renderDraftPdfSection() {
     const section = document.getElementById('draftPdfSection');
     if (!section) return;
+    const hasProfile = profileHasIdentity(state.profile);
+    const hasTerms = hasContractTerms();
+    const canDownload = hasProfile && hasTerms;
     const draftUrl = state.signing?.draftPdfUrl || '';
-    if (!draftUrl) {
-      const hasTerms = hasContractTerms();
-      section.innerHTML = `
-        <div style="margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;">
-          <button class="btn btn-success" type="button" id="downloadLocalDraftBtn" ${hasTerms ? '' : 'disabled'}>DOWNLOAD DRAFT</button>
-        </div>
-        <p style="margin: 0; color: var(--gray); text-align: center;">
-          Draft PDF bado haijazalishwa. Tafadhali subiri mkuu wa shule azalishe draft kwanza.<br>
-          The draft PDF has not been generated yet. Please wait for the headteacher to generate it first.
-        </p>
-      `;
-      const btn = document.getElementById('downloadLocalDraftBtn');
-      if (btn && hasTerms) {
-        btn.addEventListener('click', handleLocalDraftDownload);
-      }
-      return;
-    }
+
     section.innerHTML = `
-      <div style="margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
-        <a href="${draftUrl}" target="_blank" class="btn btn-success">Download Draft PDF</a>
+      <div style="margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;">
+        <button class="btn btn-success" type="button" id="downloadDraftPrintBtn" ${canDownload ? '' : 'disabled'}>DOWNLOAD DRAFT PDF</button>
+        ${draftUrl ? `<a href="${draftUrl}" target="_blank" class="btn btn-secondary">View Stored Draft</a>` : ''}
       </div>
-      <div class="pdf-viewer">
-        <p style="margin: 0 0 8px; font-weight: 600;">Preview</p>
-        <iframe src="${draftUrl}" title="Draft Contract PDF"></iframe>
-        <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
-          <a href="${draftUrl}" target="_blank" class="btn btn-success">Download Draft PDF</a>
-        </div>
-      </div>
+      <p style="margin: 0; color: var(--gray); text-align: center;">
+        Bonyeza DOWNLOAD DRAFT PDF kisha chagua Print → Save as PDF.<br>
+        Click DOWNLOAD DRAFT PDF, then choose Print → Save as PDF.
+      </p>
     `;
+    const btn = document.getElementById('downloadDraftPrintBtn');
+    if (btn && canDownload) {
+      btn.addEventListener('click', handleDraftPrintDownload);
+    }
   }
 
   function renderActions() {
     const actions = document.getElementById('actions');
     const draftUrl = state.signing?.draftPdfUrl || '';
     const signedUrl = state.signing?.signedPdfUrl || '';
-    const hasDraft = hasDownloadableDraft();
+    const hasProfile = profileHasIdentity(state.profile);
+    const hasTerms = hasContractTerms();
+    const canDownload = hasProfile && hasTerms;
 
-    if (!hasDraft) {
+    if (!canDownload) {
       actions.innerHTML = `
         <p style="color: var(--gray); text-align: center;">
-          Hakuna draft PDF bado. Huwezi kusaini kabla ya draft.<br>
-          No draft PDF yet. You cannot sign before the draft.
+          Mkataba bado haujakamilika kwa mwaka huu.<br>
+          The contract is not ready for this year yet.
         </p>
         <a href="workersdashboard.html" class="btn btn-secondary">Rudi Nyumbani | Back</a>
       `;
       return;
     }
 
-    const draftDownloadControl = draftUrl
-      ? `<a href="${draftUrl}" target="_blank" class="btn btn-success">Download Draft PDF</a>`
-      : `<button class="btn btn-success" type="button" id="downloadLocalDraftBtnActions">DOWNLOAD DRAFT</button>`;
-
     actions.innerHTML = `
-      ${draftDownloadControl}
+      <button class="btn btn-success" type="button" id="downloadDraftPrintBtnActions">DOWNLOAD DRAFT PDF</button>
+      ${draftUrl ? `<a href="${draftUrl}" target="_blank" class="btn btn-secondary">View Stored Draft</a>` : ''}
       <div class="file-input-wrapper">
-        <button class="btn btn-primary" id="uploadSignedBtn">Upload Signed PDF</button>
-        <input type="file" id="signedPdfInput" accept="application/pdf">
+        <button class="btn btn-primary" id="uploadSignedBtn" ${state.draftOpened ? '' : 'disabled'}>Upload Signed PDF</button>
+        <input type="file" id="signedPdfInput" accept="application/pdf" ${state.draftOpened ? '' : 'disabled'}>
       </div>
       ${signedUrl ? `<a href="${signedUrl}" target="_blank" class="btn btn-secondary">Download Signed PDF</a>` : ''}
       <a href="workersdashboard.html" class="btn btn-secondary">Rudi Nyumbani | Back</a>
+      ${state.draftOpened ? '' : `
+        <p style="margin: 8px 0 0; color: var(--danger); font-weight: 600;">
+          Tafadhali pakua draft kwanza. | Please download the draft first.
+        </p>
+      `}
     `;
 
-    const localDraftBtn = document.getElementById('downloadLocalDraftBtnActions');
-    if (localDraftBtn && !draftUrl) {
-      localDraftBtn.addEventListener('click', handleLocalDraftDownload);
+    const draftBtn = document.getElementById('downloadDraftPrintBtnActions');
+    if (draftBtn) {
+      draftBtn.addEventListener('click', handleDraftPrintDownload);
     }
 
     const signedInput = document.getElementById('signedPdfInput');
@@ -938,7 +978,7 @@
     const signatureSection = document.getElementById('signatureSection');
     if (signatureSection) signatureSection.style.display = 'block';
 
-    const hasDraft = hasDownloadableDraft();
+    const canSign = state.draftOpened;
     const uploadArea = document.getElementById('signatureUploadArea');
     const signatureInput = document.getElementById('signatureInput');
     const uploadBtn = uploadArea?.querySelector('button');
@@ -951,13 +991,13 @@
       uploadArea.appendChild(hint);
     }
 
-    if (signatureInput) signatureInput.disabled = !hasDraft;
-    if (uploadBtn) uploadBtn.disabled = !hasDraft;
+    if (signatureInput) signatureInput.disabled = !canSign;
+    if (uploadBtn) uploadBtn.disabled = !canSign;
     if (hint) {
-      hint.style.color = hasDraft ? 'var(--gray)' : 'var(--danger)';
-      hint.textContent = hasDraft
-        ? 'Unaweza kupakia sahihi baada ya kusoma draft PDF.'
-        : 'Sahihi imefungwa hadi draft PDF itengenezwe kwanza.';
+      hint.style.color = canSign ? 'var(--gray)' : 'var(--danger)';
+      hint.textContent = canSign
+        ? 'Unaweza kupakia sahihi baada ya kufungua draft PDF.'
+        : 'Sahihi imefungwa hadi ufungue draft PDF kwanza.';
     }
 
     const preview = document.getElementById('signaturePreview');
@@ -986,81 +1026,123 @@
   }
 
   function hasDownloadableDraft() {
-    return Boolean(state.signing?.draftPdfUrl || state.localDraftGenerated);
+    return Boolean(state.signing?.draftPdfUrl);
   }
 
-  async function handleLocalDraftDownload() {
-    const contractViewerEl = document.getElementById('contractViewer');
-    if (!contractViewerEl) {
-      showToast('Contract viewer haipo. | Contract viewer missing.', 'error');
+  function buildContractHtmlForPrint() {
+    const profile = state.profile || {};
+    const html = buildContractHtml(profile, {
+      language: state.selectedLanguage,
+      signatureUrl: '',
+      terms: state.terms || {},
+      specialAgreement: null
+    });
+    return injectSpecialAgreementClause(html, state.terms?.specialAgreement || null);
+  }
+
+  function openPrintWindow(contractHtml) {
+    const printWin = window.open('', '_blank', 'noopener,noreferrer');
+    if (!printWin) {
+      showToast('Ruhusu popups kupakua PDF. | Please allow popups to download PDF.', 'error');
+      return null;
+    }
+
+    const doc = printWin.document;
+    const schoolName = state.schoolName || state.schoolId;
+    const title = `Contract ${state.workerId} ${state.year} ${schoolName}`;
+
+    doc.open();
+    doc.write(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title}</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 12mm;
+    }
+    html, body {
+      padding: 0;
+      margin: 0;
+      background: #ffffff;
+      color: #0f172a;
+      font-family: "Times New Roman", Times, serif;
+      line-height: 1.6;
+    }
+    body {
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .print-root {
+      width: 210mm;
+      margin: 0 auto;
+      padding: 12mm;
+      box-sizing: border-box;
+      background: #ffffff;
+    }
+    img {
+      max-width: 100%;
+      height: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      page-break-inside: avoid;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      page-break-after: avoid;
+      page-break-inside: avoid;
+    }
+    p, li {
+      orphans: 3;
+      widows: 3;
+    }
+    .no-print {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="print-root">${contractHtml}</div>
+  <script>
+    window.addEventListener('load', function () {
+      setTimeout(function () {
+        window.focus();
+        window.print();
+      }, 50);
+    });
+  </script>
+</body>
+</html>`);
+    doc.close();
+    return printWin;
+  }
+
+  function handleDraftPrintDownload() {
+    const profile = state.profile || {};
+    const hasProfile = profileHasIdentity(profile);
+    const hasTerms = hasContractTerms();
+    if (!hasProfile || !hasTerms) {
+      showToast('Mkataba bado haujakamilika kwa mwaka huu.', 'error');
       return;
     }
 
-    const originalStyle = {
-      maxHeight: contractViewerEl.style.maxHeight,
-      height: contractViewerEl.style.height,
-      overflow: contractViewerEl.style.overflow,
-      overflowY: contractViewerEl.style.overflowY
-    };
-
     try {
-      const profile = state.profile || {};
-      const hasProfile = Boolean(profile.fullNameUpper || profile.firstName || profile.lastName);
-      if (!hasProfile) {
-        showToast('Hakuna taarifa za mfanyakazi kwa mwaka huu.', 'error');
-        return;
-      }
+      const contractHtml = buildContractHtmlForPrint();
+      const printWin = openPrintWindow(contractHtml);
+      if (!printWin) return;
 
-      showToast('Inatengeneza draft PDF...', 'info');
-      await ensureHtml2Pdf();
-
-      const html = buildContractHtml(profile, {
-        language: state.selectedLanguage,
-        signatureUrl: '',
-        terms: state.terms || {},
-        specialAgreement: null
-      });
-      const withClause = injectSpecialAgreementClause(html, state.terms?.specialAgreement || null);
-
-      // Ensure the viewer contains the full contract and is not clipped.
-      contractViewerEl.innerHTML = withClause;
-      contractViewerEl.style.maxHeight = 'none';
-      contractViewerEl.style.height = 'auto';
-      contractViewerEl.style.overflow = 'visible';
-      contractViewerEl.style.overflowY = 'visible';
-
-      // Let layout settle before capture.
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-
-      const pdfBlob = await window.html2pdf().set({
-        margin: 6,
-        filename: `contract-${state.workerId}.pdf`,
-        html2canvas: { scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff' },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
-        pagebreak: { mode: ['css', 'legacy'] }
-      }).from(contractViewerEl).toPdf().output('blob');
-
-      const url = URL.createObjectURL(pdfBlob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `contract-${state.workerId}-${state.year}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-
-      state.localDraftGenerated = true;
+      markDraftOpened();
+      renderWorkerDetails();
+      renderDraftPdfSection();
       renderActions();
       renderSignature();
-      showToast('Draft PDF tayari kupakua.', 'success');
+      showToast('Draft imefunguliwa. Tumia Print → Save as PDF.', 'success');
     } catch (err) {
-      console.error('Local draft generation failed:', err);
-      showToast(err.message || 'Imeshindikana kutengeneza draft PDF.', 'error');
-    } finally {
-      contractViewerEl.style.maxHeight = originalStyle.maxHeight;
-      contractViewerEl.style.height = originalStyle.height;
-      contractViewerEl.style.overflow = originalStyle.overflow;
-      contractViewerEl.style.overflowY = originalStyle.overflowY;
+      console.error('Print draft failed:', err);
+      showToast(err.message || 'Imeshindikana kufungua draft kwa print.', 'error');
     }
   }
 
@@ -1096,6 +1178,10 @@
 
   async function handleSignedUpload(file) {
     if (!file) return;
+    if (!state.draftOpened) {
+      showToast('Fungua draft kwanza kabla ya kupakia. | Open the draft before uploading.', 'error');
+      return;
+    }
     if (!file.type.includes('pdf')) {
       showToast('Tafadhali chagua PDF sahihi.', 'error');
       return;
@@ -1105,7 +1191,7 @@
       const storageRef = storage.ref(`schools/${state.schoolId}/years/${state.year}/contracts/${state.workerId}/signed.pdf`);
       await storageRef.put(file, { contentType: 'application/pdf' });
       const url = await storageRef.getDownloadURL();
-      await contractRef().child('signing').update({
+      await signingRef().child('signing').update({
         signedPdfUrl: url,
         status: 'worker_uploaded',
         workerUploadedAt: Date.now()
@@ -1121,11 +1207,15 @@
 
   async function handleSignatureUpload(file) {
     try {
+      if (!state.draftOpened) {
+        showToast('Fungua draft kwanza kabla ya sahihi. | Open the draft before signing.', 'error');
+        return;
+      }
       showToast('Inapakia sahihi...', 'info');
       const storageRef = storage.ref(`schools/${state.schoolId}/years/${state.year}/contracts/${state.workerId}/signature.png`);
       await storageRef.put(file, { contentType: file.type || 'image/png' });
       const url = await storageRef.getDownloadURL();
-      await contractRef().child('signing').update({
+      await signingRef().child('signing').update({
         signatureUrl: url
       });
       state.signing = { ...(state.signing || {}), signatureUrl: url };
