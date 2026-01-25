@@ -86,7 +86,7 @@ function renderJoinApprovalCard(id, r) {
           ${docs.passportPhotoUrl ? `<a href="${docs.passportPhotoUrl}" target="_blank" class="text-indigo-600 underline">Passport</a>` : ""}
           ${docs.birthCertUrl ? `<a href="${docs.birthCertUrl}" target="_blank" class="text-indigo-600 underline">Birth Cert</a>` : ""}
           ${docs.reportCardUrl ? `<a href="${docs.reportCardUrl}" target="_blank" class="text-indigo-600 underline">Report Card</a>` : ""}
-       ${docs.generatedJoiningFormUrl ? `<a href="${docs.generatedJoiningFormUrl}" target="_blank" class="text-indigo-600 underline">Joining Form (System)</a>` : ""}
+     ${docs.joiningLetterUrl ? `<a href="${docs.joiningLetterUrl}" target="_blank" class="text-indigo-600 underline">Joining Letter</a>` : ""}
           ${docs.medicalDocsUrl ? `<a href="${docs.medicalDocsUrl}" target="_blank" class="text-indigo-600 underline">Medical</a>` : ""}
         </div>
       </div>
