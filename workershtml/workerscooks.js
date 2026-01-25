@@ -22,6 +22,7 @@ if (!school || !school.id) {
 }
 const schoolRef = (subPath) => db.ref(SOMAP.P(subPath));
 const getYear = () => window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
+const SOMAP_DEFAULT_YEAR = 2025;
 
 async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
   const scopedSnap = await schoolRef(scopedSubPath).once('value');
@@ -36,6 +37,86 @@ async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
 
 function normalizeClassKey(value = '') {
   return String(value || '').replace(/\s+/g, '').toLowerCase();
+}
+
+function normalizeClassName(name = '') {
+  const s = String(name || '').trim();
+  if (!s) return 'Unknown';
+  const low = s.toLowerCase();
+  if (low.includes('baby')) return 'Baby Class';
+  if (low.includes('middle')) return 'Middle Class';
+  if (low.includes('pre') || low.includes('nursery') || low.includes('unit')) return 'Pre Unit Class';
+  const m = low.match(/class\s*(\d+)/) || low.match(/\b(\d+)\b/);
+  if (m) return `Class ${parseInt(m[1], 10)}`;
+  return s.replace(/\s+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+const CLASS_ORDER = [
+  'Baby Class',
+  'Middle Class',
+  'Pre Unit Class',
+  'Class 1',
+  'Class 2',
+  'Class 3',
+  'Class 4',
+  'Class 5',
+  'Class 6',
+  'Class 7'
+];
+
+function shiftClass(baseClass, deltaYears) {
+  const normalized = normalizeClassName(baseClass);
+  const idx = CLASS_ORDER.findIndex(c => c.toLowerCase() === normalized.toLowerCase());
+  if (idx < 0) return normalized || 'Unknown';
+  const next = idx + Number(deltaYears || 0);
+  if (next < 0) return 'Pre-Admission';
+  if (next >= CLASS_ORDER.length) return 'GRADUATED';
+  return CLASS_ORDER[next];
+}
+
+function normalizeEnrollments(raw) {
+  if (!raw || typeof raw !== 'object') return {};
+  const normalized = {};
+  Object.entries(raw).forEach(([key, value]) => {
+    if (value && typeof value === 'object' && (value.studentId || value.id || value.className || value.classLevel || value.class || value.grade)) {
+      const entryId = value.id || value.studentId || key;
+      normalized[entryId] = { ...value };
+      return;
+    }
+    if (value && typeof value === 'object') {
+      Object.entries(value).forEach(([stuId, stuVal]) => {
+        const entry = (stuVal && typeof stuVal === 'object') ? { ...stuVal } : {};
+        if (!entry.className && !entry.classLevel && !entry.class && !entry.grade) {
+          entry.className = key;
+        }
+        const entryId = entry.id || entry.studentId || stuId;
+        normalized[entryId] = Object.assign(normalized[entryId] || {}, entry);
+      });
+    }
+  });
+  return normalized;
+}
+
+function buildEnrollmentIndex(enrollments) {
+  const byId = enrollments || {};
+  const byAdmission = {};
+  Object.entries(enrollments || {}).forEach(([key, value]) => {
+    if (!value || typeof value !== 'object') return;
+    const admission = value.admissionNumber || value.admissionNo || value.admNo || '';
+    if (admission && !byAdmission[admission]) {
+      byAdmission[admission] = value;
+    }
+    if (!byId[key]) byId[key] = value;
+  });
+  return { byId, byAdmission };
+}
+
+function lookupEnrollment(index, studentId, admissionNo) {
+  if (!index) return {};
+  if (studentId && index.byId?.[studentId]) return index.byId[studentId];
+  if (admissionNo && index.byId?.[admissionNo]) return index.byId[admissionNo];
+  if (admissionNo && index.byAdmission?.[admissionNo]) return index.byAdmission[admissionNo];
+  return {};
 }
 
 function getPromotedClassName(current = '') {
@@ -121,13 +202,15 @@ function normalizeStudent(id, data = {}) {
     .filter(Boolean)
     .join(' ')
     .trim() || id;
+  const admissionNo = data.admissionNumber || data.admissionNo || data.admNo || '';
   return {
     id,
     gender: gender.startsWith('m') || gender.startsWith('b') ? 'boys'
       : gender.startsWith('f') || gender.startsWith('g') ? 'girls'
       : 'unknown',
     className,
-    fullName
+    fullName,
+    admissionNo
   };
 }
 
@@ -319,7 +402,38 @@ function App() {
       });
       return normalized;
     }
-    return {};
+    const baseSnap = await scopedOrSocratesLegacy('students', 'students').catch(() => null);
+    if (!baseSnap || !baseSnap.exists()) return {};
+    const baseStudents = baseSnap.val() || {};
+    const selectedYear = String(yearKey || SOMAP_DEFAULT_YEAR);
+    const deltaYears = Number(selectedYear) - SOMAP_DEFAULT_YEAR;
+    const [yearEnrollSnap, anchorEnrollSnap] = await Promise.all([
+      scopedOrSocratesLegacy(`enrollments/${selectedYear}`, `enrollments/${selectedYear}`).catch(() => null),
+      scopedOrSocratesLegacy(`enrollments/${SOMAP_DEFAULT_YEAR}`, `enrollments/${SOMAP_DEFAULT_YEAR}`).catch(() => null)
+    ]);
+    const yearIndex = buildEnrollmentIndex(normalizeEnrollments(yearEnrollSnap?.exists() ? yearEnrollSnap.val() : {}));
+    const anchorIndex = buildEnrollmentIndex(normalizeEnrollments(anchorEnrollSnap?.exists() ? anchorEnrollSnap.val() : {}));
+
+    const normalized = {};
+    Object.entries(baseStudents).forEach(([id, data]) => {
+      const status = String(data?.status || '').toLowerCase();
+      if (status === 'shifted') return;
+      const admissionNo = data?.admissionNumber || data?.admissionNo || data?.admNo || '';
+      const yearEnroll = lookupEnrollment(yearIndex, id, admissionNo);
+      let classRaw = yearEnroll.className || yearEnroll.classLevel || yearEnroll.class || yearEnroll.grade || '';
+      if (!classRaw) {
+        const anchorEnroll = lookupEnrollment(anchorIndex, id, admissionNo);
+        const baseClass = anchorEnroll.className || anchorEnroll.classLevel || anchorEnroll.class || anchorEnroll.grade ||
+          data.className || data.classLevel || data.class || data.grade || 'Unknown';
+        classRaw = shiftClass(baseClass, deltaYears);
+        if (classRaw === 'GRADUATED') return;
+      } else if (String(classRaw).trim().toUpperCase() === 'GRADUATED') {
+        return;
+      }
+      const className = normalizeClassName(classRaw);
+      normalized[id] = normalizeStudent(id, { ...data, className, class: className, grade: className, admissionNo });
+    });
+    return normalized;
   }
 
   async function loadAttendance(dateKey, schoolId, yearKey) {
