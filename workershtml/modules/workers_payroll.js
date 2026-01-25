@@ -4,6 +4,8 @@ import { loadPolicies } from './workers_inventory.js';
 
 let policiesCache = null;
 
+const getRefs = () => dbRefs(firebase.database());
+
 async function ensurePolicies() {
   if (policiesCache) return policiesCache;
   policiesCache = await loadPolicies();
@@ -11,11 +13,12 @@ async function ensurePolicies() {
 }
 
 export async function computePayrollForWorker(workerId, monthKey) {
+  const refs = getRefs();
   const [profileSnap, penaltiesSnap, payrollRunSnap, payslipSnap] = await Promise.all([
-    dbRefs.workerProfile(workerId).once('value'),
-    dbRefs.penaltiesLedgerMonth(workerId, monthKey).once('value'),
-    dbRefs.payrollRun(monthKey).once('value'),
-    dbRefs.payslip(workerId, monthKey).once('value')
+    refs.workerProfile(workerId).once('value'),
+    refs.penaltiesLedgerMonth(workerId, monthKey).once('value'),
+    refs.payrollRun(monthKey).once('value'),
+    refs.payslip(workerId, monthKey).once('value')
   ]);
 
   const profile = profileSnap.exists() ? profileSnap.val() : {};
@@ -125,7 +128,7 @@ export async function generatePayslip(workerId, monthKey, payrollData) {
   const storagePath = `payslips/${workerId}/${filename}`;
   const downloadUrl = await uploadFileToStorage(blob, storagePath);
 
-  await dbRefs.payslip(workerId, monthKey).set({
+  await getRefs().payslip(workerId, monthKey).set({
     base: baseSalary,
     items: [
       { label: 'penalties', amountTZS: penalties },
@@ -167,7 +170,7 @@ export async function upsertPayrollRun(monthKey, items) {
     return acc;
   }, {});
 
-  await dbRefs.payrollRun(monthKey).update({
+  await getRefs().payrollRun(monthKey).update({
     status: 'draft',
     createdTs: firebase.database.ServerValue.TIMESTAMP,
     totals,
@@ -177,7 +180,7 @@ export async function upsertPayrollRun(monthKey, items) {
 }
 
 export async function finalizePayrollRun(monthKey) {
-  await dbRefs.payrollRun(monthKey).update({
+  await getRefs().payrollRun(monthKey).update({
     status: 'finalized',
     finalizedTs: localTs()
   });

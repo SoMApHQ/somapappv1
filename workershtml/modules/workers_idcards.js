@@ -4,6 +4,19 @@ window.addEventListener('DOMContentLoaded', async () => {
   initStudio();
 });
 
+function getYear() {
+  return window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
+}
+
+async function scopedOrSocratesLegacy(db, scopedSubPath, legacyPath) {
+  const s = SOMAP.getSchool();
+  const scopedSnap = await db.ref(SOMAP.P(scopedSubPath)).get();
+  if (scopedSnap.exists()) return scopedSnap;
+  const isSocrates = ['socrates-school', 'default', 'socrates'].includes(s?.id);
+  if (isSocrates) return await db.ref(legacyPath).get();
+  return scopedSnap;
+}
+
 function pick(obj, pathList){
   for (const p of pathList){
     const v = (p.split('/').reduce((acc,k)=>acc && acc[k], obj));
@@ -14,12 +27,18 @@ function pick(obj, pathList){
 
 async function fetchWorkers(){
   const db = firebase.database();
-  const tryPaths = ['workers','staff','employees'];
-  for (const p of tryPaths){
-    const snap = await db.ref(p).once('value');
-    if (snap.exists()) return { path:p, map:snap.val() || {} };
+  const school = SOMAP.getSchool();
+  if (!school || !school.id) {
+    window.location.href = '../somapappv1multischool/multischool.html';
+    return { path: 'workers', map: {} };
   }
-  return { path:'workers', map:{} }; // default empty
+  const year = getYear();
+  const tryPaths = ['workers', 'staff', 'employees'];
+  for (const p of tryPaths){
+    const snap = await scopedOrSocratesLegacy(db, `years/${year}/${p}`, p);
+    if (snap.exists()) return { path: `years/${year}/${p}`, map: snap.val() || {} };
+  }
+  return { path:`years/${year}/workers`, map:{} }; // default empty
 }
 
 function normalize(wk, key){

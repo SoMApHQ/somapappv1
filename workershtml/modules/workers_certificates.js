@@ -7,6 +7,12 @@
   const params = new URLSearchParams(location.search);
   const forceFlag = params.get('force') === '1';
   const defaultLogo = window.somapLogoUrl || window.somapLogoOverride || '../images/somap-logo.png.jpg';
+  const school = window.SOMAP?.getSchool?.();
+  if (!school || !school.id) {
+    window.location.href = '../somapappv1multischool/multischool.html';
+    return;
+  }
+  const schoolRef = (subPath) => db.ref(SOMAP.P(subPath));
 
   function getYear() {
     if (window.somapYearContext?.getSelectedYear) {
@@ -58,11 +64,29 @@
     }
   }
 
+  async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
+    const scopedSnap = await schoolRef(scopedSubPath).get();
+    if (scopedSnap.exists()) return scopedSnap;
+    const isSocrates = ['socrates-school', 'default', 'socrates'].includes(school?.id);
+    if (isSocrates) return await db.ref(legacyPath).get();
+    return scopedSnap;
+  }
+
+  async function readScopedOnce(scopedSubPath, legacyPath) {
+    try {
+      const snap = await scopedOrSocratesLegacy(scopedSubPath, legacyPath);
+      return snap.exists() ? snap.val() : null;
+    } catch (err) {
+      console.warn('readScopedOnce failed', scopedSubPath, err);
+      return null;
+    }
+  }
+
   async function getRole(uid) {
     return (
-      (await readOnce(`users/${uid}/role`)) ||
-      (await readOnce(`staff/${uid}/role`)) ||
-      (await readOnce(`workers/${uid}/role`)) ||
+      (await readScopedOnce(`years/${getYear()}/workers/${uid}/profile/role`, `workers/${uid}/profile/role`)) ||
+      (await readScopedOnce(`years/${getYear()}/workers/${uid}/role`, `workers/${uid}/role`)) ||
+      (await readScopedOnce(`years/${getYear()}/staff/${uid}/role`, `staff/${uid}/role`)) ||
       'worker'
     );
   }
@@ -108,26 +132,26 @@
   }
 
   async function getWorkerByUid(uid) {
-    for (const p of [`workers/${uid}`, `staff/${uid}`]) {
-      const data = await readOnce(p);
+    for (const p of ['workers', 'staff']) {
+      const data = await readScopedOnce(`years/${getYear()}/${p}/${uid}`, `${p}/${uid}`);
       if (data) return normalizeWorker(data, uid);
     }
 
     const user = auth.currentUser;
     if (user?.email) {
       const safeEmail = user.email.replace(/\./g, '(dot)');
-      const mapped = await readOnce(`workersIndexByEmail/${safeEmail}`);
+      const mapped = await readScopedOnce(`years/${getYear()}/workersIndexByEmail/${safeEmail}`, `workersIndexByEmail/${safeEmail}`);
       if (mapped) {
-        const data = await readOnce(`workers/${mapped}`);
+        const data = await readScopedOnce(`years/${getYear()}/workers/${mapped}`, `workers/${mapped}`);
         if (data) return normalizeWorker(data, mapped);
       }
     }
 
     if (user?.phoneNumber) {
       const safePhone = user.phoneNumber.replace(/[^\d+]/g, '');
-      const mapped = await readOnce(`workersIndexByPhone/${safePhone}`);
+      const mapped = await readScopedOnce(`years/${getYear()}/workersIndexByPhone/${safePhone}`, `workersIndexByPhone/${safePhone}`);
       if (mapped) {
-        const data = await readOnce(`workers/${mapped}`);
+        const data = await readScopedOnce(`years/${getYear()}/workers/${mapped}`, `workers/${mapped}`);
         if (data) return normalizeWorker(data, mapped);
       }
     }
@@ -135,8 +159,8 @@
   }
 
   async function getWorkerById(id) {
-    for (const p of [`workers/${id}`, `staff/${id}`]) {
-      const data = await readOnce(p);
+    for (const p of ['workers', 'staff']) {
+      const data = await readScopedOnce(`years/${getYear()}/${p}/${id}`, `${p}/${id}`);
       if (data) return normalizeWorker(data, id);
     }
     return null;
@@ -145,7 +169,7 @@
   async function findWorkerByNameUpper(nameUpper) {
     if (!nameUpper) return null;
     for (const path of ['workers', 'staff']) {
-      const data = await readOnce(path);
+      const data = await readScopedOnce(`years/${getYear()}/${path}`, path);
       if (data && typeof data === 'object') {
         for (const [uid, val] of Object.entries(data)) {
           const profile = val.profile || {};
@@ -160,7 +184,7 @@
 
   async function loadAllWorkers() {
     for (const path of ['workers', 'staff']) {
-      const data = await readOnce(path);
+      const data = await readScopedOnce(`years/${getYear()}/${path}`, path);
       if (data && typeof data === 'object') {
         return Object.entries(data).map(([uid, val]) => normalizeWorker(val, uid));
       }

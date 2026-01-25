@@ -13,6 +13,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="../js/school-logo.js"></script>
 
   <style>
     .workers-table{width:100%;border-collapse:collapse}
@@ -480,7 +481,6 @@
       const displayName = getDisplayName(worker.profile);
       if (worker.source === 'legacy'){
         await Promise.all([
-          db.ref(`workers/${workerId}`).remove(),
           schoolRef(`years/${currentYear}/workers/${workerId}`).remove(),
           schoolRef(`years/${currentYear}/workersLegacyDeletes/${workerId}`).remove()
         ]);
@@ -575,30 +575,17 @@
   async function scopedOrSocratesLegacy(scopedSubPath, legacyPath){
     const scopedSnap = await schoolRef(scopedSubPath).get();
     if (scopedSnap.exists()) return { snap: scopedSnap, source:'scoped' };
-    if (legacyFriendlyId && currentYear === legacyWorkersYear){
+    const isSocrates = ['socrates-school', 'default', 'socrates'].includes(activeSchool?.id);
+    if (isSocrates) {
       const legacySnap = await db.ref(legacyPath).get();
       if (legacySnap.exists()) return { snap: legacySnap, source:'legacy' };
     }
     return { snap: scopedSnap, source:'scoped' };
   }
 
-  async function loadSchoolLogo(){
-    const el = document.getElementById('school-logo-display');
-    if (!el) return;
-    try{
-      let logoUrl = '';
-      if (schoolId === 'socrates-school' || schoolId === 'default'){
-        logoUrl = '../images/socrates_logo.png';
-      }else{
-        const snap = await schoolRef('profile/logoUrl').get();
-        logoUrl = snap.val() || '';
-      }
-      el.src = logoUrl || '../images/socrates_logo.png';
-      el.alt = `${schoolDisplayName} logo`;
-    }catch(err){
-      console.warn('Logo load failed', err);
-      el.src = '../images/socrates_logo.png';
-      el.alt = `${schoolDisplayName} logo`;
+  function loadSchoolLogo(){
+    if (window.SomapLogo?.loadSchoolLogo) {
+      SomapLogo.loadSchoolLogo(db);
     }
   }
 
@@ -607,50 +594,17 @@
       currentWorkersSource = 'scoped';
       legacyWorkerIdSet = new Set();
       const rows = [];
-      if (legacyFriendlyId && currentYear === legacyWorkersYear){
-        const [scopedSnap, legacySnap, legacyDeleteSnap] = await Promise.all([
-          schoolRef(`years/${currentYear}/workers`).get(),
-          db.ref('workers').get(),
-          schoolRef(`years/${currentYear}/workersLegacyDeletes`).get()
-        ]);
-        const legacyDeletes = new Set();
-        legacyDeleteSnap.forEach(ch=>legacyDeletes.add(ch.key));
-        const scopedMap = new Map();
-        scopedSnap.forEach(ch=>{
-          const v = ch.val()||{};
-          scopedMap.set(ch.key, {
-            id: ch.key,
-            profile: v.profile||{},
-            docs: v.docs||{},
-            source: 'scoped'
-          });
+      const { snap, source } = await scopedOrSocratesLegacy(`years/${currentYear}/workers`, 'workers');
+      currentWorkersSource = source;
+      snap.forEach(ch=>{
+        const v = ch.val()||{};
+        rows.push({
+          id: ch.key,
+          profile: v.profile||{},
+          docs: v.docs||{},
+          source
         });
-        legacySnap.forEach(ch=>{
-          const legacyId = ch.key;
-          if (legacyDeletes.has(legacyId)) return;
-          legacyWorkerIdSet.add(legacyId);
-          if (scopedMap.has(legacyId)) return;
-          const v = ch.val()||{};
-          rows.push({
-            id: legacyId,
-            profile: v.profile||{},
-            docs: v.docs||{},
-            source: 'legacy'
-          });
-        });
-        scopedMap.forEach(worker=>rows.push(worker));
-      }else{
-        const scopedSnap = await schoolRef(`years/${currentYear}/workers`).get();
-        scopedSnap.forEach(ch=>{
-          const v = ch.val()||{};
-          rows.push({
-            id: ch.key,
-            profile: v.profile||{},
-            docs: v.docs||{},
-            source: 'scoped'
-          });
-        });
-      }
+      });
       rows.sort((a,b)=>{
         const nameA = (a.profile?.fullNameUpper||'').toUpperCase();
         const nameB = (b.profile?.fullNameUpper||'').toUpperCase();
@@ -808,7 +762,7 @@
       }
     });
     if (duplicate) return duplicate;
-    if (legacyFriendlyId && currentYear === legacyWorkersYear){
+    if (legacyFriendlyId && !scopedSnap.exists()){
       const [legacySnap, legacyDeleteSnap] = await Promise.all([
         db.ref('workers').get(),
         schoolRef(`years/${currentYear}/workersLegacyDeletes`).get()

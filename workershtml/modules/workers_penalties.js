@@ -1,6 +1,7 @@
 ﻿import { dbRefs, localTs, yyyymm, toast } from './workers_helpers.js';
 
 const DEFAULT_RULE_PERCENT = 0.001;
+const getRefs = () => dbRefs(firebase.database());
 
 export async function applyPenalty({
   workerId,
@@ -15,7 +16,7 @@ export async function applyPenalty({
     throw new Error('workerId and kind are required');
   }
   const monthKey = yyyymm(new Date());
-  const ledgerRef = dbRefs.penaltiesLedgerMonth(workerId, monthKey);
+  const ledgerRef = getRefs().penaltiesLedgerMonth(workerId, monthKey);
   const snapshot = await ledgerRef.once('value');
 
   let occurrence = 1;
@@ -52,7 +53,7 @@ export async function applyPenalty({
 }
 
 export async function listMonthlyPenalties(workerId, monthKey) {
-  const snap = await dbRefs.penaltiesLedgerMonth(workerId, monthKey).once('value');
+  const snap = await getRefs().penaltiesLedgerMonth(workerId, monthKey).once('value');
   if (!snap.exists()) return [];
   return Object.entries(snap.val()).map(([key, value]) => ({ id: key, ...value }));
 }

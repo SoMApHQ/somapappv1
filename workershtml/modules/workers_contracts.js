@@ -1,5 +1,7 @@
-﻿import { dbRefs, localTs } from './workers_helpers.js';
+import { dbRefs, localTs } from './workers_helpers.js';
 import { ensureHtml2Pdf, uploadFileToStorage } from './workers_ui.js';
+
+const getRefs = () => dbRefs(firebase.database());
 
 export const CONTRACT_LANGUAGE_BY_ROLE = {
   teacher: 'en',
@@ -82,12 +84,12 @@ const ACCOUNTANT_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, ns
   </div>
 
   <div style="text-align: center; margin: 32px 0; padding: 16px; background: linear-gradient(135deg, rgba(79, 70, 229, 0.1), rgba(124, 58, 237, 0.1)); border-left: 4px solid #4f46e5; border-radius: 8px;">
-    <h2 style="margin: 0; font-size: 20pt; font-weight: 700; color: #4f46e5;">EMPLOYMENT CONTRACT — ACCOUNTANT</h2>
+    <h2 style="margin: 0; font-size: 20pt; font-weight: 700; color: #4f46e5;">EMPLOYMENT CONTRACT � ACCOUNTANT</h2>
     <p style="margin: 8px 0 0; color: #64748b;">Effective Date: ${getTodayFormatted()}<br>Place of Signature: Arusha, Tanzania</p>
   </div>
 
   <div style="margin: 24px 0; padding: 16px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 8px;">
-    <p style="margin: 0; font-weight: 600; color: #92400e;">CONFIDENTIAL — INTERNAL HR DOCUMENT</p>
+    <p style="margin: 0; font-weight: 600; color: #92400e;">CONFIDENTIAL � INTERNAL HR DOCUMENT</p>
   </div>
 
   <h3 style="margin: 24px 0 12px; font-size: 14pt; font-weight: 700; color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px;">RECITALS</h3>
@@ -102,7 +104,7 @@ const ACCOUNTANT_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, ns
 
   <h3 style="margin: 24px 0 12px; font-size: 14pt; font-weight: 700; color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px;">2. PLACE OF WORK & HOURS</h3>
   <p><strong>2.1 Workplace.</strong> School Office, Arusha, and any other location reasonably assigned.</p>
-  <p><strong>2.2 Hours.</strong> Monday–Friday, arrival before 07:20 and departure after 16:30; Saturday 08:00–13:00 (as scheduled). Reporting before 07:20 and signing the register is mandatory in SoMAp.</p>
+  <p><strong>2.2 Hours.</strong> Monday�Friday, arrival before 07:20 and departure after 16:30; Saturday 08:00�13:00 (as scheduled). Reporting before 07:20 and signing the register is mandatory in SoMAp.</p>
 
   <h3 style="margin: 24px 0 12px; font-size: 14pt; font-weight: 700; color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px;">3. REMUNERATION & STATUTORY DEDUCTIONS</h3>
   <div style="padding: 16px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(5, 150, 105, 0.1)); border-radius: 12px; margin: 16px 0;">
@@ -113,11 +115,11 @@ const ACCOUNTANT_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, ns
         <td style="padding: 8px; border: 1px solid #d1fae5; text-align: right; font-weight: 700; color: #047857;">TZS ${Number(baseSalary).toLocaleString('en-US')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #d1fae5;">  → Salary (Accounting Role)</td>
+        <td style="padding: 8px; border: 1px solid #d1fae5;">  ? Salary (Accounting Role)</td>
         <td style="padding: 8px; border: 1px solid #d1fae5; text-align: right;">TZS ${Number(salary).toLocaleString('en-US')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #d1fae5;">  → Other (Responsibilities Allowance)</td>
+        <td style="padding: 8px; border: 1px solid #d1fae5;">  ? Other (Responsibilities Allowance)</td>
         <td style="padding: 8px; border: 1px solid #d1fae5; text-align: right;">TZS ${Number(other).toLocaleString('en-US')}</td>
       </tr>
       <tr style="background: rgba(239, 68, 68, 0.1);">
@@ -125,15 +127,15 @@ const ACCOUNTANT_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, ns
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right;"></td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #fee2e2;">  → Employee Contribution (10%)</td>
+        <td style="padding: 8px; border: 1px solid #fee2e2;">  ? Employee Contribution (10%)</td>
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; color: #dc2626;">- TZS ${Number(nssfEmployee).toLocaleString('en-US')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #fee2e2;">  → Employer Contribution (10%)</td>
+        <td style="padding: 8px; border: 1px solid #fee2e2;">  ? Employer Contribution (10%)</td>
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; color: #047857;">+ TZS ${Number(nssfEmployer).toLocaleString('en-US')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #fee2e2;">  → Total NSSF Monthly</td>
+        <td style="padding: 8px; border: 1px solid #fee2e2;">  ? Total NSSF Monthly</td>
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; font-weight: 700;">TZS ${Number(nssfTotal).toLocaleString('en-US')}</td>
       </tr>
       <tr style="background: rgba(79, 70, 229, 0.15);">
@@ -148,11 +150,11 @@ const ACCOUNTANT_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, ns
   <h3 style="margin: 24px 0 12px; font-size: 14pt; font-weight: 700; color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px;">4. DUTIES & KPIs</h3>
   <p><strong>4.1 SoMAp & Records.</strong> Enter all pupil admissions/fees into SoMAp the same day. Backlog clearance is a priority obligation.</p>
   <p><strong>4.2 Daily Form.</strong> Complete and submit daily accounting form covering cash received, receipts issued, deposits, and reconciliation notes.</p>
-  <p><strong>4.3 Fees & Arrears.</strong> Daily follow-ups: ≥ 25 parents/day; Weekly arrears report every Friday 10:00.</p>
+  <p><strong>4.3 Fees & Arrears.</strong> Daily follow-ups: = 25 parents/day; Weekly arrears report every Friday 10:00.</p>
   <p><strong>4.4 Compliance.</strong> NSSF/TRA submissions, payroll accuracy, monthly statutory returns, audit support.</p>
 
   <h3 style="margin: 24px 0 12px; font-size: 14pt; font-weight: 700; color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px;">5. CONDUCT & DISCIPLINE</h3>
-  <p>Misconduct includes insubordination, unauthorised absence, falsification of records, breach of confidentiality, cash mishandling. Process: show-cause → hearing → written outcome. Sanctions may include warnings, suspension, or termination.</p>
+  <p>Misconduct includes insubordination, unauthorised absence, falsification of records, breach of confidentiality, cash mishandling. Process: show-cause ? hearing ? written outcome. Sanctions may include warnings, suspension, or termination.</p>
 
   <h3 style="margin: 24px 0 12px; font-size: 14pt; font-weight: 700; color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px;">6. LEAVE & ATTENDANCE</h3>
   <p><strong>6.1 Annual Leave.</strong> As per law; schedule by agreement.</p>
@@ -185,7 +187,7 @@ const ACCOUNTANT_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, ns
   </div>
 
   <div style="margin-top: 32px; padding: 16px; background: linear-gradient(135deg, rgba(79, 70, 229, 0.05), rgba(124, 58, 237, 0.05)); border-radius: 8px; text-align: center; color: #64748b; font-size: 9pt;">
-    <p style="margin: 0;">This contract is digitally generated and managed by SoMAp · Socrates Pre & Primary School Management System</p>
+    <p style="margin: 0;">This contract is digitally generated and managed by SoMAp � Socrates Pre & Primary School Management System</p>
     <p style="margin: 4px 0 0;">Worker Contact: ${phone || 'N/A'} | Generated: ${getTodayFormatted()}</p>
   </div>
 </div>
@@ -204,7 +206,7 @@ const TEACHER_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, nssfE
   </div>
 
   <div style="text-align: center; margin: 32px 0; padding: 16px; background: linear-gradient(135deg, rgba(79, 70, 229, 0.1), rgba(124, 58, 237, 0.1)); border-left: 4px solid #4f46e5; border-radius: 8px;">
-    <h2 style="margin: 0; font-size: 20pt; font-weight: 700; color: #4f46e5;">CONTRACT OF EMPLOYMENT — TEACHER</h2>
+    <h2 style="margin: 0; font-size: 20pt; font-weight: 700; color: #4f46e5;">CONTRACT OF EMPLOYMENT � TEACHER</h2>
     <p style="margin: 8px 0 0; color: #64748b;">Effective Date: ${getTodayFormatted()}<br>Place of Signature: Arusha, Tanzania</p>
   </div>
 
@@ -221,7 +223,7 @@ const TEACHER_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, nssfE
   <p>The school employs <strong>${fullName}</strong> as <strong>Teacher</strong>. The employee shall perform all duties as specified in this contract or as assigned by the employer/supervisor.</p>
 
   <h3 style="margin: 24px 0 12px; font-size: 14pt; font-weight: 700; color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px;">3. HOURS OF WORK</h3>
-  <p>The employee's work schedule will be determined by a duty roster and peak demands. Standard hours are 07:00–16:30 Monday to Friday, unless assigned as TOD (Teacher on Duty), with additional responsibilities as needed.</p>
+  <p>The employee's work schedule will be determined by a duty roster and peak demands. Standard hours are 07:00�16:30 Monday to Friday, unless assigned as TOD (Teacher on Duty), with additional responsibilities as needed.</p>
   <p>If the employee is prevented from working due to illness or an accident, a medical certificate must be submitted. Failure to do so will result in the absence being treated as unauthorized leave.</p>
 
   <h3 style="margin: 24px 0 12px; font-size: 14pt; font-weight: 700; color: #4f46e5; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px;">4. REMUNERATION</h3>
@@ -233,11 +235,11 @@ const TEACHER_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, nssfE
         <td style="padding: 8px; border: 1px solid #d1fae5; text-align: right; font-weight: 700; color: #047857;">TZS ${Number(baseSalary).toLocaleString('en-US')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #d1fae5;">  → Salary (Teaching Role)</td>
+        <td style="padding: 8px; border: 1px solid #d1fae5;">  ? Salary (Teaching Role)</td>
         <td style="padding: 8px; border: 1px solid #d1fae5; text-align: right;">TZS ${Number(salary).toLocaleString('en-US')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #d1fae5;">  → Other (Specific Appointment Allowance)</td>
+        <td style="padding: 8px; border: 1px solid #d1fae5;">  ? Other (Specific Appointment Allowance)</td>
         <td style="padding: 8px; border: 1px solid #d1fae5; text-align: right;">TZS ${Number(other).toLocaleString('en-US')}</td>
       </tr>
       <tr style="background: rgba(239, 68, 68, 0.1);">
@@ -245,15 +247,15 @@ const TEACHER_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, nssfE
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right;"></td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #fee2e2;">  → Employee Contribution (10%)</td>
+        <td style="padding: 8px; border: 1px solid #fee2e2;">  ? Employee Contribution (10%)</td>
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; color: #dc2626;">- TZS ${Number(nssfEmployee).toLocaleString('en-US')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #fee2e2;">  → Employer Contribution (10%)</td>
+        <td style="padding: 8px; border: 1px solid #fee2e2;">  ? Employer Contribution (10%)</td>
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; color: #047857;">+ TZS ${Number(nssfEmployer).toLocaleString('en-US')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #fee2e2;">  → Total NSSF Monthly</td>
+        <td style="padding: 8px; border: 1px solid #fee2e2;">  ? Total NSSF Monthly</td>
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; font-weight: 700;">TZS ${Number(nssfTotal).toLocaleString('en-US')}</td>
       </tr>
       <tr style="background: rgba(79, 70, 229, 0.15);">
@@ -316,7 +318,7 @@ const TEACHER_TEMPLATE_EN = ({ fullName, phone, baseSalary, salary, other, nssfE
   </div>
 
   <div style="margin-top: 32px; padding: 16px; background: linear-gradient(135deg, rgba(79, 70, 229, 0.05), rgba(124, 58, 237, 0.05)); border-radius: 8px; text-align: center; color: #64748b; font-size: 9pt;">
-    <p style="margin: 0;">This contract is digitally generated and managed by SoMAp · Socrates Pre & Primary School Management System</p>
+    <p style="margin: 0;">This contract is digitally generated and managed by SoMAp � Socrates Pre & Primary School Management System</p>
     <p style="margin: 4px 0 0;">Worker Contact: ${phone || 'N/A'} | Generated: ${getTodayFormatted()}</p>
   </div>
 </div>
@@ -370,11 +372,11 @@ const COOK_TEMPLATE_SW = ({ fullName, phone, baseSalary, salary, other, nssfEmpl
         <td style="padding: 8px; border: 1px solid #d1fae5; text-align: right; font-weight: 700; color: #047857;">TZS ${Number(baseSalary).toLocaleString('sw-TZ')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #d1fae5;">  → Mshahara (Kazi ya Upishi)</td>
+        <td style="padding: 8px; border: 1px solid #d1fae5;">  ? Mshahara (Kazi ya Upishi)</td>
         <td style="padding: 8px; border: 1px solid #d1fae5; text-align: right;">TZS ${Number(salary).toLocaleString('sw-TZ')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #d1fae5;">  → Nyingine (Wajibu Maalum)</td>
+        <td style="padding: 8px; border: 1px solid #d1fae5;">  ? Nyingine (Wajibu Maalum)</td>
         <td style="padding: 8px; border: 1px solid #d1fae5; text-align: right;">TZS ${Number(other).toLocaleString('sw-TZ')}</td>
       </tr>
       <tr style="background: rgba(239, 68, 68, 0.1);">
@@ -382,15 +384,15 @@ const COOK_TEMPLATE_SW = ({ fullName, phone, baseSalary, salary, other, nssfEmpl
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right;"></td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #fee2e2;">  → Michango ya Mfanyakazi (10%)</td>
+        <td style="padding: 8px; border: 1px solid #fee2e2;">  ? Michango ya Mfanyakazi (10%)</td>
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; color: #dc2626;">- TZS ${Number(nssfEmployee).toLocaleString('sw-TZ')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #fee2e2;">  → Michango ya Mwajiri (10%)</td>
+        <td style="padding: 8px; border: 1px solid #fee2e2;">  ? Michango ya Mwajiri (10%)</td>
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; color: #047857;">+ TZS ${Number(nssfEmployer).toLocaleString('sw-TZ')}</td>
       </tr>
       <tr>
-        <td style="padding: 8px; border: 1px solid #fee2e2;">  → Jumla ya NSSF kwa Mwezi</td>
+        <td style="padding: 8px; border: 1px solid #fee2e2;">  ? Jumla ya NSSF kwa Mwezi</td>
         <td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; font-weight: 700;">TZS ${Number(nssfTotal).toLocaleString('sw-TZ')}</td>
       </tr>
       <tr style="background: rgba(79, 70, 229, 0.15);">
@@ -448,7 +450,7 @@ const COOK_TEMPLATE_SW = ({ fullName, phone, baseSalary, salary, other, nssfEmpl
   </div>
 
   <div style="margin-top: 32px; padding: 16px; background: linear-gradient(135deg, rgba(79, 70, 229, 0.05), rgba(124, 58, 237, 0.05)); border-radius: 8px; text-align: center; color: #64748b; font-size: 9pt;">
-    <p style="margin: 0;">Mkataba huu umetengenezwa na kuendesha kwa SoMAp · Mfumo wa Usimamizi wa Shule ya Socrates</p>
+    <p style="margin: 0;">Mkataba huu umetengenezwa na kuendesha kwa SoMAp � Mfumo wa Usimamizi wa Shule ya Socrates</p>
     <p style="margin: 4px 0 0;">Simu ya Mfanyakazi: ${phone || 'Haipo'} | Tarehe ya Kutengenezwa: ${getTodayFormatted()}</p>
   </div>
 </div>
@@ -560,8 +562,8 @@ function buildSimpleContractHtml({ fullName, roleLabel, baseSalary, salary, othe
       <h3 style="margin: 0 0 12px; color: #4f46e5;">Muhtasari wa Mshahara</h3>
       <table style="width: 100%; border-collapse: collapse;">
         <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">Mshahara wa Msingi (Jumla)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right; font-weight: 700;">TZS ${Number(baseSalary).toLocaleString('sw-TZ')}</td></tr>
-        <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">→ Mshahara (Kazi)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right;">TZS ${Number(salary).toLocaleString('sw-TZ')}</td></tr>
-        <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">→ Nyingine (Wajibu)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right;">TZS ${Number(other).toLocaleString('sw-TZ')}</td></tr>
+        <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">? Mshahara (Kazi)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right;">TZS ${Number(salary).toLocaleString('sw-TZ')}</td></tr>
+        <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">? Nyingine (Wajibu)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right;">TZS ${Number(other).toLocaleString('sw-TZ')}</td></tr>
         <tr style="background: rgba(239, 68, 68, 0.1);"><td style="padding: 8px; border: 1px solid #fee2e2;">NSSF Mfanyakazi (10%)</td><td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; color: #dc2626;">- TZS ${Number(nssfEmployee).toLocaleString('sw-TZ')}</td></tr>
         <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">NSSF Mwajiri (10%)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right; color: #047857;">+ TZS ${Number(nssfEmployer).toLocaleString('sw-TZ')}</td></tr>
         <tr style="background: rgba(79, 70, 229, 0.15);"><td style="padding: 12px; border: 2px solid #4f46e5; font-weight: 700; color: #4f46e5;">MSHAHARA SAFI</td><td style="padding: 12px; border: 2px solid #4f46e5; text-align: right; font-weight: 700; color: #4f46e5;">TZS ${Number(netSalary).toLocaleString('sw-TZ')}</td></tr>
@@ -572,7 +574,7 @@ function buildSimpleContractHtml({ fullName, roleLabel, baseSalary, salary, othe
     <p>Mfanyakazi atahudhuria kazini kabla ya <strong>07:20</strong> (saa za Africa/Nairobi) kila siku ya kazi, kutekeleza majukumu kwa bidii na kuripoti tofauti mara moja.</p>
     
     <h2 style="font-size: 18px; color: #4f46e5;">2. Mahudhurio</h2>
-    <p>Kuchelewa ni kuingia baada ya <strong>07:20</strong>. Kila uchelewaji wa pili, wa nne, wa sita (sawa) ndani ya mwezi utakata <strong>0.001 × mshahara wa msingi</strong>.</p>
+    <p>Kuchelewa ni kuingia baada ya <strong>07:20</strong>. Kila uchelewaji wa pili, wa nne, wa sita (sawa) ndani ya mwezi utakata <strong>0.001 � mshahara wa msingi</strong>.</p>
     
     <h2 style="font-size: 18px; color: #4f46e5;">3. Likizo</h2>
     <p>Likizo ya ugonjwa na ya kawaida ni hadi mara tatu (3) kwa siku tisini (90) mfululizo bila ushahidi. Likizo nyingine zinahitaji idhini.</p>
@@ -590,7 +592,7 @@ function buildSimpleContractHtml({ fullName, roleLabel, baseSalary, salary, othe
   </section>
 
   <div style="margin-top: 24px; padding: 12px; background: rgba(79, 70, 229, 0.05); border-radius: 8px; text-align: center; color: #64748b; font-size: 10px;">
-    <p style="margin: 0;">Mkataba huu umetengenezwa na SoMAp · Socrates Pre & Primary School</p>
+    <p style="margin: 0;">Mkataba huu umetengenezwa na SoMAp � Socrates Pre & Primary School</p>
   </div>
 </div>`;
   }
@@ -610,8 +612,8 @@ function buildSimpleContractHtml({ fullName, roleLabel, baseSalary, salary, othe
       <h3 style="margin: 0 0 12px; color: #4f46e5;">Salary Breakdown</h3>
       <table style="width: 100%; border-collapse: collapse;">
         <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">Base Salary (Total)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right; font-weight: 700;">TZS ${Number(baseSalary).toLocaleString('en-US')}</td></tr>
-        <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">→ Salary (Role)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right;">TZS ${Number(salary).toLocaleString('en-US')}</td></tr>
-        <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">→ Other (Responsibilities)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right;">TZS ${Number(other).toLocaleString('en-US')}</td></tr>
+        <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">? Salary (Role)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right;">TZS ${Number(salary).toLocaleString('en-US')}</td></tr>
+        <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">? Other (Responsibilities)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right;">TZS ${Number(other).toLocaleString('en-US')}</td></tr>
         <tr style="background: rgba(239, 68, 68, 0.1);"><td style="padding: 8px; border: 1px solid #fee2e2;">NSSF Employee (10%)</td><td style="padding: 8px; border: 1px solid #fee2e2; text-align: right; color: #dc2626;">- TZS ${Number(nssfEmployee).toLocaleString('en-US')}</td></tr>
         <tr><td style="padding: 8px; border: 1px solid #e2e8f0;">NSSF Employer (10%)</td><td style="padding: 8px; border: 1px solid #e2e8f0; text-align: right; color: #047857;">+ TZS ${Number(nssfEmployer).toLocaleString('en-US')}</td></tr>
         <tr style="background: rgba(79, 70, 229, 0.15);"><td style="padding: 12px; border: 2px solid #4f46e5; font-weight: 700; color: #4f46e5;">NET SALARY</td><td style="padding: 12px; border: 2px solid #4f46e5; text-align: right; font-weight: 700; color: #4f46e5;">TZS ${Number(netSalary).toLocaleString('en-US')}</td></tr>
@@ -622,7 +624,7 @@ function buildSimpleContractHtml({ fullName, roleLabel, baseSalary, salary, othe
     <p>The Worker shall report daily before <strong>07:20</strong> (Africa/Nairobi). Duties include diligent fulfilment of assigned tasks, reporting variances, and safeguarding school resources.</p>
     
     <h2 style="font-size: 18px; color: #4f46e5;">2. Working Hours & Attendance</h2>
-    <p>Daily attendance is logged via the SoMAp Workers Hub. Late arrival occurs if check-in happens after <strong>07:20</strong>. The second, fourth, sixth (even) lateness in a month incurs a <strong>0.001 × base salary</strong> deduction.</p>
+    <p>Daily attendance is logged via the SoMAp Workers Hub. Late arrival occurs if check-in happens after <strong>07:20</strong>. The second, fourth, sixth (even) lateness in a month incurs a <strong>0.001 � base salary</strong> deduction.</p>
     
     <h2 style="font-size: 18px; color: #4f46e5;">3. Leave & Benefits</h2>
     <p>Sick and general leave are limited to three (3) requests every rolling ninety (90) days unless proof is provided. Additional leave types follow the SoMAp policy and require approval.</p>
@@ -640,7 +642,7 @@ function buildSimpleContractHtml({ fullName, roleLabel, baseSalary, salary, othe
   </section>
 
   <div style="margin-top: 24px; padding: 12px; background: rgba(79, 70, 229, 0.05); border-radius: 8px; text-align: center; color: #64748b; font-size: 10px;">
-    <p style="margin: 0;">This contract is generated by SoMAp · Socrates Pre & Primary School</p>
+    <p style="margin: 0;">This contract is generated by SoMAp � Socrates Pre & Primary School</p>
   </div>
 </div>`;
 }
@@ -656,7 +658,7 @@ export async function quickAcceptContract(workerId, profile, { language, templat
   };
   
   // Step 1: Convert signature to data URL (instant, no upload)
-  progress('1/2', '✍️ Inaweka sahihi... | Processing signature...');
+  progress('1/2', '?? Inaweka sahihi... | Processing signature...');
   let signatureDataUrl = '';
   if (signatureFile) {
     signatureDataUrl = await new Promise((resolve) => {
@@ -667,10 +669,10 @@ export async function quickAcceptContract(workerId, profile, { language, templat
   }
   
   // Step 2: Save acceptance to database (instant)
-  progress('2/2', '✅ Inahifadhi... | Saving acceptance...');
+  progress('2/2', '? Inahifadhi... | Saving acceptance...');
   const lang = language || defaultContractLanguage(profile.role);
   
-  await dbRefs.workerContract(workerId).update({
+  await getRefs().workerContract(workerId).update({
     language: lang,
     templateKey: templateKey || templateKeyForRole(profile.role),
     accepted: true,
@@ -680,7 +682,7 @@ export async function quickAcceptContract(workerId, profile, { language, templat
     pdfGenerationStatus: 'pending' // Track PDF generation status
   });
 
-  progress('✅', '🎉 Imekamilika! | Accepted!');
+  progress('?', '?? Imekamilika! | Accepted!');
   return { success: true, signatureDataUrl };
 }
 
@@ -695,11 +697,11 @@ export async function generateContractPdf(workerId, profile, { language, signatu
   };
   
   // Step 1: Load html2pdf library (if needed)
-  progress('1/3', '📚 Loading PDF library...');
+  progress('1/3', '?? Loading PDF library...');
   await ensureHtml2Pdf();
   
   // Step 2: Generate PDF from HTML
-  progress('2/3', '📄 Generating PDF...');
+  progress('2/3', '?? Generating PDF...');
   
   const lang = language || defaultContractLanguage(profile.role);
   const html = buildContractHtml(profile, { language: lang, signatureUrl: signatureDataUrl });
@@ -734,28 +736,30 @@ export async function generateContractPdf(workerId, profile, { language, signatu
   wrapper.remove();
 
   // Step 3: Upload PDF to Firebase Storage
-  progress('3/3', '☁️ Uploading PDF...');
+  progress('3/3', '?? Uploading PDF...');
   
   const storageRef = firebase.storage().ref(`contracts/${workerId}/${fileName}`);
   await storageRef.put(pdfBlob, { contentType: 'application/pdf' });
   const downloadUrl = await storageRef.getDownloadURL();
 
   // Update contract in database with PDF URL
-  await dbRefs.workerContract(workerId).update({
+  await getRefs().workerContract(workerId).update({
     contractPdfUrl: downloadUrl,
     pdfGenerationStatus: 'completed',
     pdfGeneratedTs: localTs()
   });
 
-  progress('✅', 'PDF Ready!');
+  progress('?', 'PDF Ready!');
   return downloadUrl;
 }
 
 export async function resetContractAcceptance(workerId) {
-  await dbRefs.workerContract(workerId).update({
+  await getRefs().workerContract(workerId).update({
     accepted: false,
     acceptedTs: 0,
     contractPdfUrl: '',
     signatureUrl: ''
   });
 }
+
+

@@ -703,6 +703,31 @@
 
   <script>
     console.log('Script loading...');
+    const db = firebase.database();
+    const school = SOMAP.getSchool();
+    if (!school || !school.id) {
+      window.location.href = '../somapappv1multischool/multischool.html';
+    }
+    const schoolRef = (p) => db.ref(SOMAP.P(p));
+    const getYear = () => window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
+    let currentYear = getYear();
+    if (window.somapYearContext?.onYearChanged) {
+      window.somapYearContext.onYearChanged((y) => {
+        currentYear = String(y);
+        location.reload();
+      });
+    }
+
+    async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
+      const scopedSnap = await schoolRef(scopedSubPath).once('value');
+      if (scopedSnap.exists()) return scopedSnap;
+      const isSocrates = ['socrates-school', 'default', 'socrates'].includes(school?.id);
+      if (isSocrates) {
+        const legacySnap = await db.ref(legacyPath).once('value');
+        if (legacySnap.exists()) return legacySnap;
+      }
+      return scopedSnap;
+    }
     
     // Simple helper functions (no imports needed!)
     function todayYMD() {
@@ -959,7 +984,7 @@
         setupDate: localTs()
       };
 
-        await firebase.database().ref(`teachers_config/${currentWorkerId}`).set(config);
+        await schoolRef(`years/${currentYear}/teachers_config/${currentWorkerId}`).set(config);
         teacherConfig = config;
         localStorage.setItem('somap_role', teacherType);
         toast('Profile saved successfully! Welcome to your dashboard!', 'success');
@@ -1032,8 +1057,7 @@
     async function loadTodayTasks() {
       try {
         const today = todayYMD();
-        const db = firebase.database();
-        const snap = await db.ref(`tasks/${currentWorkerId}/${today.replace(/-/g, '')}`).once('value');
+        const snap = await schoolRef(`years/${currentYear}/workerTasks/${currentWorkerId}/${today.replace(/-/g, '')}`).once('value');
         const tasks = snap.val() || {};
         const pendingTasks = Object.values(tasks).filter(task => !task.completedTs).length;
         document.getElementById('todayTasks').textContent = pendingTasks;
@@ -1110,10 +1134,9 @@
         }
 
         // Load worker profile and config
-        const db = firebase.database();
         const [profileSnap, configSnap] = await Promise.all([
-          db.ref(`workers/${currentWorkerId}/profile`).once('value'),
-          db.ref(`teachers_config/${currentWorkerId}`).once('value')
+          scopedOrSocratesLegacy(`years/${currentYear}/workers/${currentWorkerId}/profile`, `workers/${currentWorkerId}/profile`),
+          scopedOrSocratesLegacy(`years/${currentYear}/teachers_config/${currentWorkerId}`, `teachers_config/${currentWorkerId}`)
         ]);
 
         console.log('Profile and config loaded');

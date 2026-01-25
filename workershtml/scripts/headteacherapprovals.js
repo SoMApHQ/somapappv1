@@ -224,8 +224,8 @@
       const profileSnap = await scopedOrLegacy(db, `years/${currentYear}/workers/${workerId}/profile`, `workers/${workerId}/profile`, legacyFriendly);
       const profile = profileSnap.snap.val() || {};
       const cachedRole = (localStorage.getItem('somap_role') || '').toLowerCase();
-      const teacherCfgSnap = await db.ref(`teachers_config/${workerId}`).get();
-      const teacherCfg = teacherCfgSnap.val() || {};
+      const teacherCfgSnap = await scopedOrLegacy(db, `years/${currentYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`, legacyFriendly);
+      const teacherCfg = teacherCfgSnap.snap.val() || {};
       const teacherType = (teacherCfg.teacherType || '').toLowerCase();
       const profileRole = (profile.role || '').toLowerCase();
       const isHead = profileRole.includes('head') || teacherType.includes('head') || cachedRole.includes('head');
@@ -238,7 +238,7 @@
       document.body.classList.add('headteacher-approvals-page');
       const { container, els } = ensureContainer();
 
-      const rulesRef = db.ref(SOMAP.P('settings/workers/attendanceRules'));
+      const rulesRef = db.ref(SOMAP.P(`years/${currentYear}/workers_settings/attendanceRules`));
       await setupRules(els.rules, rulesRef);
 
       const render = async () => {
@@ -252,7 +252,7 @@
         }
 
         const [attendance, workers] = await Promise.all([
-          scopedOrLegacy(db, `years/${currentYear}/attendance`, 'attendance', legacyFriendly),
+          scopedOrLegacy(db, `years/${currentYear}/workerAttendance`, 'attendance', legacyFriendly),
           scopedOrLegacy(db, `years/${currentYear}/workers`, 'workers', legacyFriendly)
         ]);
 
@@ -348,7 +348,7 @@
         });
         detachFns.length = 0;
         const paths = [
-          SOMAP.P(`years/${currentYear}/attendance`),
+          SOMAP.P(`years/${currentYear}/workerAttendance`),
           legacyFriendly ? 'attendance' : null
         ].filter(Boolean);
         paths.forEach((path) => {
@@ -370,7 +370,7 @@
           if (!monthKey || !todayKey) return;
           const refPath = lastAttendanceSource === 'legacy'
             ? `attendance/${targetWorker}/${monthKey}/${todayKey}`
-            : SOMAP.P(`years/${currentYear}/attendance/${targetWorker}/${monthKey}/${todayKey}`);
+            : SOMAP.P(`years/${currentYear}/workerAttendance/${targetWorker}/${monthKey}/${todayKey}`);
           const ref = db.ref(refPath);
           await ref.update({ approved: approveValue, approvedTs: localTs() });
           showToast(`Entry ${approveValue ? 'approved' : 'rejected'}`, approveValue ? 'success' : 'warning');

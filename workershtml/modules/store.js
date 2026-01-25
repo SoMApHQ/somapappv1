@@ -1,18 +1,15 @@
-export async function fetchInventoryItems(schoolId = '') {
-  const db = firebase.database();
-  const paths = schoolId
-    ? [`schools/${schoolId}/inventory/items`, 'inventory/items']
-    : ['inventory/items'];
+import { getYear, scopedOrSocratesLegacy } from './workers_helpers.js';
 
-  for (const path of paths) {
-    try {
-      const snap = await db.ref(path).once('value');
-      if (snap.exists()) {
-        return normalizeItems(snap.val());
-      }
-    } catch (err) {
-      console.warn('Failed to load inventory from', path, err);
+export async function fetchInventoryItems() {
+  const db = firebase.database();
+  const scopedPath = `years/${getYear()}/workers_inventory/items`;
+  try {
+    const snap = await scopedOrSocratesLegacy(db, scopedPath, 'inventory/items');
+    if (snap.exists()) {
+      return normalizeItems(snap.val());
     }
+  } catch (err) {
+    console.warn('Failed to load inventory', err);
   }
   return [];
 }

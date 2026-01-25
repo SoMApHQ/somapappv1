@@ -29,6 +29,10 @@ export function yyyymm(date = new Date()) {
   return `${year}${month}`;
 }
 
+export function getYear() {
+  return window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
+}
+
 /**
  * Parse HH:MM string and return { hours, minutes, totalMinutes }.
  */
@@ -171,37 +175,67 @@ export function confirmDialog(message) {
 /**
  * Common RTDB references used across the worker module.
  */
-export const dbRefs = {
-  worker: workerId => firebase.database().ref(`workers/${workerId}`),
-  workerProfile: workerId => firebase.database().ref(`workers/${workerId}/profile`),
-  workerDocs: workerId => firebase.database().ref(`workers/${workerId}/docs`),
-  workerContract: workerId => firebase.database().ref(`workers/${workerId}/contract`),
-  workersRoot: () => firebase.database().ref('workers'),
-  workersIndex: loginKey => firebase.database().ref(`workers_index_by_loginKey/${loginKey}`),
-  settings: () => firebase.database().ref('settings/workers'),
-  attendanceMonth: (workerId, monthKey) => firebase.database().ref(`attendance/${workerId}/${monthKey}`),
-  attendanceDay: (workerId, monthKey, dayKey) => firebase.database().ref(`attendance/${workerId}/${monthKey}/${dayKey}`),
-  tasksDay: (workerId, ymd) => firebase.database().ref(`tasks/${workerId}/${ymd}`),
-  leaveRequests: workerId => firebase.database().ref(`leave_requests/${workerId}`),
-  leaveRequest: (workerId, requestId) => firebase.database().ref(`leave_requests/${workerId}/${requestId}`),
-  penaltiesLedgerMonth: (workerId, monthKey) => firebase.database().ref(`penalties_ledger/${workerId}/${monthKey}`),
-  payrollRun: monthKey => firebase.database().ref(`payroll_runs/${monthKey}`),
-  payslip: (workerId, monthKey) => firebase.database().ref(`payslips/${workerId}/${monthKey}`),
-  nssfMonth: (workerId, monthKey) => firebase.database().ref(`nssf/${workerId}/${monthKey}`),
-  inventoryItems: () => firebase.database().ref('inventory/items'),
-  inventoryItem: itemId => firebase.database().ref(`inventory/items/${itemId}`),
-  inventoryLedger: () => firebase.database().ref('inventory/ledger'),
-  rolesCookDaily: dateKey => firebase.database().ref(`roles/cook/daily/${dateKey}`),
-  rolesGuardHandover: dateKey => firebase.database().ref(`roles/guard/handover/${dateKey}`),
-  rolesCleanerAreas: dateKey => firebase.database().ref(`roles/cleaner/areas/${dateKey}`),
-  approvalsQueue: () => firebase.database().ref('approvals')
-};
+export function schoolRef(db, subPath) {
+  return db.ref(SOMAP.P(subPath));
+}
+
+export function yearScopedRef(db, subPath) {
+  return schoolRef(db, `years/${getYear()}/${subPath}`);
+}
+
+export async function scopedOrSocratesLegacy(db, scopedSubPath, legacyPath) {
+  const s = SOMAP.getSchool();
+  const scopedSnap = await db.ref(SOMAP.P(scopedSubPath)).get();
+  if (scopedSnap.exists()) return scopedSnap;
+  const isSocrates = ['socrates-school', 'default', 'socrates'].includes(s?.id);
+  if (isSocrates) return await db.ref(legacyPath).get();
+  return scopedSnap;
+}
+
+export function dbRefs(db = firebase.database()) {
+  const scoped = (subPath) => schoolRef(db, subPath);
+  const yearScoped = (subPath) => scoped(`years/${getYear()}/${subPath}`);
+  return {
+    workers: yearScoped('workers'),
+    workersByLoginKey: yearScoped('workers_index_by_loginKey'),
+    workersByStaffNo: yearScoped('workers_by_staffNo'),
+    workerAttendance: yearScoped('workerAttendance'),
+    penaltiesLedger: yearScoped('workers_penalties_ledger'),
+    payroll: yearScoped('workers_payroll'),
+    payslips: yearScoped('workers_payslips'),
+    inventory: yearScoped('workers_inventory'),
+    inventoryLedger: yearScoped('workers_inventory_ledger'),
+    roles: yearScoped('workerRoles'),
+    approvalsQueue: yearScoped('workers_approvals_queue'),
+    settings: yearScoped('workers_settings'),
+    worker: workerId => yearScoped(`workers/${workerId}`),
+    workerProfile: workerId => yearScoped(`workers/${workerId}/profile`),
+    workerDocs: workerId => yearScoped(`workers/${workerId}/docs`),
+    workerContract: workerId => yearScoped(`workers/${workerId}/contract`),
+    workersRoot: () => yearScoped('workers'),
+    workersIndex: loginKey => yearScoped(`workers_index_by_loginKey/${loginKey}`),
+    attendanceMonth: (workerId, monthKey) => yearScoped(`workerAttendance/${workerId}/${monthKey}`),
+    attendanceDay: (workerId, monthKey, dayKey) => yearScoped(`workerAttendance/${workerId}/${monthKey}/${dayKey}`),
+    tasksDay: (workerId, ymd) => yearScoped(`workerTasks/${workerId}/${ymd}`),
+    leaveRequests: workerId => yearScoped(`workerLeaveRequests/${workerId}`),
+    leaveRequest: (workerId, requestId) => yearScoped(`workerLeaveRequests/${workerId}/${requestId}`),
+    penaltiesLedgerMonth: (workerId, monthKey) => yearScoped(`workers_penalties_ledger/${workerId}/${monthKey}`),
+    payrollRun: monthKey => yearScoped(`workers_payroll/${monthKey}`),
+    payslip: (workerId, monthKey) => yearScoped(`workers_payslips/${workerId}/${monthKey}`),
+    nssfMonth: (workerId, monthKey) => yearScoped(`workers_nssf/${workerId}/${monthKey}`),
+    inventoryItems: () => yearScoped('workers_inventory/items'),
+    inventoryItem: itemId => yearScoped(`workers_inventory/items/${itemId}`),
+    rolesCookDaily: dateKey => yearScoped(`workerRoles/cook/daily/${dateKey}`),
+    rolesGuardHandover: dateKey => yearScoped(`workerRoles/guard/handover/${dateKey}`),
+    rolesCleanerAreas: dateKey => yearScoped(`workerRoles/cleaner/areas/${dateKey}`)
+  };
+}
 
 /**
  * Fetch workers settings once.
  */
 export async function fetchWorkersSettings() {
-  const snap = await dbRefs.settings().once('value');
+  const snap = await dbRefs(firebase.database()).settings().once('value');
   return snap.exists() ? snap.val() : null;
 }
 

@@ -3,6 +3,8 @@ import { uploadFileToStorage } from './workers_ui.js';
 
 let cachedPolicies = null;
 
+const getRefs = () => dbRefs(firebase.database());
+
 async function loadPolicies() {
   if (cachedPolicies) return cachedPolicies;
   // Try multiple paths to be robust across different page locations
@@ -26,7 +28,8 @@ async function loadPolicies() {
 }
 
 export async function createOrUpdateItem(itemId, payload) {
-  const ref = itemId ? dbRefs.inventoryItem(itemId) : dbRefs.inventoryItems().push();
+  const refs = getRefs();
+  const ref = itemId ? refs.inventoryItem(itemId) : refs.inventoryItems().push();
   const base = {
     name: payload.name,
     sku: payload.sku,
@@ -59,14 +62,15 @@ export async function recordReceive({
   counterUid
 }) {
   if (!itemId || !qty) throw new Error('Item and quantity are required');
-  const ledgerRef = dbRefs.inventoryLedger().push();
+  const refs = getRefs();
+  const ledgerRef = refs.inventoryLedger().push();
   let photoUrl = '';
   if (photoFile) {
     const storagePath = `inventory/${itemId}/receipts/${ledgerRef.key}.jpg`;
     photoUrl = await uploadFileToStorage(photoFile, storagePath);
   }
   const ts = localTs();
-  await dbRefs.inventoryItem(itemId).child('onHand').transaction(current => (current || 0) + Number(qty));
+  await refs.inventoryItem(itemId).child('onHand').transaction(current => (current || 0) + Number(qty));
   await ledgerRef.set({
     ts,
     itemId,
@@ -101,8 +105,9 @@ export async function recordIssue({
     throw new Error('Both worker and storekeeper signatures are required');
   }
 
-  const itemRef = dbRefs.inventoryItem(itemId);
-  const ledgerRef = dbRefs.inventoryLedger().push();
+  const refs = getRefs();
+  const itemRef = refs.inventoryItem(itemId);
+  const ledgerRef = refs.inventoryLedger().push();
   const ts = localTs();
 
   const newOnHand = await itemRef.child('onHand').transaction(current => {
@@ -185,7 +190,8 @@ export async function saveCookDailyReport({
   penaltyLogged = false
 }) {
   if (!dateKey || !workerId) throw new Error('Date and worker required');
-  const ref = dbRefs.rolesCookDaily(dateKey).child(workerId);
+  const refs = getRefs();
+  const ref = refs.rolesCookDaily(dateKey).child(workerId);
   await ref.set({
     headcount,
     menu,
@@ -212,7 +218,7 @@ export async function flagInventoryMismatch({
   explanation,
   workerId
 }) {
-  const approvalsRef = dbRefs.approvalsQueue().push();
+  const approvalsRef = getRefs().approvalsQueue().push();
   await approvalsRef.set({
     type: 'inventory-mismatch',
     item,

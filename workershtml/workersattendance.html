@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="../css/workers.css">
   <script src="../somapappv1multischool/js/context.js"></script>
   <script src="../Todashboardhtml/yearContext.js"></script>
+  <script src="../js/school-logo.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
@@ -252,24 +253,9 @@
 
     function setBranding() {
       if (schoolNameEl) schoolNameEl.textContent = state.schoolName;
-      const logoEl = document.getElementById('school-logo-display');
-      if (!logoEl) return;
-      (async () => {
-        try {
-          let logoUrl = '';
-          if (state.legacyFriendly) {
-            logoUrl = '../images/socrates_logo.png';
-          } else {
-            const snap = await schoolRef('profile/logoUrl').get();
-            logoUrl = snap.val() || '';
-          }
-          logoEl.src = logoUrl || '../images/socrates_logo.png';
-          logoEl.alt = `${state.schoolName} logo`;
-        } catch (err) {
-          console.warn('Logo load failed', err);
-          logoEl.src = '../images/socrates_logo.png';
-        }
-      })();
+      if (window.SomapLogo?.loadSchoolLogo) {
+        SomapLogo.loadSchoolLogo(db);
+      }
     }
 
     function initSchoolContext() {
@@ -303,15 +289,15 @@
       });
     }
 
-    function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
-      return Promise.all([
-        schoolRef(scopedSubPath).once('value'),
-        state.legacyFriendly ? db.ref(legacyPath).once('value') : Promise.resolve({ exists: () => false, val: () => null })
-      ]).then(([scopedSnap, legacySnap]) => {
-        if (scopedSnap.exists()) return { snap: scopedSnap, source: 'scoped' };
-        if (state.legacyFriendly && legacySnap.exists()) return { snap: legacySnap, source: 'legacy' };
-        return { snap: scopedSnap, source: 'scoped' };
-      });
+    async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
+      const scopedSnap = await schoolRef(scopedSubPath).once('value');
+      if (scopedSnap.exists()) return { snap: scopedSnap, source: 'scoped' };
+      const isSocrates = ['socrates-school', 'default', 'socrates'].includes(state.schoolId);
+      if (isSocrates) {
+        const legacySnap = await db.ref(legacyPath).once('value');
+        if (legacySnap.exists()) return { snap: legacySnap, source: 'legacy' };
+      }
+      return { snap: scopedSnap, source: 'scoped' };
     }
 
     async function init() {
@@ -349,7 +335,7 @@
 
     async function loadSettings() {
       const { snap } = await scopedOrSocratesLegacy(
-        'settings/workers',
+        scopedPath('workers_settings'),
         'settings/workers'
       );
       state.settings = snap.val() || {};
@@ -394,7 +380,7 @@
       const timestamp = localTs();
       const dayKey = state.todayKey;
 
-      const dayRef = schoolRef(scopedPath(`attendance/${state.workerId}/${state.monthKey}/${dayKey}`));
+      const dayRef = schoolRef(scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}/${dayKey}`));
       const daySnap = await dayRef.once('value');
       const existing = daySnap.val() || {};
 
@@ -432,7 +418,7 @@
     }
 
     async function getSummaryRef() {
-      return schoolRef(scopedPath(`attendanceSummary/${state.workerId}/${state.monthKey}`));
+      return schoolRef(scopedPath(`workerAttendanceSummary/${state.workerId}/${state.monthKey}`));
     }
 
     async function updateSummaries(existing, payload, direction, dayKey) {
@@ -478,7 +464,7 @@
       const rules = state.rules || DEFAULT_RULES;
       const threshold = kind === 'late' ? (rules.lateThreshold || 3) : (rules.earlyThreshold || 3);
       if (count < threshold) return 0;
-      const penaltyRef = schoolRef(scopedPath(`penalties/${state.workerId}/${state.monthKey}/${dayKey}-${kind}`));
+      const penaltyRef = schoolRef(scopedPath(`workers_penalties_ledger/${state.workerId}/${state.monthKey}/${dayKey}-${kind}`));
       const existing = await penaltyRef.once('value');
       if (existing.exists()) return 0;
       const amount = Number(rules.deductionAmount || 0);
@@ -487,7 +473,7 @@
         count,
         amountTZS: amount,
         label: rules.deductionLabel || 'Posho ya Uwajibikaji',
-        refPath: SOMAP.P(scopedPath(`attendance/${state.workerId}/${state.monthKey}/${dayKey}`)),
+        refPath: SOMAP.P(scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}/${dayKey}`)),
         createdTs: localTs()
       };
       await penaltyRef.set(payload);
@@ -526,7 +512,7 @@
       });
       attendanceTable.innerHTML = '';
       const { snap, source } = await scopedOrSocratesLegacy(
-        scopedPath(`attendance/${state.workerId}/${state.monthKey}`),
+        scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}`),
         `attendance/${state.workerId}/${state.monthKey}`
       );
       const data = snap.val() || {};
@@ -553,8 +539,8 @@
 
     async function renderStats() {
       const [attendanceSnap, penaltiesSnap, summarySnap] = await Promise.all([
-        schoolRef(scopedPath(`attendance/${state.workerId}/${state.monthKey}`)).once('value'),
-        schoolRef(scopedPath(`penalties/${state.workerId}/${state.monthKey}`)).once('value'),
+        schoolRef(scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}`)).once('value'),
+        schoolRef(scopedPath(`workers_penalties_ledger/${state.workerId}/${state.monthKey}`)).once('value'),
         (await getSummaryRef()).once('value')
       ]);
       const attendance = attendanceSnap.val() || {};
@@ -591,7 +577,7 @@
       const adminMonthKey = `${adminYear}${String(now.getMonth() + 1).padStart(2, '0')}`;
       const todayKey = todayYMD(now).replace(/-/g, '');
       const [{ snap: attendanceSnap }, { snap: workersSnap }] = await Promise.all([
-        scopedOrSocratesLegacy(scopedPathForYear(adminYear, 'attendance'), 'attendance'),
+        scopedOrSocratesLegacy(scopedPathForYear(adminYear, 'workerAttendance'), 'attendance'),
         scopedOrSocratesLegacy(scopedPathForYear(adminYear, 'workers'), 'workers')
       ]);
       const attendanceData = attendanceSnap.val() || {};
@@ -623,7 +609,7 @@
         if (!btn) return;
         const wId = btn.dataset.worker;
         const approveValue = btn.dataset.approve === 'true';
-        const dayRef = schoolRef(scopedPathForYear(adminYear, `attendance/${wId}/${adminMonthKey}/${todayKey}`));
+        const dayRef = schoolRef(scopedPathForYear(adminYear, `workerAttendance/${wId}/${adminMonthKey}/${todayKey}`));
         await dayRef.update({ approved: approveValue });
         toast(`Entry ${approveValue ? 'approved' : 'rejected'}`, approveValue ? 'success' : 'warning');
         await refreshAll();

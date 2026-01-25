@@ -1,3 +1,5 @@
+import { getYear, scopedOrSocratesLegacy } from './workers_helpers.js';
+
 function roundValue(value, rounding) {
   const n = Number(value || 0);
   if (!Number.isFinite(n)) return 0;
@@ -6,18 +8,14 @@ function roundValue(value, rounding) {
   return Math.floor(n * 100) / 100;
 }
 
-export async function loadLogicRules(schoolId = '') {
+export async function loadLogicRules() {
   const db = firebase.database();
-  const paths = schoolId
-    ? [`schools/${schoolId}/kitchen_logic/rules`, 'kitchen_logic/rules']
-    : ['kitchen_logic/rules'];
-  for (const path of paths) {
-    try {
-      const snap = await db.ref(path).once('value');
-      if (snap.exists()) return snap.val() || {};
-    } catch (err) {
-      console.warn('Failed to load kitchen logic from', path, err);
-    }
+  const scopedPath = `years/${getYear()}/kitchen_logic/rules`;
+  try {
+    const snap = await scopedOrSocratesLegacy(db, scopedPath, 'kitchen_logic/rules');
+    if (snap.exists()) return snap.val() || {};
+  } catch (err) {
+    console.warn('Failed to load kitchen logic rules', err);
   }
   return {};
 }
