@@ -191,6 +191,7 @@
           <h2 class="font-bold mb-2" data-i18n="referral">Referral</h2>
           <label data-i18n="referral_code"></label>
           <input id="referralCode" />
+          <div id="referralStatus" class="mt-2 text-sm"></div>
         </section>
 
         <!-- DOCS -->
@@ -288,12 +289,58 @@
       function schoolRef(path) {
         return db.ref(SOMAP.P(path));
       }
+      const referralInput = document.getElementById("referralCode");
+      const referralStatus = document.getElementById("referralStatus");
+      let referralResolved = null;
+
+      referralInput.addEventListener("input", async () => {
+        let code = referralInput.value.trim().toUpperCase();
+
+        referralResolved = null;
+        referralStatus.innerHTML = "";
+
+        if (code.length < 10) return; // prevent spam queries
+
+        try {
+          const snap = await db
+            .ref("parents")
+            .orderByChild("referralCode")
+            .equalTo(code)
+            .once("value");
+
+          if (snap.exists()) {
+            const parentId = Object.keys(snap.val())[0];
+            const parent = snap.val()[parentId];
+
+            referralResolved = {
+              parentId,
+              name: parent.name,
+              phone: parent.phone,
+            };
+
+            referralStatus.innerHTML = `
+        <span class="text-green-500 font-semibold">
+          ✅ Referred by ${parent.name} (${parent.phone})
+        </span>
+      `;
+          } else {
+            referralStatus.innerHTML = `
+        <span class="text-red-500">
+          ❌ Invalid referral code
+        </span>
+      `;
+          }
+        } catch (e) {
+          console.error("Referral lookup error", e);
+          referralStatus.innerHTML = `<span class="text-yellow-500">⚠ Checking...</span>`;
+        }
+      });
 
       /* Auto referral from URL */
       const refParam = new URLSearchParams(location.search).get("ref");
       if (refParam) {
-        referralCode.value = refParam;
-        referralCode.readOnly = true;
+        referralInput.value = refParam;
+        referralInput.readOnly = true;
       }
       /* ===== FILE UPLOAD HELPER ===== */
       async function uploadFile(inputId, folder, joinId) {
@@ -336,25 +383,19 @@
 
         const annexPage = newPdf.addPage([595, 842]);
         const font = await newPdf.embedFont(PDFLib.StandardFonts.Helvetica);
+        function writeField(label, value, x, y, width = 300) {
+          annexPage.drawText(label + ":", { x, y, size: 11, font });
+          annexPage.drawText(value || "", { x: x + 150, y, size: 11, font });
+
+          annexPage.drawLine({
+            start: { x: x + 150, y: y - 2 },
+            end: { x: x + 150 + width, y: y - 2 },
+            thickness: 1,
+          });
+        }
+
         function write(text, x, y, size = 11, underline = false) {
           const txt = String(text || "");
-          function writeField(label, value, x, y, lineWidth = 300) {
-            // Label
-            annexPage.drawText(label, { x, y, size: 11, font });
-
-            // Value
-            const valueX = x + 150;
-            annexPage.drawText(value || "", { x: valueX, y, size: 11, font });
-
-            // Underline (fixed length)
-            for (let i = 0; i < 3; i++) {
-              annexPage.drawLine({
-                start: { x: 200, y: 630 - i * 20 },
-                end: { x: 550, y: 630 - i * 20 },
-                thickness: 1,
-              });
-            }
-          }
         }
 
         const fullName = `${firstName.value} ${lastName.value}`;
@@ -378,20 +419,6 @@
         );
 
         // Student Passport Photo (PNG + JPG)
-        if (documents.passportPhotoUrl) {
-          const imgBytes = await fetch(documents.passportPhotoUrl).then((r) =>
-            r.arrayBuffer(),
-          );
-          let img;
-
-          try {
-            img = await newPdf.embedJpg(imgBytes);
-          } catch {
-            img = await newPdf.embedPng(imgBytes);
-          }
-
-          annexPage.drawImage(img, { x: 400, y: 650, width: 120, height: 120 });
-        }
         if (documents.passportPhotoUrl) {
           const imgBytes = await fetch(documents.passportPhotoUrl).then((r) =>
             r.arrayBuffer(),
@@ -491,9 +518,9 @@
             joinId,
           );
           documents.joiningLetterUrl = joiningPdfUrl; //
-         if (referralCode.value) {
-  referralCode.value = referralCode.value.trim().toUpperCase();
-}
+          if (referralInput.value) {
+            referralInput.value = referralInput.value.trim().toUpperCase();
+          }
 
           // Save Firebase record
           await joinRef.set({
@@ -519,9 +546,11 @@
 
             referral: referralCode.value
               ? {
-                  code: referralCode.value.trim(),
-                  referredByParentId: null,
-                  resolved: false,
+                  code: referralCode.value.trim().toUpperCase(),
+                  referredByParentId: referralResolved?.parentId || null,
+                  parentName: referralResolved?.name || null,
+                  parentPhone: referralResolved?.phone || null,
+                  resolved: !!referralResolved,
                 }
               : null,
 
