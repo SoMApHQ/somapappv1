@@ -218,4 +218,4 @@ async function rejectRequest(id) {
   });
 
   Swal.fire("Rejected", "Request rejected.", "success");
-}
+}}
