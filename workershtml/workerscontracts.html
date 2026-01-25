@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mkataba | Contract</title>
   <link rel="stylesheet" href="../css/workers.css">
-  <script src="../somapappv1multischool/js/context.js"></script>
+  <script type="module" src="../somapappv1multischool/js/context.js"></script>
   <script src="../Todashboardhtml/yearContext.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
@@ -341,8 +341,16 @@
       overflow-y: auto;
     }
 
+
+    .draft-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
     .pdf-viewer {
-      margin-top: 16px;
+      margin-top: 14px;
       padding: 12px;
       border: 1px solid var(--border);
       border-radius: 12px;
@@ -351,9 +359,9 @@
 
     .pdf-viewer iframe {
       width: 100%;
-      height: 520px;
+      height: 560px;
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 10px;
       background: white;
     }
 
@@ -541,19 +549,20 @@
       </div>
     </div>
 
-    <!-- Draft PDF Viewer -->
+    <!-- Signature Upload -->
+    
+    <!-- Draft PDF -->
     <div class="glass-card" id="draftPdfCard">
       <div class="card-header">
-        <h2 class="card-title">?? Draft PDF</h2>
-        <p class="card-subtitle">Soma draft PDF kabla ya kusaini. | Read the draft PDF before signing.</p>
+        <h2 class="card-title">📄 Draft PDF</h2>
+        <p class="card-subtitle">Download and read the draft before signing.</p>
       </div>
       <div id="draftPdfSection">
-        <p style="text-align: center; color: var(--gray);">Loading draft PDF...</p>
+        <p style="text-align: center; color: var(--gray); margin: 0;">Loading draft...</p>
       </div>
     </div>
 
-    <!-- Signature Upload -->
-    <div class="glass-card" id="signatureSection">
+<div class="glass-card" id="signatureSection">
       <div class="card-header">
         <h2 class="card-title">?? Sahihi | Signature</h2>
         <p class="card-subtitle">Upload your handwritten signature for this contract</p>
@@ -604,6 +613,8 @@
     throw new Error('No school selected for multi-school context');
   }
   const schoolRef = (path) => db.ref(SOMAP.P(path));
+  const LEGACY_WORKERS_YEAR = '2025';
+  const legacyFriendly = school.id === 'socrates-school' || school.id === 'default';
 
   const schoolNameEl = document.getElementById('schoolNameDisplay');
   const yearSelectEl = document.getElementById('yearSelect');
@@ -616,8 +627,7 @@
     profile: null,
     terms: {},
     signing: {},
-    selectedLanguage: 'en',
-    draftOpened: false
+    selectedLanguage: 'en'
   };
 
   init();
@@ -633,7 +643,6 @@
 
       initSchoolContext();
       initYearContext();
-      updateDraftOpenedFromStorage();
       await loadData();
       setupLanguageHandlers();
     } catch (err) {
@@ -656,7 +665,6 @@
     yearCtx?.attachYearDropdown?.(yearSelectEl);
     yearCtx?.onYearChanged?.((yr) => {
       state.year = String(yr);
-      updateDraftOpenedFromStorage();
       loadData();
     });
   }
@@ -669,43 +677,18 @@
     return schoolRef(`${yearRoot()}/workers/${state.workerId}`);
   }
 
-  function termsRef() {
-    return schoolRef(`${yearRoot()}/workersContractTerms/${state.workerId}`);
+  function contractRef() {
+    return schoolRef(`${yearRoot()}/workersContracts/${state.workerId}`);
   }
 
-  function signingRef() {
-    return schoolRef(`${yearRoot()}/workersContractSigning/${state.workerId}`);
-  }
-
-  function isSocratesSchool() {
-    const schoolCtx = SOMAP.getSchool();
-    const schoolId = schoolCtx?.id || '';
-    return schoolId === 'socrates-school' || schoolId === 'default' || /socrates/i.test(schoolId);
-  }
-
-  function draftFlagKey() {
-    return `draftOpened:${state.schoolId}:${state.year}:${state.workerId}`;
-  }
-
-  function updateDraftOpenedFromStorage() {
-    if (!state.schoolId || !state.year || !state.workerId) return;
-    state.draftOpened = localStorage.getItem(draftFlagKey()) === '1';
-  }
-
-  function markDraftOpened() {
-    localStorage.setItem(draftFlagKey(), '1');
-    state.draftOpened = true;
-  }
-
-  async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
-    const schoolCtx = SOMAP.getSchool();
-    const schoolId = schoolCtx?.id || "";
-    const scopedSnap = await db.ref(SOMAP.P(scopedSubPath)).get();
-    if (scopedSnap.exists()) return scopedSnap.val();
-    const isSocrates = (schoolId === "socrates-school" || schoolId === "default" || /socrates/i.test(schoolId));
-    if (!isSocrates) return null;
-    const legacySnap = await db.ref(legacyPath).get();
-    return legacySnap.exists() ? legacySnap.val() : null;
+  async function scopedOrSocratesLegacyYear(scopedSubPath, legacyPath, legacyYear) {
+    const scopedSnap = await schoolRef(scopedSubPath).once('value');
+    if (scopedSnap.exists()) return scopedSnap;
+    if (legacyFriendly && String(somapYearContext.getSelectedYear()) === String(legacyYear)) {
+      const legacySnap = await db.ref(legacyPath).once('value');
+      if (legacySnap.exists()) return legacySnap;
+    }
+    return scopedSnap;
   }
 
   function profileHasIdentity(profile) {
@@ -713,85 +696,74 @@
   }
 
   function injectSpecialAgreementClause(html, agreement) {
-    if (!agreement || !agreement.text) return html;
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, 'text/html');
-    const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+  if (!agreement || !String(agreement.text || '').trim()) return html;
 
-    const anchorHeading = headings.find(h => /^\s*2\./i.test(h.textContent || '')) || null;
-    if (!anchorHeading) return html;
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'));
 
-    const anchorText = (anchorHeading.textContent || '').toLowerCase();
-    const alreadyInserted = /2\(b\)\s+(special agreement|makubaliano maalum)/i.test(doc.body.textContent || '') ||
-      anchorText.includes('2(b)');
-    if (alreadyInserted) return html;
+  // Prefer Section 2 heading (e.g., "2. PLACE OF WORK" or "2. MAHALI PA AJIRA").
+  const sectionTwoHeadings = headings.filter(h => /^\s*2\./.test((h.textContent || '').trim()));
+  const preferred = sectionTwoHeadings.find(h => /(place of work|mahali pa ajira|position|nafasi)/i.test(h.textContent || ''));
+  const anchor = preferred || sectionTwoHeadings[0];
+  if (!anchor) return html;
 
-    const clauseWrap = doc.createElement('div');
-    clauseWrap.style.margin = '12px 0 0';
-    clauseWrap.style.padding = '10px 12px';
-    clauseWrap.style.borderLeft = '3px solid #4f46e5';
-    clauseWrap.style.background = 'rgba(79, 70, 229, 0.06)';
-    clauseWrap.style.borderRadius = '8px';
+  const clauseWrap = doc.createElement('div');
+  clauseWrap.style.margin = '12px 0 0';
+  clauseWrap.style.padding = '10px 12px';
+  clauseWrap.style.borderLeft = '3px solid #4f46e5';
+  clauseWrap.style.background = 'rgba(79, 70, 229, 0.06)';
+  clauseWrap.style.borderRadius = '8px';
 
-    const clause = doc.createElement('p');
-    clause.style.margin = '0';
-    clause.style.whiteSpace = 'pre-wrap';
-    const label = doc.createElement('strong');
-    label.textContent = agreement.lang === 'sw'
-      ? '2(b) Makubaliano Maalum:'
-      : '2(b) Special Agreement:';
-    clause.appendChild(label);
-    clause.appendChild(doc.createTextNode(` ${agreement.text}`));
-    clauseWrap.appendChild(clause);
+  const p = doc.createElement('p');
+  p.style.margin = '0';
+  p.style.whiteSpace = 'pre-wrap';
 
-    const following = [];
-    let cursor = anchorHeading.nextElementSibling;
-    while (cursor) {
-      following.push(cursor);
-      if (/^\s*3\./i.test(cursor.textContent || '')) break;
-      cursor = cursor.nextElementSibling;
-    }
+  const label = doc.createElement('strong');
+  const lang = (agreement.lang || '').toLowerCase();
+  label.textContent = (lang === 'sw' || lang === 'kiswahili')
+    ? '2(b) Makubaliano Maalum: '
+    : '2(b) Special Agreement: ';
+  p.appendChild(label);
+  p.appendChild(doc.createTextNode(String(agreement.text || '').trim()));
+  clauseWrap.appendChild(p);
 
-    const firstParagraph = following.find(el => el.tagName === 'P') || null;
-    if (firstParagraph) {
-      firstParagraph.after(clauseWrap);
-    } else {
-      anchorHeading.after(clauseWrap);
-    }
-    return doc.body.innerHTML;
+  // Place it inside Section 2: ideally after the first paragraph under section 2.
+  const firstAfter = anchor.nextElementSibling;
+  if (firstAfter && firstAfter.tagName && firstAfter.tagName.toLowerCase() === 'p') {
+    firstAfter.after(clauseWrap);
+  } else if (firstAfter) {
+    firstAfter.before(clauseWrap);
+  } else {
+    anchor.after(clauseWrap);
   }
 
+  return doc.body.innerHTML;
+}
+
   async function loadData() {
-    updateDraftOpenedFromStorage();
-    const workerData = await scopedOrSocratesLegacy(
+    const scopedSnap = await scopedOrSocratesLegacyYear(
       `${yearRoot()}/workers/${state.workerId}`,
-      `workers/${state.workerId}`
-    ) || {};
-    const [termsData, signingData] = await Promise.all([
-      scopedOrSocratesLegacy(
-        `${yearRoot()}/workersContractTerms/${state.workerId}`,
-        `workersContractTerms/${state.workerId}`
-      ),
-      scopedOrSocratesLegacy(
-        `${yearRoot()}/workersContractSigning/${state.workerId}`,
-        `workersContracts/${state.workerId}`
-      )
-    ]);
+      `workers/${state.workerId}`,
+      LEGACY_WORKERS_YEAR
+    );
+    const contractSnap = await contractRef().once('value');
 
-    let resolvedProfile = workerData.profile || {};
-    if (!profileHasIdentity(resolvedProfile) && isSocratesSchool()) {
-      const legacySnap = await db.ref(`workers/${state.workerId}`).get();
-      resolvedProfile = legacySnap.exists() ? (legacySnap.val()?.profile || {}) : {};
+    const scopedData = scopedSnap.val() || {};
+    let legacyData = null;
+    if (!profileHasIdentity(scopedData.profile) && legacyFriendly && String(state.year) === LEGACY_WORKERS_YEAR) {
+      const legacySnap = await db.ref(`workers/${state.workerId}`).once('value');
+      if (legacySnap.exists()) {
+        legacyData = legacySnap.val() || {};
+      }
     }
-    state.profile = resolvedProfile;
+    state.profile = profileHasIdentity(scopedData.profile)
+      ? scopedData.profile
+      : (legacyData?.profile || {});
 
-    let resolvedTerms = termsData;
-    if (!resolvedTerms && isSocratesSchool()) {
-      const legacyTermsSnap = await db.ref(`workers/${state.workerId}/contract/terms`).get();
-      resolvedTerms = legacyTermsSnap.exists() ? legacyTermsSnap.val() : null;
-    }
-    state.terms = resolvedTerms || {};
-    state.signing = signingData?.signing || {};
+    const contractData = contractSnap.val() || {};
+    state.terms = scopedData.contract?.terms || legacyData?.contract?.terms || {};
+    state.signing = contractData.signing || {};
 
     state.selectedLanguage = defaultContractLanguage(state.profile.role);
 
@@ -826,13 +798,7 @@
       worker_uploaded: 'Pending Approval',
       draft: 'Draft Ready'
     };
-    const draftHint = state.draftOpened
-      ? 'Draft opened'
-      : 'Open draft before signing';
-    statusLabel.innerHTML = `
-      <span class="status-badge status-${status === 'approved' ? 'accepted' : 'pending'}">${labelMap[status] || 'Draft'}</span>
-      <span style="margin-left: 8px; color: var(--gray); font-weight: 600;">${draftHint}</span>
-    `;
+    statusLabel.innerHTML = `<span class="status-badge status-${status === 'approved' ? 'accepted' : 'pending'}">${labelMap[status] || 'Draft'}</span>`;
   }
 
   function renderSalaryBreakdown() {
@@ -902,68 +868,206 @@
     document.getElementById('langEn').classList.toggle('active', !isSw);
   }
 
+  
+  function draftReadKey() {
+    return `somap_contract_draft_read__${state.schoolId}__${state.year}__${state.workerId}`;
+  }
+
+  function hasDraftReadyForSigning() {
+    return localStorage.getItem(draftReadKey()) === '1';
+  }
+
+  function markDraftRead() {
+    try { localStorage.setItem(draftReadKey(), '1'); } catch (e) {}
+  }
+
   function renderDraftPdfSection() {
     const section = document.getElementById('draftPdfSection');
     if (!section) return;
-    const hasProfile = profileHasIdentity(state.profile);
-    const hasTerms = hasContractTerms();
-    const canDownload = hasProfile && hasTerms;
-    const draftUrl = state.signing?.draftPdfUrl || '';
+
+    const draftUrl = String(state.signing?.draftPdfUrl || '').trim();
+
+    // Always show a clear download button.
+    const btnHtml = draftUrl
+      ? `<a href="${draftUrl}" target="_blank" class="btn btn-success" id="downloadDraftBtn">DOWNLOAD DRAFT PDF</a>`
+      : `<button class="btn btn-success" type="button" id="downloadDraftBtn">DOWNLOAD DRAFT PDF</button>`;
+
+    const noteHtml = draftUrl
+      ? `<p style="margin: 10px 0 0; color: var(--gray); text-align: center;">If the PDF preview is slow, use the download button above.</p>`
+      : `<p style="margin: 10px 0 0; color: var(--gray); text-align: center;">
+           No uploaded draft PDF yet. You can still download and read this draft now, then sign after you accept.
+         </p>`;
+
+    const previewHtml = draftUrl
+      ? `<div class="pdf-viewer">
+           <iframe id="draftPdfFrame" src="${draftUrl}" title="Draft Contract PDF"></iframe>
+         </div>`
+      : '';
 
     section.innerHTML = `
-      <div style="margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;">
-        <button class="btn btn-success" type="button" id="downloadDraftPrintBtn" ${canDownload ? '' : 'disabled'}>DOWNLOAD DRAFT PDF</button>
-        ${draftUrl ? `<a href="${draftUrl}" target="_blank" class="btn btn-secondary">View Stored Draft</a>` : ''}
+      <div class="draft-actions" style="justify-content:center;">
+        ${btnHtml}
       </div>
-      <p style="margin: 0; color: var(--gray); text-align: center;">
-        Bonyeza DOWNLOAD DRAFT PDF kisha chagua Print → Save as PDF.<br>
-        Click DOWNLOAD DRAFT PDF, then choose Print → Save as PDF.
-      </p>
+      ${noteHtml}
+      ${previewHtml}
     `;
-    const btn = document.getElementById('downloadDraftPrintBtn');
-    if (btn && canDownload) {
-      btn.addEventListener('click', handleDraftPrintDownload);
+
+    const btn = document.getElementById('downloadDraftBtn');
+
+    const frame = document.getElementById('draftPdfFrame');
+    if (frame) {
+      frame.addEventListener('load', () => {
+        markDraftRead();
+        renderActions();
+        renderSignature();
+      });
+    }
+
+    if (!btn) return;
+
+    if (!draftUrl) {
+      btn.addEventListener('click', handleLocalDraftDownload);
+    } else {
+      // When using an uploaded draft, clicking it should still unlock signing (after the worker has access to read).
+      btn.addEventListener('click', () => {
+        markDraftRead();
+        renderActions();
+        renderSignature();
+      });
     }
   }
 
-  function renderActions() {
-    const actions = document.getElementById('actions');
-    const draftUrl = state.signing?.draftPdfUrl || '';
-    const signedUrl = state.signing?.signedPdfUrl || '';
-    const hasProfile = profileHasIdentity(state.profile);
-    const hasTerms = hasContractTerms();
-    const canDownload = hasProfile && hasTerms;
+  function openPrintableDraftWindow(contractHtml) {
+    const title = `Contract Draft - ${state.workerId} - ${state.year}`;
+    const printDoc = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${title}</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  body { margin: 0; font-family: Arial, sans-serif; color: #111; }
+  .no-print { padding: 12px 14px; background: #f3f4f6; border-bottom: 1px solid #e5e7eb; }
+  .no-print button { padding: 10px 14px; border: 0; border-radius: 10px; background: #16a34a; color: white; font-weight: 700; cursor: pointer; }
+  .no-print p { margin: 8px 0 0; color: #374151; font-size: 14px; line-height: 1.35; }
+  .content { padding: 0; }
+  /* Improve typical contract readability */
+  .content { font-size: 12pt; line-height: 1.35; }
+  .content h1 { font-size: 18pt; margin: 0 0 8pt; }
+  .content h2 { font-size: 14pt; margin: 14pt 0 8pt; }
+  .content h3 { font-size: 12.5pt; margin: 12pt 0 6pt; }
+  .content p { margin: 0 0 8pt; }
+  .content table { width: 100%; border-collapse: collapse; page-break-inside: avoid; }
+  .content h1, .content h2, .content h3 { page-break-after: avoid; }
+  .content p { orphans: 3; widows: 3; }
+  .content td, .content th { vertical-align: top; }
+  @media print {
+    .no-print { display: none !important; }
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+  <div class="no-print">
+    <button onclick="window.print()">SAVE AS PDF / PRINT</button>
+    <p>Choose <b>Save as PDF</b> in the print dialog, then save. After saving, return to SoMAp and upload your signature.</p>
+  </div>
+  <div class="content">${contractHtml}</div>
+  <script>
+    window.addEventListener('load', () => {
+      setTimeout(() => { try { window.print(); } catch(e) {} }, 600);
+    });
+  </script>
+</body>
+</html>`;
 
-    if (!canDownload) {
-      actions.innerHTML = `
-        <p style="color: var(--gray); text-align: center;">
-          Mkataba bado haujakamilika kwa mwaka huu.<br>
-          The contract is not ready for this year yet.
-        </p>
-        <a href="workersdashboard.html" class="btn btn-secondary">Rudi Nyumbani | Back</a>
-      `;
+    const w = window.open('', '_blank');
+    if (!w) {
+      showToast('Popup blocked. Please allow popups to download the draft.', 'error');
       return;
     }
+    w.document.open();
+    w.document.write(printDoc);
+    w.document.close();
+  }
 
-    actions.innerHTML = `
-      <button class="btn btn-success" type="button" id="downloadDraftPrintBtnActions">DOWNLOAD DRAFT PDF</button>
-      ${draftUrl ? `<a href="${draftUrl}" target="_blank" class="btn btn-secondary">View Stored Draft</a>` : ''}
-      <div class="file-input-wrapper">
-        <button class="btn btn-primary" id="uploadSignedBtn" ${state.draftOpened ? '' : 'disabled'}>Upload Signed PDF</button>
-        <input type="file" id="signedPdfInput" accept="application/pdf" ${state.draftOpened ? '' : 'disabled'}>
-      </div>
-      ${signedUrl ? `<a href="${signedUrl}" target="_blank" class="btn btn-secondary">Download Signed PDF</a>` : ''}
-      <a href="workersdashboard.html" class="btn btn-secondary">Rudi Nyumbani | Back</a>
-      ${state.draftOpened ? '' : `
-        <p style="margin: 8px 0 0; color: var(--danger); font-weight: 600;">
-          Tafadhali pakua draft kwanza. | Please download the draft first.
-        </p>
-      `}
+  async function handleLocalDraftDownload() {
+    try {
+      const profile = state.profile || {};
+      if (!profile || (!profile.fullNameUpper && !profile.firstName && !profile.lastName)) {
+        showToast('Worker profile missing for this year.', 'error');
+        return;
+      }
+
+      // Build the same contract HTML shown in the viewer (including 2(b)).
+      const html = buildContractHtml(profile, {
+        language: state.selectedLanguage,
+        signatureUrl: '',
+        terms: state.terms || {},
+        specialAgreement: null
+      });
+      const withClause = injectSpecialAgreementClause(html, state.terms?.specialAgreement || null);
+
+      openPrintableDraftWindow(withClause);
+
+      // Mark as read/unlocked for signing.
+      markDraftRead();
+      renderActions();
+      renderSignature();
+      showToast('Draft opened. Save as PDF, then come back to sign.', 'success');
+    } catch (err) {
+      console.error('Draft download failed:', err);
+      showToast(err?.message || 'Failed to open draft.', 'error');
+    }
+  }
+
+function renderActions() {
+    const actions = document.getElementById('actions');
+    const draftUrl = String(state.signing?.draftPdfUrl || '').trim();
+    const signedUrl = String(state.signing?.signedPdfUrl || '').trim();
+    const hasDraft = hasDraftReadyForSigning();
+
+    const draftControl = draftUrl
+      ? `<a href="${draftUrl}" target="_blank" class="btn btn-success" id="downloadDraftBtnActions">Download Draft PDF</a>`
+      : `<button class="btn btn-success" type="button" id="downloadDraftBtnActions">DOWNLOAD DRAFT PDF</button>`;
+
+    const lockNote = hasDraft ? '' : `
+      <p style="margin: 12px 0 0; color: var(--danger); text-align: center;">
+        Download and read the draft first. Signing is locked until you open the draft.
+      </p>
     `;
 
-    const draftBtn = document.getElementById('downloadDraftPrintBtnActions');
+    actions.innerHTML = `
+      <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:center;">
+        ${draftControl}
+      </div>
+
+      <div class="file-input-wrapper" style="margin-top: 12px; justify-content:center;">
+        <button class="btn btn-primary" id="uploadSignedBtn" ${hasDraft ? '' : 'disabled'}>Upload Signed PDF</button>
+        <input type="file" id="signedPdfInput" accept="application/pdf" ${hasDraft ? '' : 'disabled'}>
+      </div>
+
+      ${signedUrl ? `<div style="display:flex; justify-content:center; margin-top:10px;"><a href="${signedUrl}" target="_blank" class="btn btn-secondary">Download Signed PDF</a></div>` : ''}
+
+      ${lockNote}
+
+      <div style="display:flex; justify-content:center; margin-top: 12px;">
+        <a href="workersdashboard.html" class="btn btn-secondary">Rudi Nyumbani | Back</a>
+      </div>
+    `;
+
+    const draftBtn = document.getElementById('downloadDraftBtnActions');
     if (draftBtn) {
-      draftBtn.addEventListener('click', handleDraftPrintDownload);
+      if (!draftUrl) {
+        draftBtn.addEventListener('click', handleLocalDraftDownload);
+      } else {
+        draftBtn.addEventListener('click', () => {
+          markDraftRead();
+          renderActions();
+          renderSignature();
+        });
+      }
     }
 
     const signedInput = document.getElementById('signedPdfInput');
@@ -978,26 +1082,28 @@
     const signatureSection = document.getElementById('signatureSection');
     if (signatureSection) signatureSection.style.display = 'block';
 
-    const canSign = state.draftOpened;
+    const hasDraft = hasDraftReadyForSigning();
+
     const uploadArea = document.getElementById('signatureUploadArea');
     const signatureInput = document.getElementById('signatureInput');
     const uploadBtn = uploadArea?.querySelector('button');
+
+    if (signatureInput) signatureInput.disabled = !hasDraft;
+    if (uploadBtn) uploadBtn.disabled = !hasDraft;
+
     let hint = document.getElementById('signatureHint');
     if (!hint && uploadArea) {
       hint = document.createElement('p');
       hint.id = 'signatureHint';
       hint.style.margin = '8px 0 0';
-      hint.style.fontSize = '0.9rem';
+      hint.style.fontSize = '0.92rem';
       uploadArea.appendChild(hint);
     }
-
-    if (signatureInput) signatureInput.disabled = !canSign;
-    if (uploadBtn) uploadBtn.disabled = !canSign;
     if (hint) {
-      hint.style.color = canSign ? 'var(--gray)' : 'var(--danger)';
-      hint.textContent = canSign
-        ? 'Unaweza kupakia sahihi baada ya kufungua draft PDF.'
-        : 'Sahihi imefungwa hadi ufungue draft PDF kwanza.';
+      hint.style.color = hasDraft ? 'var(--gray)' : 'var(--danger)';
+      hint.textContent = hasDraft
+        ? 'Upload your signature after reading the draft.'
+        : 'Signing is locked until you download/read the draft above.';
     }
 
     const preview = document.getElementById('signaturePreview');
@@ -1013,136 +1119,6 @@
         preview.style.display = 'none';
         preview.innerHTML = '';
       }
-    }
-  }
-
-  function hasContractTerms() {
-    const terms = state.terms || {};
-    return Boolean(
-      Number(terms.roleSalary || 0) > 0 ||
-      Number(terms.responsibilityAllowance || 0) > 0 ||
-      (terms.specialAgreement && String(terms.specialAgreement.text || '').trim())
-    );
-  }
-
-  function hasDownloadableDraft() {
-    return Boolean(state.signing?.draftPdfUrl);
-  }
-
-  function buildContractHtmlForPrint() {
-    const profile = state.profile || {};
-    const html = buildContractHtml(profile, {
-      language: state.selectedLanguage,
-      signatureUrl: '',
-      terms: state.terms || {},
-      specialAgreement: null
-    });
-    return injectSpecialAgreementClause(html, state.terms?.specialAgreement || null);
-  }
-
-  function openPrintWindow(contractHtml) {
-    const printWin = window.open('', '_blank', 'noopener,noreferrer');
-    if (!printWin) {
-      showToast('Ruhusu popups kupakua PDF. | Please allow popups to download PDF.', 'error');
-      return null;
-    }
-
-    const doc = printWin.document;
-    const schoolName = state.schoolName || state.schoolId;
-    const title = `Contract ${state.workerId} ${state.year} ${schoolName}`;
-
-    doc.open();
-    doc.write(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${title}</title>
-  <style>
-    @page {
-      size: A4;
-      margin: 12mm;
-    }
-    html, body {
-      padding: 0;
-      margin: 0;
-      background: #ffffff;
-      color: #0f172a;
-      font-family: "Times New Roman", Times, serif;
-      line-height: 1.6;
-    }
-    body {
-      -webkit-print-color-adjust: exact;
-      print-color-adjust: exact;
-    }
-    .print-root {
-      width: 210mm;
-      margin: 0 auto;
-      padding: 12mm;
-      box-sizing: border-box;
-      background: #ffffff;
-    }
-    img {
-      max-width: 100%;
-      height: auto;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      page-break-inside: avoid;
-    }
-    h1, h2, h3, h4, h5, h6 {
-      page-break-after: avoid;
-      page-break-inside: avoid;
-    }
-    p, li {
-      orphans: 3;
-      widows: 3;
-    }
-    .no-print {
-      display: none !important;
-    }
-  </style>
-</head>
-<body>
-  <div class="print-root">${contractHtml}</div>
-  <script>
-    window.addEventListener('load', function () {
-      setTimeout(function () {
-        window.focus();
-        window.print();
-      }, 50);
-    });
-  </script>
-</body>
-</html>`);
-    doc.close();
-    return printWin;
-  }
-
-  function handleDraftPrintDownload() {
-    const profile = state.profile || {};
-    const hasProfile = profileHasIdentity(profile);
-    const hasTerms = hasContractTerms();
-    if (!hasProfile || !hasTerms) {
-      showToast('Mkataba bado haujakamilika kwa mwaka huu.', 'error');
-      return;
-    }
-
-    try {
-      const contractHtml = buildContractHtmlForPrint();
-      const printWin = openPrintWindow(contractHtml);
-      if (!printWin) return;
-
-      markDraftOpened();
-      renderWorkerDetails();
-      renderDraftPdfSection();
-      renderActions();
-      renderSignature();
-      showToast('Draft imefunguliwa. Tumia Print → Save as PDF.', 'success');
-    } catch (err) {
-      console.error('Print draft failed:', err);
-      showToast(err.message || 'Imeshindikana kufungua draft kwa print.', 'error');
     }
   }
 
@@ -1178,10 +1154,6 @@
 
   async function handleSignedUpload(file) {
     if (!file) return;
-    if (!state.draftOpened) {
-      showToast('Fungua draft kwanza kabla ya kupakia. | Open the draft before uploading.', 'error');
-      return;
-    }
     if (!file.type.includes('pdf')) {
       showToast('Tafadhali chagua PDF sahihi.', 'error');
       return;
@@ -1191,7 +1163,7 @@
       const storageRef = storage.ref(`schools/${state.schoolId}/years/${state.year}/contracts/${state.workerId}/signed.pdf`);
       await storageRef.put(file, { contentType: 'application/pdf' });
       const url = await storageRef.getDownloadURL();
-      await signingRef().child('signing').update({
+      await contractRef().child('signing').update({
         signedPdfUrl: url,
         status: 'worker_uploaded',
         workerUploadedAt: Date.now()
@@ -1207,15 +1179,11 @@
 
   async function handleSignatureUpload(file) {
     try {
-      if (!state.draftOpened) {
-        showToast('Fungua draft kwanza kabla ya sahihi. | Open the draft before signing.', 'error');
-        return;
-      }
       showToast('Inapakia sahihi...', 'info');
       const storageRef = storage.ref(`schools/${state.schoolId}/years/${state.year}/contracts/${state.workerId}/signature.png`);
       await storageRef.put(file, { contentType: file.type || 'image/png' });
       const url = await storageRef.getDownloadURL();
-      await signingRef().child('signing').update({
+      await contractRef().child('signing').update({
         signatureUrl: url
       });
       state.signing = { ...(state.signing || {}), signatureUrl: url };

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Workers Contract Hub | Headteacher</title>
   <link rel="stylesheet" href="../css/workers.css">
-  <script src="../somapappv1multischool/js/context.js"></script>
+  <script type="module" src="../somapappv1multischool/js/context.js"></script>
   <script src="../Todashboardhtml/yearContext.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
@@ -224,6 +224,8 @@
       throw new Error('No school selected for multi-school context');
     }
     const schoolRef = (path) => db.ref(SOMAP.P(path));
+    const LEGACY_WORKERS_YEAR = '2025';
+    const legacyFriendly = school.id === 'socrates-school' || school.id === 'default';
 
     const schoolNameEl = document.getElementById('schoolNameDisplay');
     const yearSelectEl = document.getElementById('yearSelect');
@@ -252,12 +254,6 @@
     };
 
     init();
-
-    function isSocratesSchool() {
-      const schoolCtx = SOMAP.getSchool();
-      const schoolId = schoolCtx?.id || '';
-      return schoolId === 'socrates-school' || schoolId === 'default' || /socrates/i.test(schoolId);
-    }
 
     function init() {
       initSchoolContext();
@@ -307,23 +303,22 @@
       return schoolRef(`years/${year}/workers`);
     }
 
-    function signingRef(workerId, year) {
-      return schoolRef(`years/${year}/workersContractSigning/${workerId}`);
+    function contractRef(workerId, year) {
+      return schoolRef(`years/${year}/workersContracts/${workerId}`);
     }
 
     function workerContractTermsRef(workerId, year) {
-      return schoolRef(`years/${year}/workersContractTerms/${workerId}`);
+      return schoolRef(`years/${year}/workers/${workerId}/contract/terms`);
     }
 
-    async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
-      const schoolCtx = SOMAP.getSchool();
-      const schoolId = schoolCtx?.id || "";
-      const scopedSnap = await db.ref(SOMAP.P(scopedSubPath)).get();
-      if (scopedSnap.exists()) return scopedSnap.val();
-      const isSocrates = (schoolId === "socrates-school" || schoolId === "default" || /socrates/i.test(schoolId));
-      if (!isSocrates) return null;
-      const legacySnap = await db.ref(legacyPath).get();
-      return legacySnap.exists() ? legacySnap.val() : null;
+    async function scopedOrSocratesLegacyYear(scopedSubPath, legacyPath, legacyYear) {
+      const scopedSnap = await schoolRef(scopedSubPath).once('value');
+      if (scopedSnap.exists()) return scopedSnap;
+      if (legacyFriendly && String(somapYearContext.getSelectedYear()) === String(legacyYear)) {
+        const legacySnap = await db.ref(legacyPath).once('value');
+        if (legacySnap.exists()) return legacySnap;
+      }
+      return scopedSnap;
     }
 
     function workerHasProfile(data) {
@@ -335,16 +330,31 @@
       try {
         workerSelectEl.innerHTML = '<option value="">-- Choose worker --</option>';
         const year = state.year;
-        const workersData = await scopedOrSocratesLegacy(
+        let snap = await scopedOrSocratesLegacyYear(
           `years/${year}/workers`,
-          'workers'
-        ) || {};
+          'workers',
+          LEGACY_WORKERS_YEAR
+        );
+        if (legacyFriendly && String(year) === LEGACY_WORKERS_YEAR) {
+          let hasProfile = false;
+          snap.forEach(child => {
+            if (workerHasProfile(child.val())) {
+              hasProfile = true;
+            }
+          });
+          if (!hasProfile) {
+            const legacySnap = await db.ref('workers').once('value');
+            if (legacySnap.exists()) {
+              snap = legacySnap;
+            }
+          }
+        }
         const rows = [];
-        Object.entries(workersData).forEach(([workerId, data]) => {
-          const workerData = data || {};
+        snap.forEach(child => {
+          const data = child.val() || {};
           rows.push({
-            id: workerId,
-            profile: workerData.profile || {}
+            id: child.key,
+            profile: data.profile || {}
           });
         });
         rows.sort((a, b) => {
@@ -369,75 +379,62 @@
     }
 
     function injectSpecialAgreementClause(html, agreement) {
-      if (!agreement || !agreement.text) return html;
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
-      const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+  if (!agreement || !String(agreement.text || '').trim()) return html;
 
-      const anchorHeading = headings.find(h => /^\s*2\./i.test(h.textContent || '')) || null;
-      if (!anchorHeading) return html;
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'));
 
-      const anchorText = (anchorHeading.textContent || '').toLowerCase();
-      const alreadyInserted = /2\(b\)\s+(special agreement|makubaliano maalum)/i.test(doc.body.textContent || '') ||
-        anchorText.includes('2(b)');
-      if (alreadyInserted) return html;
+  // Prefer Section 2 heading (e.g., "2. PLACE OF WORK" or "2. MAHALI PA AJIRA").
+  const sectionTwoHeadings = headings.filter(h => /^\s*2\./.test((h.textContent || '').trim()));
+  const preferred = sectionTwoHeadings.find(h => /(place of work|mahali pa ajira|position|nafasi)/i.test(h.textContent || ''));
+  const anchor = preferred || sectionTwoHeadings[0];
+  if (!anchor) return html;
 
-      const clauseWrap = doc.createElement('div');
-      clauseWrap.style.margin = '12px 0 0';
-      clauseWrap.style.padding = '10px 12px';
-      clauseWrap.style.borderLeft = '3px solid #4f46e5';
-      clauseWrap.style.background = 'rgba(79, 70, 229, 0.06)';
-      clauseWrap.style.borderRadius = '8px';
+  const clauseWrap = doc.createElement('div');
+  clauseWrap.style.margin = '12px 0 0';
+  clauseWrap.style.padding = '10px 12px';
+  clauseWrap.style.borderLeft = '3px solid #4f46e5';
+  clauseWrap.style.background = 'rgba(79, 70, 229, 0.06)';
+  clauseWrap.style.borderRadius = '8px';
 
-      const clause = doc.createElement('p');
-      clause.style.margin = '0';
-      clause.style.whiteSpace = 'pre-wrap';
-      const label = doc.createElement('strong');
-      label.textContent = agreement.lang === 'sw'
-        ? '2(b) Makubaliano Maalum:'
-        : '2(b) Special Agreement:';
-      clause.appendChild(label);
-      clause.appendChild(doc.createTextNode(` ${agreement.text}`));
-      clauseWrap.appendChild(clause);
+  const p = doc.createElement('p');
+  p.style.margin = '0';
+  p.style.whiteSpace = 'pre-wrap';
 
-      const following = [];
-      let cursor = anchorHeading.nextElementSibling;
-      while (cursor) {
-        following.push(cursor);
-        if (/^\s*3\./i.test(cursor.textContent || '')) break;
-        cursor = cursor.nextElementSibling;
-      }
+  const label = doc.createElement('strong');
+  const lang = (agreement.lang || '').toLowerCase();
+  label.textContent = (lang === 'sw' || lang === 'kiswahili')
+    ? '2(b) Makubaliano Maalum: '
+    : '2(b) Special Agreement: ';
+  p.appendChild(label);
+  p.appendChild(doc.createTextNode(String(agreement.text || '').trim()));
+  clauseWrap.appendChild(p);
 
-      const firstParagraph = following.find(el => el.tagName === 'P') || null;
-      if (firstParagraph) {
-        firstParagraph.after(clauseWrap);
-      } else {
-        anchorHeading.after(clauseWrap);
-      }
-      return doc.body.innerHTML;
-    }
+  // Place it inside Section 2: ideally after the first paragraph under section 2.
+  const firstAfter = anchor.nextElementSibling;
+  if (firstAfter && firstAfter.tagName && firstAfter.tagName.toLowerCase() === 'p') {
+    firstAfter.after(clauseWrap);
+  } else if (firstAfter) {
+    firstAfter.before(clauseWrap);
+  } else {
+    anchor.after(clauseWrap);
+  }
+
+  return doc.body.innerHTML;
+}
 
     async function loadContractData() {
       if (!state.selectedWorkerId) return;
       try {
         const year = state.year;
-        const [termsData, signingData] = await Promise.all([
-          scopedOrSocratesLegacy(
-            `years/${year}/workersContractTerms/${state.selectedWorkerId}`,
-            `workersContractTerms/${state.selectedWorkerId}`
-          ),
-          scopedOrSocratesLegacy(
-            `years/${year}/workersContractSigning/${state.selectedWorkerId}`,
-            `workersContracts/${state.selectedWorkerId}`
-          )
+        const [termsSnap, signingSnap] = await Promise.all([
+          workerContractTermsRef(state.selectedWorkerId, year).once('value'),
+          contractRef(state.selectedWorkerId, year).once('value')
         ]);
-        let resolvedTerms = termsData;
-        if (!resolvedTerms && isSocratesSchool()) {
-          const legacyTermsSnap = await db.ref(`workers/${state.selectedWorkerId}/contract/terms`).get();
-          resolvedTerms = legacyTermsSnap.exists() ? legacyTermsSnap.val() : null;
-        }
-        state.terms = resolvedTerms || {};
-        state.signing = signingData?.signing || {};
+        state.terms = termsSnap.val() || {};
+        const signingData = signingSnap.val() || {};
+        state.signing = signingData.signing || {};
         populateWorkerMeta();
         populateForm();
         refreshStatus();
@@ -483,21 +480,22 @@
     }
 
     function refreshStatus() {
-      const status = state.signing?.status || 'draft';
-      const statusMap = {
-        draft: 'Draft ready (generate if missing).',
-        worker_uploaded: 'Signed PDF uploaded by worker. Ready to approve.',
-        approved: 'Approved and finalized.'
-      };
-      const base = statusMap[status] || 'Contract status ready.';
-      const savedAt = Number(state.terms?.updatedAt || 0);
-      if (savedAt > 0) {
-        const when = new Date(savedAt).toLocaleString();
-        statusEl.textContent = `${base} Terms saved: ${when}.`;
-        return;
-      }
-      statusEl.textContent = base;
-    }
+  const status = state.signing?.status || 'draft';
+  const statusMap = {
+    draft: 'Draft ready (generate if missing).',
+    worker_uploaded: 'Signed PDF uploaded by worker. Ready to approve.',
+    approved: 'Approved and finalized.'
+  };
+  const base = statusMap[status] || 'Contract status ready.';
+
+  const savedAt = Number(state.terms?.updatedAt || 0);
+  if (savedAt > 0) {
+    const when = new Date(savedAt).toLocaleString();
+    statusEl.textContent = `${base} Terms saved: ${when}.`;
+    return;
+  }
+  statusEl.textContent = base;
+}
 
     function collectTermsPayload() {
       const roleSalary = Number(roleSalaryEl.value || 0);
@@ -582,7 +580,7 @@
         await storageRef.put(pdfBlob, { contentType: 'application/pdf' });
         const url = await storageRef.getDownloadURL();
 
-        await signingRef(state.selectedWorkerId, state.year).child('signing').update({
+        await contractRef(state.selectedWorkerId, state.year).child('signing').update({
           draftPdfUrl: url,
           status: 'draft'
         });
@@ -604,7 +602,7 @@
       }
       const actor = localStorage.getItem('workerId') || firebase.auth().currentUser?.uid || '';
       try {
-        await signingRef(state.selectedWorkerId, state.year).child('signing').update({
+        await contractRef(state.selectedWorkerId, state.year).child('signing').update({
           status: 'approved',
           approvedAt: Date.now(),
           approvedBy: actor
