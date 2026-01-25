@@ -341,6 +341,22 @@
       overflow-y: auto;
     }
 
+    .pdf-viewer {
+      margin-top: 16px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(79, 70, 229, 0.04);
+    }
+
+    .pdf-viewer iframe {
+      width: 100%;
+      height: 520px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: white;
+    }
+
     .language-selector {
       display: flex;
       gap: 12px;
@@ -525,6 +541,17 @@
       </div>
     </div>
 
+    <!-- Draft PDF Viewer -->
+    <div class="glass-card" id="draftPdfCard">
+      <div class="card-header">
+        <h2 class="card-title">?? Draft PDF</h2>
+        <p class="card-subtitle">Soma draft PDF kabla ya kusaini. | Read the draft PDF before signing.</p>
+      </div>
+      <div id="draftPdfSection">
+        <p style="text-align: center; color: var(--gray);">Loading draft PDF...</p>
+      </div>
+    </div>
+
     <!-- Signature Upload -->
     <div class="glass-card" id="signatureSection">
       <div class="card-header">
@@ -665,18 +692,37 @@
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
     const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'));
-    const positionHeading = headings.find(h => /position/i.test(h.textContent || ''));
-    if (!positionHeading) return html;
+
+    const sectionTwoHeadings = headings.filter(h => /^\s*2\./i.test(h.textContent || ''));
+    const preferredHeading = sectionTwoHeadings.find(h =>
+      /(position|place of work|mahali pa ajira)/i.test(h.textContent || '')
+    );
+    const anchorHeading = preferredHeading || sectionTwoHeadings[0] || null;
+    if (!anchorHeading) return html;
+
+    const clauseWrap = doc.createElement('div');
+    clauseWrap.style.margin = '12px 0 0';
+    clauseWrap.style.padding = '10px 12px';
+    clauseWrap.style.borderLeft = '3px solid #4f46e5';
+    clauseWrap.style.background = 'rgba(79, 70, 229, 0.06)';
+    clauseWrap.style.borderRadius = '8px';
+
     const clause = doc.createElement('p');
+    clause.style.margin = '0';
+    clause.style.whiteSpace = 'pre-wrap';
     const label = doc.createElement('strong');
-    label.textContent = '2.1 Special Agreement:';
+    label.textContent = agreement.lang === 'sw'
+      ? '2(b) Makubaliano Maalum:'
+      : '2(b) Special Agreement:';
     clause.appendChild(label);
     clause.appendChild(doc.createTextNode(` ${agreement.text}`));
-    const afterEl = positionHeading.nextElementSibling;
-    if (afterEl && afterEl.tagName.toLowerCase() === 'p') {
-      afterEl.after(clause);
+    clauseWrap.appendChild(clause);
+
+    const afterEl = anchorHeading.nextElementSibling;
+    if (afterEl) {
+      afterEl.after(clauseWrap);
     } else {
-      positionHeading.after(clause);
+      anchorHeading.after(clauseWrap);
     }
     return doc.body.innerHTML;
   }
@@ -713,6 +759,7 @@
     renderWorkerDetails();
     renderSalaryBreakdown();
     renderContract();
+    renderDraftPdfSection();
     renderActions();
     renderSignature();
   }
@@ -806,10 +853,45 @@
     document.getElementById('langEn').classList.toggle('active', !isSw);
   }
 
+  function renderDraftPdfSection() {
+    const section = document.getElementById('draftPdfSection');
+    if (!section) return;
+    const draftUrl = state.signing?.draftPdfUrl || '';
+    if (!draftUrl) {
+      section.innerHTML = `
+        <p style="margin: 0; color: var(--gray); text-align: center;">
+          Draft PDF bado haijazalishwa. Tafadhali subiri mkuu wa shule azalishe draft kwanza.<br>
+          The draft PDF has not been generated yet. Please wait for the headteacher to generate it first.
+        </p>
+      `;
+      return;
+    }
+    section.innerHTML = `
+      <div class="pdf-viewer">
+        <p style="margin: 0 0 8px; font-weight: 600;">Preview</p>
+        <iframe src="${draftUrl}" title="Draft Contract PDF"></iframe>
+        <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
+          <a href="${draftUrl}" target="_blank" class="btn btn-success">Download Draft PDF</a>
+        </div>
+      </div>
+    `;
+  }
+
   function renderActions() {
     const actions = document.getElementById('actions');
     const draftUrl = state.signing?.draftPdfUrl || '';
     const signedUrl = state.signing?.signedPdfUrl || '';
+
+    if (!draftUrl) {
+      actions.innerHTML = `
+        <p style="color: var(--gray); text-align: center;">
+          Hakuna draft PDF bado. Huwezi kusaini kabla ya draft.<br>
+          No draft PDF yet. You cannot sign before the draft.
+        </p>
+        <a href="workersdashboard.html" class="btn btn-secondary">Rudi Nyumbani | Back</a>
+      `;
+      return;
+    }
 
     actions.innerHTML = `
       ${draftUrl ? `<a href="${draftUrl}" target="_blank" class="btn btn-success">Download Draft PDF</a>` : '<p style="color: var(--gray);">Draft haipo bado.</p>'}
@@ -832,6 +914,28 @@
   function renderSignature() {
     const signatureSection = document.getElementById('signatureSection');
     if (signatureSection) signatureSection.style.display = 'block';
+
+    const hasDraft = Boolean(state.signing?.draftPdfUrl);
+    const uploadArea = document.getElementById('signatureUploadArea');
+    const signatureInput = document.getElementById('signatureInput');
+    const uploadBtn = uploadArea?.querySelector('button');
+    let hint = document.getElementById('signatureHint');
+    if (!hint && uploadArea) {
+      hint = document.createElement('p');
+      hint.id = 'signatureHint';
+      hint.style.margin = '8px 0 0';
+      hint.style.fontSize = '0.9rem';
+      uploadArea.appendChild(hint);
+    }
+
+    if (signatureInput) signatureInput.disabled = !hasDraft;
+    if (uploadBtn) uploadBtn.disabled = !hasDraft;
+    if (hint) {
+      hint.style.color = hasDraft ? 'var(--gray)' : 'var(--danger)';
+      hint.textContent = hasDraft
+        ? 'Unaweza kupakia sahihi baada ya kusoma draft PDF.'
+        : 'Sahihi imefungwa hadi draft PDF itengenezwe kwanza.';
+    }
 
     const preview = document.getElementById('signaturePreview');
     const signatureUrl = state.signing?.signatureUrl || '';
