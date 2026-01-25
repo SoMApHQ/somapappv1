@@ -17,6 +17,8 @@ const listEl = document.getElementById("approvalsList");
 let allRequests = {};
 let currentTab = "pending";
 let searchTerm = "";
+let parentReferralMap = {};
+
 
 /* ---------------- Tabs ---------------- */
 document.getElementById("searchInput").addEventListener("input", (e) => {
@@ -34,6 +36,22 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     currentTab = btn.dataset.tab;
     render();
   });
+});
+db.ref("parents").on("value", snap => {
+  const parents = snap.val() || {};
+  parentReferralMap = {};
+
+  Object.values(parents).forEach(p => {
+    if (p.referralCode) {
+      parentReferralMap[p.referralCode] = {
+        parentId: p.id || null,
+        parentName: p.name || "",
+        parentPhone: p.phone || ""
+      };
+    }
+  });
+
+  render(); // 
 });
 
 /* ---------------- Load Data ---------------- */
@@ -75,10 +93,17 @@ function render() {
     return;
   }
 
-  entries.forEach(([id, r]) => {
-    listEl.innerHTML += renderJoinApprovalCard(id, r);
-  });
-}
+ entries.forEach(([id, r]) => {
+  if (r.referral?.code && parentReferralMap[r.referral.code]) {
+    r.referral = {
+      ...r.referral,
+      ...parentReferralMap[r.referral.code]
+    };
+  }
+
+  listEl.innerHTML += renderJoinApprovalCard(id, r);
+});
+
 
 /* ---------------- Counts ---------------- */
 function updateCounts() {
@@ -107,6 +132,27 @@ async function approveRequest(id) {
   if (!snap.exists()) return;
 
   const r = snap.val();
+  let referralResolved = null;
+
+if (r.referral?.code) {
+  const parentSnap = await db.ref("parents")
+    .orderByChild("referralCode")
+    .equalTo(r.referral.code)
+    .once("value");
+
+  if (parentSnap.exists()) {
+    const parentId = Object.keys(parentSnap.val())[0];
+    const parent = parentSnap.val()[parentId];
+
+    referralResolved = {
+      code: r.referral.code,
+      parentId,
+      parentName: parent.name || "",
+      parentPhone: parent.phone || ""
+    };
+  }
+}
+
 
  sessionStorage.setItem(
   "somap_pending_admission",

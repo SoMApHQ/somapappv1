@@ -152,7 +152,9 @@
           </div>
 
           <div>
-            <label data-i18n="birth_certificate_no">Birth Certificate Number *</label>
+            <label data-i18n="birth_certificate_no"
+              >Birth Certificate Number *</label
+            >
             <input id="birthCertNumber" />
           </div>
 
@@ -336,15 +338,22 @@
         const font = await newPdf.embedFont(PDFLib.StandardFonts.Helvetica);
         function write(text, x, y, size = 11, underline = false) {
           const txt = String(text || "");
-          annexPage.drawText(txt, { x, y, size, font });
+          function writeField(label, value, x, y, lineWidth = 300) {
+            // Label
+            annexPage.drawText(label, { x, y, size: 11, font });
 
-          if (underline && txt) {
-            const textWidth = font.widthOfTextAtSize(txt, size);
-            annexPage.drawLine({
-              start: { x, y: y - 2 },
-              end: { x: x + textWidth, y: y - 2 },
-              thickness: 1,
-            });
+            // Value
+            const valueX = x + 150;
+            annexPage.drawText(value || "", { x: valueX, y, size: 11, font });
+
+            // Underline (fixed length)
+            for (let i = 0; i < 3; i++) {
+              annexPage.drawLine({
+                start: { x: 200, y: 630 - i * 20 },
+                end: { x: 550, y: 630 - i * 20 },
+                thickness: 1,
+              });
+            }
           }
         }
 
@@ -352,16 +361,21 @@
         const age = calcAge(dob.value);
 
         write("SOCRATES PRE AND PRIMARY SCHOOL", 150, 810, 14);
-       // write("AUTOMATED ADMISSION ANNEX (SoMAp)", 150, 790, 12);
+        // write("AUTOMATED ADMISSION ANNEX (SoMAp)", 150, 790, 12);
 
-        write("1. MAELEZO YA MWANAFUNZI", 50, 740, 12);
-        write(`Jina: ${fullName}`, 50, 710, 11, true);
-        write(`Jinsia: ${gender.value}`, 50, 690, 11, true);
-        write(`Umri: ${age}`, 50, 670, 11, true);
-        write(`Darasa: ${classLevel.value}`, 50, 650, 11, true);
-        write(`Makazi: ${residentialAddress.value}`, 50, 630, 11, true);
-        write(`Birth Cert No: ${birthCertNumber.value}`, 50, 610, 11, true);
-        write(`Tatizo la Kiafya: ${healthProblem.value || "Hakuna"}`, 50, 590, 11, true);
+        writeField("Jina:", fullName, 50, 710);
+        writeField("Jinsia:", gender.value, 50, 690);
+        writeField("Umri:", age, 50, 670);
+        writeField("Darasa:", classLevel.value, 50, 650);
+        writeField("Makazi:", residentialAddress.value, 50, 630, 500);
+        writeField("Birth Cert No:", birthCertNumber.value, 50, 610);
+        writeField(
+          "Tatizo la Kiafya:",
+          healthProblem.value || "Hakuna",
+          50,
+          590,
+          350,
+        );
 
         // Student Passport Photo (PNG + JPG)
         if (documents.passportPhotoUrl) {
@@ -393,8 +407,8 @@
         }
 
         write("2. MAELEZO YA MZAZI / MLEZI", 50, 540, 12);
-        write(`Jina: ${parentName.value}`, 50, 510);
-        write(`Simu: ${parentPhone.value}`, 50, 490);
+        writeField("Jina la Mzazi:", parentName.value, 50, 510, 300);
+        writeField("Simu:", parentPhone.value, 50, 490, 200);
 
         write("3. KIAPO CHA MZAZI / MLEZI", 50, 450, 12);
         annexPage.drawText(
@@ -435,100 +449,110 @@
       }
 
       /* Submit */
-joinForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  if (submitBtn.dataset.submitting === "true") return;
-  submitBtn.dataset.submitting = "true";
-  submitBtn.disabled = true;
+      joinForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        if (submitBtn.dataset.submitting === "true") return;
+        submitBtn.dataset.submitting = "true";
+        submitBtn.disabled = true;
 
-  // 🔄 LOADING POPUP
-  Swal.fire({
-    title: "Submitting Application",
-    text: "Generating official joining form. Please wait...",
-    allowOutsideClick: false,
-    allowEscapeKey: false,
-    didOpen: () => Swal.showLoading()
-  });
+        //  LOADING POPUP
+        Swal.fire({
+          title: "Submitting Application",
+          text: "Generating official joining form. Please wait...",
+          allowOutsideClick: false,
+          allowEscapeKey: false,
+          didOpen: () => Swal.showLoading(),
+        });
 
-  try {
-    const joinRef = db.ref("joinApprovalsPending").push();
-    const joinId = joinRef.key;
+        try {
+          const joinRef = db.ref("joinApprovalsPending").push();
+          const joinId = joinRef.key;
 
-    // Upload files
-    const documents = {
-      passportPhotoUrl: await uploadFile("passportPhoto", "passport", joinId),
-      birthCertUrl: await uploadFile("birthCert", "birthCert", joinId),
-      reportCardUrl: await uploadFile("reportCard", "reportCard", joinId),
-      medicalDocsUrl: await uploadFile("medicalDocs", "medical", joinId),
-    };
+          // Upload files
+          Swal.update({ text: "Uploading documents..." });
+          const documents = {
+            passportPhotoUrl: await uploadFile(
+              "passportPhoto",
+              "passport",
+              joinId,
+            ),
+            birthCertUrl: await uploadFile("birthCert", "birthCert", joinId),
+            reportCardUrl: await uploadFile("reportCard", "reportCard", joinId),
+            medicalDocsUrl: await uploadFile("medicalDocs", "medical", joinId),
+          };
+          Swal.update({ text: "Generating official joining form PDF..." });
+          // Generate PDF + download for parent
+          const generatedPdfBlob = await generateAnnexJoiningPDF(documents);
 
-    // Generate PDF + download for parent
-    const generatedPdfBlob = await generateAnnexJoiningPDF(documents);
+          // Upload generated PDF
+          const joiningPdfUrl = await uploadGeneratedPdf(
+            generatedPdfBlob,
+            joinId,
+          );
+          documents.joiningLetterUrl = joiningPdfUrl; //
 
-    // Upload generated PDF
-    const joiningPdfUrl = await uploadGeneratedPdf(generatedPdfBlob, joinId);
-    documents.joiningLetterUrl = joiningPdfUrl; // 
+          // Save Firebase record
+          await joinRef.set({
+            approvalType: "JOIN_REQUEST",
+            status: "pending",
+            academicYear: academicYear.value.trim(),
 
-    // Save Firebase record
-    await joinRef.set({
-      approvalType: "JOIN_REQUEST",
-      status: "pending",
-      academicYear: academicYear.value.trim(),
+            studentSnapshot: {
+              firstName: firstName.value.trim(),
+              lastName: lastName.value.trim(),
+              gender: gender.value,
+              dob: dob.value,
+              birthCertNumber: birthCertNumber.value.trim(),
+              residentialAddress: residentialAddress.value.trim(),
+              healthProblem: healthProblem.value.trim(),
+              classLevel: classLevel.value,
+            },
 
-      studentSnapshot: {
-        firstName: firstName.value.trim(),
-        lastName: lastName.value.trim(),
-        gender: gender.value,
-        dob: dob.value,
-        birthCertNumber: birthCertNumber.value.trim(),
-        residentialAddress: residentialAddress.value.trim(),
-        healthProblem: healthProblem.value.trim(),
-        classLevel: classLevel.value,
-      },
+            parentSnapshot: {
+              name: parentName.value.trim(),
+              phone: parentPhone.value.trim(),
+            },
 
-      parentSnapshot: {
-        name: parentName.value.trim(),
-        phone: parentPhone.value.trim(),
-      },
+            referral: referralCode.value
+              ? {
+                  code: referralCode.value.trim(),
+                  referredByParentId: null,
+                  resolved: false,
+                }
+              : null,
 
-      referral: referralCode.value
-        ? { code: referralCode.value.trim(), referredByParentId: null, resolved: false }
-        : null,
+            documents,
 
-      documents,
+            source: {
+              channel: referralCode.value ? "parent-referral" : "public",
+              submittedVia: "join.html",
+            },
 
-      source: {
-        channel: referralCode.value ? "parent-referral" : "public",
-        submittedVia: "join.html",
-      },
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
 
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    });
+          joinForm.reset();
 
-    joinForm.reset();
+          // SUCCESS POPUP
+          Swal.fire({
+            icon: "success",
+            title: "Submitted Successfully",
+            html: "Application sent to school.<br><b>Official Joining Form Generated & Downloaded.</b>",
+            confirmButtonText: "OK",
+          }).then(() => location.reload());
+        } catch (err) {
+          console.error("JOIN ERROR:", err);
 
-    // SUCCESS POPUP
-    Swal.fire({
-      icon: "success",
-      title: "Submitted Successfully",
-      html: "Application sent to school.<br><b>Official Joining Form Generated & Downloaded.</b>",
-      confirmButtonText: "OK"
-    }).then(() => location.reload());
+          Swal.fire({
+            icon: "error",
+            title: "Submission Failed",
+            text: err.message || "Could not submit application.",
+          });
 
-  } catch (err) {
-    console.error("JOIN ERROR:", err);
-
-    Swal.fire({
-      icon: "error",
-      title: "Submission Failed",
-      text: err.message || "Could not submit application.",
-    });
-
-    submitBtn.disabled = false;
-  }
-});
-
+          submitBtn.disabled = false;
+        }
+      });
 
       /* ---------------- i18n ---------------- */
       const i18n = {
@@ -570,12 +594,12 @@ joinForm.addEventListener("submit", async (e) => {
           doc_medical_help:
             "Medical report or special health information (if any)",
         },
-        gender:"Gender",
-        Male_gender:"Male",
-        Female_gender:"Female",
-        birth_certificate_no:"Birth Certificate Number",
-        residential_address:"Residential Address",
-        health_problem:"Health Problem",
+        Gender: "Gender",
+        Male_gender: "Male",
+        Female_gender: "Female",
+        birth_certificate_no: "Birth Certificate Number",
+        residential_address: "Residential Address",
+        health_problem: "Health Problem",
         sw: {
           title: "Ombi la Kujiunga na Shule",
           subtitle:
@@ -594,7 +618,7 @@ joinForm.addEventListener("submit", async (e) => {
           academic_year: "Mwaka *",
           parent_name: "Jina la Mzazi *",
           phone_number: "Simu *",
-          referral_code: "Msimbo wa Rufaa",
+          referral_code: "Msimbo wa Rufaa(sio lazima)",
           submit: "Tuma Ombi",
           doc_passport: "Picha ya Pasipoti *",
           doc_passport_help:
@@ -612,12 +636,12 @@ joinForm.addEventListener("submit", async (e) => {
 
           doc_medical: "Nyaraka za Afya (hiari)",
           doc_medical_help: "Ripoti ya afya au taarifa maalum (ikiwa ipo)",
-          gender:"Jinsia",
-          Male_gender:"Wakiume",
-          Female_gender:"Wakike",
-          birth_certificate_no:"Namba Ya Cheti Chakuzaliwa",
-          residential_address:"Makazi",
-          health_problem:"Tatizo La Kiafya",
+          Gender: "Jinsia",
+          Male_gender: "Wakiume",
+          Female_gender: "Wakike",
+          birth_certificate_no: "Namba Ya Cheti Chakuzaliwa",
+          residential_address: "Makazi",
+          health_problem: "Tatizo La Kiafya",
         },
       };
       function applyLang(l) {

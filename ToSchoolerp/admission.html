@@ -470,8 +470,12 @@ function openModal() {
 
   clearForm();
   openModal();
+clearForm();
+openModal();
 
-  // ✅ USE getElementById (THIS WAS THE BUG)
+// Delay filling until modal DOM is ready
+setTimeout(() => {
+
   if (payload.student) {
     document.getElementById("firstName").value =
       payload.student.firstName || "";
@@ -481,11 +485,12 @@ function openModal() {
 
     document.getElementById("classLevel").value =
       payload.student.classLevel || "";
-  }
 
-  if (payload.academicYear) {
-    document.getElementById("academicYear").value =
-      payload.academicYear;
+    document.getElementById("gender").value =
+      payload.student.gender || "";
+
+    document.getElementById("dob").value =
+      payload.student.dob || "";
   }
 
   if (payload.parent) {
@@ -496,24 +501,20 @@ function openModal() {
       payload.parent.phone || "";
   }
 
+  if (payload.academicYear) {
+    document.getElementById("academicYear").value = payload.academicYear;
+  }
+
   document.getElementById("admissionNumber").value =
     `AUTO-${Date.now()}`;
 
-  // keep context for submit (DO NOT CHANGE)
   window.__SOMAP_REFERRAL__ = payload.referral || null;
   window.__SOMAP_APPROVAL_KEY__ = payload.approvalKey || null;
 
   checkFormValidity();
+  console.log("✅ Prefill completed");
 
-  sessionStorage.setItem("somap_join_consumed", "1");
-
-  // remove query param
-  const url = new URL(window.location.href);
-  url.searchParams.delete("from");
-  window.history.replaceState({}, "", url.toString());
-
-  console.log("✅ Admission modal opened & prefilled");
-})();
+}, 500); // <-- CRITICAL FIX
 
 
 
@@ -706,7 +707,9 @@ async function syncFinanceAfterUpsert(studentKey, studentData) {
       return el && String(el.value || '').trim() !== '';
     });
     // When editing, files are OPTIONAL. When creating new, files are required.
-    const filesOk = editingKey ? true : requiredFiles.every(id => {
+    const fromJoin = !!window.__SOMAP_APPROVAL_KEY__;
+const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
+
       const el = document.getElementById(id);
       return el && el.files && el.files.length > 0;
     });
@@ -856,13 +859,46 @@ async function syncFinanceAfterUpsert(studentKey, studentData) {
           // CREATE NEW
           const newRef = schoolRef('students').push();
           const newKey = newRef.key;
+                    // AUTO-IMPORT JOIN DOCUMENTS
+            if (window.__SOMAP_APPROVAL_KEY__) {
+              const joinSnap = await schoolRef(
+                `joinApprovalsPending/${window.__SOMAP_APPROVAL_KEY__}`
+              ).once("value");
+
+              const joinData = joinSnap.val();
+              if (joinData?.documents) {
+                studentData.passportPhotoUrl = joinData.documents.passportPhotoUrl || null;
+                studentData.birthCertUrl = joinData.documents.birthCertUrl || null;
+                studentData.reportCardUrl = joinData.documents.reportCardUrl || null;
+                studentData.joiningLetterUrl =
+                  joinData.documents.generatedJoiningFormUrl ||
+                  joinData.documents.joiningLetterUrl || null;
+                studentData.medicalDocsUrl = joinData.documents.medicalDocsUrl || null;
+              }
+            }
           // Upload files (all required for new registration)
-          console.log('Creating new student, uploading files for key:', newKey); // Debug log
-          studentData.passportPhotoUrl = await uploadMaybe("passportPhoto", "passport", newKey, null);
-          studentData.birthCertUrl = await uploadMaybe("birthCertUpload", "birthCert", newKey, null);
-          studentData.reportCardUrl = await uploadMaybe("reportCardUpload", "reportCard", newKey, null);
-          studentData.joiningLetterUrl = await uploadMaybe("joiningLetterUpload", "joiningLetter", newKey, null);
-          studentData.medicalDocsUrl = await uploadMaybe("medicalDocsUpload", "medicalDocs", newKey, null);
+          console.log('Creating new student, uploading files for key:', newKey);
+           // Debug log
+studentData.passportPhotoUrl =
+  studentData.passportPhotoUrl ||
+  await uploadMaybe("passportPhoto", "passport", newKey, null);
+
+studentData.birthCertUrl =
+  studentData.birthCertUrl ||
+  await uploadMaybe("birthCertUpload", "birthCert", newKey, null);
+
+studentData.reportCardUrl =
+  studentData.reportCardUrl ||
+  await uploadMaybe("reportCardUpload", "reportCard", newKey, null);
+
+studentData.joiningLetterUrl =
+  studentData.joiningLetterUrl ||
+  await uploadMaybe("joiningLetterUpload", "joiningLetter", newKey, null);
+
+studentData.medicalDocsUrl =
+  studentData.medicalDocsUrl ||
+  await uploadMaybe("medicalDocsUpload", "medicalDocs", newKey, null);
+
           await newRef.set({ createdAt: firebase.database.ServerValue.TIMESTAMP, ...studentData });
           await syncFinanceAfterUpsert(newKey, studentData);
 

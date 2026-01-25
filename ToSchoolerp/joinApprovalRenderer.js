@@ -37,15 +37,23 @@ function renderJoinApprovalCard(id, r) {
 
           ${
             referral?.code
-              ? `<p class="text-xs mt-1 text-indigo-600">
-                   <i class="fas fa-link mr-1"></i>
-                   Referred (Code: ${esc(referral.code)})
-                 </p>`
+              ? (referral.parentName
+                  ? `<p class="text-xs mt-1 text-green-600">
+                       <i class="fas fa-user mr-1"></i>
+                       Referred by: <b>${esc(referral.parentName)}</b> (${esc(referral.parentPhone)})<br>
+                       <span class="text-indigo-500 text-xs">Code: ${esc(referral.code)}</span>
+                     </p>`
+                  : `<p class="text-xs mt-1 text-amber-600">
+                       <i class="fas fa-link mr-1"></i>
+                       Referral Code: ${esc(referral.code)} (Parent not resolved)
+                     </p>`
+                )
               : `<p class="text-xs mt-1 text-slate-400 italic">
                    Direct / Public Join
                  </p>`
           }
         </div>
+
 
         ${
           status === "pending"
