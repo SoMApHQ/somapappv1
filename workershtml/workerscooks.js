@@ -13,7 +13,7 @@ import {
   resolveYearKey 
 } from './modules/vifaajikoni.js';
 
-const { createElement: h, useEffect, useMemo, useState } = React;
+const { createElement: h, useEffect, useMemo, useRef, useState } = React;
 
 const db = firebase.database();
 const school = window.SOMAP?.getSchool?.();
@@ -94,8 +94,17 @@ const statusLabels = {
 };
 
 function safeNumber(value) {
-  const n = Number(value);
+  const cleaned = String(value ?? '').replace(/[\s,]+/g, '');
+  const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
+}
+
+function normalizeItemName(value = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  const compact = raw.replace(/\s+/g, '');
+  if (compact.includes('mahindi') || compact.includes('maize')) return 'maize';
+  return compact;
 }
 
 function getWorkerSession() {
@@ -179,6 +188,7 @@ function App() {
     qtyTotal: 0, sourceType: 'purchased', sourceName: '', 
     unitPrice: 0, note: '', acquiredDate: '' 
   });
+  const yearInitRef = useRef(false);
 
   useEffect(() => {
     if (!workerSession.workerId) {
@@ -207,16 +217,26 @@ function App() {
     const yearSelect = document.getElementById('yearSelect');
     if (window.somapYearContext && yearSelect) {
       somapYearContext.attachYearDropdown(yearSelect);
-      const systemYear = String(new Date().getFullYear());
-      const selected = String(somapYearContext.getSelectedYear?.() || systemYear);
-      if (Number(selected) < Number(systemYear)) {
-        somapYearContext.resetToCurrentYear?.();
+      if (!yearInitRef.current) {
+        const systemYear = String(new Date().getFullYear());
+        const selected = String(somapYearContext.getSelectedYear?.() || systemYear);
+        if (Number(selected) < Number(systemYear)) {
+          somapYearContext.resetToCurrentYear?.();
+        }
+        somapYearContext.onYearChanged((y) => {
+          const nextYear = String(y);
+          setCurrentYear(nextYear);
+          setReportDate((prev) => {
+            if (!prev) return `${nextYear}-01-01`;
+            const parts = String(prev).split('-');
+            if (parts.length !== 3) return `${nextYear}-01-01`;
+            return `${nextYear}-${parts[1]}-${parts[2]}`;
+          });
+        });
+        yearInitRef.current = true;
       }
-      somapYearContext.onYearChanged((y) => {
-        setCurrentYear(String(y));
-      });
     }
-  }, []);
+  }, [currentYear]);
 
   useEffect(() => {
     if (!workerSession.workerId) return;
@@ -692,14 +712,26 @@ function App() {
       return;
     }
     try {
-      const ref = schoolRef(inventoryPath()).push();
-      await ref.set({
-        name: newItem.name,
-        unit: newItem.unit || '',
-        onHand: safeNumber(newItem.onHand),
-        createdAt: Date.now()
-      });
-      toast('Imeongezwa stoo.', 'success');
+      const canonical = normalizeItemName(newItem.name);
+      const existing = inventoryItems.find(item => normalizeItemName(item.name) === canonical);
+      const qty = safeNumber(newItem.onHand);
+      if (existing && existing.id) {
+        const updatedOnHand = safeNumber(existing.onHand) + qty;
+        await schoolRef(`${inventoryPath()}/${existing.id}`).update({
+          onHand: updatedOnHand,
+          unit: newItem.unit || existing.unit || ''
+        });
+        toast('Imesasishwa stoo.', 'success');
+      } else {
+        const ref = schoolRef(inventoryPath()).push();
+        await ref.set({
+          name: newItem.name,
+          unit: newItem.unit || '',
+          onHand: qty,
+          createdAt: Date.now()
+        });
+        toast('Imeongezwa stoo.', 'success');
+      }
       setNewItem({ name: '', unit: '', onHand: '' });
       const items = await fetchInventoryItems(workerSession.schoolId);
       setInventoryItems(items);
@@ -922,7 +954,7 @@ function App() {
       h('div', { className: 'workers-card__toolbar' }, [
         h('label', { className: 'workers-chip' }, [
           'Mwaka ',
-          h('select', { id: 'yearSelect' })
+          h('select', { id: 'yearSelect', 'data-somap-year-select': true })
         ]),
         statusBadge(reportStatus)
       ])
