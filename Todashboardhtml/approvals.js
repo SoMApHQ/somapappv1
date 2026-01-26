@@ -23,6 +23,7 @@
     graduation: 'Graduation',
     fridaymoney: 'Friday Money',
     joining: 'Joining Applications',
+    admission: 'Admissions (Joining Fee)',
   };
   const financeDedupe = window.SOMAP_FINANCE || {};
 
@@ -869,15 +870,22 @@
       confirmButtonText: 'Reject Payment',
     }).then((result) => {
       if (!result.isConfirmed) return;
-      moveApprovalToHistory(record, 'rejected')
-        .then(() => {
-          toast('Payment rejected. Record archived for audit.', 'warning');
-          hideDetailModal();
-        })
-        .catch((err) => {
-          console.error('Approvals: rejection failed', err);
-          toast(err?.message || 'Rejection failed', 'danger');
-        });
+      (async () => {
+        if (record.sourceModule === 'admission') {
+          const year = String(record.modulePayload?.year || record.forYear || state.selectedYear || getContextYear());
+          const draftId = record.modulePayload?.admissionDraftId;
+          if (draftId) {
+            await sref(`admissionsPending/${year}/${draftId}/status`).set('rejected');
+            await sref(`admissionsPending/${year}/${draftId}/rejectedAt`).set(firebase.database.ServerValue.TIMESTAMP);
+          }
+        }
+        await moveApprovalToHistory(record, 'rejected');
+        toast('Payment rejected. Record archived for audit.', 'warning');
+        hideDetailModal();
+      })().catch((err) => {
+        console.error('Approvals: rejection failed', err);
+        toast(err?.message || 'Rejection failed', 'danger');
+      });
     });
   }
 
@@ -923,6 +931,9 @@
           case 'joining':
             await commitJoiningPayment(record);
             break;
+          case 'admission':
+            await commitAdmissionApproval(record, targetYear);
+            break;
           default:
             throw new Error(`Unknown module ${record.sourceModule}`);
         }
@@ -948,6 +959,61 @@
     updates[`${basePath}/paymentVerifiedByUserId`] = record.approvedBy || actorEmail();
     updates[`${basePath}/status`] = 'paid_form_issued';
     await db.ref().update(updates);
+  }
+
+  async function commitAdmissionApproval(record, targetYear) {
+    if (record.sourceModule !== 'admission') return;
+    const year = String(record.modulePayload?.year || record.forYear || targetYear || state.selectedYear || getContextYear());
+    const draftId = record.modulePayload?.admissionDraftId;
+    if (!draftId) throw new Error('Missing admission draft ID.');
+    const draftSnap = await sref(`admissionsPending/${year}/${draftId}`).once('value');
+    const draft = draftSnap.val();
+    if (!draft) throw new Error('Admission draft not found.');
+
+    const studentKey = draft.reservedStudentKey || record.modulePayload?.reservedStudentKey || sref('students').push().key;
+    const studentData = draft.studentData || {};
+    const docs = draft.documents || {};
+    const payment = draft.payment || {};
+    const approvedAt = record.approvedAt || Date.now();
+
+    const studentPayload = {
+      createdAt: firebase.database.ServerValue.TIMESTAMP,
+      admissionApprovedAt: approvedAt,
+      admissionApprovedBy: record.approvedBy || actorEmail(),
+      joiningFormPayment: {
+        reference: payment.reference || record.paymentReferenceCode || '',
+        receivedBy: payment.receivedBy || record.recordedBy || '',
+        amount: Number(payment.amount || record.amountPaidNow || 0),
+        approvedAt: approvedAt,
+        approvalId: record.approvalId
+      },
+      ...studentData,
+      ...docs
+    };
+
+    await sref(`students/${studentKey}`).set(studentPayload);
+    await sref(`admittedStudents/${studentKey}`).set({
+      student: {
+        firstName: studentPayload.firstName,
+        middleName: studentPayload.middleName || '',
+        lastName: studentPayload.lastName,
+        admissionNumber: studentPayload.admissionNumber,
+        classLevel: studentPayload.classLevel,
+        gender: studentPayload.gender,
+        dob: studentPayload.dob
+      },
+      parent: {
+        name: studentPayload.primaryParentName,
+        phone: studentPayload.primaryParentContact
+      },
+      academicYear: studentPayload.academicYear,
+      referral: draft.referral || null,
+      joinedAt: Date.now(),
+      studentId: studentKey,
+      source: 'direct_admission_approved'
+    });
+
+    await sref(`admissionsPending/${year}/${draftId}`).remove();
   }
 
   async function commitFinancePayment(record, targetYear) {

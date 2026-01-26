@@ -218,6 +218,35 @@
           </div>
         </div>
 
+        <!-- JOINING FORM PAYMENT -->
+        <div class="section">
+          <h3 class="font-semibold">Joining Form Payment</h3>
+          <p class="text-xs text-gray-500 mb-2">
+            This payment must be approved in Dashboard -> Approvals before the student is fully registered.
+          </p>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label for="paymentReference" class="block text-sm text-gray-600">Payment reference *</label>
+              <input id="paymentReference" name="paymentReference" required
+                     placeholder="MPesa ref / receipt no"
+                     class="border p-2 rounded w-full"/>
+            </div>
+
+            <div>
+              <label for="paymentReceivedBy" class="block text-sm text-gray-600">Payment received by *</label>
+              <input id="paymentReceivedBy" name="paymentReceivedBy" required
+                     placeholder="Staff name"
+                     class="border p-2 rounded w-full"/>
+            </div>
+
+            <div>
+              <label for="amountPaid" class="block text-sm text-gray-600">Amount paid (TZS) *</label>
+              <input type="number" id="amountPaid" name="amountPaid" required value="7000"
+                     class="border p-2 rounded w-full"/>
+            </div>
+          </div>
+        </div>
+
         <!-- SCHOOL INFO -->
         <div class="section">
           <h3 class="font-semibold">School Information</h3>
@@ -434,6 +463,8 @@ function openModal() {
   checkFormValidity();
 }
 
+  window.somapOpenAdmissionModal = openModal;
+
 
   function clearForm() {
    
@@ -449,6 +480,12 @@ function openModal() {
       const el = document.getElementById(id);
       if (el) el.innerHTML = '';
     });
+    const amountPaid = document.getElementById('amountPaid');
+    if (amountPaid) amountPaid.value = '7000';
+    const paymentReference = document.getElementById('paymentReference');
+    if (paymentReference) paymentReference.value = '';
+    const paymentReceivedBy = document.getElementById('paymentReceivedBy');
+    if (paymentReceivedBy) paymentReceivedBy.value = '';
   }
 // =========================================================
 // JOIN APPROVAL → ADMISSION PREFILL (FIXED)
@@ -697,7 +734,8 @@ async function syncFinanceAfterUpsert(studentKey, studentData) {
     'firstName', 'lastName', 'gender', 'dob',
     'schoolName', 'classLevel', 'academicYear', 'boardingStatus',
     'primaryParentName', 'primaryParentContact', 'residentialAddress',
-    'feePerYear', 'paymentPlan'
+    'feePerYear', 'paymentPlan',
+    'paymentReference', 'paymentReceivedBy', 'amountPaid'
   ];
   const requiredFiles = ['passportPhoto', 'birthCertUpload', 'reportCardUpload', 'joiningLetterUpload'];
 
@@ -856,179 +894,104 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
         }
 
         if (!editingKey) {
-          // CREATE NEW
-          const newRef = schoolRef('students').push();
-          const newKey = newRef.key;
-                    // AUTO-IMPORT JOIN DOCUMENTS
-            if (window.__SOMAP_APPROVAL_KEY__) {
-              const joinSnap = await schoolRef(
-                `joinApprovalsPending/${window.__SOMAP_APPROVAL_KEY__}`
-              ).once("value");
+          // CREATE NEW (pending approval)
+          const reservedStudentKey = schoolRef('students').push().key;
+          const year = Number(studentData.academicYear || getWorkingYear());
+          const paymentReference = fd.get('paymentReference') || '';
+          const paymentReceivedBy = fd.get('paymentReceivedBy') || '';
+          const amountPaid = Number(fd.get('amountPaid') || 7000);
 
-              const joinData = joinSnap.val();
-              if (joinData?.documents) {
-                studentData.passportPhotoUrl = joinData.documents.passportPhotoUrl || null;
-                studentData.birthCertUrl = joinData.documents.birthCertUrl || null;
-                studentData.reportCardUrl = joinData.documents.reportCardUrl || null;
-                studentData.joiningLetterUrl =
-                  joinData.documents.generatedJoiningFormUrl ||
-                  joinData.documents.joiningLetterUrl || null;
-                studentData.medicalDocsUrl = joinData.documents.medicalDocsUrl || null;
-              }
+          // AUTO-IMPORT JOIN DOCUMENTS
+          if (window.__SOMAP_APPROVAL_KEY__) {
+            const joinSnap = await schoolRef(
+              `joinApprovalsPending/${window.__SOMAP_APPROVAL_KEY__}`
+            ).once("value");
+
+            const joinData = joinSnap.val();
+            if (joinData?.documents) {
+              studentData.passportPhotoUrl = joinData.documents.passportPhotoUrl || null;
+              studentData.birthCertUrl = joinData.documents.birthCertUrl || null;
+              studentData.reportCardUrl = joinData.documents.reportCardUrl || null;
+              studentData.joiningLetterUrl =
+                joinData.documents.generatedJoiningFormUrl ||
+                joinData.documents.joiningLetterUrl || null;
+              studentData.medicalDocsUrl = joinData.documents.medicalDocsUrl || null;
             }
-          // Upload files (all required for new registration)
-          console.log('Creating new student, uploading files for key:', newKey);
-           // Debug log
-studentData.passportPhotoUrl =
-  studentData.passportPhotoUrl ||
-  await uploadMaybe("passportPhoto", "passport", newKey, null);
-
-studentData.birthCertUrl =
-  studentData.birthCertUrl ||
-  await uploadMaybe("birthCertUpload", "birthCert", newKey, null);
-
-studentData.reportCardUrl =
-  studentData.reportCardUrl ||
-  await uploadMaybe("reportCardUpload", "reportCard", newKey, null);
-
-studentData.joiningLetterUrl =
-  studentData.joiningLetterUrl ||
-  await uploadMaybe("joiningLetterUpload", "joiningLetter", newKey, null);
-
-studentData.medicalDocsUrl =
-  studentData.medicalDocsUrl ||
-  await uploadMaybe("medicalDocsUpload", "medicalDocs", newKey, null);
-
-          await newRef.set({ createdAt: firebase.database.ServerValue.TIMESTAMP, ...studentData });
-          await syncFinanceAfterUpsert(newKey, studentData);
-
-          /* =========================================================
-   ADMITTED STUDENTS (REPORTING NODE)
-   ========================================================= */
-try {
-  const admittedPayload = {
-    student: {
-      firstName: studentData.firstName,
-      middleName: studentData.middleName || '',
-      lastName: studentData.lastName,
-      admissionNumber: studentData.admissionNumber,
-      classLevel: studentData.classLevel,
-      gender: studentData.gender,
-      dob: studentData.dob
-    },
-
-    parent: {
-      name: studentData.primaryParentName,
-      phone: studentData.primaryParentContact
-    },
-
-    academicYear: studentData.academicYear,
-
-    referral: window.__SOMAP_REFERRAL__ || null,
-
-    joinedAt: Date.now(),
-
-    studentId: newKey,
-    source: window.__SOMAP_APPROVAL_KEY__ ? 'join_approval' : 'direct_admission'
-  };
-
-  await schoolRef(`admittedStudents/${newKey}`).set(admittedPayload);
-
-} catch (err) {
-  console.warn('Failed to write admittedStudents record:', err);
-}
-
-          /* =========================================================
-
-          
-   REFERRAL PERSISTENCE (FROM JOIN APPROVAL)
-   ========================================================= */
-if (window.__SOMAP_REFERRAL__?.code) {
-  try {
-    const refCode = window.__SOMAP_REFERRAL__.code;
-
-    // Resolve referral owner (parent)
-    const parentSnap = await schoolRef("parents")
-      .orderByChild("referralCode")
-      .equalTo(refCode)
-      .once("value");
-
-    if (parentSnap.exists()) {
-      const parentId = Object.keys(parentSnap.val())[0];
-      const parent = parentSnap.val()[parentId] || {};
-
-      const parentPhone =
-        String(parent.phone || parent.parentPhone || "")
-          .replace(/\D/g, "");
-
-      //  Store referral on student record
-      await schoolRef(`students/${newKey}/referral`).set({
-        code: refCode,
-        referredBy: {
-          parentId,
-          name: parent.name || null,
-          phone: parentPhone || null
-        },
-        source: "parent",
-        resolvedAt: Date.now()
-      });
-
-      // Add student under parent referrals (parents.html expects this)
-      if (parentPhone) {
-        await schoolRef(`parentReferrals/${parentPhone}/${newKey}`).set({
-          studentName:
-            studentData.firstName + " " + studentData.lastName,
-          classLevel: studentData.classLevel,
-          academicYear: studentData.academicYear,
-          joinedAt: Date.now(),
-          source: "parent"
-        });
-      }
-    }
-  } catch (err) {
-    console.warn("Referral persistence failed:", err);
-  }
-}
-
-/* =========================================================
-   CLOSE JOIN APPROVAL LOOP (MARK ADMITTED)
-   ========================================================= */
-if (window.__SOMAP_APPROVAL_KEY__) {
-  try {
-    await schoolRef(
-      `joinApprovalsPending/${window.__SOMAP_APPROVAL_KEY__}`
-    ).update({
-      status: "admitted",
-      studentId: newKey,
-      admittedAt: Date.now()
-    });
-  } catch (err) {
-    console.warn("Failed to update join approval status:", err);
-  }
-
-  // Cleanup temporary context
-  sessionStorage.removeItem("somap_pending_admission");
-  window.__SOMAP_REFERRAL__ = null;
-  window.__SOMAP_APPROVAL_KEY__ = null;
-}
-
-          // Bridge: if this student came from a joining application, mark it admitted and drop from queue
-          if (window.JoiningService && window.currentJoiningAppToAdmit) {
-            const { applicationId, year } = window.currentJoiningAppToAdmit;
-            try {
-              await window.JoiningService.updateJoiningApplication(year, applicationId, {
-                status: 'admitted',
-                studentId: newKey,
-                lastUpdatedAt: Date.now(),
-              });
-              const queuePath = window.JoiningService.withSchoolPath(`joiningAdmissionsQueue/${year}/${applicationId}`);
-              await db.ref(queuePath).remove();
-            } catch (queueErr) {
-              console.warn('Failed to update joining admission queue', queueErr);
-            }
-            window.currentJoiningAppToAdmit = null;
           }
-          alert('✅ Student registered successfully!');
+
+          // Upload files (all required for new registration)
+          console.log('Creating admission draft, uploading files for key:', reservedStudentKey);
+           // Debug log
+          studentData.passportPhotoUrl =
+            studentData.passportPhotoUrl ||
+            await uploadMaybe("passportPhoto", "passport", reservedStudentKey, null);
+
+          studentData.birthCertUrl =
+            studentData.birthCertUrl ||
+            await uploadMaybe("birthCertUpload", "birthCert", reservedStudentKey, null);
+
+          studentData.reportCardUrl =
+            studentData.reportCardUrl ||
+            await uploadMaybe("reportCardUpload", "reportCard", reservedStudentKey, null);
+
+          studentData.joiningLetterUrl =
+            studentData.joiningLetterUrl ||
+            await uploadMaybe("joiningLetterUpload", "joiningLetter", reservedStudentKey, null);
+
+          studentData.medicalDocsUrl =
+            studentData.medicalDocsUrl ||
+            await uploadMaybe("medicalDocsUpload", "medicalDocs", reservedStudentKey, null);
+
+          const documents = {
+            passportPhotoUrl: studentData.passportPhotoUrl || null,
+            birthCertUrl: studentData.birthCertUrl || null,
+            reportCardUrl: studentData.reportCardUrl || null,
+            joiningLetterUrl: studentData.joiningLetterUrl || null,
+            medicalDocsUrl: studentData.medicalDocsUrl || null
+          };
+
+          const draftRef = schoolRef(`admissionsPending/${year}`).push();
+          const draftId = draftRef.key;
+
+          await draftRef.set({
+            createdAt: firebase.database.ServerValue.TIMESTAMP,
+            status: 'pending_approval',
+            reservedStudentKey,
+            studentData,
+            documents,
+            payment: {
+              reference: paymentReference,
+              receivedBy: paymentReceivedBy,
+              amount: amountPaid
+            },
+            referral: window.__SOMAP_REFERRAL__ || null
+          });
+
+          const approvalRef = schoolRef('approvalsPending').push();
+          await approvalRef.set({
+            approvalId: approvalRef.key,
+            createdAt: firebase.database.ServerValue.TIMESTAMP,
+            datePaid: Date.now(),
+            status: 'pending',
+            sourceModule: 'admission',
+            source: 'Admission (Joining Fee)',
+            forYear: year,
+            academicYear: year,
+            studentName: `${studentData.firstName} ${studentData.middleName || ''} ${studentData.lastName}`.replace(/\s+/g, ' ').trim(),
+            studentAdm: studentData.admissionNumber,
+            className: studentData.classLevel,
+            parentContact: studentData.primaryParentContact,
+            amountPaidNow: amountPaid,
+            recordedBy: paymentReceivedBy,
+            paymentReferenceCode: paymentReference,
+            modulePayload: {
+              admissionDraftId: draftId,
+              year,
+              reservedStudentKey
+            }
+          });
+
+          alert('Submitted for approval. Go to Dashboard -> Approvals to approve this admission payment.');
           closeRegistrationModal();
         } else {
           // UPDATE existing
@@ -1444,5 +1407,24 @@ function renderReferralBadge(record) {
 }
 
 </script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('openRegistrationModal');
+  const modal = document.getElementById('registrationModal');
+  if (!btn || !modal) return;
+
+  btn.addEventListener('click', () => {
+    if (typeof window.somapOpenAdmissionModal === 'function') {
+      window.somapOpenAdmissionModal();
+    } else {
+      modal.style.display = 'block';
+      // auto admission number
+      const adm = document.getElementById('admissionNumber');
+      if (adm && !adm.value) adm.value = `AUTO-${Date.now()}`;
+    }
+  });
+});
+</script>
 </body>
 </html>
+
