@@ -134,7 +134,8 @@
 
       <div>
         <h3 class="font-medium text-gray-800">Transfer Requests</h3>
-        <p class="text-sm text-gray-500 mb-2">Students requesting transfer in/out</p>
+        <p class="text-sm text-gray-500 mb-1">Students requesting transfer in/out</p>
+        <p class="text-xs text-gray-500 mb-2">School: <span id="somapSchoolName">--</span></p>
         <div class="flex justify-between">
           <span class="text-sm font-medium text-yellow-600">3 pending requests</span>
           <a href="javascript:void(0)" class="text-sm text-indigo-600 hover:underline">View all</a>
@@ -373,6 +374,7 @@
       <div class="mt-8">
         <h3 class="font-semibold">Search Students</h3>
         <input type="text" id="search-box" placeholder="Search by name or ID" class="border p-2 rounded w-64 mt-2"/>
+        <div id="student-list-meta" class="text-xs text-slate-500 mt-2"></div>
         <div id="student-list" class="mt-4"></div>
       </div>
     </div>
@@ -574,6 +576,17 @@ setTimeout(() => {
     window.location.href = "../somapappv1multischool/multischool.html";
   }
   window.currentSchoolId = currentSchool?.id;
+  const schoolNameEl = document.getElementById('somapSchoolName');
+  if (schoolNameEl) {
+    const schoolName =
+      currentSchool?.name ||
+      currentSchool?.schoolName ||
+      currentSchool?.label ||
+      currentSchool?.title ||
+      currentSchool?.id ||
+      'Unknown school';
+    schoolNameEl.textContent = schoolName;
+  }
 
   function schoolRef(subPath) {
     return db.ref(SOMAP.P(subPath));
@@ -603,6 +616,8 @@ setTimeout(() => {
 
   let cachedStudents = [];
   const cachedStudentsById = new Map();
+  let yearStudents = {};
+  let yearStudentsRef = null;
   let shiftReports = {};
   let anchorEnrollments = {};
   let yearEnrollments = {};
@@ -729,6 +744,17 @@ async function syncFinanceAfterUpsert(studentKey, studentData) {
     yearEnrollRef = schoolRef(`enrollments/${yearStr}`);
     yearEnrollRef.on('value', (snap) => {
       yearEnrollments = snap.val() || {};
+      queueRender();
+    });
+  }
+
+  function attachYearStudentsListener(year) {
+    if (!db) return;
+    const yearStr = String(year);
+    if (yearStudentsRef) yearStudentsRef.off();
+    yearStudentsRef = schoolRef(`years/${yearStr}/students`);
+    yearStudentsRef.on('value', (snap) => {
+      yearStudents = snap.val() || {};
       queueRender();
     });
   }
@@ -1057,11 +1083,13 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
       queueRender();
     });
     attachYearEnrollmentListener(getWorkingYear());
+    attachYearStudentsListener(getWorkingYear());
   }
 
   window.somapYearContext.onYearChanged((newYear) => {
     planLabelCache.clear();
     attachYearEnrollmentListener(newYear);
+    attachYearStudentsListener(newYear);
     const selectEl = document.querySelector('[data-somap-year-select]');
     const hintEl = document.getElementById('somapYearHint');
     if (selectEl) selectEl.value = String(newYear);
@@ -1074,13 +1102,21 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
   async function renderSearchList(students) {
     const searchList = document.getElementById('student-list');
     const searchBox = document.getElementById('search-box');
+    const listMeta = document.getElementById('student-list-meta');
     if (!searchList) return;
     const term = (searchBox ? searchBox.value || '' : '').toLowerCase().trim();
     const currentYear = String(getWorkingYear());
+    const yearEntries = Object.entries(yearStudents || {});
+    const yearScopedStudents = yearEntries.length ? yearEntries.map(([key, s]) => {
+      const base = cachedStudentsById.get(key) || {};
+      return { key, ...base, ...(s || {}) };
+    }) : [];
     const yearHasEnrollments = yearEnrollments && Object.keys(yearEnrollments).length > 0;
-    const scopedStudents = yearHasEnrollments
-      ? students.filter((s) => yearEnrollments[s.key])
-      : students.filter((s) => !s.academicYear || String(s.academicYear) === currentYear);
+    const scopedStudents = yearEntries.length
+      ? yearScopedStudents
+      : (yearHasEnrollments
+        ? students.filter((s) => yearEnrollments[s.key])
+        : students.filter((s) => !s.academicYear || String(s.academicYear) === currentYear));
     const filtered = !term ? scopedStudents : scopedStudents.filter((s) => {
       const full = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.toLowerCase();
       return (
@@ -1089,6 +1125,14 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
         (String(s.admissionNumber || '').toLowerCase().includes(term))
       );
     });
+    if (listMeta) {
+      const total = scopedStudents.length;
+      const matches = filtered.length;
+      const totalLabel = total ? `${total} pupil(s)` : 'No pupils';
+      listMeta.textContent = term
+        ? `${totalLabel} registered for ${currentYear}. Showing ${matches} match(es).`
+        : `${totalLabel} registered for ${currentYear}.`;
+    }
     searchList.innerHTML = '';
     if (!filtered.length) {
       searchList.innerHTML = '<div class="text-sm text-slate-500">No students match the current filter or year.</div>';
