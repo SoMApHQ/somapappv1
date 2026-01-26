@@ -595,7 +595,6 @@
     buildContractHtml,
     calculateSalaryBreakdown
   } from './modules/workers_contracts.js';
-  import { ensureHtml2Pdf } from './modules/workers_ui.js';
 
   const db = firebase.database();
   const storage = firebase.storage();
@@ -620,7 +619,7 @@
     terms: {},
     signing: {},
     selectedLanguage: 'en',
-    localDraftGenerated: false
+    draftOpened: false
   };
 
   init();
@@ -693,13 +692,11 @@
     if (!agreement || !agreement.text) return html;
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
-    const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6'));
-
-    const sectionTwoHeadings = headings.filter(h => /^\s*2\./i.test(h.textContent || ''));
-    const preferredHeading = sectionTwoHeadings.find(h =>
-      /(position|place of work|mahali pa ajira)/i.test(h.textContent || '')
-    );
-    const anchorHeading = preferredHeading || sectionTwoHeadings[0] || null;
+    const candidates = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p'));
+    const anchorHeading = candidates.find(el => {
+      const text = (el.textContent || '').trim();
+      return /^\s*2\./i.test(text) || /MAHALI PA AJIRA/i.test(text);
+    }) || null;
     if (!anchorHeading) return html;
 
     const clauseWrap = doc.createElement('div');
@@ -751,6 +748,7 @@
     const contractData = contractSnap.val() || {};
     state.terms = scopedData.contract?.terms || legacyData?.contract?.terms || {};
     state.signing = contractData.signing || {};
+    state.draftOpened = readDraftOpened();
 
     state.selectedLanguage = defaultContractLanguage(state.profile.role);
 
@@ -858,72 +856,51 @@
   function renderDraftPdfSection() {
     const section = document.getElementById('draftPdfSection');
     if (!section) return;
-    const draftUrl = state.signing?.draftPdfUrl || '';
-    if (!draftUrl) {
-      const hasTerms = hasContractTerms();
-      section.innerHTML = `
-        <div style="margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;">
-          <button class="btn btn-success" type="button" id="downloadLocalDraftBtn" ${hasTerms ? '' : 'disabled'}>DOWNLOAD DRAFT</button>
-        </div>
-        <p style="margin: 0; color: var(--gray); text-align: center;">
-          Draft PDF bado haijazalishwa. Tafadhali subiri mkuu wa shule azalishe draft kwanza.<br>
-          The draft PDF has not been generated yet. Please wait for the headteacher to generate it first.
-        </p>
-      `;
-      const btn = document.getElementById('downloadLocalDraftBtn');
-      if (btn && hasTerms) {
-        btn.addEventListener('click', handleLocalDraftDownload);
-      }
-      return;
-    }
+    const hasTerms = hasContractTerms();
     section.innerHTML = `
-      <div style="margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
-        <a href="${draftUrl}" target="_blank" class="btn btn-success">Download Draft PDF</a>
+      <div style="margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;">
+        <button class="btn btn-success" type="button" id="downloadDraftBtn" ${hasTerms ? '' : 'disabled'}>DOWNLOAD DRAFT PDF</button>
       </div>
-      <div class="pdf-viewer">
-        <p style="margin: 0 0 8px; font-weight: 600;">Preview</p>
-        <iframe src="${draftUrl}" title="Draft Contract PDF"></iframe>
-        <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
-          <a href="${draftUrl}" target="_blank" class="btn btn-success">Download Draft PDF</a>
-        </div>
-      </div>
+      <p style="margin: 0; color: var(--gray); text-align: center;">
+        Soma draft PDF kabla ya kusaini. | Read the draft PDF before signing.
+      </p>
     `;
+    const btn = document.getElementById('downloadDraftBtn');
+    if (btn && hasTerms) {
+      btn.addEventListener('click', handleDraftPrint);
+    }
   }
 
   function renderActions() {
     const actions = document.getElementById('actions');
-    const draftUrl = state.signing?.draftPdfUrl || '';
     const signedUrl = state.signing?.signedPdfUrl || '';
-    const hasDraft = hasDownloadableDraft();
+    const hasTerms = hasContractTerms();
+    const hasDraftOpened = hasOpenedDraft();
 
-    if (!hasDraft) {
+    if (!hasTerms) {
       actions.innerHTML = `
         <p style="color: var(--gray); text-align: center;">
-          Hakuna draft PDF bado. Huwezi kusaini kabla ya draft.<br>
-          No draft PDF yet. You cannot sign before the draft.
+          Hakuna masharti ya mkataba kwa mwaka huu.<br>
+          No contract terms yet for this year.
         </p>
         <a href="workersdashboard.html" class="btn btn-secondary">Rudi Nyumbani | Back</a>
       `;
       return;
     }
 
-    const draftDownloadControl = draftUrl
-      ? `<a href="${draftUrl}" target="_blank" class="btn btn-success">Download Draft PDF</a>`
-      : `<button class="btn btn-success" type="button" id="downloadLocalDraftBtnActions">DOWNLOAD DRAFT</button>`;
-
     actions.innerHTML = `
-      ${draftDownloadControl}
+      <button class="btn btn-success" type="button" id="downloadDraftBtnActions">DOWNLOAD DRAFT PDF</button>
       <div class="file-input-wrapper">
-        <button class="btn btn-primary" id="uploadSignedBtn">Upload Signed PDF</button>
-        <input type="file" id="signedPdfInput" accept="application/pdf">
+        <button class="btn btn-primary" id="uploadSignedBtn" ${hasDraftOpened ? '' : 'disabled'}>Upload Signed PDF</button>
+        <input type="file" id="signedPdfInput" accept="application/pdf" ${hasDraftOpened ? '' : 'disabled'}>
       </div>
       ${signedUrl ? `<a href="${signedUrl}" target="_blank" class="btn btn-secondary">Download Signed PDF</a>` : ''}
       <a href="workersdashboard.html" class="btn btn-secondary">Rudi Nyumbani | Back</a>
     `;
 
-    const localDraftBtn = document.getElementById('downloadLocalDraftBtnActions');
-    if (localDraftBtn && !draftUrl) {
-      localDraftBtn.addEventListener('click', handleLocalDraftDownload);
+    const draftBtn = document.getElementById('downloadDraftBtnActions');
+    if (draftBtn) {
+      draftBtn.addEventListener('click', handleDraftPrint);
     }
 
     const signedInput = document.getElementById('signedPdfInput');
@@ -938,7 +915,7 @@
     const signatureSection = document.getElementById('signatureSection');
     if (signatureSection) signatureSection.style.display = 'block';
 
-    const hasDraft = hasDownloadableDraft();
+    const hasDraft = hasOpenedDraft();
     const uploadArea = document.getElementById('signatureUploadArea');
     const signatureInput = document.getElementById('signatureInput');
     const uploadBtn = uploadArea?.querySelector('button');
@@ -957,7 +934,7 @@
       hint.style.color = hasDraft ? 'var(--gray)' : 'var(--danger)';
       hint.textContent = hasDraft
         ? 'Unaweza kupakia sahihi baada ya kusoma draft PDF.'
-        : 'Sahihi imefungwa hadi draft PDF itengenezwe kwanza.';
+        : 'Sahihi imefungwa hadi draft PDF ifunguliwe kwanza.';
     }
 
     const preview = document.getElementById('signaturePreview');
@@ -985,83 +962,83 @@
     );
   }
 
-  function hasDownloadableDraft() {
-    return Boolean(state.signing?.draftPdfUrl || state.localDraftGenerated);
+  function draftOpenedKey() {
+    return `workersDraftOpened:${state.workerId}:${state.year}`;
   }
 
-  async function handleLocalDraftDownload() {
-    const contractViewerEl = document.getElementById('contractViewer');
-    if (!contractViewerEl) {
-      showToast('Contract viewer haipo. | Contract viewer missing.', 'error');
+  function readDraftOpened() {
+    return localStorage.getItem(draftOpenedKey()) === 'true';
+  }
+
+  function markDraftOpened() {
+    localStorage.setItem(draftOpenedKey(), 'true');
+    state.draftOpened = true;
+  }
+
+  function hasOpenedDraft() {
+    return Boolean(state.draftOpened);
+  }
+
+  function handleDraftPrint() {
+    const profile = state.profile || {};
+    const hasProfile = Boolean(profile.fullNameUpper || profile.firstName || profile.lastName);
+    if (!hasProfile) {
+      showToast('Hakuna taarifa za mfanyakazi kwa mwaka huu.', 'error');
       return;
     }
 
-    const originalStyle = {
-      maxHeight: contractViewerEl.style.maxHeight,
-      height: contractViewerEl.style.height,
-      overflow: contractViewerEl.style.overflow,
-      overflowY: contractViewerEl.style.overflowY
-    };
+    const html = buildContractHtml(profile, {
+      language: state.selectedLanguage,
+      signatureUrl: '',
+      terms: state.terms || {},
+      specialAgreement: null
+    });
+    const withClause = injectSpecialAgreementClause(html, state.terms?.specialAgreement || null);
 
-    try {
-      const profile = state.profile || {};
-      const hasProfile = Boolean(profile.fullNameUpper || profile.firstName || profile.lastName);
-      if (!hasProfile) {
-        showToast('Hakuna taarifa za mfanyakazi kwa mwaka huu.', 'error');
-        return;
+    const printCss = `
+      @page { size: A4; margin: 12mm; }
+      html, body { margin: 0; padding: 0; }
+      body { font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, Ubuntu, Arial, sans-serif; color: #111827; }
+      * { box-sizing: border-box; }
+      .contract-root { overflow: visible; max-height: none; }
+      .contract-root * { overflow: visible; max-height: none; }
+      @media print {
+        .print-toolbar { display: none !important; }
       }
+    `;
 
-      showToast('Inatengeneza draft PDF...', 'info');
-      await ensureHtml2Pdf();
-
-      const html = buildContractHtml(profile, {
-        language: state.selectedLanguage,
-        signatureUrl: '',
-        terms: state.terms || {},
-        specialAgreement: null
-      });
-      const withClause = injectSpecialAgreementClause(html, state.terms?.specialAgreement || null);
-
-      // Ensure the viewer contains the full contract and is not clipped.
-      contractViewerEl.innerHTML = withClause;
-      contractViewerEl.style.maxHeight = 'none';
-      contractViewerEl.style.height = 'auto';
-      contractViewerEl.style.overflow = 'visible';
-      contractViewerEl.style.overflowY = 'visible';
-
-      // Let layout settle before capture.
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-
-      const pdfBlob = await window.html2pdf().set({
-        margin: 6,
-        filename: `contract-${state.workerId}.pdf`,
-        html2canvas: { scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff' },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
-        pagebreak: { mode: ['css', 'legacy'] }
-      }).from(contractViewerEl).toPdf().output('blob');
-
-      const url = URL.createObjectURL(pdfBlob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `contract-${state.workerId}-${state.year}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-
-      state.localDraftGenerated = true;
-      renderActions();
-      renderSignature();
-      showToast('Draft PDF tayari kupakua.', 'success');
-    } catch (err) {
-      console.error('Local draft generation failed:', err);
-      showToast(err.message || 'Imeshindikana kutengeneza draft PDF.', 'error');
-    } finally {
-      contractViewerEl.style.maxHeight = originalStyle.maxHeight;
-      contractViewerEl.style.height = originalStyle.height;
-      contractViewerEl.style.overflow = originalStyle.overflow;
-      contractViewerEl.style.overflowY = originalStyle.overflowY;
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      showToast('Pop-up imezuiwa. Tafadhali ruhusu pop-up.', 'error');
+      return;
     }
+
+    printWindow.document.open();
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Draft Contract</title>
+        <style>${printCss}</style>
+      </head>
+      <body>
+        <div class="contract-root">${withClause}</div>
+        <script>
+          window.addEventListener('load', () => {
+            setTimeout(() => window.print(), 150);
+          });
+        </script>
+      </body>
+      </html>
+    `);
+    printWindow.document.close();
+
+    markDraftOpened();
+    renderActions();
+    renderSignature();
+    showToast('Draft PDF imefunguliwa. Tumia "Save as PDF".', 'success');
   }
 
   function setupLanguageHandlers() {
