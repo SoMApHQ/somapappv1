@@ -348,6 +348,7 @@
               <label for="reportCardUpload" class="block text-sm text-gray-600">Report Card (First Term, Ongoing) *</label>
               <input type="file" id="reportCardUpload" name="reportCardUpload" accept="image/*,application/pdf" class="border p-2 rounded w-full"/>
 <div id="reportCardPreview" class="mt-2 hint"></div>
+            </div>
             <div>
               <label for="joiningLetterUpload" class="block text-sm text-gray-600">Joining or Transfer Letter (PDF/Image) *</label>
               <input type="file" id="joiningLetterUpload" name="joiningLetterUpload" accept="image/*,application/pdf" class="border p-2 rounded w-full"/>
@@ -577,15 +578,28 @@ setTimeout(() => {
   }
   window.currentSchoolId = currentSchool?.id;
   const schoolNameEl = document.getElementById('somapSchoolName');
+  async function resolveSchoolName() {
+    const localName =
+      (typeof localStorage !== 'undefined' && (localStorage.getItem('somap_school_name') || '')) ||
+      '';
+    if (currentSchool?.name || currentSchool?.schoolName || localName) {
+      return currentSchool?.name || currentSchool?.schoolName || localName;
+    }
+    const schoolId = currentSchool?.id;
+    if (!db || !schoolId || schoolId === 'socrates-school') return schoolId || 'Socrates School';
+    try {
+      const profileSnap = await db.ref(`/schools/${schoolId}/profile`).once('value');
+      const profile = profileSnap.val() || {};
+      return profile.name || profile.schoolName || schoolId;
+    } catch (err) {
+      console.warn('Unable to resolve school name', err);
+      return schoolId || 'Unknown school';
+    }
+  }
   if (schoolNameEl) {
-    const schoolName =
-      currentSchool?.name ||
-      currentSchool?.schoolName ||
-      currentSchool?.label ||
-      currentSchool?.title ||
-      currentSchool?.id ||
-      'Unknown school';
-    schoolNameEl.textContent = schoolName;
+    resolveSchoolName().then((name) => {
+      schoolNameEl.textContent = name || 'Unknown school';
+    });
   }
 
   function schoolRef(subPath) {
@@ -1099,6 +1113,65 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
 
   queueRender();
 
+  function isStudentRecord(value) {
+    if (!value || typeof value !== 'object') return false;
+    return Boolean(
+      value.firstName ||
+      value.lastName ||
+      value.admissionNumber ||
+      value.pupilId ||
+      value.dob ||
+      value.classLevel ||
+      value.className
+    );
+  }
+
+  function deriveYearScopedStudents() {
+    const entries = Object.entries(yearStudents || {});
+    if (!entries.length) return [];
+    const records = [];
+    const keyed = new Set();
+
+    entries.forEach(([key, value]) => {
+      if (isStudentRecord(value)) {
+        records.push({ key, ...(value || {}) });
+        return;
+      }
+      if (value && typeof value === 'object') {
+        let nestedRecord = false;
+        Object.entries(value).forEach(([childKey, childVal]) => {
+          if (isStudentRecord(childVal)) {
+            records.push({ key: childKey, ...(childVal || {}) });
+            nestedRecord = true;
+          } else if (childVal === true || childVal === 1) {
+            keyed.add(childKey);
+          }
+        });
+        if (!nestedRecord && (value === true || value === 1)) {
+          keyed.add(key);
+        }
+        return;
+      }
+      if (value === true || value === 1) keyed.add(key);
+    });
+
+    if (records.length) {
+      return records.map((record) => {
+        const base = cachedStudentsById.get(record.key) || {};
+        return { key: record.key, ...base, ...record };
+      });
+    }
+
+    if (keyed.size) {
+      return Array.from(keyed).map((key) => {
+        const base = cachedStudentsById.get(key) || {};
+        return { key, ...base };
+      });
+    }
+
+    return [];
+  }
+
   async function renderSearchList(students) {
     const searchList = document.getElementById('student-list');
     const searchBox = document.getElementById('search-box');
@@ -1106,13 +1179,9 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
     if (!searchList) return;
     const term = (searchBox ? searchBox.value || '' : '').toLowerCase().trim();
     const currentYear = String(getWorkingYear());
-    const yearEntries = Object.entries(yearStudents || {});
-    const yearScopedStudents = yearEntries.length ? yearEntries.map(([key, s]) => {
-      const base = cachedStudentsById.get(key) || {};
-      return { key, ...base, ...(s || {}) };
-    }) : [];
+    const yearScopedStudents = deriveYearScopedStudents();
     const yearHasEnrollments = yearEnrollments && Object.keys(yearEnrollments).length > 0;
-    const scopedStudents = yearEntries.length
+    const scopedStudents = yearScopedStudents.length
       ? yearScopedStudents
       : (yearHasEnrollments
         ? students.filter((s) => yearEnrollments[s.key])
