@@ -361,6 +361,27 @@
           .filter((n) => n.length >= 2);
       }
 
+      function normalizeFullString(str) {
+        return String(str || "")
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, " ");
+      }
+
+      function uniqueTokens(arr) {
+        return Array.from(new Set(arr));
+      }
+
+      function tokenIntersectionSize(a, b) {
+        const setA = new Set(a);
+        const setB = new Set(b);
+        let count = 0;
+        for (const item of setA) {
+          if (setB.has(item)) count++;
+        }
+        return count;
+      }
+
       /* STAFF LOGIN */
       googleLogin.onclick = async () => {
         if (!grecaptcha.getResponse()) {
@@ -393,59 +414,64 @@
       parentForm.onsubmit = async (e) => {
         e.preventDefault();
 
-        const inputNames = normalizeName(childNames.value);
+        const inputFull = normalizeFullString(childNames.value);
+        const inputTokens = uniqueTokens(normalizeName(childNames.value));
         const inputPhone = normalizePhoneAll(parentPhone.value);
+        const inputWordCount = inputFull ? inputFull.split(" ").length : 0;
 
         parentError.classList.add("hidden");
 
-        if (inputNames.length < 2) {
+        if (inputTokens.length < 2) {
           parentError.textContent = "Enter at least two child names";
           parentError.classList.remove("hidden");
           return;
         }
 
-        const roots = [
-          window.SOMAP ? SOMAP.P("students") : "students",
-          "students",
-        ];
+        const root =
+          window.SOMAP && SOMAP.getSchool && SOMAP.getSchool()?.id
+            ? SOMAP.P("students")
+            : "students";
 
-        let match = null;
+        const snap = await db.ref(root).once("value");
+        const data = snap.val() || {};
+        let exactCandidate = null;
+        const candidates = [];
 
-        for (const root of roots) {
-          const snap = await db.ref(root).once("value");
+        for (const [key, st] of Object.entries(data)) {
+          const fullDb = normalizeFullString(
+            `${st.firstName || ""} ${st.middleName || ""} ${st.lastName || ""}`,
+          );
+          const dbTokens = uniqueTokens(normalizeName(fullDb));
+          const dbPhone = normalizePhoneAll(
+            st.parentPhone ||
+              st.parentContact ||
+              st.primaryParentContact ||
+              st.primaryParentPhone ||
+              "",
+          );
 
-          snap.forEach((s) => {
-            const st = s.val();
+          const phoneMatch =
+            (dbPhone && inputPhone && dbPhone.endsWith(inputPhone.slice(-7))) ||
+            (dbPhone && inputPhone && inputPhone.endsWith(dbPhone.slice(-7)));
 
-            const fullName = normalizeName(
-              `${st.firstName || ""} ${st.middleName || ""} ${st.lastName || ""}`,
-            );
+          const exactNameMatch = fullDb === inputFull;
 
-            const dbPhone = normalizePhoneAll(
-              st.parentPhone ||
-                st.parentContact ||
-                st.primaryParentContact ||
-                st.primaryParentPhone ||
-                "",
-            );
+          if (phoneMatch && inputWordCount >= 3 && exactNameMatch) {
+            exactCandidate = { key, studentInfo: st };
+            break;
+          }
 
-            const nameMatches = inputNames.filter((n) =>
-              fullName.includes(n),
-            ).length;
-
-            const phoneMatch =
-              dbPhone.endsWith(inputPhone.slice(-7)) ||
-              inputPhone.endsWith(dbPhone.slice(-7));
-
-            if (nameMatches >= 2 && phoneMatch) {
-              match = s.key;
-            }
-          });
-
-          if (match) break;
+          if (phoneMatch && tokenIntersectionSize(inputTokens, dbTokens) >= 2) {
+            candidates.push({ key, studentInfo: st });
+          }
         }
 
-        if (!match) {
+        if (exactCandidate) {
+          loginParent(exactCandidate.key, inputPhone);
+          return;
+        }
+
+        if (candidates.length === 0) {
           parentError.textContent =
             "Student not found. Check spelling or phone number.";
           parentError.classList.remove("hidden");
@@ -454,9 +480,38 @@
           return;
         }
 
-        localStorage.setItem("role", "parent");
-        localStorage.setItem("studentKey", match);
-        location.href = "parent.html";
+        if (candidates.length === 1) {
+          loginParent(candidates[0].key, inputPhone);
+          return;
+        }
+
+        const inputOptions = {};
+        for (const candidate of candidates) {
+          const st = candidate.studentInfo || {};
+          const name = normalizeFullString(
+            `${st.firstName || ""} ${st.middleName || ""} ${st.lastName || ""}`,
+          );
+          const admission =
+            st.admissionNumber || st.admissionNo || st.admNo || "N/A";
+          const className =
+            st.className || st.class || st.classLevel || st.currentClass || "N/A";
+          inputOptions[candidate.key] =
+            `${name.toUpperCase()} - ${admission} - ${className}`;
+        }
+
+        const { value: selectedKey } = await Swal.fire({
+          title: "Select child",
+          input: "radio",
+          inputOptions,
+          inputValidator: (value) =>
+            value ? undefined : "Please select a child",
+          confirmButtonText: "Continue",
+          showCancelButton: true,
+        });
+
+        if (selectedKey) {
+          loginParent(selectedKey, inputPhone);
+        }
       };
 
       /* WORKER LOGIN */
@@ -491,6 +546,14 @@
         if (!el) return;
         el.classList.add("shake");
         setTimeout(() => el.classList.remove("shake"), 300);
+      }
+
+      function loginParent(studentKey, normalizedPhone) {
+        localStorage.setItem("role", "parent");
+        localStorage.setItem("studentKey", studentKey);
+        localStorage.setItem("parentPhone", normalizedPhone);
+        location.href =
+          "parent.html?studentKey=" + encodeURIComponent(studentKey);
       }
     </script>
 
