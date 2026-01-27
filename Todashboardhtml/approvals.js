@@ -14,7 +14,18 @@
     }
     return String(new Date().getFullYear());
   };
-  const P = (subPath) => (window.SOMAP && typeof SOMAP.P === 'function') ? SOMAP.P(subPath) : subPath;
+  const P = (subPath) => {
+    if (window.SOMAP && typeof SOMAP.P === 'function') return SOMAP.P(subPath);
+    const trimmed = String(subPath || '').replace(/^\/+/, '');
+    let schoolId = '';
+    try {
+      schoolId = localStorage.getItem('somap.currentSchoolId') || '';
+    } catch (_) {
+      schoolId = '';
+    }
+    if (!schoolId || schoolId === 'socrates-school') return trimmed;
+    return `schools/${schoolId}/${trimmed}`;
+  };
   const sref = (subPath) => firebase.database().ref(P(subPath));
   const MODULE_LABELS = {
     finance: 'School Fees',
