@@ -307,8 +307,11 @@
 
       const state = {
         students: new Map(),
+        scopedStudents: new Map(),
+        legacyStudents: new Map(),
         anchorEnrollments: {},
         yearEnrollments: {},
+        yearStudentIndex: {},
         ledger: {},
         planCache: new Map(),
         latestRecords: [],
@@ -316,6 +319,7 @@
         renderToken: 0,
         yearEnrollRef: null,
         legacyYearEnrollRef: null,
+        yearStudentsRef: null,
         anchorEnrollRef: null,
         legacyAnchorEnrollRef: null,
         ledgerRef: null,
@@ -388,6 +392,7 @@
         const yearStr = String(year);
         if (state.yearEnrollRef) state.yearEnrollRef.off();
         if (state.ledgerRef) state.ledgerRef.off();
+        if (state.yearStudentsRef) state.yearStudentsRef.off();
 
         const scopedYearEnrollRef = schoolRef(`enrollments/${yearStr}`);
         const legacyYearEnrollRef = isSocrates ? db.ref(`enrollments/${yearStr}`) : null;
@@ -426,6 +431,13 @@
             queueRender();
           });
         }
+
+        // Year student index (scoped only)
+        state.yearStudentsRef = schoolRef(`years/${yearStr}/students`);
+        state.yearStudentsRef.on('value', (snap) => {
+          state.yearStudentIndex = snap.val() || {};
+          queueRender();
+        });
       }
 
       (async () => {
@@ -436,7 +448,7 @@
           if (state.legacyStudentsRef) state.legacyStudentsRef.off();
           state.studentsRef = scopedRef;
           state.legacyStudentsRef = legacyRef;
-          const updateStudents = () => {
+          const rebuildMerged = () => {
             const merged = mergeSnapshots(state.studentsRef?._lastSnap, state.legacyStudentsRef?._lastSnap);
             state.students.clear();
             Object.entries(merged).forEach(([key, value]) => {
@@ -446,12 +458,20 @@
           };
           state.studentsRef.on('value', (snapshot) => {
             state.studentsRef._lastSnap = snapshot;
-            updateStudents();
+            state.scopedStudents.clear();
+            Object.entries(snapshot.val() || {}).forEach(([key, value]) => {
+              state.scopedStudents.set(key, { key, ...(value || {}) });
+            });
+            rebuildMerged();
           });
           if (state.legacyStudentsRef) {
             state.legacyStudentsRef.on('value', (snapshot) => {
               state.legacyStudentsRef._lastSnap = snapshot;
-              updateStudents();
+              state.legacyStudents.clear();
+              Object.entries(snapshot.val() || {}).forEach(([key, value]) => {
+                state.legacyStudents.set(key, { key, ...(value || {}), _legacy: true });
+              });
+              rebuildMerged();
             });
           }
         } catch (err) {
@@ -514,7 +534,14 @@
         const generation = ++state.renderToken;
 
         const studentsArray = Array.from(state.students.values());
-        const records = await Promise.all(studentsArray.map(async (stu) => {
+        const legacyArray = Array.from(state.legacyStudents.values());
+        const scopedArray = Array.from(state.scopedStudents.values());
+        const hasIndex = state.yearStudentIndex && Object.keys(state.yearStudentIndex).length > 0;
+        const scopedInYear = hasIndex ? scopedArray.filter((stu) => state.yearStudentIndex[stu.key]) : scopedArray;
+        const visibleStudents = hasIndex
+          ? (isSocrates ? scopedInYear.concat(legacyArray) : scopedInYear)
+          : (isSocrates ? legacyArray : []);
+        const records = await Promise.all(visibleStudents.map(async (stu) => {
           const fallbackClass = stu.classLevel || stu.className || '';
           const resolvedClass = resolveClassForYear(stu.key, fallbackClass, year) || fallbackClass || 'N/A';
           const anchorClass = state.anchorEnrollments[stu.key]?.className || state.anchorEnrollments[stu.key]?.classLevel || fallbackClass;
