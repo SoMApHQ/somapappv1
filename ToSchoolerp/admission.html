@@ -666,6 +666,17 @@ setTimeout(() => {
   }
   const legacyRootIds = new Set(['socrates-school', 'default', 'socrates']);
   const useLegacyRootFallback = legacyRootIds.has(currentSchool?.id) && SOMAP.P('students') !== 'students';
+  const pickRefWithLegacy = async (scopedSubPath, legacyPath) => {
+    const scopedRef = schoolRef(scopedSubPath);
+    if (!useLegacyRootFallback || !legacyPath) return scopedRef;
+    try {
+      const snap = await scopedRef.get();
+      if (snap.exists()) return scopedRef;
+    } catch (err) {
+      console.warn('Scoped read failed; falling back to legacy path.', err);
+    }
+    return db.ref(legacyPath);
+  };
 
   if (!db) {
     console.error('Firebase Realtime Database not available. Ensure ../firebase.js and Firebase SDKs are loaded.');
@@ -693,25 +704,14 @@ setTimeout(() => {
   const cachedStudentsById = new Map();
   let studentsRaw = {};
   let admittedRaw = {};
-  let legacyStudentsRaw = {};
-  let legacyAdmittedRaw = {};
   const admittedStudentsById = new Map();
   let yearStudents = {};
-  let scopedYearStudents = {};
-  let legacyYearStudents = {};
   let yearStudentsRef = null;
-  let legacyYearStudentsRef = null;
   let shiftReports = {};
   let anchorEnrollments = {};
-  let scopedAnchorEnrollments = {};
-  let legacyAnchorEnrollments = {};
   let yearEnrollments = {};
-  let scopedYearEnrollments = {};
-  let legacyYearEnrollments = {};
   let anchorEnrollRef = null;
-  let legacyAnchorEnrollRef = null;
   let yearEnrollRef = null;
-  let legacyYearEnrollRef = null;
   let renderGeneration = 0;
   const planLabelCache = new Map();
   const currencyFormatter = new Intl.NumberFormat('en-US', { minimumFractionDigits: 0 });
@@ -745,20 +745,10 @@ setTimeout(() => {
     cachedStudentsById.clear();
     admittedStudentsById.clear();
     const merged = new Map();
-    Object.entries(legacyAdmittedRaw || {}).forEach(([key, admitted]) => {
-      const normalized = normalizeAdmittedStudent(key, admitted || {});
-      admittedStudentsById.set(key, normalized);
-      merged.set(key, normalized);
-    });
     Object.entries(admittedRaw || {}).forEach(([key, admitted]) => {
       const normalized = normalizeAdmittedStudent(key, admitted || {});
       admittedStudentsById.set(key, normalized);
       merged.set(key, normalized);
-    });
-    Object.entries(legacyStudentsRaw || {}).forEach(([key, student]) => {
-      const admitted = merged.get(key) || admittedStudentsById.get(key) || {};
-      const combined = { key, ...admitted, ...(student || {}) };
-      merged.set(key, combined);
     });
     Object.entries(studentsRaw || {}).forEach(([key, student]) => {
       const admitted = merged.get(key) || admittedStudentsById.get(key) || {};
@@ -874,45 +864,33 @@ async function syncFinanceAfterUpsert(studentKey, studentData) {
 
 
 
-  function attachYearEnrollmentListener(year) {
+  async function attachYearEnrollmentListener(year) {
     if (!db) return;
     const yearStr = String(year);
     if (yearEnrollRef) yearEnrollRef.off();
-    if (legacyYearEnrollRef) legacyYearEnrollRef.off();
-    yearEnrollRef = schoolRef(`enrollments/${yearStr}`);
-    yearEnrollRef.on('value', (snap) => {
-      scopedYearEnrollments = snap.val() || {};
-      yearEnrollments = { ...(legacyYearEnrollments || {}), ...(scopedYearEnrollments || {}) };
-      queueRender();
-    }, (err) => console.error('year enrollments listener error', err));
-    if (useLegacyRootFallback) {
-      legacyYearEnrollRef = db.ref(`enrollments/${yearStr}`);
-      legacyYearEnrollRef.on('value', (snap) => {
-        legacyYearEnrollments = snap.val() || {};
-        yearEnrollments = { ...(legacyYearEnrollments || {}), ...(scopedYearEnrollments || {}) };
+    try {
+      yearEnrollRef = await pickRefWithLegacy(`enrollments/${yearStr}`, `enrollments/${yearStr}`);
+      yearEnrollRef.on('value', (snap) => {
+        yearEnrollments = snap.val() || {};
         queueRender();
-      }, (err) => console.error('legacy year enrollments listener error', err));
+      }, (err) => console.error('year enrollments listener error', err));
+    } catch (err) {
+      console.error('Failed to attach year enrollments listener', err);
     }
   }
 
-  function attachYearStudentsListener(year) {
+  async function attachYearStudentsListener(year) {
     if (!db) return;
     const yearStr = String(year);
     if (yearStudentsRef) yearStudentsRef.off();
-    if (legacyYearStudentsRef) legacyYearStudentsRef.off();
-    yearStudentsRef = schoolRef(`years/${yearStr}/students`);
-    yearStudentsRef.on('value', (snap) => {
-      scopedYearStudents = snap.val() || {};
-      yearStudents = { ...(legacyYearStudents || {}), ...(scopedYearStudents || {}) };
-      queueRender();
-    }, (err) => console.error('year students listener error', err));
-    if (useLegacyRootFallback) {
-      legacyYearStudentsRef = db.ref(`years/${yearStr}/students`);
-      legacyYearStudentsRef.on('value', (snap) => {
-        legacyYearStudents = snap.val() || {};
-        yearStudents = { ...(legacyYearStudents || {}), ...(scopedYearStudents || {}) };
+    try {
+      yearStudentsRef = await pickRefWithLegacy(`years/${yearStr}/students`, `years/${yearStr}/students`);
+      yearStudentsRef.on('value', (snap) => {
+        yearStudents = snap.val() || {};
         queueRender();
-      }, (err) => console.error('legacy year students listener error', err));
+      }, (err) => console.error('year students listener error', err));
+    } catch (err) {
+      console.error('Failed to attach year students listener', err);
     }
   }
 
@@ -1220,50 +1198,45 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
 
   // ---- Live cache + rendering for search (and edit buttons) ----
   if (db) {
-  schoolRef('students').on('value', (snapshot) => {
-      studentsRaw = snapshot.val() || {};
-      rebuildCachedStudents();
-      queueRender();
-    }, (err) => console.error('students listener error', err));
-  if (useLegacyRootFallback) {
-    db.ref('students').on('value', (snapshot) => {
-      legacyStudentsRaw = snapshot.val() || {};
-      rebuildCachedStudents();
-      queueRender();
-    }, (err) => console.error('legacy students listener error', err));
-  }
-  schoolRef('admittedStudents').on('value', (snapshot) => {
-      admittedRaw = snapshot.val() || {};
-      rebuildCachedStudents();
-      queueRender();
-    }, (err) => console.error('admittedStudents listener error', err));
-  if (useLegacyRootFallback) {
-    db.ref('admittedStudents').on('value', (snapshot) => {
-      legacyAdmittedRaw = snapshot.val() || {};
-      rebuildCachedStudents();
-      queueRender();
-    }, (err) => console.error('legacy admittedStudents listener error', err));
-  }
-  db.ref(SHIFT_REPORT_PATH).on('value', (snapshot) => {
+    (async () => {
+      try {
+        const studentsRef = await pickRefWithLegacy('students', 'students');
+        studentsRef.on('value', (snapshot) => {
+          studentsRaw = snapshot.val() || {};
+          rebuildCachedStudents();
+          queueRender();
+        }, (err) => console.error('students listener error', err));
+      } catch (err) {
+        console.error('Failed to attach students listener', err);
+      }
+      try {
+        const admittedRef = await pickRefWithLegacy('admittedStudents', 'admittedStudents');
+        admittedRef.on('value', (snapshot) => {
+          admittedRaw = snapshot.val() || {};
+          rebuildCachedStudents();
+          queueRender();
+        }, (err) => console.error('admittedStudents listener error', err));
+      } catch (err) {
+        console.error('Failed to attach admittedStudents listener', err);
+      }
+      try {
+        const anchorRef = await pickRefWithLegacy(`enrollments/${SOMAP_DEFAULT_YEAR}`, `enrollments/${SOMAP_DEFAULT_YEAR}`);
+        anchorEnrollRef = anchorRef;
+        anchorEnrollRef.on('value', (snapshot) => {
+          anchorEnrollments = snapshot.val() || {};
+          queueRender();
+        }, (err) => console.error('anchor enrollments listener error', err));
+      } catch (err) {
+        console.error('Failed to attach anchor enrollment listener', err);
+      }
+      attachYearEnrollmentListener(getWorkingYear());
+      attachYearStudentsListener(getWorkingYear());
+    })();
+
+    db.ref(SHIFT_REPORT_PATH).on('value', (snapshot) => {
       shiftReports = snapshot.exists() ? snapshot.val() : {};
       queueRender();
     });
-  anchorEnrollRef = schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`);
-    anchorEnrollRef.on('value', (snapshot) => {
-      scopedAnchorEnrollments = snapshot.val() || {};
-      anchorEnrollments = { ...(legacyAnchorEnrollments || {}), ...(scopedAnchorEnrollments || {}) };
-      queueRender();
-    }, (err) => console.error('anchor enrollments listener error', err));
-  if (useLegacyRootFallback) {
-    legacyAnchorEnrollRef = db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`);
-    legacyAnchorEnrollRef.on('value', (snapshot) => {
-      legacyAnchorEnrollments = snapshot.val() || {};
-      anchorEnrollments = { ...(legacyAnchorEnrollments || {}), ...(scopedAnchorEnrollments || {}) };
-      queueRender();
-    }, (err) => console.error('legacy anchor enrollments listener error', err));
-  }
-    attachYearEnrollmentListener(getWorkingYear());
-    attachYearStudentsListener(getWorkingYear());
   }
 
   window.somapYearContext.onYearChanged((newYear) => {
