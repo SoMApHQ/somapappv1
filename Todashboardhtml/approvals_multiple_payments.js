@@ -189,9 +189,10 @@
   async function fetchPending(year) {
     let snap = await db.ref(P('approvalsPending')).once('value');
     let data = snap.val() || {};
-    if (isSocratesSchool() && (!data || Object.keys(data).length === 0)) {
+    if (isSocratesSchool()) {
       const legacySnap = await legacyRef('approvalsPending').once('value');
-      data = legacySnap.val() || {};
+      const legacyData = legacySnap.val() || {};
+      data = { ...legacyData, ...data };
     }
     if (!data || Object.keys(data).length === 0) return [];
     return Object.entries(data).map(([key, value]) =>
@@ -206,9 +207,10 @@
   async function fetchHistory(year) {
     let yearSnap = await db.ref(P('approvalsHistory')).child(String(year)).once('value');
     let yearTree = yearSnap.val() || {};
-    if (isSocratesSchool() && (!yearTree || Object.keys(yearTree).length === 0)) {
+    if (isSocratesSchool()) {
       const legacySnap = await legacyRef('approvalsHistory').child(String(year)).once('value');
-      yearTree = legacySnap.val() || {};
+      const legacyTree = legacySnap.val() || {};
+      yearTree = { ...legacyTree, ...yearTree };
     }
     if (!yearTree || Object.keys(yearTree).length === 0) return [];
     const list = [];

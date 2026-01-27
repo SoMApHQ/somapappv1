@@ -391,17 +391,16 @@
     const legacy = isSocratesSchool() ? legacyRef('approvalsPending') : null;
     let scopedSnap = null;
     let legacySnap = null;
-    const hasEntries = (snap) => {
-      if (!snap || !snap.exists()) return false;
-      const val = snap.val();
-      return val && Object.keys(val).length > 0;
+    const mergeSnapshots = () => {
+      const scopedVal = scopedSnap && scopedSnap.exists() ? (scopedSnap.val() || {}) : {};
+      const legacyVal = legacySnap && legacySnap.exists() ? (legacySnap.val() || {}) : {};
+      if (!legacy) return scopedVal;
+      return { ...legacyVal, ...scopedVal }; // scoped wins on key collision
     };
-    const pickSnapshot = () => (hasEntries(scopedSnap) ? scopedSnap : legacySnap || scopedSnap);
     const handler = (snapshot, isLegacy) => {
       if (isLegacy) legacySnap = snapshot;
       else scopedSnap = snapshot;
-      const effective = pickSnapshot();
-      state.pending = (effective && effective.val()) || {};
+      state.pending = mergeSnapshots();
       state.pendingList = Object.entries(state.pending).map(([key, value]) => ({
         approvalId: key,
         ...(value || {}),
@@ -1246,11 +1245,9 @@
     let snapshot = await sref('approvalsHistory').once('value');
     let tree = snapshot.val() || {};
     if (isSocratesSchool()) {
-      const hasEntries = tree && Object.keys(tree).length > 0;
-      if (!hasEntries) {
-        const legacySnap = await legacyRef('approvalsHistory').once('value');
-        tree = legacySnap.val() || {};
-      }
+      const legacySnap = await legacyRef('approvalsHistory').once('value');
+      const legacyTree = legacySnap.val() || {};
+      tree = { ...legacyTree, ...tree };
     }
     const entries = [];
 
