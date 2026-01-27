@@ -499,6 +499,7 @@
   }
 
   let allStudents = [];
+  let legacyStudents = [];
   let cachedStudents = [];
   const cachedStudentsById = new Map();
   let yearStudentIndex = null;
@@ -506,6 +507,7 @@
   let anchorEnrollments = {};
   let yearEnrollments = {};
   let studentsRef = null;
+  let legacyStudentsRef = null;
   let yearIndexRef = null;
   let shiftReportRef = null;
   let anchorEnrollRef = null;
@@ -943,9 +945,10 @@
     const allowLegacy = shouldUseLegacyFallback(getWorkingYear());
     const hasIndex = yearStudentIndex && Object.keys(yearStudentIndex).length > 0;
     if (hasIndex) {
-      cachedStudents = allStudents.filter((s) => yearStudentIndex[s.key]);
+      const scopedInYear = allStudents.filter((s) => yearStudentIndex[s.key]);
+      cachedStudents = allowLegacy ? scopedInYear.concat(legacyStudents) : scopedInYear;
     } else if (allowLegacy) {
-      cachedStudents = allStudents;
+      cachedStudents = allStudents.concat(legacyStudents);
     } else {
       cachedStudents = [];
     }
@@ -954,13 +957,25 @@
 
   async function attachStudentsListener() {
     if (studentsRef) studentsRef.off();
-    studentsRef = await scopedOrSocratesLegacy('students', 'students', getWorkingYear());
+    if (legacyStudentsRef) legacyStudentsRef.off();
+    studentsRef = schoolScopedRef('students');
     studentsRef.on('value', (snapshot) => {
       const raw = snapshot.val() || {};
       allStudents = Object.entries(raw).map(([key, s]) => ({ key, ...(s || {}) }));
       rebuildCachedStudents();
       queueRender();
     });
+    if (shouldUseLegacyFallback(getWorkingYear())) {
+      legacyStudentsRef = db.ref('students');
+      legacyStudentsRef.on('value', (snapshot) => {
+        const raw = snapshot.val() || {};
+        legacyStudents = Object.entries(raw).map(([key, s]) => ({ key, ...(s || {}), _legacy: true }));
+        rebuildCachedStudents();
+        queueRender();
+      });
+    } else {
+      legacyStudents = [];
+    }
   }
 
   async function attachYearIndexListener(year) {
@@ -1005,6 +1020,7 @@
     window.somapYearContext.onYearChanged((newYear) => {
       planLabelCache.clear();
       attachYearScopedListeners(newYear).catch(err => console.warn('Year listener attach failed', err));
+      attachStudentsListener().catch(err => console.warn('Student listener attach failed', err));
       updateYearHint(newYear);
       syncFormSchoolFields();
       queueRender();
