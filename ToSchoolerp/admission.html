@@ -84,18 +84,21 @@
 
     <script>
     (function initYearSelector(){
-      const sel = document.querySelector('[data-somap-year-select]');
+      const selects = Array.from(document.querySelectorAll('[data-somap-year-select]'));
       const hint = document.getElementById('somapYearHint');
-      if (!sel) return;
-      sel.innerHTML = SOMAP_ALLOWED_YEARS.map(y=>`<option value="${y}">${y}</option>`).join('');
+      if (!selects.length) return;
+      const options = SOMAP_ALLOWED_YEARS.map(y=>`<option value="${y}">${y}</option>`).join('');
       const current = window.somapYearContext.getSelectedYear();
-      sel.value = current;
-      if (hint) hint.textContent = current;
-      sel.addEventListener('change', e=>{
-        const y = String(e.target.value);
-        window.somapYearContext.setSelectedYear(y);
-        if (hint) hint.textContent = y;
+      selects.forEach((sel) => {
+        sel.innerHTML = options;
+        sel.value = current;
+        sel.addEventListener('change', e=>{
+          const y = String(e.target.value);
+          window.somapYearContext.setSelectedYear(y);
+          if (hint) hint.textContent = y;
+        });
       });
+      if (hint) hint.textContent = current;
     })();
     </script>
 
@@ -371,13 +374,44 @@
   </button>
 </div>
 
-      <!-- Quick search (live) -->
-      <div class="mt-8">
-        <h3 class="font-semibold">Search Students</h3>
-        <input type="text" id="search-box" placeholder="Search by name or ID" class="border p-2 rounded w-64 mt-2"/>
-        <div id="student-list-meta" class="text-xs text-slate-500 mt-2"></div>
-        <div id="student-list" class="mt-4"></div>
+    </div>
+  </div>
+
+  <!-- Registered Students (always visible) -->
+  <div id="registeredStudentsSection" class="bg-white rounded-lg shadow p-4 mt-4">
+    <div class="flex flex-wrap justify-between items-center gap-2">
+      <h3 class="font-medium text-gray-800">Registered Students</h3>
+      <span id="studentListContextLabel" class="text-xs text-slate-500">School: -- | Working year: --</span>
+    </div>
+    <div class="mt-3 flex flex-wrap gap-3 items-end">
+      <div class="min-w-[240px]">
+        <label for="searchStudentInput" class="block text-xs text-gray-600">Search Students</label>
+        <input type="text" id="searchStudentInput" placeholder="Search by name, admission no, or parent phone" class="border p-2 rounded w-full mt-1"/>
       </div>
+      <div>
+        <label for="studentYearSelect" class="block text-xs text-gray-600">Working Year</label>
+        <select id="studentYearSelect" data-somap-year-select class="border rounded px-2 py-2 text-sm mt-1"></select>
+      </div>
+      <div class="border rounded-lg px-3 py-2 bg-slate-50">
+        <div class="text-xs text-slate-500">Total students (<span id="studentCountYear">--</span>)</div>
+        <div id="studentCount" class="text-lg font-semibold text-slate-800">0</div>
+      </div>
+    </div>
+    <div id="student-list-meta" class="text-xs text-slate-500 mt-3"></div>
+    <div class="overflow-x-auto mt-3">
+      <table class="min-w-full text-sm">
+        <thead>
+          <tr>
+            <th>Admission No</th>
+            <th>Full Name</th>
+            <th>Class</th>
+            <th>Parent Contact</th>
+            <th>Gender</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="student-list"></tbody>
+      </table>
     </div>
   </div>
 
@@ -439,10 +473,12 @@
 
   let editingKey = null;      // When set -> form is in EDIT mode
   let editingStudent = null;  // Currently loaded student object (for keeping old URLs)
+  let isViewMode = false;
 
   if (openModalBtn && modal) {
     openModalBtn.addEventListener('click', function() {
       console.log('Create New Admission button clicked'); // Debug log
+      exitViewMode();
       clearForm();
       document.getElementById('admissionNumber').value = `AUTO-${Date.now()}`;
       openModal();
@@ -468,6 +504,25 @@ function openModal() {
 }
 
   window.somapOpenAdmissionModal = openModal;
+
+  function setFormReadonly(isReadOnly) {
+    if (!form) return;
+    const fields = form.querySelectorAll('input, select, textarea');
+    fields.forEach((field) => {
+      if (field.type === 'file' || field.tagName === 'SELECT') {
+        field.disabled = Boolean(isReadOnly);
+      } else if (field.id !== 'admissionNumber') {
+        field.readOnly = Boolean(isReadOnly);
+      }
+    });
+    if (registerBtn) registerBtn.disabled = Boolean(isReadOnly);
+  }
+
+  function exitViewMode() {
+    isViewMode = false;
+    setFormReadonly(false);
+    if (registerBtn) registerBtn.classList.remove('hidden');
+  }
 
 
   function clearForm() {
@@ -562,6 +617,7 @@ setTimeout(() => {
   function closeRegistrationModal() {
     console.log('Closing modal'); // Debug log
     if (modal) modal.style.display = 'none';
+    exitViewMode();
     clearForm();
     if (registerBtn) registerBtn.disabled = true;
   }
@@ -578,6 +634,7 @@ setTimeout(() => {
   }
   window.currentSchoolId = currentSchool?.id;
   const schoolNameEl = document.getElementById('somapSchoolName');
+  let resolvedSchoolName = null;
   async function resolveSchoolName() {
     const localName =
       (typeof localStorage !== 'undefined' && (localStorage.getItem('somap_school_name') || '')) ||
@@ -596,11 +653,13 @@ setTimeout(() => {
       return schoolId || 'Unknown school';
     }
   }
-  if (schoolNameEl) {
-    resolveSchoolName().then((name) => {
-      schoolNameEl.textContent = name || 'Unknown school';
-    });
-  }
+  resolveSchoolName().then((name) => {
+    resolvedSchoolName = name || 'Unknown school';
+    if (schoolNameEl) {
+      schoolNameEl.textContent = resolvedSchoolName;
+    }
+    if (typeof queueRender === 'function') queueRender();
+  });
 
   function schoolRef(subPath) {
     return db.ref(SOMAP.P(subPath));
@@ -630,6 +689,9 @@ setTimeout(() => {
 
   let cachedStudents = [];
   const cachedStudentsById = new Map();
+  let studentsRaw = {};
+  let admittedRaw = {};
+  const admittedStudentsById = new Map();
   let yearStudents = {};
   let yearStudentsRef = null;
   let shiftReports = {};
@@ -645,6 +707,44 @@ setTimeout(() => {
     renderSearchList(cachedStudents).catch(err => console.error('Render error', err));
   };
   window.somapRenderAdmissionList = queueRender;
+
+  function normalizeAdmittedStudent(key, admitted) {
+    const student = admitted?.student || {};
+    const parent = admitted?.parent || {};
+    return {
+      key,
+      admissionNumber: student.admissionNumber || admitted?.admissionNumber || '',
+      firstName: student.firstName || admitted?.firstName || '',
+      middleName: student.middleName || admitted?.middleName || '',
+      lastName: student.lastName || admitted?.lastName || '',
+      classLevel: student.classLevel || admitted?.classLevel || admitted?.className || '',
+      academicYear: admitted?.academicYear || student.academicYear || admitted?.year || '',
+      primaryParentName: parent.name || admitted?.primaryParentName || '',
+      primaryParentContact: parent.phone || admitted?.primaryParentContact || '',
+      parentPhone: parent.phone || admitted?.primaryParentContact || '',
+      gender: student.gender || admitted?.gender || '',
+      createdAt: admitted?.joinedAt || admitted?.createdAt || null,
+      source: admitted?.source || 'admittedStudents'
+    };
+  }
+
+  function rebuildCachedStudents() {
+    cachedStudentsById.clear();
+    admittedStudentsById.clear();
+    const merged = new Map();
+    Object.entries(admittedRaw || {}).forEach(([key, admitted]) => {
+      const normalized = normalizeAdmittedStudent(key, admitted || {});
+      admittedStudentsById.set(key, normalized);
+      merged.set(key, normalized);
+    });
+    Object.entries(studentsRaw || {}).forEach(([key, student]) => {
+      const admitted = merged.get(key) || admittedStudentsById.get(key) || {};
+      const combined = { key, ...admitted, ...(student || {}) };
+      merged.set(key, combined);
+    });
+    cachedStudents = Array.from(merged.values());
+    cachedStudents.forEach((rec) => cachedStudentsById.set(rec.key, rec));
+  }
 
   function resolveClassForStudentYear(studentKey, fallbackClass, targetYear) {
     const override = yearEnrollments[studentKey] || {};
@@ -1078,15 +1178,15 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
   // ---- Live cache + rendering for search (and edit buttons) ----
   if (db) {
   schoolRef('students').on('value', (snapshot) => {
-      const raw = snapshot.val() || {};
-      cachedStudentsById.clear();
-      cachedStudents = Object.entries(raw).map(([key, s]) => {
-        const rec = { key, ...(s || {}) };
-        cachedStudentsById.set(key, rec);
-        return rec;
-      });
+      studentsRaw = snapshot.val() || {};
+      rebuildCachedStudents();
       queueRender();
-    });
+    }, (err) => console.error('students listener error', err));
+  schoolRef('admittedStudents').on('value', (snapshot) => {
+      admittedRaw = snapshot.val() || {};
+      rebuildCachedStudents();
+      queueRender();
+    }, (err) => console.error('admittedStudents listener error', err));
   db.ref(SHIFT_REPORT_PATH).on('value', (snapshot) => {
       shiftReports = snapshot.exists() ? snapshot.val() : {};
       queueRender();
@@ -1104,9 +1204,9 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
     planLabelCache.clear();
     attachYearEnrollmentListener(newYear);
     attachYearStudentsListener(newYear);
-    const selectEl = document.querySelector('[data-somap-year-select]');
+    const selectEls = Array.from(document.querySelectorAll('[data-somap-year-select]'));
     const hintEl = document.getElementById('somapYearHint');
-    if (selectEl) selectEl.value = String(newYear);
+    selectEls.forEach((el) => { el.value = String(newYear); });
     if (hintEl) hintEl.textContent = String(newYear);
     queueRender();
   });
@@ -1174,26 +1274,40 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
 
   async function renderSearchList(students) {
     const searchList = document.getElementById('student-list');
-    const searchBox = document.getElementById('search-box');
+    const searchBox = document.getElementById('searchStudentInput') || document.getElementById('search-box');
     const listMeta = document.getElementById('student-list-meta');
+    const studentCountEl = document.getElementById('studentCount');
+    const studentCountYearEl = document.getElementById('studentCountYear');
+    const contextLabelEl = document.getElementById('studentListContextLabel');
     if (!searchList) return;
     const term = (searchBox ? searchBox.value || '' : '').toLowerCase().trim();
     const currentYear = String(getWorkingYear());
+    const schoolLabel = resolvedSchoolName || currentSchool?.name || currentSchool?.id || 'Unknown school';
+    if (studentCountYearEl) studentCountYearEl.textContent = currentYear;
+    if (contextLabelEl) contextLabelEl.textContent = `School: ${schoolLabel} | Working year: ${currentYear}`;
+
     const yearScopedStudents = deriveYearScopedStudents();
-    const yearHasEnrollments = yearEnrollments && Object.keys(yearEnrollments).length > 0;
-    const scopedStudents = yearScopedStudents.length
-      ? yearScopedStudents
-      : (yearHasEnrollments
-        ? students.filter((s) => yearEnrollments[s.key])
-        : students.filter((s) => !s.academicYear || String(s.academicYear) === currentYear));
+    const mergedScoped = new Map();
+    (students || []).forEach((s) => {
+      if (s && s.key) mergedScoped.set(s.key, s);
+    });
+    yearScopedStudents.forEach((s) => {
+      if (!s || !s.key) return;
+      const base = mergedScoped.get(s.key) || {};
+      mergedScoped.set(s.key, { ...base, ...s });
+    });
+    const scopedStudents = Array.from(mergedScoped.values());
     const filtered = !term ? scopedStudents : scopedStudents.filter((s) => {
       const full = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.toLowerCase();
+      const parent = String(s.primaryParentContact || s.parentPhone || '').toLowerCase();
       return (
         full.includes(term) ||
         (String(s.pupilId || '').toLowerCase().includes(term)) ||
-        (String(s.admissionNumber || '').toLowerCase().includes(term))
+        (String(s.admissionNumber || '').toLowerCase().includes(term)) ||
+        parent.includes(term)
       );
     });
+    if (studentCountEl) studentCountEl.textContent = String(scopedStudents.length);
     if (listMeta) {
       const total = scopedStudents.length;
       const matches = filtered.length;
@@ -1202,9 +1316,14 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
         ? `${totalLabel} registered for ${currentYear}. Showing ${matches} match(es).`
         : `${totalLabel} registered for ${currentYear}.`;
     }
+
     searchList.innerHTML = '';
+    if (!scopedStudents.length) {
+      searchList.innerHTML = '<tr><td colspan="6" class="text-sm text-slate-500">No students found for this school.</td></tr>';
+      return;
+    }
     if (!filtered.length) {
-      searchList.innerHTML = '<div class="text-sm text-slate-500">No students match the current filter or year.</div>';
+      searchList.innerHTML = '<tr><td colspan="6" class="text-sm text-slate-500">No students match the current filter or year.</td></tr>';
       return;
     }
 
@@ -1234,51 +1353,39 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
 
     if (generation !== renderGeneration) return;
 
-    enriched.forEach(({ stu, finance, feeLabel, classLabel, planLabel }) => {
-      const div = document.createElement('div');
-      div.className = 'student-card';
+    const fragment = document.createDocumentFragment();
+    enriched.forEach(({ stu, classLabel }) => {
+      const row = document.createElement('tr');
+      const studentFullName = `${stu.firstName || ''} ${stu.middleName || ''} ${stu.lastName || ''}`.replace(/\s+/g, ' ').trim();
+      const parentContact = stu.primaryParentContact || stu.parentPhone || '';
       const shiftInfo = (shiftReports && shiftReports[stu.key]) ? shiftReports[stu.key] : null;
       const shiftStatus = shiftInfo && shiftInfo.status ? String(shiftInfo.status).toLowerCase() : null;
       const showShiftButton = shiftInfo && shiftStatus !== 'shifted';
-      const shiftButtonHtml = showShiftButton ? `<button class="btn shift-btn bg-amber-100 text-amber-800 px-3 py-1 rounded" data-key="${stu.key}">Shift</button>` : '';
-      const shiftSummaryHtml = shiftInfo ? `
-        <div class="mt-2 text-xs ${shiftStatus === 'shifted' ? 'text-emerald-600' : 'text-amber-600'}">
-          Shift status: ${escapeHtml((shiftStatus || 'pending').toUpperCase())}
-          ${shiftInfo.flaggedAbsences ? ` • ${escapeHtml(String(shiftInfo.flaggedAbsences))} absent days` : ''}
-          ${shiftInfo.dateShifted ? ` • Date: ${escapeHtml(shiftInfo.dateShifted)}` : ''}
-          ${shiftInfo.reason ? ` • Reason: ${escapeHtml(shiftInfo.reason)}` : ''}
-        </div>
-      ` : '';
-      const studentFullName = `${stu.firstName || ''} ${stu.middleName || ''} ${stu.lastName || ''}`.replace(/\s+/g, ' ').trim();
-      const planDisplay = planLabel || (finance.planId ? finance.planId : 'Class default');
-      div.innerHTML = `
-        <div class="flex justify-between items-start">
-          <div>
-            <strong>${escapeHtml(studentFullName || 'Unnamed Student')}</strong><br>
-            Admission: ${escapeHtml(stu.admissionNumber || stu.pupilId || 'N/A')}<br>
-            Class (${escapeHtml(String(currentYear))}): ${escapeHtml(classLabel || 'N/A')}<br>
-            Fee (${escapeHtml(String(currentYear))}): ${escapeHtml(feeLabel)}<br>
-            Plan: ${escapeHtml(planDisplay)}
-          </div>
-          <div class="flex gap-2">
-            <button class="btn edit-btn bg-yellow-100 text-yellow-800 px-3 py-1 rounded" data-key="${stu.key}">Edit</button>
-            <button class="btn delete-btn bg-red-100 text-red-800 px-3 py-1 rounded" data-key="${stu.key}">Delete</button>
+      const shiftButtonHtml = showShiftButton ? `<button class="btn shift-btn bg-amber-100 text-amber-800 px-2 py-1 rounded text-xs" data-key="${stu.key}">Shift</button>` : '';
+      row.innerHTML = `
+        <td>${escapeHtml(stu.admissionNumber || stu.pupilId || 'N/A')}</td>
+        <td>${escapeHtml(studentFullName || 'Unnamed Student')}</td>
+        <td>${escapeHtml(classLabel || 'N/A')}</td>
+        <td>${escapeHtml(parentContact || 'N/A')}</td>
+        <td>${escapeHtml(stu.gender || 'N/A')}</td>
+        <td>
+          <div class="flex flex-wrap gap-2">
+            <button class="btn view-btn bg-slate-100 text-slate-800 px-2 py-1 rounded text-xs" data-key="${stu.key}">View</button>
+            <button class="btn edit-btn bg-yellow-100 text-yellow-800 px-2 py-1 rounded text-xs" data-key="${stu.key}">Edit</button>
+            <button class="btn delete-btn bg-red-100 text-red-800 px-2 py-1 rounded text-xs" data-key="${stu.key}">Delete</button>
             ${shiftButtonHtml}
           </div>
-        </div>
-        ${stu.passportPhotoUrl ? `<img src="${stu.passportPhotoUrl}" alt="Passport" style="width:80px; height:80px; margin-top:8px; border-radius:6px;" />` : ''}
-        <div style="margin-top:6px;">
-          ${stu.birthCertUrl ? `<a href="${stu.birthCertUrl}" download target="_blank" class="text-indigo-600 hover:underline">Birth Cert</a> | ` : ''}
-          ${stu.reportCardUrl ? `<a href="${stu.reportCardUrl}" download target="_blank" class="text-indigo-600 hover:underline">Report Card</a> | ` : ''}
-          ${stu.joiningLetterUrl ? `<a href="${stu.joiningLetterUrl}" download target="_blank" class="text-indigo-600 hover:underline">Joining Letter</a> | ` : ''}
-          ${stu.medicalDocsUrl ? `<a href="${stu.medicalDocsUrl}" download target="_blank" class="text-indigo-600 hover:underline">Medical Docs</a>` : ''}
-        </div>
-        ${shiftSummaryHtml}
+        </td>
       `;
-      searchList.appendChild(div);
+      fragment.appendChild(row);
     });
+    searchList.appendChild(fragment);
 
-    // Attach listeners to edit/delete buttons with password check
+    // Attach listeners to view/edit/delete buttons with password check
+    document.querySelectorAll('.view-btn').forEach(btn => btn.addEventListener('click', (e) => {
+      const key = e.currentTarget.getAttribute('data-key');
+      startViewForKey(key);
+    }));
     document.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', (e) => {
       const key = e.currentTarget.getAttribute('data-key');
       if (restrictAction('Edit')) {
@@ -1305,8 +1412,23 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
   }
 
   // Search input
-  const searchBox = document.getElementById('search-box');
+  const searchBox = document.getElementById('searchStudentInput') || document.getElementById('search-box');
   if (searchBox) searchBox.addEventListener('input', queueRender);
+
+  // ---- View / Edit flow ----
+  function startViewForKey(key) {
+    const student = cachedStudents.find(s => s.key === key);
+    if (!student) return alert('Student not found locally. Please refresh.');
+    editingKey = key;
+    editingStudent = student;
+    isViewMode = true;
+    setFormReadonly(true);
+    if (registerBtn) registerBtn.classList.add('hidden');
+    if (cancelEditBtn) cancelEditBtn.classList.add('hidden');
+    modalTitle.textContent = 'View Student - ' + (student.firstName || '') + ' ' + (student.lastName || '');
+    populateFormWithStudent(student);
+    openModal();
+  }
 
   // ---- Edit flow ----
   function startEditForKey(key) {
@@ -1314,6 +1436,7 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
     if (!student) return alert('Student not found locally. Please refresh.');
     editingKey = key;
     editingStudent = student;
+    exitViewMode();
     document.getElementById('recordKey').value = key;
     modalTitle.textContent = 'Edit Student — ' + (student.firstName || '') + ' ' + (student.lastName || '');
     registerBtn.textContent = 'Save Changes';
@@ -1325,6 +1448,7 @@ const filesOk = editingKey || fromJoin ? true : requiredFiles.every(id => {
 
   if (cancelEditBtn) {
     cancelEditBtn.addEventListener('click', () => {
+      exitViewMode();
       clearForm();
       modal.style.display = 'none';
     });
@@ -1573,4 +1697,5 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 </body>
 </html>
+
 
