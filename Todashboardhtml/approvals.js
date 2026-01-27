@@ -14,24 +14,16 @@
     }
     return String(new Date().getFullYear());
   };
-  const resolveSchoolId = () => {
-    if (window.SOMAP && typeof SOMAP.getSchool === 'function') {
-      const school = SOMAP.getSchool();
-      if (school && school.id) return school.id;
-    }
-    try {
-      return localStorage.getItem('somap.currentSchoolId') || '';
-    } catch (_) {
-      return '';
-    }
-  };
-  const schoolId = resolveSchoolId();
-  const isSocratesSchool = schoolId === 'socrates-school' || schoolId === 'default';
   const normalizePath = (subPath) => String(subPath || '').replace(/^\/+/, '');
+  const isSocratesSchool = () => {
+    const id = resolveSchoolId();
+    return id === 'socrates-school' || id === 'default';
+  };
   const P = (subPath) => {
     const trimmed = normalizePath(subPath);
-    if (!schoolId) return trimmed;
-    return `schools/${schoolId}/${trimmed}`;
+    const id = resolveSchoolId();
+    if (!id) return trimmed;
+    return `schools/${id}/${trimmed}`;
   };
   const sref = (subPath) => firebase.database().ref(P(subPath));
   const legacyRef = (subPath) => firebase.database().ref(normalizePath(subPath));
@@ -103,11 +95,11 @@
         balance: document.getElementById('friday-balance'),
         pending: document.getElementById('friday-pending-count'),
       },
-      joining: {
+      admission: {
         required: null,
-        approved: document.getElementById('joining-approved'),
-        balance: document.getElementById('joining-balance'),
-        pending: document.getElementById('joining-pending-count'),
+        approved: document.getElementById('admission-approved'),
+        balance: document.getElementById('admission-balance'),
+        pending: document.getElementById('admission-pending-count'),
       },
     },
   };
@@ -134,7 +126,7 @@
       prefonefinance: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       graduation: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       fridaymoney: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
-      joining: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
+      admission: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
     },
     unsubPending: null,
     historyMonthOptions: [],
@@ -396,7 +388,7 @@
       state.unsubPending = null;
     }
     const ref = sref('approvalsPending');
-    const legacy = isSocratesSchool ? legacyRef('approvalsPending') : null;
+    const legacy = isSocratesSchool() ? legacyRef('approvalsPending') : null;
     let scopedSnap = null;
     let legacySnap = null;
     const hasEntries = (snap) => {
@@ -1253,7 +1245,7 @@
   async function loadHistorySnapshot() {
     let snapshot = await sref('approvalsHistory').once('value');
     let tree = snapshot.val() || {};
-    if (isSocratesSchool) {
+    if (isSocratesSchool()) {
       const hasEntries = tree && Object.keys(tree).length > 0;
       if (!hasEntries) {
         const legacySnap = await legacyRef('approvalsHistory').once('value');
@@ -1378,7 +1370,7 @@
       prefonefinance: { count: 0, amount: 0 },
       graduation: { count: 0, amount: 0 },
       fridaymoney: { count: 0, amount: 0 },
-      joining: { count: 0, amount: 0 },
+      admission: { count: 0, amount: 0 },
     };
 
     state.pendingList.forEach((row) => {
@@ -1405,7 +1397,7 @@
       computePrefoneSummary(),
       computeGraduationSummary(),
       computeFridaySummary(),
-      computeJoiningSummary(),
+      computeAdmissionSummary(),
     ]);
   }
 
@@ -1549,20 +1541,32 @@
     updateSummaryCard('fridaymoney', { required: collected, approved, balance: pendingTotal });
   }
 
-  async function computeJoiningSummary() {
-    const schoolId = resolveSchoolId();
+  async function computeAdmissionSummary() {
     const year = state.selectedYear || getContextYear();
-    const snap = await db.ref(`schools/${schoolId}/joiningApplications/${year}`).once('value');
-    const data = snap.val() || {};
-    let approved = 0;
-    Object.values(data).forEach((app) => {
-      if (!app) return;
-      if (app.paymentVerificationStatus === 'verified') {
-        approved += Number(app.joiningFeeAmount || 0);
+    let tree = {};
+    try {
+      const snap = await sref(`approvalsHistory/${year}`).once('value');
+      tree = snap.val() || {};
+      if (isSocratesSchool()) {
+        const hasEntries = tree && Object.keys(tree).length > 0;
+        if (!hasEntries) {
+          const legacySnap = await legacyRef(`approvalsHistory/${year}`).once('value');
+          tree = legacySnap.val() || {};
+        }
       }
+    } catch (err) {
+      console.warn('Approvals: admission summary load failed', err);
+      tree = {};
+    }
+    let approved = 0;
+    Object.values(tree || {}).forEach((records) => {
+      Object.values(records || {}).forEach((entry) => {
+        if (!entry || entry.sourceModule !== 'admission') return;
+        approved += Number(entry.amountPaidNow || 0);
+      });
     });
-    const balance = Math.max(0, state.summary.joining.pendingAmount);
-    updateSummaryCard('joining', { required: 0, approved, balance });
+    const balance = Math.max(0, state.summary.admission.pendingAmount);
+    updateSummaryCard('admission', { required: 0, approved, balance });
   }
 
   function updateSummaryCard(module, { required, approved, balance }) {
