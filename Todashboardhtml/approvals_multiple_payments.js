@@ -22,7 +22,29 @@
   }
 
   const financeHelpers = window.SOMAP_FINANCE || {};
-  const P = (subPath) => (window.SOMAP && typeof window.SOMAP.P === 'function' ? window.SOMAP.P(subPath) : subPath);
+  const normalizePath = (subPath) => String(subPath || '').replace(/^\/+/, '');
+  const resolveSchoolId = () => {
+    if (window.SOMAP && typeof window.SOMAP.getSchool === 'function') {
+      const school = window.SOMAP.getSchool();
+      if (school && school.id) return school.id;
+    }
+    try {
+      return localStorage.getItem('somap.currentSchoolId') || '';
+    } catch (_) {
+      return '';
+    }
+  };
+  const isSocratesSchool = () => {
+    const id = resolveSchoolId();
+    return id === 'socrates-school' || id === 'default';
+  };
+  const P = (subPath) => {
+    const trimmed = normalizePath(subPath);
+    const id = resolveSchoolId();
+    if (!id) return trimmed;
+    return `schools/${id}/${trimmed}`;
+  };
+  const legacyRef = (subPath) => db.ref(normalizePath(subPath));
 
   let currentGroups = [];
 
@@ -165,32 +187,37 @@
   }
 
   async function fetchPending(year) {
-    const snap = await db.ref(P('approvalsPending')).once('value');
-    if (!snap.exists()) return [];
-    const list = [];
-    snap.forEach((child) => {
-      list.push(
-        toRowModel(child.val() || {}, 'pending', {
-          id: child.key,
-          path: P(`approvalsPending/${child.key}`),
-          year,
-        })
-      );
-    });
-    return list;
+    let snap = await db.ref(P('approvalsPending')).once('value');
+    let data = snap.val() || {};
+    if (isSocratesSchool() && (!data || Object.keys(data).length === 0)) {
+      const legacySnap = await legacyRef('approvalsPending').once('value');
+      data = legacySnap.val() || {};
+    }
+    if (!data || Object.keys(data).length === 0) return [];
+    return Object.entries(data).map(([key, value]) =>
+      toRowModel(value || {}, 'pending', {
+        id: key,
+        path: P(`approvalsPending/${key}`),
+        year,
+      })
+    );
   }
 
   async function fetchHistory(year) {
-    const yearSnap = await db.ref(P('approvalsHistory')).child(String(year)).once('value');
-    if (!yearSnap.exists()) return [];
+    let yearSnap = await db.ref(P('approvalsHistory')).child(String(year)).once('value');
+    let yearTree = yearSnap.val() || {};
+    if (isSocratesSchool() && (!yearTree || Object.keys(yearTree).length === 0)) {
+      const legacySnap = await legacyRef('approvalsHistory').child(String(year)).once('value');
+      yearTree = legacySnap.val() || {};
+    }
+    if (!yearTree || Object.keys(yearTree).length === 0) return [];
     const list = [];
-    yearSnap.forEach((monthNode) => {
-      const monthKey = monthNode.key;
-      monthNode.forEach((entry) => {
+    Object.entries(yearTree).forEach(([monthKey, records]) => {
+      Object.entries(records || {}).forEach(([entryKey, entry]) => {
         list.push(
-          toRowModel(entry.val() || {}, 'history', {
-            id: entry.key,
-            path: P(`approvalsHistory/${year}/${monthKey}/${entry.key}`),
+          toRowModel(entry || {}, 'history', {
+            id: entryKey,
+            path: P(`approvalsHistory/${year}/${monthKey}/${entryKey}`),
             year,
             month: monthKey,
           })
