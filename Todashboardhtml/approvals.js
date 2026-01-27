@@ -14,19 +14,27 @@
     }
     return String(new Date().getFullYear());
   };
-  const P = (subPath) => {
-    if (window.SOMAP && typeof SOMAP.P === 'function') return SOMAP.P(subPath);
-    const trimmed = String(subPath || '').replace(/^\/+/, '');
-    let schoolId = '';
-    try {
-      schoolId = localStorage.getItem('somap.currentSchoolId') || '';
-    } catch (_) {
-      schoolId = '';
+  const resolveSchoolId = () => {
+    if (window.SOMAP && typeof SOMAP.getSchool === 'function') {
+      const school = SOMAP.getSchool();
+      if (school && school.id) return school.id;
     }
-    if (!schoolId || schoolId === 'socrates-school') return trimmed;
+    try {
+      return localStorage.getItem('somap.currentSchoolId') || '';
+    } catch (_) {
+      return '';
+    }
+  };
+  const schoolId = resolveSchoolId();
+  const isSocratesSchool = schoolId === 'socrates-school' || schoolId === 'default';
+  const normalizePath = (subPath) => String(subPath || '').replace(/^\/+/, '');
+  const P = (subPath) => {
+    const trimmed = normalizePath(subPath);
+    if (!schoolId) return trimmed;
     return `schools/${schoolId}/${trimmed}`;
   };
   const sref = (subPath) => firebase.database().ref(P(subPath));
+  const legacyRef = (subPath) => firebase.database().ref(normalizePath(subPath));
   const MODULE_LABELS = {
     finance: 'School Fees',
     transport: 'Transport',
@@ -388,8 +396,20 @@
       state.unsubPending = null;
     }
     const ref = sref('approvalsPending');
-    const handler = (snapshot) => {
-      state.pending = snapshot.val() || {};
+    const legacy = isSocratesSchool ? legacyRef('approvalsPending') : null;
+    let scopedSnap = null;
+    let legacySnap = null;
+    const hasEntries = (snap) => {
+      if (!snap || !snap.exists()) return false;
+      const val = snap.val();
+      return val && Object.keys(val).length > 0;
+    };
+    const pickSnapshot = () => (hasEntries(scopedSnap) ? scopedSnap : legacySnap || scopedSnap);
+    const handler = (snapshot, isLegacy) => {
+      if (isLegacy) legacySnap = snapshot;
+      else scopedSnap = snapshot;
+      const effective = pickSnapshot();
+      state.pending = (effective && effective.val()) || {};
       state.pendingList = Object.entries(state.pending).map(([key, value]) => ({
         approvalId: key,
         ...(value || {}),
@@ -397,8 +417,12 @@
       renderPendingTable();
       recomputePendingSummaries();
     };
-    ref.on('value', handler);
-    state.unsubPending = () => ref.off('value', handler);
+    ref.on('value', (snap) => handler(snap, false));
+    if (legacy) legacy.on('value', (snap) => handler(snap, true));
+    state.unsubPending = () => {
+      ref.off('value');
+      if (legacy) legacy.off('value');
+    };
   }
 
   function renderPendingTable() {
@@ -1227,8 +1251,15 @@
     await firebase.database().ref().update(updates);
   }
   async function loadHistorySnapshot() {
-    const snapshot = await sref('approvalsHistory').once('value');
-    const tree = snapshot.val() || {};
+    let snapshot = await sref('approvalsHistory').once('value');
+    let tree = snapshot.val() || {};
+    if (isSocratesSchool) {
+      const hasEntries = tree && Object.keys(tree).length > 0;
+      if (!hasEntries) {
+        const legacySnap = await legacyRef('approvalsHistory').once('value');
+        tree = legacySnap.val() || {};
+      }
+    }
     const entries = [];
 
     Object.entries(tree).forEach(([year, months]) => {
