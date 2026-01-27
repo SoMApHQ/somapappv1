@@ -272,6 +272,13 @@
         return db.ref(legacyPath);
       };
 
+      const mergeSnapshots = (scopedSnap, legacySnap) => {
+        if (!isSocrates) return scopedSnap?.val?.() || {};
+        const scopedVal = scopedSnap && scopedSnap.exists() ? (scopedSnap.val() || {}) : {};
+        const legacyVal = legacySnap && legacySnap.exists() ? (legacySnap.val() || {}) : {};
+        return { ...legacyVal, ...scopedVal };
+      };
+
       const elements = {
         listBody: document.getElementById('studentListBody'),
         schoolReportBody: document.getElementById('schoolReportBody'),
@@ -308,8 +315,13 @@
         latestYear: getWorkingYear(),
         renderToken: 0,
         yearEnrollRef: null,
+        legacyYearEnrollRef: null,
+        anchorEnrollRef: null,
+        legacyAnchorEnrollRef: null,
         ledgerRef: null,
+        legacyLedgerRef: null,
         studentsRef: null,
+        legacyStudentsRef: null,
       };
       const queueRender = () => {
         renderAllTables().catch((err) => console.error('Render error', err));
@@ -377,30 +389,71 @@
         if (state.yearEnrollRef) state.yearEnrollRef.off();
         if (state.ledgerRef) state.ledgerRef.off();
 
-        state.yearEnrollRef = await pickRefWithLegacy(`enrollments/${yearStr}`, `enrollments/${yearStr}`);
+        const scopedYearEnrollRef = schoolRef(`enrollments/${yearStr}`);
+        const legacyYearEnrollRef = isSocrates ? db.ref(`enrollments/${yearStr}`) : null;
+        if (state.yearEnrollRef) state.yearEnrollRef.off();
+        if (state.legacyYearEnrollRef) state.legacyYearEnrollRef.off();
+        state.yearEnrollRef = scopedYearEnrollRef;
+        state.legacyYearEnrollRef = legacyYearEnrollRef;
         state.yearEnrollRef.on('value', (snap) => {
-          state.yearEnrollments = snap.val() || {};
+          state.yearEnrollRef._lastSnap = snap;
+          state.yearEnrollments = mergeSnapshots(snap, state.legacyYearEnrollRef?._lastSnap);
           queueRender();
         });
+        if (state.legacyYearEnrollRef) {
+          state.legacyYearEnrollRef.on('value', (snap) => {
+            state.legacyYearEnrollRef._lastSnap = snap;
+            state.yearEnrollments = mergeSnapshots(state.yearEnrollRef?._lastSnap, snap);
+            queueRender();
+          });
+        }
 
-        state.ledgerRef = await pickRefWithLegacy(`financeLedgers/${yearStr}`, `financeLedgers/${yearStr}`);
+        const scopedLedgerRef = schoolRef(`financeLedgers/${yearStr}`);
+        const legacyLedgerRef = isSocrates ? db.ref(`financeLedgers/${yearStr}`) : null;
+        if (state.ledgerRef) state.ledgerRef.off();
+        if (state.legacyLedgerRef) state.legacyLedgerRef.off();
+        state.ledgerRef = scopedLedgerRef;
+        state.legacyLedgerRef = legacyLedgerRef;
         state.ledgerRef.on('value', (snap) => {
-          state.ledger = snap.val() || {};
+          state.ledgerRef._lastSnap = snap;
+          state.ledger = mergeSnapshots(snap, state.legacyLedgerRef?._lastSnap);
           queueRender();
         });
+        if (state.legacyLedgerRef) {
+          state.legacyLedgerRef.on('value', (snap) => {
+            state.legacyLedgerRef._lastSnap = snap;
+            state.ledger = mergeSnapshots(state.ledgerRef?._lastSnap, snap);
+            queueRender();
+          });
+        }
       }
 
       (async () => {
         try {
-          state.studentsRef = await pickRefWithLegacy('students', 'students');
-          state.studentsRef.on('value', (snapshot) => {
-            const raw = snapshot.val() || {};
+          const scopedRef = schoolRef('students');
+          const legacyRef = isSocrates ? db.ref('students') : null;
+          if (state.studentsRef) state.studentsRef.off();
+          if (state.legacyStudentsRef) state.legacyStudentsRef.off();
+          state.studentsRef = scopedRef;
+          state.legacyStudentsRef = legacyRef;
+          const updateStudents = () => {
+            const merged = mergeSnapshots(state.studentsRef?._lastSnap, state.legacyStudentsRef?._lastSnap);
             state.students.clear();
-            Object.entries(raw).forEach(([key, value]) => {
+            Object.entries(merged).forEach(([key, value]) => {
               state.students.set(key, { key, ...(value || {}) });
             });
             queueRender();
+          };
+          state.studentsRef.on('value', (snapshot) => {
+            state.studentsRef._lastSnap = snapshot;
+            updateStudents();
           });
+          if (state.legacyStudentsRef) {
+            state.legacyStudentsRef.on('value', (snapshot) => {
+              state.legacyStudentsRef._lastSnap = snapshot;
+              updateStudents();
+            });
+          }
         } catch (err) {
           console.error('Failed to attach students listener', err);
         }
@@ -408,11 +461,26 @@
 
       (async () => {
         try {
-          const anchorRef = await pickRefWithLegacy(`enrollments/${SOMAP_DEFAULT_YEAR}`, `enrollments/${SOMAP_DEFAULT_YEAR}`);
-          anchorRef.on('value', (snapshot) => {
-            state.anchorEnrollments = snapshot.val() || {};
+          const scopedAnchorRef = schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`);
+          const legacyAnchorRef = isSocrates ? db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`) : null;
+          if (state.anchorEnrollRef) state.anchorEnrollRef.off();
+          if (state.legacyAnchorEnrollRef) state.legacyAnchorEnrollRef.off();
+          state.anchorEnrollRef = scopedAnchorRef;
+          state.legacyAnchorEnrollRef = legacyAnchorRef;
+          const updateAnchor = () => {
+            state.anchorEnrollments = mergeSnapshots(state.anchorEnrollRef?._lastSnap, state.legacyAnchorEnrollRef?._lastSnap);
             queueRender();
+          };
+          state.anchorEnrollRef.on('value', (snapshot) => {
+            state.anchorEnrollRef._lastSnap = snapshot;
+            updateAnchor();
           });
+          if (state.legacyAnchorEnrollRef) {
+            state.legacyAnchorEnrollRef.on('value', (snapshot) => {
+              state.legacyAnchorEnrollRef._lastSnap = snapshot;
+              updateAnchor();
+            });
+          }
         } catch (err) {
           console.error('Failed to attach anchor enrollment listener', err);
         }
