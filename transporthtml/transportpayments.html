@@ -9,7 +9,9 @@
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
+    <script src="../somapappv1multischool/js/context.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="../Todashboardhtml/yearContext.js"></script>
     <script>
       const firebaseConfig = {
         apiKey: "AIzaSyBhONntRE_aRsU0y1YcPZzWud3CBfwH_a8",
@@ -27,7 +29,7 @@
     <div id="contextBar" class="bar">
       <div>
         <h1>💰 Transport Payments & Debt Management</h1>
-        <small>Comprehensive payment tracking and debt monitoring</small>
+        <small>Comprehensive payment tracking and debt monitoring Â· <span id="schoolNameDisplay">â€”</span></small>
       </div>
       <div class="context-selectors">
         <div class="date-time-display">
@@ -39,7 +41,6 @@
           <select id="yearSelect" data-somap-year-select data-somap-year-min="2023" data-somap-year-max="2042" style="min-width: 100px; padding: 0.5rem;">
           </select>
         </div>
-        <script src="../Todashboardhtml/yearContext.js"></script>
         <a id="backButton" href="transport.html" class="btn secondary">← Back to Dashboard</a>
       </div>
     </div>
@@ -340,14 +341,129 @@
     <script src="./modules/transport_helpers.js"></script>
     <script src="./modules/transport_pricing.js"></script>
     <script>
+      const db = firebase.database();
+      const currentSchool = window.SOMAP?.getSchool?.();
+      if (!currentSchool || !currentSchool.id) {
+        window.location.href = '../somapappv1multischool/multischool.html';
+      }
+      const schoolId = currentSchool?.id || '';
+      const schoolName = currentSchool?.name || schoolId;
+      const isSocratesSchool = (id) => id === 'socrates-school' || id === 'default';
+
+      function schoolSubPath(subPath) {
+        const clean = String(subPath || '').replace(/^\/+/, '');
+        return isSocratesSchool(schoolId) ? `schools/${schoolId}/${clean}` : clean;
+      }
+
+      function schoolRef(subPath) {
+        return db.ref(window.SOMAP.P(schoolSubPath(subPath)));
+      }
+
+      async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
+        const scopedRef = schoolRef(scopedSubPath);
+        if (!isSocratesSchool(schoolId) || !legacyPath) return scopedRef.once('value');
+        const scopedSnap = await scopedRef.once('value');
+        if (scopedSnap.exists()) return scopedSnap;
+        return db.ref(legacyPath).once('value');
+      }
+
+      function schoolPath(subPath) {
+        return window.SOMAP.P(schoolSubPath(subPath));
+      }
+
+      function maybeAutoAdvanceYear() {
+        const ctx = window.somapYearContext;
+        if (!ctx || typeof ctx.getSelectedYear !== 'function') return;
+        const current = String(new Date().getFullYear());
+        const selected = String(ctx.getSelectedYear());
+        if (Number(current) > Number(selected)) {
+          if (typeof ctx.resetToCurrentYear === 'function') {
+            ctx.resetToCurrentYear();
+          } else if (typeof ctx.setSelectedYear === 'function') {
+            ctx.setSelectedYear(current, { manual: false, forceDispatch: true });
+          }
+        }
+      }
+
+      const CLASS_ORDER = ['Baby Class', 'Middle Class', 'Pre Unit Class', 'Class 1', 'Class 2', 'Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7'];
+      function shiftClass(baseClass, deltaYears) {
+        const normalized = String(baseClass || '').trim();
+        const idx = CLASS_ORDER.findIndex(c => c.toLowerCase() === normalized.toLowerCase());
+        if (idx < 0) return baseClass || '';
+        const newIdx = idx + Number(deltaYears || 0);
+        if (newIdx < 0) return 'PRE-ADMISSION';
+        if (newIdx >= CLASS_ORDER.length) return 'GRADUATED';
+        return CLASS_ORDER[newIdx];
+      }
+
+      async function maybeRunRollover() {
+        const systemYear = String(new Date().getFullYear());
+        const flagRef = schoolRef(`meta/rolloverDone/${systemYear}`);
+        try {
+          const flagSnap = await flagRef.get();
+          if (flagSnap.exists()) return;
+          const previousYear = String(Number(systemYear) - 1);
+          const prevEnrollSnap = await scopedOrSocratesLegacy(`years/${previousYear}/enrollments`, `enrollments/${previousYear}`);
+          const prevEnrollments = prevEnrollSnap.val() || {};
+          const nowIso = new Date().toISOString();
+          const updates = {};
+
+          Object.entries(prevEnrollments).forEach(([studentKey, record]) => {
+            const baseClass = (record && (record.className || record.classLevel)) || '';
+            const nextClass = shiftClass(baseClass, 1);
+            if (nextClass === 'GRADUATED') {
+              updates[schoolPath(`years/${systemYear}/graduated/${studentKey}`)] = {
+                className: baseClass || 'Class 7',
+                promotedAt: nowIso,
+                fromYear: Number(previousYear)
+              };
+              updates[schoolPath(`years/${systemYear}/enrollments/${studentKey}`)] = {
+                className: 'GRADUATED',
+                promotedFrom: baseClass || 'Class 7',
+                fromYear: Number(previousYear),
+                at: firebase.database.ServerValue.TIMESTAMP
+              };
+            } else {
+              updates[schoolPath(`years/${systemYear}/enrollments/${studentKey}`)] = {
+                className: nextClass,
+                promotedFrom: baseClass,
+                fromYear: Number(previousYear),
+                at: firebase.database.ServerValue.TIMESTAMP
+              };
+            }
+          });
+
+          updates[schoolPath(`meta/rolloverDone/${systemYear}`)] = true;
+          await db.ref().update(updates);
+        } catch (err) {
+          console.warn('Year rollover skipped/failed:', err);
+        }
+      }
+
+      const schoolNameDisplay = document.getElementById('schoolNameDisplay');
+      if (schoolNameDisplay) schoolNameDisplay.textContent = schoolName || '—';
+
+      // Allow deep links to set the active year via the shared helper
+      (function syncYearFromUrl() {
+        const params = new URLSearchParams(window.location.search);
+        const y = parseInt(params.get('year'), 10);
+        if (Number.isFinite(y) && window.somapYearContext?.setSelectedYear) {
+          window.somapYearContext.setSelectedYear(String(y), { manual: false, forceDispatch: true });
+        }
+      })();
+
       // Global State
-      const context = TransportContext.getContext();
       const state = {
         user: null,
         role: null,
-        year: context.year || new Date().getFullYear(),
-        month: context.month || new Date().getMonth() + 1,
-        school: context.school || "socrates",
+        year: (() => {
+          const rawYear = window.somapYearContext?.getSelectedYear?.();
+          const parsed = parseInt(rawYear, 10);
+          return Number.isFinite(parsed) ? parsed : new Date().getFullYear();
+        })(),
+        month: new Date().getMonth() + 1,
+        schoolId,
+        schoolName,
         students: {},
         transportEnrollments: {},
         financeData: {},
@@ -417,71 +533,10 @@
         return date.toLocaleDateString('en-GB');
       }
 
-      // Class progression helper
-      function shiftClass(baseClass, deltaYears) {
-        const normalized = String(baseClass || '').trim();
-        const idx = CLASS_ORDER.findIndex(c => c.toLowerCase() === normalized.toLowerCase());
-        if (idx < 0) return baseClass || '';
-        const newIdx = idx + Number(deltaYears || 0);
-        if (newIdx < 0) return 'PRE-ADMISSION';
-        if (newIdx >= CLASS_ORDER.length) return 'GRADUATED';
-        return CLASS_ORDER[newIdx];
-      }
-
       // Phone normalization
       function normalizePhone(p) {
         const s = String(p || '').replace(/[\s\-()]/g, '');
         return s.replace(/(?!^\+)[^\d]/g, '');
-      }
-
-      // Resolve school id if a friendly name (e.g., "socrates") is present and set window.currentSchoolId
-      async function resolveSchoolIdIfNeeded() {
-        try {
-          // If already an RTDB id, keep it and set global
-          const looksLikeId = typeof state.school === 'string' && state.school.startsWith('-');
-          if (looksLikeId) {
-            window.currentSchoolId = state.school;
-            return;
-          }
-          const snap = await firebase.database().ref('schools').get();
-          if (!snap.exists()) return;
-          const schools = snap.val() || {};
-          const target = String(state.school || '').toLowerCase().trim();
-          let matchedId = null;
-          Object.keys(schools).some((id) => {
-            const s = schools[id] || {};
-            const slug = String(s.slug || '').toLowerCase();
-            const name = String(s.name || '').toLowerCase();
-            if (slug === target || name === target || id === state.school) { matchedId = id; return true; }
-            if (!matchedId && (name.includes(target) || slug.includes(target))) { matchedId = id; }
-            return false;
-          });
-          if (matchedId) {
-            state.school = matchedId;
-            window.currentSchoolId = matchedId;
-          }
-        } catch (err) {
-          console.warn('Failed to resolve school id', err);
-        }
-      }
-
-      // School prefix helper
-      function currentSchoolPrefix() {
-        return window.currentSchoolId ? `schools/${window.currentSchoolId}/` : '';
-      }
-
-      async function fetchWithSchoolFallback(path) {
-        const db = firebase.database();
-        const prefix = currentSchoolPrefix();
-        if (prefix) {
-          try {
-            const scoped = await db.ref(`${prefix}${path}`).once('value');
-            if (scoped.exists()) return scoped;
-          } catch (err) {
-            console.warn('Scoped fetch failed, using global path for', path, err);
-          }
-        }
-        return db.ref(path).once('value');
       }
 
       const toast = document.getElementById("toast");
@@ -926,7 +981,7 @@
         const enrollmentStart = resolveStartDate(enrollment);
 
         try {
-          const assignSnap = await fetchWithSchoolFallback(`transportAssignments/${year}/${studentId}`);
+          const assignSnap = await scopedOrSocratesLegacy(`years/${year}/transportAssignments/${studentId}`, `transportAssignments/${year}/${studentId}`);
           const assign = assignSnap.val();
           
           if (assign && assign.status === 'Using') {
@@ -1053,7 +1108,7 @@
           // Convert payment date to timestamp (local timezone - Africa/Nairobi)
           const paidAt = new Date(paymentDate + 'T12:00:00').getTime();
           const timestamp = Date.now();
-          const pendingRef = firebase.database().ref('approvalsPending').push();
+          const pendingRef = schoolRef('approvalsPending').push();
           const monthName = MONTH_NAMES[month] || `Month ${month}`;
           const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim();
           const totalRequired = Number(status.totalExpected || 0);
@@ -1061,10 +1116,8 @@
           const newBalance = Math.max(0, totalRequired - Math.min(totalRequired, totalPaidBefore + amount));
 
           // Also write to transport ledger as pending (for parent view and history)
-          const db = firebase.database();
           const yearStr = String(state.year);
-          const prefix = window.currentSchoolId ? `schools/${window.currentSchoolId}/` : '';
-          const payRef = db.ref(`${prefix}transportLedgers/${yearStr}/${studentId}/payments`).push();
+          const payRef = schoolRef(`years/${yearStr}/transportLedgers/${studentId}/payments`).push();
           
           const paymentData = {
             month: monthName,
@@ -1096,10 +1149,10 @@
             status: 'pending',
             createdAt: timestamp
           };
-          await db.ref(`transportPayments/${yearStr}/${studentId}`).push(canonical);
+          await schoolRef(`years/${yearStr}/transportPayments/${studentId}`).push(canonical);
           
           // Queue for approval - include payment key for matching
-          const queueRef = db.ref(`${prefix}pendingApprovals/transportPayments/${payRef.key}`);
+          const queueRef = schoolRef(`pendingApprovals/transportPayments/${payRef.key}`);
           await queueRef.set({
             year: yearStr,
             studentId,
@@ -1187,7 +1240,7 @@
         // Load transport assignment to get start date
         const year = String(state.year);
         try {
-          const assignSnap = await fetchWithSchoolFallback(`transportAssignments/${year}/${studentId}`);
+          const assignSnap = await scopedOrSocratesLegacy(`years/${year}/transportAssignments/${studentId}`, `transportAssignments/${year}/${studentId}`);
           const assign = assignSnap.val();
           const rawStart = assign?.startDate || assign?.start_date || assign?.startTimestamp || assign?.start_time;
           if (rawStart) {
@@ -1214,9 +1267,8 @@
         }
         
         // Also check pendingApprovals to get latest approval status
-        const prefix = currentSchoolPrefix();
         try {
-          const pendingSnap = await firebase.database().ref(`${prefix}pendingApprovals/transportPayments`).once('value');
+          const pendingSnap = await schoolRef('pendingApprovals/transportPayments').once('value');
           const pendingApprovals = pendingSnap.val() || {};
           
           // Create a map of payment keys to approval status
@@ -1233,7 +1285,7 @@
           
           // Also check approvalsHistory for approved payments
           const year = String(state.year);
-          const historySnap = await firebase.database().ref(`approvalsHistory/${year}`).once('value').catch(() => ({ val: () => null }));
+          const historySnap = await scopedOrSocratesLegacy(`years/${year}/approvalsHistory`, `approvalsHistory/${year}`).catch(() => ({ val: () => null }));
           const history = historySnap.val() || {};
           Object.values(history).forEach(months => {
             Object.values(months || {}).forEach(records => {
@@ -1332,7 +1384,7 @@
             year: state.year,
           };
           
-          await firebase.database().ref('transport_expenses').push(expense);
+          await schoolRef(`years/${state.year}/transport_expenses`).push(expense);
           
           showToast('Expense added successfully!');
           document.getElementById('expenseCategory').value = '';
@@ -1427,15 +1479,13 @@
       async function loadAllData() {
         try {
           showToast('Loading transport data...', 'ok');
-          const db = firebase.database();
           const year = String(state.year);
-          const prefix = currentSchoolPrefix();
           
           // STEP 1: Load transport enrollments FIRST (smaller dataset) - this tells us which students to load
           const [legacyEnrollSnap, enrollSnap, assignmentsSnap] = await Promise.all([
-            db.ref(`${prefix}transport_enrollments`).once('value'),
-            db.ref(`${prefix}transportRegistry/${year}`).once('value').catch(() => ({ val: () => null })),
-            fetchWithSchoolFallback(`transportAssignments/${year}`).catch(() => ({ val: () => null }))
+            scopedOrSocratesLegacy(`years/${year}/transportEnrollments`, 'transport_enrollments'),
+            scopedOrSocratesLegacy(`years/${year}/transportRegistry`, `transportRegistry/${year}`).catch(() => ({ val: () => null })),
+            scopedOrSocratesLegacy(`years/${year}/transportAssignments`, `transportAssignments/${year}`).catch(() => ({ val: () => null }))
           ]);
 
           // Build list of student IDs on transport
@@ -1509,7 +1559,7 @@
           for (let i = 0; i < studentIds.length; i += BATCH_SIZE) {
             const batch = studentIds.slice(i, i + BATCH_SIZE);
             const studentPromises = batch.map(id => 
-              db.ref(`${prefix}students/${id}`).once('value').then(snap => ({ id, data: snap.val() }))
+              scopedOrSocratesLegacy(`students/${id}`, `students/${id}`).then(snap => ({ id, data: snap.val() }))
             );
             const students = await Promise.all(studentPromises);
             students.forEach(({ id, data }) => {
@@ -1524,8 +1574,8 @@
           // STEP 3: Load payments ONLY for transport students (year-scoped)
           showToast('Loading payments...', 'ok');
           const [paymentsSnap, legacyPaymentsSnap] = await Promise.all([
-            db.ref(`${prefix}transportLedgers/${year}`).once('value'),
-            db.ref(`${prefix}transport_payments`).once('value').catch(() => ({ val: () => null }))
+            scopedOrSocratesLegacy(`years/${year}/transportLedgers`, `transportLedgers/${year}`),
+            scopedOrSocratesLegacy(`years/${year}/transport_payments`, 'transport_payments').catch(() => ({ val: () => null }))
           ]);
 
           const paymentsData = {};
@@ -1548,7 +1598,7 @@
           state.transportPayments = paymentsData;
 
           // STEP 4: Load expenses (lightweight, can load all)
-          const expensesSnap = await db.ref(`${prefix}transport_expenses`).once('value');
+          const expensesSnap = await scopedOrSocratesLegacy(`years/${year}/transport_expenses`, 'transport_expenses');
           const allExpenses = expensesSnap.val() || {};
           state.expenses = {};
           Object.entries(allExpenses).forEach(([key, exp]) => {
@@ -1581,8 +1631,11 @@
 
       function refreshData() {
         showToast('Refreshing data...');
-        resolveSchoolIdIfNeeded().then(() => loadAllData());
+        loadAllData();
       }
+
+      maybeAutoAdvanceYear();
+      maybeRunRollover();
 
       // Event listeners
       if (yearSelect) {
@@ -1633,7 +1686,6 @@
       async function renderParentTransportPayment(studentId) {
         try {
           const y = String(state.year);
-          const prefix = currentSchoolPrefix();
           
           // Ensure expenses/balance cards are hidden (already done on init, but double-check)
           const expCard = document.getElementById('totalExpenses')?.closest('.stat-card');
@@ -1651,11 +1703,11 @@
         // Load ONLY this specific student's data (fast!)
         // Use same data source as admin view (transportLedgers)
         const [sSnap, enrollSnap, ledSnap, legacySnap, finSnap] = await Promise.all([
-          fetchWithSchoolFallback(`students/${studentId}`),
-          fetchWithSchoolFallback(`transport_enrollments/${studentId}`).catch(() => ({ val: () => null })),
-          fetchWithSchoolFallback(`transportLedgers/${y}/${studentId}/payments`).catch(() => ({ val: () => null })),
-          fetchWithSchoolFallback(`transport_payments/${studentId}`).catch(() => ({ val: () => null })),
-          fetchWithSchoolFallback(`finance/${y}/${studentId}/payments`).catch(() => ({ val: () => null }))
+          scopedOrSocratesLegacy(`students/${studentId}`, `students/${studentId}`),
+          scopedOrSocratesLegacy(`years/${y}/transportEnrollments/${studentId}`, `transport_enrollments/${studentId}`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${y}/transportLedgers/${studentId}/payments`, `transportLedgers/${y}/${studentId}/payments`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${y}/transport_payments/${studentId}`, `transport_payments/${studentId}`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${y}/finance/${studentId}/payments`, `finance/${y}/${studentId}/payments`).catch(() => ({ val: () => null }))
         ]);
         
         const S = sSnap.val() || {};
@@ -1724,12 +1776,12 @@
       async function loadTransportContextStrict(year, studentId){
         const db = firebase.database();
         const [assignSnap, enrollSnap, paysSnap, legacyPaysSnap, financeSnap, studentSnap] = await Promise.all([
-          fetchWithSchoolFallback(`transportAssignments/${year}/${studentId}`),
-          fetchWithSchoolFallback(`transport_enrollments/${studentId}`).catch(() => ({ val: () => null })),
-          fetchWithSchoolFallback(`transportLedgers/${year}/${studentId}/payments`).catch(() => ({ val: () => null })),
-          fetchWithSchoolFallback(`transport_payments/${studentId}`).catch(() => ({ val: () => null })),
-          fetchWithSchoolFallback(`finance/${year}/${studentId}/payments`).catch(() => ({ val: () => null })),
-          fetchWithSchoolFallback(`students/${studentId}`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${year}/transportAssignments/${studentId}`, `transportAssignments/${year}/${studentId}`),
+          scopedOrSocratesLegacy(`years/${year}/transportEnrollments/${studentId}`, `transport_enrollments/${studentId}`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${year}/transportLedgers/${studentId}/payments`, `transportLedgers/${year}/${studentId}/payments`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${year}/transport_payments/${studentId}`, `transport_payments/${studentId}`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${year}/finance/${studentId}/payments`, `finance/${year}/${studentId}/payments`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`students/${studentId}`, `students/${studentId}`).catch(() => ({ val: () => null })),
         ]);
         const assign = assignSnap.val() || null;
         const legacyEnroll = enrollSnap.val() || null;
@@ -1751,9 +1803,8 @@
         const finance = Object.values(financeSnap.val()||{});
         const schoolFeePaid = finance.reduce((a,p)=>a+(Number(p.amount)||0),0);
         const student = studentSnap.val() || {};
-        if (student && student.schoolId && !window.currentSchoolId) {
-          state.school = student.schoolId;
-          window.currentSchoolId = student.schoolId;
+        if (student && student.schoolId) {
+          // School context is managed by SOMAP; do not override here.
         }
         state.students[studentId] = student;
         const existingEnrollment = state.transportEnrollments[studentId] || {};
@@ -1918,11 +1969,10 @@
       const studentParam = urlParams.get('student') || localStorage.getItem('parentFocusStudent');
       const yearParam = urlParams.get('year');
       const monthParam = parseInt(urlParams.get('month'), 10);
-      const schoolParam = urlParams.get('school');
       
       // Initialize year from URL or context
-      if (yearParam) {
-        state.year = parseInt(yearParam) || state.year;
+      if (yearParam && window.somapYearContext?.setSelectedYear) {
+        window.somapYearContext.setSelectedYear(String(parseInt(yearParam, 10)), { manual: false, forceDispatch: true });
       } else if (window.somapYearContext) {
         const currentYear = window.somapYearContext.getSelectedYear();
         if (currentYear) state.year = parseInt(currentYear) || state.year;
@@ -1932,13 +1982,6 @@
         state.monthSelectedFromUrl = true;
       } else {
         state.monthSelectedFromUrl = false;
-      }
-      // Apply school from URL early so data loads under correct scope
-      if (schoolParam) {
-        state.school = schoolParam;
-        if (typeof schoolParam === 'string' && schoolParam.startsWith('-')) {
-          window.currentSchoolId = schoolParam;
-        }
       }
       if (yearSelect && state.year) yearSelect.value = state.year;
       
@@ -1981,7 +2024,7 @@
         if (debtorsBtn) debtorsBtn.style.display = 'none';
         
         // Load and render immediately using strict year-scoped data
-        resolveSchoolIdIfNeeded().then(() => renderYearScopedStudentView(studentParam)).catch(err => {
+        renderYearScopedStudentView(studentParam).catch(err => {
           console.error('Error rendering parent transport payment:', err);
           if (totalExpectedEl) totalExpectedEl.textContent = 'Error';
           if (totalCollectedEl) totalCollectedEl.textContent = 'Error';
@@ -2008,10 +2051,9 @@
         // If explicit school is provided in URL, only load ALL data if no focused student can be resolved
         const schoolParam = urlParams.get('school');
         if (schoolParam) {
-          state.school = schoolParam;
           if (yearSelect && state.year) yearSelect.value = state.year;
           tryLocalFirst().then(found => {
-            if (!found) resolveSchoolIdIfNeeded().then(() => loadAllData());
+            if (!found) loadAllData();
           });
         } else {
         const tryResolveAndRender = async (user) => {
@@ -2029,7 +2071,7 @@
             const phone = (user && user.phoneNumber) ? String(user.phoneNumber).replace(/\D/g,'') : (localStorage.getItem('parentPhone')||'');
             const normPhone = phone ? phone.replace(/\D/g,'') : '';
             if (normPhone) {
-              const snap = await fetchWithSchoolFallback('students');
+              const snap = await scopedOrSocratesLegacy('students', 'students');
               const all = snap.val() || {};
               const matches = Object.entries(all).filter(([k,v]) => {
                 const sp = String(v?.primaryParentContact||v?.parentPhone||'').replace(/\D/g,'');
@@ -2040,7 +2082,7 @@
                 const year = String(state.year);
                 let picked = null;
                 for (const [kid] of matches) {
-                  const a = await fetchWithSchoolFallback(`transportAssignments/${year}/${kid}`);
+                  const a = await scopedOrSocratesLegacy(`years/${year}/transportAssignments/${kid}`, `transportAssignments/${year}/${kid}`);
                   if (a.exists()) { picked = kid; break; }
                 }
                 if (!picked) {
@@ -2073,13 +2115,11 @@
         // Use auth state if available, else attempt without
         const current = firebase.auth().currentUser;
         if (current) {
-          resolveSchoolIdIfNeeded().then(() => tryResolveAndRender(current));
+          tryResolveAndRender(current);
         } else {
           firebase.auth().onAuthStateChanged((user) => {
-            resolveSchoolIdIfNeeded().then(() => {
-              if (!user) { tryResolveAndRender(null); return; }
-              tryResolveAndRender(user);
-            });
+            if (!user) { tryResolveAndRender(null); return; }
+            tryResolveAndRender(user);
           });
         }
         }
