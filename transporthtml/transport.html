@@ -310,6 +310,7 @@
         students: {},
         vehicles: {},
         transportEnrollments: {},
+        transportAssignments: {},
         transportPayments: {},
         financeData: {},
         currentAssignStudentId: null,
@@ -374,8 +375,67 @@
         const y = parseInt(params.get('year'), 10);
         const sch = params.get('school');
         if (Number.isFinite(y)) state.year = y;
-        if (sch) state.school = sch;
+        if (sch) {
+          state.school = sch;
+          if (typeof sch === 'string' && sch.startsWith('-')) {
+            window.currentSchoolId = sch;
+          }
+        }
       })();
+
+      // Resolve school id if a friendly name (e.g., "socrates") is present and set window.currentSchoolId
+      async function resolveSchoolIdIfNeeded() {
+        try {
+          await resolveSchoolIdIfNeeded();
+          const looksLikeId = typeof state.school === 'string' && state.school.startsWith('-');
+          if (looksLikeId) {
+            window.currentSchoolId = state.school;
+            return;
+          }
+          const snap = await firebase.database().ref('schools').get();
+          if (!snap.exists()) return;
+          const schools = snap.val() || {};
+          const target = String(state.school || '').toLowerCase().trim();
+          let matchedId = null;
+          Object.keys(schools).some((id) => {
+            const s = schools[id] || {};
+            const slug = String(s.slug || '').toLowerCase();
+            const name = String(s.name || '').toLowerCase();
+            if (slug === target || name === target || id === state.school) { matchedId = id; return true; }
+            if (!matchedId && (name.includes(target) || slug.includes(target))) { matchedId = id; }
+            return false;
+          });
+          if (matchedId) {
+            state.school = matchedId;
+            window.currentSchoolId = matchedId;
+          }
+        } catch (err) {
+          console.warn('Failed to resolve school id', err);
+        }
+      }
+
+      function currentSchoolPrefix() {
+        return window.currentSchoolId ? `schools/${window.currentSchoolId}/` : '';
+      }
+
+      function withSchoolPrefix(path) {
+        const prefix = currentSchoolPrefix();
+        return prefix ? `${prefix}${path}` : path;
+      }
+
+      async function fetchWithSchoolFallback(path) {
+        const db = firebase.database();
+        const prefix = currentSchoolPrefix();
+        if (prefix) {
+          try {
+            const scoped = await db.ref(`${prefix}${path}`).once('value');
+            if (scoped.exists()) return scoped;
+          } catch (err) {
+            console.warn('Scoped fetch failed, using global path for', path, err);
+          }
+        }
+        return db.ref(path).once('value');
+      }
 
       // Year selection handler
       if (yearSelect && window.somapYearContext) {
@@ -417,7 +477,11 @@
       // Render KPI Cards
       function renderKpis() {
         const totalStudents = Object.keys(state.students || {}).length;
-        const studentsOnTransport = Object.keys(state.transportEnrollments || {}).length;
+        const assignments = state.transportAssignments || {};
+        const assignmentIds = Object.entries(assignments).filter(([, a]) => a && a.status === 'Using').map(([id]) => id);
+        const studentsOnTransport = assignmentIds.length > 0
+          ? assignmentIds.length
+          : Object.keys(state.transportEnrollments || {}).length;
         const notOnTransport = totalStudents > 0 ? totalStudents - studentsOnTransport : '—';
 
         // Calculate financial KPIs (matching transportpayments.html logic)
@@ -633,7 +697,12 @@
           .map(([id, student]) => {
             const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
             const enrollment = state.transportEnrollments[id];
-            const isUsingTransport = !!enrollment;
+            const assignments = state.transportAssignments || {};
+            const hasYearAssignments = Object.keys(assignments).length > 0;
+            const assignment = assignments[id];
+            const isUsingTransport = assignment && assignment.status === 'Using'
+              ? true
+              : (!hasYearAssignments && !!enrollment);
 
             // Get finance data
             const financeData = state.financeData[id] || {};
@@ -1060,7 +1129,7 @@
           };
 
           await firebase.database()
-            .ref(`transport_enrollments/${studentId}`)
+            .ref(withSchoolPrefix(`transport_enrollments/${studentId}`))
             .set(enrollment);
 
           // Also write year-scoped assignment with base fees + start date (canonical path)
@@ -1081,13 +1150,14 @@
             admissionNo: state.students[studentId]?.admissionNumber || '',
             fullName: `${state.students[studentId]?.firstName||''} ${state.students[studentId]?.middleName||''} ${state.students[studentId]?.lastName||''}`.replace(/\s+/g,' ').trim()
           };
-          await firebase.database().ref(`transportAssignments/${state.year}/${studentId}`).set(assignPayload);
+          await firebase.database().ref(withSchoolPrefix(`transportAssignments/${state.year}/${studentId}`)).set(assignPayload);
 
           showToast('Transport assignment saved successfully!');
           transportAssignModal.classList.add('hidden');
           
           // Update local state immediately
           state.transportEnrollments[studentId] = enrollment;
+          state.transportAssignments[studentId] = assignPayload;
           
           // Refresh data in background
           loadCriticalData().then(() => {
@@ -1124,12 +1194,42 @@
           kpiRowEl.innerHTML = '<article class="card stat-card"><div class="stat-label">Loading...</div><div class="stat-value">⏳</div></article>';
           
           // Load critical data in parallel
-          const [enrollSnap, vehiclesSnap] = await Promise.all([
-            firebase.database().ref('transport_enrollments').once('value'),
+          const [enrollSnap, assignmentsSnap, vehiclesSnap] = await Promise.all([
+            fetchWithSchoolFallback('transport_enrollments'),
+            fetchWithSchoolFallback(`transportAssignments/${state.year}`).catch(() => ({ val: () => null })),
             firebase.database().ref(`transport/${state.school}/${state.year}/buses`).once('value')
           ]);
 
-          state.transportEnrollments = enrollSnap.val() || {};
+          const legacyEnrollments = enrollSnap.val() || {};
+          const assignments = assignmentsSnap.val() || {};
+          const hasAssignments = Object.keys(assignments || {}).length > 0;
+          state.transportAssignments = assignments || {};
+          state.transportEnrollments = {};
+
+          if (!hasAssignments) {
+            Object.entries(legacyEnrollments).forEach(([studentId, enrollment]) => {
+              if (enrollment) state.transportEnrollments[studentId] = enrollment;
+            });
+          }
+
+          Object.entries(assignments).forEach(([studentId, assignRecord]) => {
+            if (!assignRecord || assignRecord.status !== 'Using') return;
+            const existing = state.transportEnrollments[studentId] || {};
+            const amStop = assignRecord.morningRouteId || assignRecord.amStop || existing.amStop || '';
+            const pmStop = assignRecord.eveningRouteId || assignRecord.pmStop || existing.pmStop || '';
+            const route = assignRecord.route || existing.route || amStop || pmStop || '';
+            const period = amStop && pmStop ? 'both' : (amStop ? 'morning' : (pmStop ? 'evening' : ''));
+            state.transportEnrollments[studentId] = {
+              ...existing,
+              ...assignRecord,
+              amStop,
+              pmStop,
+              route,
+              period: assignRecord.period || existing.period || period,
+              baseMonthlyFee: assignRecord.baseMonthlyFee || existing.baseMonthlyFee,
+              startDate: assignRecord.startDate || existing.startDate,
+            };
+          });
           
           // Process vehicles
           state.vehicles = {};
@@ -1227,7 +1327,8 @@
         }
 
         try {
-          const studentsSnap = await firebase.database().ref('students').once('value');
+          await resolveSchoolIdIfNeeded();
+          const studentsSnap = await fetchWithSchoolFallback('students');
           state.students = studentsSnap.val() || {};
           
           // Process finance data
