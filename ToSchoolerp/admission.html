@@ -8,6 +8,8 @@
   <!-- Icons + Tailwind -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css"/>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="../somapappv1multischool/js/context.js"></script>
+  <script src="../Todashboardhtml/yearContext.js"></script>
 
   <style>
     body { font-family: Inter, system-ui, Arial; background:#f8fafc; color:#0f172a; }
@@ -25,8 +27,7 @@
   </style>
 
   <script>
-  /** Year range + anchor **/
-  const SOMAP_ALLOWED_YEARS = Array.from({length: 20}, (_,i)=>2023+i); // 2023..2042
+  /** SoMAp anchor year **/
   const SOMAP_DEFAULT_YEAR = 2025;
 
   /** Tanzania class ladder (no Class 8). Keep labels EXACTLY. */
@@ -43,25 +44,6 @@
     return CLASS_ORDER[j];
   }
   </script>
-
-  <script>
-  /** Reuse shared year context if present, else create a light fallback. */
-  window.somapYearContext = window.somapYearContext || (function(){
-    let selected = (sessionStorage.getItem('somap_selected_year') || SOMAP_DEFAULT_YEAR)+'';
-    const listeners = new Set();
-    return {
-      getSelectedYear(){ return selected; },
-      setSelectedYear(y){
-        y = String(y);
-        if (selected===y) return;
-        selected = y;
-        try{ sessionStorage.setItem('somap_selected_year', y); }catch(_e){}
-        listeners.forEach(fn=>{ try{ fn(y); }catch(err){ console.error(err); } });
-      },
-      onYearChanged(fn){ if (typeof fn==='function') listeners.add(fn); }
-    };
-  })();
-  </script>
 </head>
 <body class="bg-gray-50 p-4">
 
@@ -74,28 +56,20 @@
 
   <!-- Admissions Content -->
   <div class="bg-white rounded-lg shadow p-4">
-    <div id="somapYearWrap" style="display:flex;gap:.5rem;align-items:center;margin-bottom:1rem;">
-      <label class="text-xs font-semibold">Academic Year</label>
-      <select data-somap-year-select class="border rounded px-2 py-1 text-sm"></select>
-      <span class="text-xs text-slate-600">Working year: <b id="somapYearHint">--</b></span>
+    <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
+      <div class="flex items-center gap-3">
+        <img id="school-logo-display" alt="School logo" src="images/socrates_logo.png" class="h-10 w-10 rounded-full object-cover border border-slate-200"/>
+        <div>
+          <div class="text-xs text-gray-500">Current School</div>
+          <div id="schoolNameDisplay" class="text-sm font-semibold text-slate-800">--</div>
+        </div>
+      </div>
+      <div id="somapYearWrap" class="flex items-center gap-2">
+        <label class="text-xs font-semibold">Academic Year</label>
+        <select data-somap-year-select class="border rounded px-2 py-1 text-sm"></select>
+        <span class="text-xs text-slate-600">Working year: <b id="somapYearHint">--</b></span>
+      </div>
     </div>
-
-    <script>
-    (function initYearSelector(){
-      const sel = document.querySelector('[data-somap-year-select]');
-      const hint = document.getElementById('somapYearHint');
-      if (!sel) return;
-      sel.innerHTML = SOMAP_ALLOWED_YEARS.map(y=>`<option value="${y}">${y}</option>`).join('');
-      const current = window.somapYearContext.getSelectedYear();
-      sel.value = current;
-      if (hint) hint.textContent = current;
-      sel.addEventListener('change', e=>{
-        const y = String(e.target.value);
-        window.somapYearContext.setSelectedYear(y);
-        if (hint) hint.textContent = y;
-      });
-    })();
-    </script>
 
     <div class="space-y-4">
       <div>
@@ -253,6 +227,39 @@
           </div>
         </div>
 
+        <!-- JOINING FORM PAYMENT -->
+        <div class="section">
+          <h3 class="font-semibold">Joining Form Payment</h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label for="joiningFeeAmount" class="block text-sm text-gray-600">Joining Form Fee (Tsh) *</label>
+              <input type="number" id="joiningFeeAmount" name="joiningFeeAmount" placeholder="e.g., 7000" required class="border p-2 rounded w-full"/>
+            </div>
+            <div>
+              <label for="joiningFeeReference" class="block text-sm text-gray-600">Reference Code *</label>
+              <input type="text" id="joiningFeeReference" name="joiningFeeReference" placeholder="e.g., MPESA-1234" required class="border p-2 rounded w-full"/>
+            </div>
+            <div>
+              <label for="joiningFeeReceivedBy" class="block text-sm text-gray-600">Received By *</label>
+              <input type="text" id="joiningFeeReceivedBy" name="joiningFeeReceivedBy" placeholder="e.g., Bursar name" required class="border p-2 rounded w-full"/>
+            </div>
+            <div>
+              <label for="joiningFeeMethod" class="block text-sm text-gray-600">Payment Method</label>
+              <select id="joiningFeeMethod" name="joiningFeeMethod" class="border p-2 rounded w-full">
+                <option value="">Select method</option>
+                <option value="cash">Cash</option>
+                <option value="mpesa">M-Pesa</option>
+                <option value="bank">Bank</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+            <div>
+              <label for="joiningFeePaidAt" class="block text-sm text-gray-600">Payment Date</label>
+              <input type="date" id="joiningFeePaidAt" name="joiningFeePaidAt" class="border p-2 rounded w-full"/>
+            </div>
+          </div>
+        </div>
+
         <!-- PARENT/GUARDIAN -->
         <div class="section">
           <h3 class="font-semibold">Parent / Guardian Details</h3>
@@ -356,12 +363,52 @@
       setStudentFeeOverride
     } from '../js/financeplans.js';
 
-    document.addEventListener('DOMContentLoaded', function() {
+    document.addEventListener('DOMContentLoaded', async function() {
   console.log('admission.editable.html loaded'); // Debug log to confirm script execution
+
+  // ---- Firebase handles ----
+  const db = window.db || (window.firebase && firebase.database ? firebase.database() : null);
+  const storage = window.storage || (window.firebase && firebase.storage ? firebase.storage() : null);
+
+  if (!db) {
+    console.error('Firebase Realtime Database not available. Ensure ../firebase.js and Firebase SDKs are loaded.');
+    return;
+  }
+  if (!storage) {
+    console.warn('Firebase Storage not available. File uploads will be skipped.');
+  }
+
+  // ---- Multi-school context ----
+  if (!window.SOMAP || typeof SOMAP.getSchool !== 'function') {
+    console.error('SOMAP context not available. Ensure somapappv1multischool/js/context.js is loaded.');
+    window.location.href = '../somapappv1multischool/multischool.html';
+    return;
+  }
+  const currentSchool = SOMAP.getSchool();
+  if (!currentSchool || !currentSchool.id) {
+    window.location.href = '../somapappv1multischool/multischool.html';
+    return;
+  }
+  const schoolId = currentSchool.id;
+  const isSocratesSchool = (id) => id === 'socrates-school' || id === 'default';
+  const schoolRef = (subPath) => db.ref(SOMAP.P(subPath));
+  const normalizePath = (subPath) => String(subPath || '').replace(/^\/+/, '');
+  const schoolWritePath = (subPath) => {
+    const trimmed = normalizePath(subPath);
+    if (isSocratesSchool(schoolId) && !trimmed.startsWith('schools/')) {
+      return `schools/${schoolId}/${trimmed}`;
+    }
+    return trimmed;
+  };
+  const schoolWriteRef = (subPath) => db.ref(SOMAP.P(schoolWritePath(subPath)));
+  const P = (subPath) => SOMAP.P(subPath);
+  const Pw = (subPath) => SOMAP.P(schoolWritePath(subPath));
+  const shouldUseLegacyFallback = (year) => isSocratesSchool(schoolId) && String(year) === String(SOMAP_DEFAULT_YEAR);
+  const getWorkingYear = () => window.somapYearContext?.getSelectedYear?.() || String(SOMAP_DEFAULT_YEAR);
 
   // ---- Password for restricted actions ----
   const ACTION_PASSWORD = 'REHEMam!'; // Hardcoded password for Edit/Delete
-  const SHIFT_REPORT_PATH = 'shiftReports';
+  const getShiftReportPath = (year) => `years/${year}/shiftReports`;
 
   // ---- Modal open/close ----
   const openModalBtn = document.getElementById('openRegistrationModal');
@@ -371,6 +418,8 @@
   const registerBtn = document.getElementById('registerBtn');
   const cancelEditBtn = document.getElementById('cancelEditBtn');
   const modalTitle = document.getElementById('modalTitle');
+  const schoolNameDisplay = document.getElementById('schoolNameDisplay');
+  const schoolLogoDisplay = document.getElementById('school-logo-display');
 
   // Debug: Check if elements are found
   if (!openModalBtn) console.error('openRegistrationModal button not found');
@@ -387,6 +436,7 @@
       console.log('Create New Admission button clicked'); // Debug log
       clearForm();
       document.getElementById('admissionNumber').value = `AUTO-${Date.now()}`;
+      syncFormSchoolFields();
       openModal();
     });
   }
@@ -401,6 +451,28 @@
   function openModal() {
     modal.style.display = 'block';
     checkFormValidity();
+  }
+
+  function syncFormSchoolFields() {
+    const schoolNameField = document.getElementById('schoolName');
+    const academicYearField = document.getElementById('academicYear');
+    const joinAmountField = document.getElementById('joiningFeeAmount');
+    const joinDateField = document.getElementById('joiningFeePaidAt');
+    const currentYear = getWorkingYear();
+    if (schoolNameField) {
+      schoolNameField.value = currentSchool.name || schoolId;
+      schoolNameField.readOnly = true;
+    }
+    if (academicYearField) {
+      academicYearField.value = currentYear;
+      academicYearField.readOnly = true;
+    }
+    if (!editingKey && joinAmountField && !joinAmountField.value) {
+      joinAmountField.value = '7000';
+    }
+    if (!editingKey && joinDateField && !joinDateField.value) {
+      joinDateField.value = toDateInput(Date.now());
+    }
   }
 
   function clearForm() {
@@ -425,24 +497,16 @@
     if (registerBtn) registerBtn.disabled = true;
   }
 
-  // ---- Resolve Firebase handles gracefully ----
-  const db = window.db || (window.firebase && firebase.database ? firebase.database() : null);
-  const storage = window.storage || (window.firebase && firebase.storage ? firebase.storage() : null);
-
-  if (!db) {
-    console.error('Firebase Realtime Database not available. Ensure ../firebase.js and Firebase SDKs are loaded.');
-  }
-  if (!storage) {
-    console.warn('Firebase Storage not available. File uploads will be skipped.');
-  }
-
-  const getWorkingYear = () => window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR;
-
+  let allStudents = [];
   let cachedStudents = [];
   const cachedStudentsById = new Map();
+  let yearStudentIndex = null;
   let shiftReports = {};
   let anchorEnrollments = {};
   let yearEnrollments = {};
+  let studentsRef = null;
+  let yearIndexRef = null;
+  let shiftReportRef = null;
   let anchorEnrollRef = null;
   let yearEnrollRef = null;
   let renderGeneration = 0;
@@ -452,6 +516,103 @@
   const queueRender = () => {
     renderSearchList(cachedStudents).catch(err => console.error('Render error', err));
   };
+
+  function updateYearHint(year) {
+    const hintEl = document.getElementById('somapYearHint');
+    if (hintEl) hintEl.textContent = String(year || '');
+  }
+
+  async function updateSchoolDisplay() {
+    if (schoolNameDisplay) {
+      schoolNameDisplay.textContent = currentSchool.name || schoolId;
+    }
+    if (!schoolLogoDisplay) return;
+    if (isSocratesSchool(schoolId)) {
+      schoolLogoDisplay.src = 'images/socrates_logo.png';
+      return;
+    }
+    try {
+      const logoSnap = await schoolWriteRef('profile/logoUrl').get();
+      const logoUrl = logoSnap.exists() ? logoSnap.val() : '';
+      schoolLogoDisplay.src = logoUrl || 'images/socrates_logo.png';
+    } catch (err) {
+      console.warn('Failed to load school logo', err);
+      schoolLogoDisplay.src = 'images/socrates_logo.png';
+    }
+  }
+
+  function maybeAutoAdvanceYear() {
+    const ctx = window.somapYearContext;
+    if (!ctx || typeof ctx.getSelectedYear !== 'function') return;
+    const current = String(new Date().getFullYear());
+    const selected = String(ctx.getSelectedYear());
+    if (Number(current) > Number(selected)) {
+      if (typeof ctx.resetToCurrentYear === 'function') {
+        ctx.resetToCurrentYear();
+      } else if (typeof ctx.setSelectedYear === 'function') {
+        ctx.setSelectedYear(current, { manual: false, forceDispatch: true });
+      }
+    }
+  }
+
+  async function resolveReadRef(scopedSubPath, legacyPath, allowLegacy) {
+    const scopedRef = schoolRef(scopedSubPath);
+    if (!allowLegacy || !legacyPath) return scopedRef;
+    const snap = await scopedRef.get();
+    return snap.exists() ? scopedRef : db.ref(legacyPath);
+  }
+
+  async function scopedOrSocratesLegacy(scopedSubPath, legacyPath, year) {
+    return resolveReadRef(scopedSubPath, legacyPath, shouldUseLegacyFallback(year));
+  }
+
+  async function maybeRunRollover() {
+    const systemYear = String(new Date().getFullYear());
+    const flagRef = schoolWriteRef(`meta/rolloverDone/${systemYear}`);
+    try {
+      const flagSnap = await flagRef.get();
+      if (flagSnap.exists()) return;
+
+      const previousYear = String(Number(systemYear) - 1);
+      const allowLegacy = shouldUseLegacyFallback(previousYear);
+      const prevEnrollRef = await resolveReadRef(`years/${previousYear}/enrollments`, `enrollments/${previousYear}`, allowLegacy);
+      const prevSnap = await prevEnrollRef.get();
+      const prevEnrollments = prevSnap.val() || {};
+      const nowIso = new Date().toISOString();
+      const updates = {};
+
+      Object.entries(prevEnrollments).forEach(([studentKey, record]) => {
+        const baseClass = (record && (record.className || record.classLevel)) || '';
+        const nextClass = shiftClass(baseClass, 1);
+        if (nextClass === 'GRADUATED') {
+          updates[Pw(`years/${systemYear}/graduated/${studentKey}`)] = {
+            className: baseClass || 'Class 7',
+            promotedAt: nowIso,
+            fromYear: Number(previousYear)
+          };
+          updates[Pw(`years/${systemYear}/enrollments/${studentKey}`)] = {
+            className: 'GRADUATED',
+            promotedFrom: baseClass || 'Class 7',
+            fromYear: Number(previousYear),
+            at: firebase.database.ServerValue.TIMESTAMP
+          };
+        } else {
+          updates[Pw(`years/${systemYear}/enrollments/${studentKey}`)] = {
+            className: nextClass,
+            promotedFrom: baseClass,
+            fromYear: Number(previousYear),
+            at: firebase.database.ServerValue.TIMESTAMP
+          };
+        }
+      });
+
+      updates[Pw(`meta/rolloverDone/${systemYear}`)] = true;
+      await db.ref().update(updates);
+      console.log('Year rollover completed for', systemYear);
+    } catch (err) {
+      console.warn('Year rollover skipped/failed:', err);
+    }
+  }
 
   function resolveClassForStudentYear(studentKey, fallbackClass, targetYear) {
     const override = yearEnrollments[studentKey] || {};
@@ -502,11 +663,12 @@
     }
   }
 
-  function attachYearEnrollmentListener(year) {
+  async function attachYearEnrollmentListener(year) {
     if (!db) return;
     const yearStr = String(year);
     if (yearEnrollRef) yearEnrollRef.off();
-    yearEnrollRef = db.ref(`enrollments/${yearStr}`);
+    const allowLegacy = shouldUseLegacyFallback(yearStr);
+    yearEnrollRef = await resolveReadRef(`years/${yearStr}/enrollments`, `enrollments/${yearStr}`, allowLegacy);
     yearEnrollRef.on('value', (snap) => {
       yearEnrollments = snap.val() || {};
       queueRender();
@@ -520,10 +682,17 @@
     'primaryParentName', 'primaryParentContact', 'residentialAddress',
     'feePerYear', 'paymentPlan'
   ];
+  const requiredCreateOnlyFields = [
+    'joiningFeeAmount', 'joiningFeeReference', 'joiningFeeReceivedBy'
+  ];
   const requiredFiles = ['passportPhoto', 'birthCertUpload', 'reportCardUpload', 'joiningLetterUpload'];
 
   function checkFormValidity() {
     const fieldsOk = requiredFields.every(id => {
+      const el = document.getElementById(id);
+      return el && String(el.value || '').trim() !== '';
+    });
+    const createOnlyOk = editingKey ? true : requiredCreateOnlyFields.every(id => {
       const el = document.getElementById(id);
       return el && String(el.value || '').trim() !== '';
     });
@@ -533,12 +702,12 @@
       return el && el.files && el.files.length > 0;
     });
     if (registerBtn) {
-      registerBtn.disabled = !(fieldsOk && filesOk);
-      console.log('Form validity:', { fieldsOk, filesOk }); // Debug log
+      registerBtn.disabled = !(fieldsOk && createOnlyOk && filesOk);
+      console.log('Form validity:', { fieldsOk, createOnlyOk, filesOk }); // Debug log
     }
   }
 
-  [...requiredFields, ...requiredFiles].forEach(id => {
+  [...requiredFields, ...requiredCreateOnlyFields, ...requiredFiles].forEach(id => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener('input', checkFormValidity);
@@ -607,6 +776,7 @@
       console.log('Form submitted'); // Debug log
 
       const fd = new FormData(form);
+      const workingYear = String(getWorkingYear());
       const studentData = {
         firstName: fd.get('firstName'),
         middleName: fd.get('middleName') || '',
@@ -618,10 +788,10 @@
         birthCertNumber: fd.get('birthCertNumber') || '',
         religion: fd.get('religion') || '',
         tribe: fd.get('tribe') || '',
-        schoolName: fd.get('schoolName'),
+        schoolName: currentSchool.name || schoolId,
         classLevel: fd.get('classLevel'),
         stream: fd.get('stream') || '',
-        academicYear: fd.get('academicYear'),
+        academicYear: workingYear,
         academicTrack: fd.get('academicTrack') || '',
         boardingStatus: fd.get('boardingStatus'),
         shiftedFrom: fd.get('shiftedFrom') || '',
@@ -633,6 +803,14 @@
         employmentStatus: fd.get('employmentStatus') || '',
         feePerYear: Number(fd.get('feePerYear') || 0),
         paymentPlan: fd.get('paymentPlan'),
+        schoolId: schoolId
+      };
+      const draftPayment = {
+        amount: Number(fd.get('joiningFeeAmount') || 0),
+        reference: String(fd.get('joiningFeeReference') || '').trim(),
+        receivedBy: String(fd.get('joiningFeeReceivedBy') || '').trim(),
+        method: String(fd.get('joiningFeeMethod') || '').trim(),
+        paidAt: fd.get('joiningFeePaidAt') || ''
       };
 
       try {
@@ -640,7 +818,8 @@
 
         // Duplicate check: Look for existing student with same parent contact + name + dob + class + admission number
         let duplicate = false;
-        const dupQuery = db.ref('students').orderByChild('primaryParentContact').equalTo(studentData.primaryParentContact);
+        const dupRef = await scopedOrSocratesLegacy('students', 'students', workingYear);
+        const dupQuery = dupRef.orderByChild('primaryParentContact').equalTo(studentData.primaryParentContact);
         const dupSnap = await dupQuery.once('value');
         console.log('Duplicate check: Matches=', dupSnap.numChildren(), 'Ignored self=', editingKey ? `Yes (${editingKey})` : 'N/A'); // Debug log
         dupSnap.forEach(child => {
@@ -668,19 +847,57 @@
         }
 
         if (!editingKey) {
-          // CREATE NEW
-          const newRef = db.ref('students').push();
-          const newKey = newRef.key;
+          // CREATE NEW -> queue for approval
+          const reservedStudentKey = schoolWriteRef('students').push().key;
+          const draftRef = schoolWriteRef(`admissionsPending/${workingYear}`).push();
+          const draftId = draftRef.key;
           // Upload files (all required for new registration)
-          console.log('Creating new student, uploading files for key:', newKey); // Debug log
-          studentData.passportPhotoUrl = await uploadMaybe("passportPhoto", "passport", newKey, null);
-          studentData.birthCertUrl = await uploadMaybe("birthCertUpload", "birthCert", newKey, null);
-          studentData.reportCardUrl = await uploadMaybe("reportCardUpload", "reportCard", newKey, null);
-          studentData.joiningLetterUrl = await uploadMaybe("joiningLetterUpload", "joiningLetter", newKey, null);
-          studentData.medicalDocsUrl = await uploadMaybe("medicalDocsUpload", "medicalDocs", newKey, null);
-          await newRef.set({ createdAt: firebase.database.ServerValue.TIMESTAMP, ...studentData });
-          await syncFinanceAfterUpsert(newKey, studentData);
-          alert('✅ Student registered successfully!');
+          console.log('Creating new admission draft, uploading files for key:', reservedStudentKey); // Debug log
+          const documents = {
+            passportPhotoUrl: await uploadMaybe("passportPhoto", "passport", reservedStudentKey, null),
+            birthCertUrl: await uploadMaybe("birthCertUpload", "birthCert", reservedStudentKey, null),
+            reportCardUrl: await uploadMaybe("reportCardUpload", "reportCard", reservedStudentKey, null),
+            joiningLetterUrl: await uploadMaybe("joiningLetterUpload", "joiningLetter", reservedStudentKey, null),
+            medicalDocsUrl: await uploadMaybe("medicalDocsUpload", "medicalDocs", reservedStudentKey, null)
+          };
+          await draftRef.set({
+            studentData,
+            documents,
+            payment: draftPayment,
+            reservedStudentKey,
+            schoolId,
+            year: Number(workingYear),
+            status: 'pending',
+            createdAt: firebase.database.ServerValue.TIMESTAMP
+          });
+
+          const fullName = `${studentData.firstName || ''} ${studentData.middleName || ''} ${studentData.lastName || ''}`.replace(/\s+/g, ' ').trim();
+          const paidAt = draftPayment.paidAt ? new Date(draftPayment.paidAt).getTime() : Date.now();
+          const approvalRef = schoolWriteRef('approvalsPending').push();
+          await approvalRef.set({
+            approvalId: approvalRef.key,
+            sourceModule: 'admission',
+            status: 'pending',
+            forYear: Number(workingYear),
+            academicYear: Number(workingYear),
+            studentName: fullName || 'Joining applicant',
+            studentAdm: studentData.admissionNumber || '',
+            className: studentData.classLevel || '',
+            parentContact: studentData.primaryParentContact || '',
+            amountPaidNow: Number(draftPayment.amount || 0),
+            paymentMethod: draftPayment.method || 'cash',
+            paymentReferenceCode: draftPayment.reference || '',
+            recordedBy: draftPayment.receivedBy || '',
+            datePaid: paidAt,
+            createdAt: firebase.database.ServerValue.TIMESTAMP,
+            modulePayload: {
+              admissionDraftId: draftId,
+              reservedStudentKey,
+              admissionNumber: studentData.admissionNumber,
+              year: Number(workingYear)
+            }
+          });
+          alert('✅ Student queued for approval. Approve in approvals.html to activate.');
           closeRegistrationModal();
         } else {
           // UPDATE existing
@@ -698,12 +915,12 @@
           studentData.joiningLetterUrl = await uploadMaybe("joiningLetterUpload", "joiningLetter", keyToUpdate, existing.joiningLetterUrl || null);
           studentData.medicalDocsUrl = await uploadMaybe("medicalDocsUpload", "medicalDocs", keyToUpdate, existing.medicalDocsUrl || null);
           // Do an update (preserves existing createdAt if present)
-          await db.ref('students/' + keyToUpdate).update({ ...studentData, updatedAt: firebase.database.ServerValue.TIMESTAMP });
+          await schoolRef('students/' + keyToUpdate).update({ ...studentData, updatedAt: firebase.database.ServerValue.TIMESTAMP });
           await syncFinanceAfterUpsert(keyToUpdate, studentData);
           // Clean up unused files after update
           await cleanupUnusedFiles(keyToUpdate);
           // Fetch fresh data from Firebase to ensure latest state
-          const updatedSnap = await db.ref('students/' + keyToUpdate).once('value');
+          const updatedSnap = await schoolRef('students/' + keyToUpdate).once('value');
           const updatedStudent = { key: keyToUpdate, ...updatedSnap.val() };
           if (confirm('✅ Changes saved! Stay in edit mode?')) {
             populateFormWithStudent(updatedStudent); // Reload form with fresh data
@@ -720,39 +937,84 @@
     });
   }
 
-  // ---- Live cache + rendering for search (and edit buttons) ----
-  if (db) {
-    db.ref('students').on('value', (snapshot) => {
+  function rebuildCachedStudents() {
+    cachedStudentsById.clear();
+    const allowLegacy = shouldUseLegacyFallback(getWorkingYear());
+    const hasIndex = yearStudentIndex && Object.keys(yearStudentIndex).length > 0;
+    if (hasIndex) {
+      cachedStudents = allStudents.filter((s) => yearStudentIndex[s.key]);
+    } else if (allowLegacy) {
+      cachedStudents = allStudents;
+    } else {
+      cachedStudents = [];
+    }
+    cachedStudents.forEach((rec) => cachedStudentsById.set(rec.key, rec));
+  }
+
+  async function attachStudentsListener() {
+    if (studentsRef) studentsRef.off();
+    studentsRef = await scopedOrSocratesLegacy('students', 'students', getWorkingYear());
+    studentsRef.on('value', (snapshot) => {
       const raw = snapshot.val() || {};
-      cachedStudentsById.clear();
-      cachedStudents = Object.entries(raw).map(([key, s]) => {
-        const rec = { key, ...(s || {}) };
-        cachedStudentsById.set(key, rec);
-        return rec;
-      });
+      allStudents = Object.entries(raw).map(([key, s]) => ({ key, ...(s || {}) }));
+      rebuildCachedStudents();
       queueRender();
     });
-    db.ref(SHIFT_REPORT_PATH).on('value', (snapshot) => {
+  }
+
+  async function attachYearIndexListener(year) {
+    if (yearIndexRef) yearIndexRef.off();
+    yearIndexRef = schoolRef(`years/${year}/students`);
+    yearIndexRef.on('value', (snapshot) => {
+      yearStudentIndex = snapshot.val() || {};
+      rebuildCachedStudents();
+      queueRender();
+    });
+  }
+
+  async function attachShiftReportsListener(year) {
+    if (shiftReportRef) shiftReportRef.off();
+    shiftReportRef = await scopedOrSocratesLegacy(getShiftReportPath(year), 'shiftReports', year);
+    shiftReportRef.on('value', (snapshot) => {
       shiftReports = snapshot.exists() ? snapshot.val() : {};
       queueRender();
     });
-    anchorEnrollRef = db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`);
+  }
+
+  async function attachYearScopedListeners(year) {
+    await Promise.all([
+      attachYearEnrollmentListener(year),
+      attachYearIndexListener(year),
+      attachShiftReportsListener(year)
+    ]);
+  }
+
+  // ---- Live cache + rendering for search (and edit buttons) ----
+  if (db) {
+    anchorEnrollRef = await resolveReadRef(`years/${SOMAP_DEFAULT_YEAR}/enrollments`, `enrollments/${SOMAP_DEFAULT_YEAR}`, shouldUseLegacyFallback(SOMAP_DEFAULT_YEAR));
     anchorEnrollRef.on('value', (snapshot) => {
       anchorEnrollments = snapshot.val() || {};
       queueRender();
     });
-    attachYearEnrollmentListener(getWorkingYear());
+    await attachStudentsListener();
+    await attachYearScopedListeners(getWorkingYear());
   }
 
-  window.somapYearContext.onYearChanged((newYear) => {
-    planLabelCache.clear();
-    attachYearEnrollmentListener(newYear);
-    const selectEl = document.querySelector('[data-somap-year-select]');
-    const hintEl = document.getElementById('somapYearHint');
-    if (selectEl) selectEl.value = String(newYear);
-    if (hintEl) hintEl.textContent = String(newYear);
-    queueRender();
-  });
+  if (window.somapYearContext?.onYearChanged) {
+    window.somapYearContext.onYearChanged((newYear) => {
+      planLabelCache.clear();
+      attachYearScopedListeners(newYear).catch(err => console.warn('Year listener attach failed', err));
+      updateYearHint(newYear);
+      syncFormSchoolFields();
+      queueRender();
+    });
+  }
+
+  updateYearHint(getWorkingYear());
+  updateSchoolDisplay();
+  syncFormSchoolFields();
+  maybeAutoAdvanceYear();
+  maybeRunRollover();
 
   queueRender();
 
@@ -819,6 +1081,15 @@
       ` : '';
       const studentFullName = `${stu.firstName || ''} ${stu.middleName || ''} ${stu.lastName || ''}`.replace(/\s+/g, ' ').trim();
       const planDisplay = planLabel || (finance.planId ? finance.planId : 'Class default');
+      const joiningPayment = stu.joiningFormPayment || {};
+      const joiningAmount = joiningPayment.amount != null ? `TSh ${currencyFormatter.format(Number(joiningPayment.amount || 0))}` : '';
+      const joiningInfoHtml = joiningAmount ? `
+        <div class="mt-1 text-xs text-slate-600">
+          Joining fee: ${escapeHtml(joiningAmount)}
+          ${joiningPayment.reference ? ` â€¢ Ref: ${escapeHtml(joiningPayment.reference)}` : ''}
+          ${joiningPayment.receivedBy ? ` â€¢ Received by: ${escapeHtml(joiningPayment.receivedBy)}` : ''}
+        </div>
+      ` : '';
       div.innerHTML = `
         <div class="flex justify-between items-start">
           <div>
@@ -827,6 +1098,7 @@
             Class (${escapeHtml(String(currentYear))}): ${escapeHtml(classLabel || 'N/A')}<br>
             Fee (${escapeHtml(String(currentYear))}): ${escapeHtml(feeLabel)}<br>
             Plan: ${escapeHtml(planDisplay)}
+            ${joiningInfoHtml}
           </div>
           <div class="flex gap-2">
             <button class="btn edit-btn bg-yellow-100 text-yellow-800 px-3 py-1 rounded" data-key="${stu.key}">Edit</button>
@@ -909,6 +1181,13 @@
     }
   }
 
+  function toDateInput(value) {
+    if (!value) return '';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toISOString().slice(0, 10);
+  }
+
   function populateFormWithStudent(s) {
     try {
       // Map all form fields by their IDs
@@ -925,6 +1204,19 @@
         const el = document.getElementById(k);
         if (el) el.value = s[k] || '';
       });
+
+      // Joining fee fields (if available)
+      const joining = s.joiningFormPayment || s.joiningFormPaymentDraft || {};
+      const joinAmount = document.getElementById('joiningFeeAmount');
+      const joinRef = document.getElementById('joiningFeeReference');
+      const joinBy = document.getElementById('joiningFeeReceivedBy');
+      const joinMethod = document.getElementById('joiningFeeMethod');
+      const joinDate = document.getElementById('joiningFeePaidAt');
+      if (joinAmount && joining.amount != null) joinAmount.value = joining.amount;
+      if (joinRef && joining.reference) joinRef.value = joining.reference;
+      if (joinBy && joining.receivedBy) joinBy.value = joining.receivedBy;
+      if (joinMethod && joining.method) joinMethod.value = joining.method;
+      if (joinDate) joinDate.value = toDateInput(joining.paidAt || joining.approvedAt);
 
       // File previews
       setIf('passportPreview', s.passportPhotoUrl, 'Current Passport Photo');
@@ -947,7 +1239,7 @@
         alert('No shift alert details found for this student.');
         return;
       }
-      const snap = await db.ref('students/' + key).get();
+      const snap = await schoolRef('students/' + key).get();
       if (!snap.exists()) {
         alert('Student record not found or already shifted.');
         return;
@@ -957,7 +1249,8 @@
       const nowIso = new Date().toISOString();
       const shiftDate = shiftInfo.dateShifted || nowIso.slice(0, 10);
       const updates = {};
-      updates[`shiftedStudents/${key}`] = {
+      const currentYear = String(getWorkingYear());
+      updates[P(`shiftedStudents/${key}`)] = {
         ...studentData,
         status: 'shifted',
         shiftedAt: shiftDate,
@@ -969,11 +1262,13 @@
           outstandingBalance: balance
         }
       };
-      updates[`students/${key}`] = null;
-      updates[`${SHIFT_REPORT_PATH}/${key}/status`] = 'shifted';
-      updates[`${SHIFT_REPORT_PATH}/${key}/adminShiftedAt`] = nowIso;
-      updates[`${SHIFT_REPORT_PATH}/${key}/outstandingBalance`] = balance;
-      updates[`${SHIFT_REPORT_PATH}/${key}/statusNote`] = 'Shifted to hub';
+      updates[P(`students/${key}`)] = null;
+      updates[P(`years/${currentYear}/students/${key}`)] = null;
+      updates[P(`years/${currentYear}/enrollments/${key}`)] = null;
+      updates[P(`${getShiftReportPath(currentYear)}/${key}/status`)] = 'shifted';
+      updates[P(`${getShiftReportPath(currentYear)}/${key}/adminShiftedAt`)] = nowIso;
+      updates[P(`${getShiftReportPath(currentYear)}/${key}/outstandingBalance`)] = balance;
+      updates[P(`${getShiftReportPath(currentYear)}/${key}/statusNote`)] = 'Shifted to hub';
       await db.ref().update(updates);
       alert('Student shifted to SHIFTED HUB successfully.');
     } catch (err) {
@@ -985,7 +1280,12 @@
   async function doDeleteKey(key) {
     if (!confirm('Delete this student record? This action cannot be undone.')) return;
     try {
-      await db.ref('students/' + key).remove();
+      const currentYear = String(getWorkingYear());
+      const updates = {};
+      updates[P(`students/${key}`)] = null;
+      updates[P(`years/${currentYear}/students/${key}`)] = null;
+      updates[P(`years/${currentYear}/enrollments/${key}`)] = null;
+      await db.ref().update(updates);
       await cleanupUnusedFiles(key); // Clean up files after deletion
       alert('✅ Student deleted.');
     } catch (err) {
@@ -1021,7 +1321,7 @@
 
   // ---- Connectivity sanity check ----
   if (db) {
-    db.ref('z_test_write').set({ ok: true, ts: Date.now() })
+    schoolWriteRef('meta/diagnostics/z_test_write').set({ ok: true, ts: Date.now() })
       .then(() => console.log('DB test write OK'))
       .catch(err => console.warn('DB test write failed (ignore if rules block):', err.message));
   }
