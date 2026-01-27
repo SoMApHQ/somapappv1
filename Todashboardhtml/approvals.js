@@ -992,6 +992,18 @@
     };
 
     await sref(`students/${studentKey}`).set(studentPayload);
+    // Ensure student is indexed in the selected year for listing in admission.html
+    await sref(`years/${year}/students/${studentKey}`).set(true);
+
+    // Optional but recommended: store enrollment snapshot for the year
+    const className = studentPayload.classLevel || studentPayload.className || '';
+    if (className) {
+      await sref(`enrollments/${year}/${studentKey}`).set({
+        className,
+        setBy: 'admission_approval',
+        at: firebase.database.ServerValue.TIMESTAMP
+      });
+    }
     await sref(`admittedStudents/${studentKey}`).set({
       student: {
         firstName: studentPayload.firstName,
