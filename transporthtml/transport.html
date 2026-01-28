@@ -522,11 +522,7 @@
       // Render KPI Cards
       function renderKpis() {
         const totalStudents = Object.keys(state.students || {}).length;
-        const assignments = state.transportAssignments || {};
-        const assignmentIds = Object.entries(assignments).filter(([, a]) => a && a.status === 'Using').map(([id]) => id);
-        const studentsOnTransport = assignmentIds.length > 0
-          ? assignmentIds.length
-          : Object.keys(state.transportEnrollments || {}).length;
+        const studentsOnTransport = Object.keys(state.transportEnrollments || {}).length;
         const notOnTransport = totalStudents > 0 ? totalStudents - studentsOnTransport : '—';
 
         // Calculate financial KPIs (matching transportpayments.html logic)
@@ -743,11 +739,10 @@
             const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
             const enrollment = state.transportEnrollments[id];
             const assignments = state.transportAssignments || {};
-            const hasYearAssignments = Object.keys(assignments).length > 0;
             const assignment = assignments[id];
-            const isUsingTransport = assignment && assignment.status === 'Using'
-              ? true
-              : (!hasYearAssignments && !!enrollment);
+            const isUsingTransport = assignment
+              ? assignment.status === 'Using'
+              : !!enrollment;
 
             // Get finance data
             const financeData = state.financeData[id] || {};
@@ -1245,18 +1240,22 @@
 
           const legacyEnrollments = enrollSnap.val() || {};
           const assignments = assignmentsSnap.val() || {};
-          const hasAssignments = Object.keys(assignments || {}).length > 0;
           state.transportAssignments = assignments || {};
           state.transportEnrollments = {};
 
-          if (!hasAssignments) {
-            Object.entries(legacyEnrollments).forEach(([studentId, enrollment]) => {
-              if (enrollment) state.transportEnrollments[studentId] = enrollment;
-            });
-          }
+          // Always load legacy enrollments, then let year-scoped assignments override them.
+          Object.entries(legacyEnrollments).forEach(([studentId, enrollment]) => {
+            if (enrollment) state.transportEnrollments[studentId] = enrollment;
+          });
 
           Object.entries(assignments).forEach(([studentId, assignRecord]) => {
-            if (!assignRecord || assignRecord.status !== 'Using') return;
+            if (!assignRecord || assignRecord.status !== 'Using') {
+              // If a student exists in legacy but is marked not using in assignments, remove.
+              if (state.transportEnrollments[studentId]) {
+                delete state.transportEnrollments[studentId];
+              }
+              return;
+            }
             const existing = state.transportEnrollments[studentId] || {};
             const amStop = assignRecord.morningRouteId || assignRecord.amStop || existing.amStop || '';
             const pmStop = assignRecord.eveningRouteId || assignRecord.pmStop || existing.pmStop || '';
