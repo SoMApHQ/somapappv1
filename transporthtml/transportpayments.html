@@ -350,25 +350,25 @@
       const schoolName = currentSchool?.name || schoolId;
       const isSocratesSchool = (id) => id === 'socrates-school' || id === 'default';
 
-      function schoolSubPath(subPath) {
+      function schoolRef(subPath) {
+        return db.ref(window.SOMAP.P(subPath));
+      }
+
+      function schoolWritePath(subPath) {
         const clean = String(subPath || '').replace(/^\/+/, '');
         return isSocratesSchool(schoolId) ? `schools/${schoolId}/${clean}` : clean;
       }
 
-      function schoolRef(subPath) {
-        return db.ref(window.SOMAP.P(schoolSubPath(subPath)));
+      function schoolWriteRef(subPath) {
+        return db.ref(window.SOMAP.P(schoolWritePath(subPath)));
       }
 
       async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
-        const scopedRef = schoolRef(scopedSubPath);
+        const scopedRef = db.ref(window.SOMAP.P(schoolWritePath(scopedSubPath)));
         if (!isSocratesSchool(schoolId) || !legacyPath) return scopedRef.once('value');
         const scopedSnap = await scopedRef.once('value');
         if (scopedSnap.exists()) return scopedSnap;
         return db.ref(legacyPath).once('value');
-      }
-
-      function schoolPath(subPath) {
-        return window.SOMAP.P(schoolSubPath(subPath));
       }
 
       function maybeAutoAdvanceYear() {
@@ -398,7 +398,7 @@
 
       async function maybeRunRollover() {
         const systemYear = String(new Date().getFullYear());
-        const flagRef = schoolRef(`meta/rolloverDone/${systemYear}`);
+        const flagRef = schoolWriteRef(`meta/rolloverDone/${systemYear}`);
         try {
           const flagSnap = await flagRef.get();
           if (flagSnap.exists()) return;
@@ -412,19 +412,19 @@
             const baseClass = (record && (record.className || record.classLevel)) || '';
             const nextClass = shiftClass(baseClass, 1);
             if (nextClass === 'GRADUATED') {
-              updates[schoolPath(`years/${systemYear}/graduated/${studentKey}`)] = {
+              updates[schoolWritePath(`years/${systemYear}/graduated/${studentKey}`)] = {
                 className: baseClass || 'Class 7',
                 promotedAt: nowIso,
                 fromYear: Number(previousYear)
               };
-              updates[schoolPath(`years/${systemYear}/enrollments/${studentKey}`)] = {
+              updates[schoolWritePath(`years/${systemYear}/enrollments/${studentKey}`)] = {
                 className: 'GRADUATED',
                 promotedFrom: baseClass || 'Class 7',
                 fromYear: Number(previousYear),
                 at: firebase.database.ServerValue.TIMESTAMP
               };
             } else {
-              updates[schoolPath(`years/${systemYear}/enrollments/${studentKey}`)] = {
+              updates[schoolWritePath(`years/${systemYear}/enrollments/${studentKey}`)] = {
                 className: nextClass,
                 promotedFrom: baseClass,
                 fromYear: Number(previousYear),
@@ -433,7 +433,7 @@
             }
           });
 
-          updates[schoolPath(`meta/rolloverDone/${systemYear}`)] = true;
+          updates[schoolWritePath(`meta/rolloverDone/${systemYear}`)] = true;
           await db.ref().update(updates);
         } catch (err) {
           console.warn('Year rollover skipped/failed:', err);
@@ -1108,7 +1108,7 @@
           // Convert payment date to timestamp (local timezone - Africa/Nairobi)
           const paidAt = new Date(paymentDate + 'T12:00:00').getTime();
           const timestamp = Date.now();
-          const pendingRef = schoolRef('approvalsPending').push();
+          const pendingRef = schoolWriteRef('approvalsPending').push();
           const monthName = MONTH_NAMES[month] || `Month ${month}`;
           const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim();
           const totalRequired = Number(status.totalExpected || 0);
@@ -1117,7 +1117,7 @@
 
           // Also write to transport ledger as pending (for parent view and history)
           const yearStr = String(state.year);
-          const payRef = schoolRef(`years/${yearStr}/transportLedgers/${studentId}/payments`).push();
+          const payRef = schoolWriteRef(`years/${yearStr}/transportLedgers/${studentId}/payments`).push();
           
           const paymentData = {
             month: monthName,
@@ -1149,10 +1149,10 @@
             status: 'pending',
             createdAt: timestamp
           };
-          await schoolRef(`years/${yearStr}/transportPayments/${studentId}`).push(canonical);
+          await schoolWriteRef(`years/${yearStr}/transportPayments/${studentId}`).push(canonical);
           
           // Queue for approval - include payment key for matching
-          const queueRef = schoolRef(`pendingApprovals/transportPayments/${payRef.key}`);
+          const queueRef = schoolWriteRef(`pendingApprovals/transportPayments/${payRef.key}`);
           await queueRef.set({
             year: yearStr,
             studentId,
@@ -1268,7 +1268,7 @@
         
         // Also check pendingApprovals to get latest approval status
         try {
-          const pendingSnap = await schoolRef('pendingApprovals/transportPayments').once('value');
+          const pendingSnap = await schoolWriteRef('pendingApprovals/transportPayments').once('value');
           const pendingApprovals = pendingSnap.val() || {};
           
           // Create a map of payment keys to approval status
@@ -1384,7 +1384,7 @@
             year: state.year,
           };
           
-          await schoolRef(`years/${state.year}/transport_expenses`).push(expense);
+          await schoolWriteRef(`years/${state.year}/transport_expenses`).push(expense);
           
           showToast('Expense added successfully!');
           document.getElementById('expenseCategory').value = '';
