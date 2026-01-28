@@ -1231,17 +1231,42 @@
           // Show loading state
           kpiRowEl.innerHTML = '<article class="card stat-card"><div class="stat-label">Loading...</div><div class="stat-value">⏳</div></article>';
           
-          // Load critical data in parallel
-          const [enrollSnap, registrySnap, assignmentsSnap, vehiclesSnap] = await Promise.all([
-            scopedOrSocratesLegacy(`years/${state.year}/transportEnrollments`, 'transport_enrollments'),
-            scopedOrSocratesLegacy(`years/${state.year}/transportRegistry`, `transportRegistry/${state.year}`).catch(() => ({ val: () => null })),
-            scopedOrSocratesLegacy(`years/${state.year}/transportAssignments`, `transportAssignments/${state.year}`).catch(() => ({ val: () => null })),
-            schoolRef(`years/${state.year}/transport/buses`).once('value')
+          // IMPORTANT:
+          // For Socrates/legacy schools we must MERGE legacy + year-scoped data.
+          // If the year-scoped path exists, the old helper would stop falling back,
+          // which makes previously-assigned students "disappear" in the UI.
+          const yearKey = String(state.year);
+          const isLegacyMerge = isSocratesSchool(schoolId);
+
+          const [
+            enrollScopedSnap,
+            enrollLegacySnap,
+            registryScopedSnap,
+            registryLegacySnap,
+            assignmentsScopedSnap,
+            assignmentsLegacySnap,
+            vehiclesSnap
+          ] = await Promise.all([
+            schoolRef(`years/${yearKey}/transportEnrollments`).once('value'),
+            isLegacyMerge ? db.ref('transport_enrollments').once('value') : Promise.resolve(null),
+            schoolRef(`years/${yearKey}/transportRegistry`).once('value').catch(() => ({ val: () => null })),
+            isLegacyMerge ? db.ref(`transportRegistry/${yearKey}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
+            schoolRef(`years/${yearKey}/transportAssignments`).once('value').catch(() => ({ val: () => null })),
+            isLegacyMerge ? db.ref(`transportAssignments/${yearKey}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
+            schoolRef(`years/${yearKey}/transport/buses`).once('value')
           ]);
 
-          const legacyEnrollments = enrollSnap.val() || {};
-          const registry = registrySnap.val() || {};
-          const assignments = assignmentsSnap.val() || {};
+          const scopedEnrollments = (enrollScopedSnap && typeof enrollScopedSnap.val === 'function') ? (enrollScopedSnap.val() || {}) : {};
+          const legacyEnrollmentsRaw = (enrollLegacySnap && typeof enrollLegacySnap.val === 'function') ? (enrollLegacySnap.val() || {}) : {};
+          const legacyEnrollments = isLegacyMerge ? { ...legacyEnrollmentsRaw, ...scopedEnrollments } : scopedEnrollments;
+
+          const scopedRegistry = (registryScopedSnap && typeof registryScopedSnap.val === 'function') ? (registryScopedSnap.val() || {}) : {};
+          const legacyRegistry = (registryLegacySnap && typeof registryLegacySnap.val === 'function') ? (registryLegacySnap.val() || {}) : {};
+          const registry = isLegacyMerge ? { ...legacyRegistry, ...scopedRegistry } : scopedRegistry;
+
+          const scopedAssignments = (assignmentsScopedSnap && typeof assignmentsScopedSnap.val === 'function') ? (assignmentsScopedSnap.val() || {}) : {};
+          const legacyAssignments = (assignmentsLegacySnap && typeof assignmentsLegacySnap.val === 'function') ? (assignmentsLegacySnap.val() || {}) : {};
+          const assignments = isLegacyMerge ? { ...legacyAssignments, ...scopedAssignments } : scopedAssignments;
           state.transportAssignments = assignments || {};
           state.transportEnrollments = {};
 
