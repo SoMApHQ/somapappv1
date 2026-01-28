@@ -21,12 +21,25 @@
   };
   const P = (subPath) => {
     const trimmed = normalizePath(subPath);
+    if (window.SOMAP && typeof window.SOMAP.P === 'function') {
+      return window.SOMAP.P(trimmed);
+    }
+    const id = resolveSchoolId();
+    if (!id) return trimmed;
+    if (id === 'socrates-school' || id === 'default') return trimmed;
+    return `schools/${id}/${trimmed}`;
+  };
+  const scopedPath = (subPath) => {
+    const trimmed = normalizePath(subPath);
     const id = resolveSchoolId();
     if (!id) return trimmed;
     return `schools/${id}/${trimmed}`;
   };
+  const shouldUseScopedShadow = (subPath) => (
+    isSocratesSchool() && scopedPath(subPath) !== P(subPath)
+  );
   const sref = (subPath) => firebase.database().ref(P(subPath));
-  const legacyRef = (subPath) => firebase.database().ref(normalizePath(subPath));
+  const scopedRef = (subPath) => firebase.database().ref(scopedPath(subPath));
   const MODULE_LABELS = {
     finance: 'School Fees',
     transport: 'Transport',
@@ -388,18 +401,18 @@
       state.unsubPending = null;
     }
     const ref = sref('approvalsPending');
-    const legacy = isSocratesSchool() ? legacyRef('approvalsPending') : null;
-    let scopedSnap = null;
+    const legacy = shouldUseScopedShadow('approvalsPending') ? scopedRef('approvalsPending') : null;
+    let primarySnap = null;
     let legacySnap = null;
     const mergeSnapshots = () => {
-      const scopedVal = scopedSnap && scopedSnap.exists() ? (scopedSnap.val() || {}) : {};
-      const legacyVal = legacySnap && legacySnap.exists() ? (legacySnap.val() || {}) : {};
-      if (!legacy) return scopedVal;
-      return { ...legacyVal, ...scopedVal }; // scoped wins on key collision
+      const scopedVal = legacySnap && legacySnap.exists() ? (legacySnap.val() || {}) : {};
+      const primaryVal = primarySnap && primarySnap.exists() ? (primarySnap.val() || {}) : {};
+      if (!legacy) return primaryVal;
+      return { ...scopedVal, ...primaryVal }; // primary (root) wins on collision
     };
     const handler = (snapshot, isLegacy) => {
       if (isLegacy) legacySnap = snapshot;
-      else scopedSnap = snapshot;
+      else primarySnap = snapshot;
       state.pending = mergeSnapshots();
       state.pendingList = Object.entries(state.pending).map(([key, value]) => ({
         approvalId: key,
@@ -522,10 +535,14 @@
     const normalized = normalizeYearValue(targetYear || record.forYear || state.selectedYear);
     const numeric = Number(normalized);
     try {
-      await sref(`approvalsPending/${approvalId}`).update({
-        forYear: numeric,
-        academicYear: numeric,
-      });
+      const updates = {};
+      updates[P(`approvalsPending/${approvalId}/forYear`)] = numeric;
+      updates[P(`approvalsPending/${approvalId}/academicYear`)] = numeric;
+      if (shouldUseScopedShadow('approvalsPending')) {
+        updates[`${scopedPath(`approvalsPending/${approvalId}/forYear`)}`] = numeric;
+        updates[`${scopedPath(`approvalsPending/${approvalId}/academicYear`)}`] = numeric;
+      }
+      await db.ref().update(updates);
     } catch (err) {
       console.error('Approvals: failed to stamp year', err);
     }
@@ -807,6 +824,12 @@
     updates[P(`approvalsPending/${approvalId}/rejectedReason`)] = reason || 'Duplicate payment detected';
     updates[P(`approvalsPending/${approvalId}/rejectedAt`)] = firebase.database.ServerValue.TIMESTAMP;
     updates[P(`approvalsPending/${approvalId}/rejectedBy`)] = actorEmail();
+    if (shouldUseScopedShadow('approvalsPending')) {
+      updates[`${scopedPath(`approvalsPending/${approvalId}/status`)}`] = 'REJECTED_DUPLICATE';
+      updates[`${scopedPath(`approvalsPending/${approvalId}/rejectedReason`)}`] = reason || 'Duplicate payment detected';
+      updates[`${scopedPath(`approvalsPending/${approvalId}/rejectedAt`)}`] = firebase.database.ServerValue.TIMESTAMP;
+      updates[`${scopedPath(`approvalsPending/${approvalId}/rejectedBy`)}`] = actorEmail();
+    }
     await firebase.database().ref().update(updates);
     await moveApprovalToHistory(
       { ...record, status: 'REJECTED_DUPLICATE' },
@@ -901,8 +924,14 @@
           const year = String(record.modulePayload?.year || record.forYear || state.selectedYear || getContextYear());
           const draftId = record.modulePayload?.admissionDraftId;
           if (draftId) {
-            await sref(`admissionsPending/${year}/${draftId}/status`).set('rejected');
-            await sref(`admissionsPending/${year}/${draftId}/rejectedAt`).set(firebase.database.ServerValue.TIMESTAMP);
+            const updates = {};
+            updates[P(`admissionsPending/${year}/${draftId}/status`)] = 'rejected';
+            updates[P(`admissionsPending/${year}/${draftId}/rejectedAt`)] = firebase.database.ServerValue.TIMESTAMP;
+            if (shouldUseScopedShadow('admissionsPending')) {
+              updates[`${scopedPath(`admissionsPending/${year}/${draftId}/status`)}`] = 'rejected';
+              updates[`${scopedPath(`admissionsPending/${year}/${draftId}/rejectedAt`)}`] = firebase.database.ServerValue.TIMESTAMP;
+            }
+            await db.ref().update(updates);
           }
         }
         await moveApprovalToHistory(record, 'rejected');
@@ -992,8 +1021,16 @@
     const year = String(record.modulePayload?.year || record.forYear || targetYear || state.selectedYear || getContextYear());
     const draftId = record.modulePayload?.admissionDraftId;
     if (!draftId) throw new Error('Missing admission draft ID.');
-    const draftSnap = await sref(`admissionsPending/${year}/${draftId}`).once('value');
-    const draft = draftSnap.val();
+    const draftPath = `admissionsPending/${year}/${draftId}`;
+    let draftSnap = await sref(draftPath).once('value');
+    let draft = draftSnap.val();
+    if (!draft && shouldUseScopedShadow('admissionsPending')) {
+      const scopedSnap = await scopedRef(draftPath).once('value');
+      if (scopedSnap.exists()) {
+        draftSnap = scopedSnap;
+        draft = scopedSnap.val();
+      }
+    }
     if (!draft) throw new Error('Admission draft not found.');
 
     const studentKey = draft.reservedStudentKey || record.modulePayload?.reservedStudentKey || sref('students').push().key;
@@ -1051,7 +1088,11 @@
       source: 'direct_admission_approved'
     });
 
-    await sref(`admissionsPending/${year}/${draftId}`).remove();
+    const removals = [sref(draftPath).remove()];
+    if (shouldUseScopedShadow('admissionsPending')) {
+      removals.push(scopedRef(draftPath).remove());
+    }
+    await Promise.all(removals);
   }
 
   async function commitFinancePayment(record, targetYear) {
@@ -1239,15 +1280,18 @@
     const updates = {};
     updates[P(`approvalsPending/${approvalId}`)] = null;
     updates[P(historyPath)] = payload;
+    if (shouldUseScopedShadow('approvalsPending')) {
+      updates[`${scopedPath(`approvalsPending/${approvalId}`)}`] = null;
+    }
     await firebase.database().ref().update(updates);
   }
   async function loadHistorySnapshot() {
     let snapshot = await sref('approvalsHistory').once('value');
     let tree = snapshot.val() || {};
     if (isSocratesSchool()) {
-      const legacySnap = await legacyRef('approvalsHistory').once('value');
-      const legacyTree = legacySnap.val() || {};
-      tree = { ...legacyTree, ...tree };
+      const scopedSnap = await scopedRef('approvalsHistory').once('value');
+      const scopedTree = scopedSnap.val() || {};
+      tree = { ...scopedTree, ...tree };
     }
     const entries = [];
 
@@ -1547,8 +1591,8 @@
       if (isSocratesSchool()) {
         const hasEntries = tree && Object.keys(tree).length > 0;
         if (!hasEntries) {
-          const legacySnap = await legacyRef(`approvalsHistory/${year}`).once('value');
-          tree = legacySnap.val() || {};
+          const scopedSnap = await scopedRef(`approvalsHistory/${year}`).once('value');
+          tree = scopedSnap.val() || {};
         }
       }
     } catch (err) {
