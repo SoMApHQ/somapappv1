@@ -287,7 +287,8 @@
         drivers: [],
         currentId: null,
         uploads: {},
-        routes: [] // Will store assigned routes
+        routes: [], // Will store assigned routes
+        vehiclesRef: null
       };
 
       // All available routes from transport system
@@ -419,11 +420,54 @@
         if (sch) state.school = sch;
       })();
 
+      function normalizeRole(role) {
+        return String(role || "").trim().toLowerCase();
+      }
+
+      function isSocratesAlias() {
+        const target = String(state.school || "").toLowerCase().trim();
+        return target === "socrates-school" || target === "socrates" || target === "default";
+      }
+
+      function schoolScopedPath(subPath) {
+        const clean = String(subPath || "").replace(/^\/+/, "");
+        return `schools/${state.school}/${clean}`;
+      }
+
+      function getScopedBusesPath() {
+        return schoolScopedPath(`years/${state.year}/transport/buses`);
+      }
+
+      function getLegacyBusesPaths() {
+        if (!isSocratesAlias()) return [];
+        const year = state.year;
+        if (String(state.school || "").toLowerCase().trim() === "socrates-school") {
+          return [
+            `transport/socrates-school/${year}/buses`,
+            `transport/socrates/${year}/buses`
+          ];
+        }
+        return [`transport/socrates/${year}/buses`];
+      }
+
+      function isEmptySnapshot(snapshot) {
+        if (!snapshot || !snapshot.exists()) return true;
+        const val = snapshot.val();
+        if (!val) return true;
+        if (typeof val !== "object") return false;
+        return Object.keys(val).length === 0;
+      }
+
       // Year selection handler
       yearSelect.value = String(state.year);
       yearSelect.addEventListener('change', (e) => {
         state.year = parseInt(e.target.value, 10);
-        subscribeVehicles();
+        loadDrivers()
+          .then(() => subscribeVehicles())
+          .catch((err) => {
+            console.error('Error reloading drivers:', err);
+            subscribeVehicles();
+          });
       });
 
       function chipForExpiry(dateStr) {
@@ -609,24 +653,38 @@
       // Load Drivers from Workers Database
       async function loadDrivers() {
         try {
-          const workersSnap = await firebase.database().ref('workers').once('value');
-          state.drivers = [];
-          
-          if (workersSnap.exists()) {
-            workersSnap.forEach(workerSnap => {
-              const worker = workerSnap.val();
-              if (worker.profile && worker.profile.role === 'driver' && worker.profile.active !== false) {
-                state.drivers.push({
-                  id: workerSnap.key,
-                  fullName: worker.profile.fullNameUpper || `${worker.profile.firstName} ${worker.profile.middleName} ${worker.profile.lastName}`,
-                  phone: worker.profile.phone,
-                  firstName: worker.profile.firstName,
-                  middleName: worker.profile.middleName,
-                  lastName: worker.profile.lastName
-                });
-              }
-            });
+          const year = String(state.year);
+          const scopedWorkersRef = firebase.database().ref(schoolScopedPath(`years/${year}/workers`));
+          const snapshots = [scopedWorkersRef.once('value')];
+          if (isSocratesAlias()) {
+            snapshots.push(firebase.database().ref(`years/${year}/workers`).once('value'));
           }
+          const workerSnaps = await Promise.all(snapshots);
+          state.drivers = [];
+          const driversById = new Map();
+          
+          workerSnaps.forEach((workersSnap) => {
+            if (!workersSnap || !workersSnap.exists()) return;
+            workersSnap.forEach(workerSnap => {
+              const worker = workerSnap.val() || {};
+              const profile = worker.profile || {};
+              const roleValue = normalizeRole(profile.role || worker.role);
+              if (roleValue !== 'driver' || profile.active === false) return;
+              if (driversById.has(workerSnap.key)) return;
+              const fullName = profile.fullNameUpper
+                || `${profile.firstName || ''} ${profile.middleName || ''} ${profile.lastName || ''}`.trim();
+              driversById.set(workerSnap.key, {
+                id: workerSnap.key,
+                fullName: fullName || 'Unnamed Driver',
+                phone: profile.phone || worker.phone || '',
+                firstName: profile.firstName,
+                middleName: profile.middleName,
+                lastName: profile.lastName
+              });
+            });
+          });
+
+          state.drivers = Array.from(driversById.values());
 
           // Populate driver dropdown
           const driverSelect = document.getElementById('assignedDriverSelect');
@@ -1004,7 +1062,7 @@
         console.log('User authenticated:', state.user.uid);
 
         const isNew = !state.currentId;
-        const dbPath = `transport/${state.school}/${state.year}/buses`;
+        const dbPath = getScopedBusesPath();
         const ref = isNew
           ? firebase.database().ref(dbPath).push()
           : firebase.database().ref(`${dbPath}/${state.currentId}`);
@@ -1091,7 +1149,7 @@
 
         try {
           showToast("Deleting vehicle...");
-          const path = `transport/${state.school}/${state.year}/buses/${vehicleId}`;
+          const path = `${getScopedBusesPath()}/${vehicleId}`;
           await firebase.database().ref(path).remove();
           showToast("Vehicle deleted successfully.", "ok");
           if (state.currentId === vehicleId) {
@@ -1255,30 +1313,55 @@
       });
 
       // Subscribe to Vehicles
-      function subscribeVehicles() {
-        const path = `transport/${state.school}/${state.year}/buses`;
-        const ref = firebase.database().ref(path);
-        
-        ref.on("value", (snapshot) => {
-          const vehicles = [];
-          snapshot.forEach((child) => {
-            const value = child.val() || {};
-            vehicles.push({ id: child.key, ...value });
-          });
-          
-          if (state.role === "driver") {
-            state.vehicles = vehicles.filter((v) => v.assignedDriverUid === state.user.uid);
-          } else {
-            state.vehicles = vehicles;
+      async function subscribeVehicles() {
+        try {
+          const scopedPath = getScopedBusesPath();
+          const scopedRef = firebase.database().ref(scopedPath);
+          const scopedSnap = await scopedRef.once('value');
+
+          let resolvedPath = scopedPath;
+          if (isEmptySnapshot(scopedSnap)) {
+            const legacyPaths = getLegacyBusesPaths();
+            for (const legacyPath of legacyPaths) {
+              const legacySnap = await firebase.database().ref(legacyPath).once('value');
+              if (!isEmptySnapshot(legacySnap)) {
+                await scopedRef.set(legacySnap.val() || {});
+                resolvedPath = scopedPath;
+                break;
+              }
+            }
           }
+
+          if (state.vehiclesRef) {
+            state.vehiclesRef.off();
+          }
+          const ref = firebase.database().ref(resolvedPath);
+          state.vehiclesRef = ref;
           
-          renderKpis();
-          renderAlerts();
-          renderTable();
-        }, (err) => {
+          ref.on("value", (snapshot) => {
+            const vehicles = [];
+            snapshot.forEach((child) => {
+              const value = child.val() || {};
+              vehicles.push({ id: child.key, ...value });
+            });
+            
+            if (state.role === "driver") {
+              state.vehicles = vehicles.filter((v) => v.assignedDriverUid === state.user.uid);
+            } else {
+              state.vehicles = vehicles;
+            }
+            
+            renderKpis();
+            renderAlerts();
+            renderTable();
+          }, (err) => {
+            console.error(err);
+            showToast("Failed to load vehicles", "bad");
+          });
+        } catch (err) {
           console.error(err);
           showToast("Failed to load vehicles", "bad");
-        });
+        }
       }
 
       // Auth and Initialization
@@ -1300,8 +1383,8 @@
               
               console.log('User role loaded:', state.role, 'Raw:', roleRaw);
               
-              // Load drivers, resolve school id, then subscribe to vehicles
-              loadDrivers().then(() => resolveSchoolIdIfNeeded()).then(() => {
+              // Resolve school id, load drivers, then subscribe to vehicles
+              resolveSchoolIdIfNeeded().then(() => loadDrivers()).then(() => {
                 subscribeVehicles();
               }).catch((err) => {
                 console.error('Error loading drivers:', err);
@@ -1314,7 +1397,7 @@
               showToast("Failed to verify user", "bad");
               // Still allow using the page even if role check fails
               state.role = "admin";
-              loadDrivers().then(() => resolveSchoolIdIfNeeded()).then(() => {
+              resolveSchoolIdIfNeeded().then(() => loadDrivers()).then(() => {
                 subscribeVehicles();
               }).catch((err2) => {
                 console.error('Error loading drivers:', err2);
