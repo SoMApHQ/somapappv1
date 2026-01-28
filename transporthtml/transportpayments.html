@@ -343,38 +343,57 @@
     <script>
       const db = firebase.database();
       const schoolParams = new URLSearchParams(window.location.search);
-      const schoolParam = schoolParams.get('school');
-      if (schoolParam && window.SOMAP?.setSchoolId) {
-        window.SOMAP.setSchoolId(schoolParam);
+      const initOptions = {
+        db,
+        allowQuerySchoolParam: true,
+        redirectIfMissingSchool: true,
+        multischoolPath: '../somapappv1multischool/multischool.html',
+      };
+      if (window.SOMAP?.init) {
+        try {
+          window.SOMAP.init(initOptions);
+        } catch (err) {
+          console.warn('SOMAP.init failed:', err);
+        }
+      } else if (initOptions.allowQuerySchoolParam) {
+        const schoolParam = schoolParams.get('school');
+        if (schoolParam && window.SOMAP?.setSchoolId) {
+          window.SOMAP.setSchoolId(schoolParam);
+        }
       }
+
       const currentSchool = window.SOMAP?.getSchool?.();
       if (!currentSchool || !currentSchool.id) {
-        window.location.href = '../somapappv1multischool/multischool.html';
+        if (initOptions.redirectIfMissingSchool) {
+          window.location.href = initOptions.multischoolPath;
+        }
       }
-      const schoolId = currentSchool?.id || '';
-      const schoolName = currentSchool?.name || schoolId;
-      const isSocratesSchool = (id) => id === 'socrates-school' || id === 'default';
 
-      function schoolSubPath(subPath) {
+      let schoolId = currentSchool?.id || '';
+      let schoolName = currentSchool?.name || schoolId;
+      const isSocratesSchool = () => schoolId === 'socrates-school' || schoolId === 'default';
+
+      function scopedSubPath(subPath) {
         const clean = String(subPath || '').replace(/^\/+/, '');
-        return isSocratesSchool(schoolId) ? `schools/${schoolId}/${clean}` : clean;
+        if (isSocratesSchool()) return `schools/${schoolId}/${clean}`;
+        return clean;
       }
 
       function schoolRef(subPath) {
-        return db.ref(window.SOMAP.P(schoolSubPath(subPath)));
+        return db.ref(window.SOMAP.P(scopedSubPath(subPath)));
       }
 
       function schoolPath(subPath) {
-        return window.SOMAP.P(schoolSubPath(subPath));
+        return window.SOMAP.P(scopedSubPath(subPath));
       }
 
       async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
         const scopedRef = schoolRef(scopedSubPath);
-        if (!isSocratesSchool(schoolId) || !legacyPath) return scopedRef.once('value');
+        if (!isSocratesSchool() || !legacyPath) return scopedRef.once('value');
         const scopedSnap = await scopedRef.once('value');
-        if (!scopedSnap.exists()) return db.ref(legacyPath).once('value');
         const val = scopedSnap.val();
-        if (val && typeof val === 'object' && Object.keys(val).length === 0) {
+        const emptyObj = val && typeof val === 'object' && Object.keys(val).length === 0;
+        if (!scopedSnap.exists() || emptyObj) {
           return db.ref(legacyPath).once('value');
         }
         return scopedSnap;
@@ -452,7 +471,7 @@
       const schoolNameDisplay = document.getElementById('schoolNameDisplay');
       if (schoolNameDisplay) {
         schoolNameDisplay.textContent = schoolName
-          || (isSocratesSchool(schoolId) ? 'Socrates School' : schoolId)
+          || (isSocratesSchool() ? 'Socrates School' : schoolId)
           || 'Socrates School';
       }
 
@@ -715,7 +734,7 @@
         const monthForKpi = getFocusedMonth();
         const kpiMonthLabel = MONTH_NAMES[monthForKpi] || ('Month ' + monthForKpi);
         const urlParams = new URLSearchParams(window.location.search);
-        const studentParam = urlParams.get('student') || localStorage.getItem('parentFocusStudent');
+        const studentParam = urlParams.get('studentKey');
         if (studentParam) {
           return; // Don't render KPIs in parent view
         }
@@ -1228,10 +1247,11 @@
           closePaymentModal();
           
           // Refresh based on view mode
-          const studentParam = localStorage.getItem('parentFocusStudent');
+          const urlParams = new URLSearchParams(window.location.search);
+          const studentParam = urlParams.get('studentKey');
           if (studentParam) {
-            // Parent view - reload single student
-            renderParentTransportPayment(studentParam);
+            // Single-student view - reload that student only
+            renderYearScopedStudentView(studentParam);
           } else {
             // Admin view - reload all data
             loadAllData();
@@ -1488,6 +1508,42 @@
       const statusCache = new Map();
       const getCacheKey = (studentId, year) => `${studentId}_${year}`;
 
+      function normalizePaymentList(data) {
+        if (!data) return [];
+        if (Array.isArray(data)) return data;
+        if (typeof data === 'object') return Object.values(data);
+        return [data];
+      }
+
+      function filterLegacyPaymentsByYear(data, year) {
+        const yearNum = Number(year);
+        return normalizePaymentList(data).filter((p) => Number(p?.year) === yearNum);
+      }
+
+      async function readSupplementalPayments(year, studentId) {
+        let scopedSnap = null;
+        try {
+          scopedSnap = await schoolRef(`years/${year}/transport_payments/${studentId}`).once('value');
+        } catch (err) {
+          scopedSnap = null;
+        }
+        const scopedVal = scopedSnap?.val();
+        const scopedEmpty = !scopedSnap?.exists() ||
+          (scopedVal && typeof scopedVal === 'object' && Object.keys(scopedVal).length === 0);
+        if (!scopedEmpty && scopedVal) {
+          return normalizePaymentList(scopedVal);
+        }
+        if (isSocratesSchool()) {
+          try {
+            const legacySnap = await db.ref(`transport_payments/${studentId}`).once('value');
+            return filterLegacyPaymentsByYear(legacySnap.val(), year);
+          } catch (err) {
+            return [];
+          }
+        }
+        return [];
+      }
+
       // Load all data - ULTRA-OPTIMIZED: Load only transport students, progressive loading
       async function loadAllData() {
         try {
@@ -1584,30 +1640,53 @@
             }
           }
 
-          // STEP 3: Load payments ONLY for transport students (year-scoped)
+          // STEP 3: Load payments ONLY for transport students (year-scoped ledgers primary)
           showToast('Loading payments...', 'ok');
-          const [paymentsSnap, legacyPaymentsSnap] = await Promise.all([
-            scopedOrSocratesLegacy(`years/${year}/transportLedgers`, `transportLedgers/${year}`),
-            scopedOrSocratesLegacy(`years/${year}/transport_payments`, 'transport_payments').catch(() => ({ val: () => null }))
-          ]);
+          const paymentsSnap = await scopedOrSocratesLegacy(`years/${year}/transportLedgers`, `transportLedgers/${year}`);
+          let scopedPaymentsSnap = null;
+          let legacyPaymentsSnap = null;
+
+          try {
+            scopedPaymentsSnap = await schoolRef(`years/${year}/transport_payments`).once('value');
+          } catch (err) {
+            scopedPaymentsSnap = null;
+          }
+
+          const scopedPaymentsVal = scopedPaymentsSnap?.val() || {};
+          const scopedEmpty = !scopedPaymentsSnap?.exists() ||
+            (scopedPaymentsVal && typeof scopedPaymentsVal === 'object' && Object.keys(scopedPaymentsVal).length === 0);
+
+          if (isSocratesSchool() && scopedEmpty) {
+            try {
+              legacyPaymentsSnap = await db.ref('transport_payments').once('value');
+            } catch (err) {
+              legacyPaymentsSnap = null;
+            }
+          }
+
+          const legacyPaymentsVal = legacyPaymentsSnap?.val ? (legacyPaymentsSnap.val() || {}) : {};
 
           const paymentsData = {};
           const ledgers = paymentsSnap.val() || {};
           studentIds.forEach(studentId => {
             if (ledgers[studentId] && ledgers[studentId].payments) {
-              paymentsData[studentId] = Object.values(ledgers[studentId].payments);
+              paymentsData[studentId] = normalizePaymentList(ledgers[studentId].payments);
             }
           });
-          
-          // Check legacy path only for transport students
-          const legacyPayments = legacyPaymentsSnap.val() || {};
+
+          // Optional legacy payments: scoped year path (non-Socrates) or legacy root (Socrates fallback)
           studentIds.forEach(studentId => {
-            if (!paymentsData[studentId] && legacyPayments[studentId]) {
-              const payments = legacyPayments[studentId];
-              paymentsData[studentId] = Array.isArray(payments) ? payments : Object.values(payments || {});
+            if (paymentsData[studentId] && paymentsData[studentId].length) return;
+            if (scopedPaymentsVal && scopedPaymentsVal[studentId]) {
+              paymentsData[studentId] = normalizePaymentList(scopedPaymentsVal[studentId]);
+              return;
+            }
+            if (legacyPaymentsVal && legacyPaymentsVal[studentId]) {
+              const legacyPayments = legacyPaymentsVal[studentId];
+              paymentsData[studentId] = filterLegacyPaymentsByYear(legacyPayments, year);
             }
           });
-          
+
           state.transportPayments = paymentsData;
 
           // STEP 4: Load expenses (lightweight, can load all)
@@ -1715,31 +1794,20 @@
         
         // Load ONLY this specific student's data (fast!)
         // Use same data source as admin view (transportLedgers)
-        const [sSnap, enrollSnap, ledSnap, legacySnap, finSnap] = await Promise.all([
+        const [sSnap, enrollSnap, ledSnap, finSnap] = await Promise.all([
           scopedOrSocratesLegacy(`students/${studentId}`, `students/${studentId}`),
           scopedOrSocratesLegacy(`years/${y}/transportEnrollments/${studentId}`, `transport_enrollments/${studentId}`).catch(() => ({ val: () => null })),
           scopedOrSocratesLegacy(`years/${y}/transportLedgers/${studentId}/payments`, `transportLedgers/${y}/${studentId}/payments`).catch(() => ({ val: () => null })),
-          scopedOrSocratesLegacy(`years/${y}/transport_payments/${studentId}`, `transport_payments/${studentId}`).catch(() => ({ val: () => null })),
           scopedOrSocratesLegacy(`years/${y}/finance/${studentId}/payments`, `finance/${y}/${studentId}/payments`).catch(() => ({ val: () => null }))
         ]);
         
         const S = sSnap.val() || {};
         const enrollment = enrollSnap.val() || {};
-        let pays = ledSnap.val() || {};
+        let pays = normalizePaymentList(ledSnap.val() || {});
         
         // Also check legacy path if no data in new path
-        if (!pays || (typeof pays === 'object' && Object.keys(pays).length === 0)) {
-          const legacyPays = legacySnap.val() || {};
-          if (legacyPays && typeof legacyPays === 'object') {
-            pays = Object.values(legacyPays);
-          } else {
-            pays = legacyPays;
-          }
-        } else {
-          // New format - convert to array
-          if (typeof pays === 'object' && !Array.isArray(pays)) {
-            pays = Object.values(pays);
-          }
+        if (!pays || pays.length === 0) {
+          pays = await readSupplementalPayments(y, studentId);
         }
         
         const schoolPayments = finSnap.val() || {};
@@ -1788,11 +1856,10 @@
       function monthName(num){ return MONTH_NAMES[num] || ''; }
       async function loadTransportContextStrict(year, studentId){
         const db = firebase.database();
-        const [assignSnap, enrollSnap, paysSnap, legacyPaysSnap, financeSnap, studentSnap] = await Promise.all([
+        const [assignSnap, enrollSnap, paysSnap, financeSnap, studentSnap] = await Promise.all([
           scopedOrSocratesLegacy(`years/${year}/transportAssignments/${studentId}`, `transportAssignments/${year}/${studentId}`),
           scopedOrSocratesLegacy(`years/${year}/transportEnrollments/${studentId}`, `transport_enrollments/${studentId}`).catch(() => ({ val: () => null })),
           scopedOrSocratesLegacy(`years/${year}/transportLedgers/${studentId}/payments`, `transportLedgers/${year}/${studentId}/payments`).catch(() => ({ val: () => null })),
-          scopedOrSocratesLegacy(`years/${year}/transport_payments/${studentId}`, `transport_payments/${studentId}`).catch(() => ({ val: () => null })),
           scopedOrSocratesLegacy(`years/${year}/finance/${studentId}/payments`, `finance/${year}/${studentId}/payments`).catch(() => ({ val: () => null })),
           scopedOrSocratesLegacy(`students/${studentId}`, `students/${studentId}`).catch(() => ({ val: () => null })),
         ]);
@@ -1800,10 +1867,9 @@
         const legacyEnroll = enrollSnap.val() || null;
         
         // Get payments from both paths
-        let payments = Object.values(paysSnap.val()||{});
+        let payments = normalizePaymentList(paysSnap.val() || {});
         if (!payments || payments.length === 0) {
-          const legacyPays = legacyPaysSnap.val() || {};
-          payments = Array.isArray(legacyPays) ? legacyPays : Object.values(legacyPays);
+          payments = await readSupplementalPayments(year, studentId);
         }
         
         // Normalize payment objects
@@ -1977,19 +2043,11 @@
         }
       }
 
-      // Check for parent/single-student view IMMEDIATELY
+      // Check for single-student view (ONLY via URL studentKey)
       const urlParams = new URLSearchParams(window.location.search);
-      const studentParam = urlParams.get('student') || localStorage.getItem('parentFocusStudent');
-      const yearParam = urlParams.get('year');
+      const studentParam = urlParams.get('studentKey');
       const monthParam = parseInt(urlParams.get('month'), 10);
       
-      // Initialize year from URL or context
-      if (yearParam && window.somapYearContext?.setSelectedYear) {
-        window.somapYearContext.setSelectedYear(String(parseInt(yearParam, 10)), { manual: false, forceDispatch: true });
-      } else if (window.somapYearContext) {
-        const currentYear = window.somapYearContext.getSelectedYear();
-        if (currentYear) state.year = parseInt(currentYear) || state.year;
-      }
       if (Number.isFinite(monthParam) && monthParam >= 1 && monthParam <= 12) {
         state.month = monthParam;
         state.monthSelectedFromUrl = true;
@@ -1999,15 +2057,13 @@
       if (yearSelect && state.year) yearSelect.value = state.year;
       
       if (studentParam) {
-        // Parent view mode - render immediately without waiting for auth
-        localStorage.setItem('parentFocusStudent', studentParam);
         state.currentPaymentStudentId = studentParam;
         
-        // Hide expense/balance cards IMMEDIATELY for parent view
+        // Hide expense/balance cards for single-student view
         const expensesCard = document.getElementById('totalExpenses')?.closest('.stat-card');
         const netBalanceCard = document.getElementById('netBalance')?.closest('.stat-card');
-        if (expensesCard) expensesCard.style.display = 'none';
-        if (netBalanceCard) netBalanceCard.style.display = 'none';
+        if (expensesCard) expensesCard.style.display = "none";
+        if (netBalanceCard) netBalanceCard.style.display = "none";
         
         // Hide expenses section completely
         const expensesSection = document.querySelector('section.card.mt-3:has([id="fuelExpenses"])');
@@ -2030,131 +2086,31 @@
         if (totalCollectedEl) totalCollectedEl.textContent = 'Loading...';
         if (totalDebtEl) totalDebtEl.textContent = 'Loading...';
         if (monthLabelEl) monthLabelEl.textContent = '';
-        if (classFilter) classFilter.style.display = 'none';
-        if (searchInput) searchInput.style.display = 'none';
-        if (statusFilter) statusFilter.style.display = 'none';
+        if (classFilter) classFilter.style.display = "none";
+        if (searchInput) searchInput.style.display = "none";
+        if (statusFilter) statusFilter.style.display = "none";
         const debtorsBtn = document.getElementById('debtorsBtnText')?.parentElement;
-        if (debtorsBtn) debtorsBtn.style.display = 'none';
+        if (debtorsBtn) debtorsBtn.style.display = "none";
         
         // Load and render immediately using strict year-scoped data
         renderYearScopedStudentView(studentParam).catch(err => {
-          console.error('Error rendering parent transport payment:', err);
+          console.error('Error rendering single-student transport payment:', err);
           if (totalExpectedEl) totalExpectedEl.textContent = 'Error';
           if (totalCollectedEl) totalCollectedEl.textContent = 'Error';
           if (totalDebtEl) totalDebtEl.textContent = 'Error';
         });
       } else {
-        // No student param: determine admin vs parent view
-        const parentMarker = localStorage.getItem('parentFocusStudent')
-          || localStorage.getItem('parent_student')
-          || localStorage.getItem('studentKey')
-          || localStorage.getItem('parentPhone');
-        const schoolParam = urlParams.get('school');
-
-        if (!parentMarker) {
-          const backBtn = document.getElementById('backButton');
-          if (backBtn) { backBtn.href = 'transport.html'; backBtn.textContent = '<- Back to Dashboard'; }
-          loadAllData();
-        } else {
-          const backBtn = document.getElementById('backButton');
-          if (backBtn) { backBtn.href = '../parent.html'; backBtn.textContent = '<- Back to Parent Dashboard'; }
-
-          // Prefer resolving a focused student from storage FIRST, even if `school` is present
-          const tryLocalFirst = async () => {
-            let sid = localStorage.getItem('parentFocusStudent')
-              || localStorage.getItem('parent_student')
-              || localStorage.getItem('studentKey');
-            if (sid) {
-              state.currentPaymentStudentId = sid;
-              await renderYearScopedStudentView(sid);
-              return true;
-            }
-            return false;
-          };
-
-          // If explicit school is provided in URL, only load ALL data if no focused student can be resolved
-          if (schoolParam) {
-            if (yearSelect && state.year) yearSelect.value = state.year;
-            tryLocalFirst().then(found => {
-              if (!found) loadAllData();
-            });
-          } else {
-          const tryResolveAndRender = async (user) => {
-            try {
-              // Try local sources first
-              let sid = localStorage.getItem('parentFocusStudent')
-                || localStorage.getItem('parent_student')
-                || localStorage.getItem('studentKey');
-              if (sid) {
-                state.currentPaymentStudentId = sid;
-                await renderYearScopedStudentView(sid);
-                return;
-              }
-              // Try phone mapping to students
-              const phone = (user && user.phoneNumber) ? String(user.phoneNumber).replace(/\D/g,'') : (localStorage.getItem('parentPhone')||'');
-              const normPhone = phone ? phone.replace(/\D/g,'') : '';
-              if (normPhone) {
-                const snap = await scopedOrSocratesLegacy('students', 'students');
-                const all = snap.val() || {};
-                const matches = Object.entries(all).filter(([k,v]) => {
-                  const sp = String(v?.primaryParentContact||v?.parentPhone||'').replace(/\D/g,'');
-                  return sp && sp.endsWith(normPhone);
-                });
-                if (matches.length) {
-                  // Prefer a child with an assignment in the selected year
-                  const year = String(state.year);
-                  let picked = null;
-                  for (const [kid] of matches) {
-                    const a = await scopedOrSocratesLegacy(`years/${year}/transportAssignments/${kid}`, `transportAssignments/${year}/${kid}`);
-                    if (a.exists()) { picked = kid; break; }
-                  }
-                  if (!picked) {
-                    // fallback: pick the most recently created student
-                    matches.sort((a,b)=> (Number(b[1]?.timestamp||0) - Number(a[1]?.timestamp||0)));
-                    picked = matches[0][0];
-                  }
-                  sid = picked;
-                  localStorage.setItem('parentFocusStudent', sid);
-                  state.currentPaymentStudentId = sid;
-                  await renderYearScopedStudentView(sid);
-                  return;
-                }
-              }
-              // Fallback: show friendly message
-              renderNoDataStrict('No child found for your account for this year.');
-            } catch (e) {
-              console.error('Parent resolve error', e);
-              renderNoDataStrict('Unable to load transport information.');
-            }
-          };
-
-          const totalExpectedEl = document.getElementById('totalExpected');
-          const totalCollectedEl = document.getElementById('totalCollected');
-          const totalDebtEl = document.getElementById('totalDebt');
-          if (totalExpectedEl) totalExpectedEl.textContent = 'Loading...';
-          if (totalCollectedEl) totalCollectedEl.textContent = 'Loading...';
-          if (totalDebtEl) totalDebtEl.textContent = 'Loading...';
-
-          // Use auth state if available, else attempt without
-          const current = firebase.auth().currentUser;
-          if (current) {
-            tryResolveAndRender(current);
-          } else {
-            firebase.auth().onAuthStateChanged((user) => {
-              if (!user) { tryResolveAndRender(null); return; }
-              tryResolveAndRender(user);
-            });
-          }
-          }
-        }
+        const backBtn = document.getElementById('backButton');
+        if (backBtn) { backBtn.href = 'transport.html'; backBtn.textContent = '<- Back to Dashboard'; }
+        loadAllData();
       }
-      
-      // Listen to year changes for parent view
+
+      // Listen to year changes for single-student view
       if (window.somapYearContext) {
         window.somapYearContext.onYearChanged((year) => {
-          const studentId = state.currentPaymentStudentId || localStorage.getItem('parentFocusStudent');
+          const studentId = state.currentPaymentStudentId;
           const urlParams = new URLSearchParams(window.location.search);
-          const studentParam = urlParams.get('student') || localStorage.getItem('parentFocusStudent');
+          const studentParam = urlParams.get('studentKey');
           if (studentParam) {
             const newYear = parseInt(year) || state.year;
             state.year = newYear;
