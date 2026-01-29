@@ -120,6 +120,58 @@
       font-size: 1rem;
     }
 
+    .school-meta {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      background: rgba(255, 255, 255, 0.15);
+      padding: 12px 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+
+    .school-logo {
+      width: 56px;
+      height: 56px;
+      border-radius: 12px;
+      object-fit: cover;
+      background: rgba(255, 255, 255, 0.2);
+      border: 2px solid rgba(255, 255, 255, 0.2);
+    }
+
+    .school-name {
+      font-weight: 700;
+      font-size: 1rem;
+    }
+
+    .year-select-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    .year-select-wrap label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+    }
+
+    .year-select-wrap select {
+      padding: 8px 12px;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 10px;
+      color: white;
+      font-size: 0.95rem;
+    }
+
+    .year-select-wrap select option {
+      background: #5a67d8;
+      color: white;
+    }
+
     .user-badge {
       display: flex;
       align-items: center;
@@ -553,6 +605,16 @@
           <h1>👨‍🏫 Teacher Dashboard</h1>
           <p class="header-subtitle" id="dateLabel">Loading...</p>
         </div>
+        <div class="school-meta">
+          <img id="school-logo-display" class="school-logo" alt="School logo">
+          <div>
+            <div class="school-name" id="schoolNameDisplay">Loading...</div>
+            <div class="year-select-wrap">
+              <label for="yearSelect">Academic Year</label>
+              <select id="yearSelect" data-somap-year-select data-somap-year-min="2025" data-somap-year-max="2032"></select>
+            </div>
+          </div>
+        </div>
         <div class="user-badge">
           <div class="user-avatar" id="userAvatar">T</div>
           <div class="user-info">
@@ -709,24 +771,124 @@
       window.location.href = '../somapappv1multischool/multischool.html';
     }
     const schoolRef = (p) => db.ref(SOMAP.P(p));
+    const schoolPath = (p) => SOMAP.P(p);
+
+    function isSocratesSchool(id) {
+      return ['socrates-school', 'default', 'socrates'].includes(id);
+    }
+
+    async function updateSchoolDisplay() {
+      const nameEl = document.getElementById('schoolNameDisplay');
+      if (nameEl) nameEl.textContent = school.name || school.id || 'School';
+
+      const logoEl = document.getElementById('school-logo-display');
+      if (!logoEl) return;
+      if (isSocratesSchool(school?.id)) {
+        logoEl.src = '../images/socrates_logo.png';
+        return;
+      }
+      try {
+        const logoSnap = await schoolRef('profile/logoUrl').get();
+        const logoUrl = logoSnap.exists() ? logoSnap.val() : '';
+        logoEl.src = logoUrl || '../images/socrates_logo.png';
+      } catch (err) {
+        console.warn('Failed to load school logo', err);
+        logoEl.src = '../images/socrates_logo.png';
+      }
+    }
+
+    function maybeAutoAdvanceYear() {
+      const ctx = window.somapYearContext;
+      if (!ctx || typeof ctx.getSelectedYear !== 'function') return;
+      const current = String(new Date().getFullYear());
+      const selected = String(ctx.getSelectedYear());
+      if (Number(current) > Number(selected)) {
+        if (typeof ctx.resetToCurrentYear === 'function') {
+          ctx.resetToCurrentYear();
+        } else if (typeof ctx.setSelectedYear === 'function') {
+          ctx.setSelectedYear(current, { manual: false, forceDispatch: true });
+        }
+      }
+    }
+
     const getYear = () => window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
-    let currentYear = getYear();
+    maybeAutoAdvanceYear();
+    let currentYear = String(getYear());
     if (window.somapYearContext?.onYearChanged) {
       window.somapYearContext.onYearChanged((y) => {
-        currentYear = String(y);
-        location.reload();
+        const nextYear = String(y);
+        if (nextYear === String(currentYear)) return;
+        currentYear = nextYear;
+        reloadForYear();
       });
     }
 
     async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
       const scopedSnap = await schoolRef(scopedSubPath).once('value');
       if (scopedSnap.exists()) return scopedSnap;
-      const isSocrates = ['socrates-school', 'default', 'socrates'].includes(school?.id);
+      const isSocrates = isSocratesSchool(school?.id);
       if (isSocrates) {
         const legacySnap = await db.ref(legacyPath).once('value');
         if (legacySnap.exists()) return legacySnap;
       }
       return scopedSnap;
+    }
+
+    function normalizeClassKey(value = '') {
+      return String(value || '')
+        .replace(/\s+/g, '')
+        .replace(/[-_/]/g, '')
+        .toLowerCase();
+    }
+
+    function getPromotedClassName(current = '') {
+      const key = normalizeClassKey(current);
+      const ladder = {
+        baby: 'Middle',
+        middle: 'Preunit',
+        preunit: 'Class1',
+        class1: 'Class2',
+        class2: 'Class3',
+        class3: 'Class4',
+        class4: 'Class5',
+        class5: 'Class6',
+        class6: 'Class7',
+        class7: 'Graduated/Archive'
+      };
+      return ladder[key] || current || '';
+    }
+
+    async function maybeRunRollover() {
+      const systemYear = String(new Date().getFullYear());
+      const flagRef = schoolRef(`meta/rolloverDone/${systemYear}`);
+      try {
+        const flagSnap = await flagRef.get();
+        if (flagSnap.exists()) return;
+
+        const previousYear = String(Number(systemYear) - 1);
+        const prevEnrollSnap = await scopedOrSocratesLegacy(
+          `years/${previousYear}/enrollments`,
+          `enrollments/${previousYear}`
+        );
+        const prevEnrollments = prevEnrollSnap.val() || {};
+        const updates = {};
+
+        Object.entries(prevEnrollments).forEach(([studentKey, record]) => {
+          const baseClass = (record && (record.className || record.classLevel || record.class)) || '';
+          const nextClass = getPromotedClassName(baseClass);
+          updates[schoolPath(`years/${systemYear}/enrollments/${studentKey}`)] = {
+            className: nextClass,
+            promotedFrom: baseClass,
+            fromYear: Number(previousYear),
+            at: firebase.database.ServerValue.TIMESTAMP
+          };
+        });
+
+        updates[schoolPath(`meta/rolloverDone/${systemYear}`)] = true;
+        await db.ref().update(updates);
+      } catch (err) {
+        console.warn('Year rollover skipped/failed:', err);
+      }
     }
     
     // Simple helper functions (no imports needed!)
@@ -789,6 +951,21 @@
     const openHeadteacherContracts = document.getElementById('openHeadteacherContracts');
 
     let classSubjectMap = []; // Array of {class: 'Class 1', subjects: ['Math', 'English']}
+
+    async function reloadForYear() {
+      try {
+        classSubjectMappings.innerHTML = '';
+        classSubjectMap = [];
+        teacherConfig = null;
+        setupSection.classList.add('hidden');
+        mainDashboard.classList.add('hidden');
+        await maybeRunRollover();
+        await setup();
+      } catch (err) {
+        console.error('Failed to reload year data', err);
+        toast('Failed to reload selected year data.', 'error');
+      }
+    }
 
     // Toast function
     function toast(message, type = 'info') {
@@ -1140,12 +1317,13 @@
         ]);
 
         console.log('Profile and config loaded');
-        workerProfile = profileSnap.val();
+        workerProfile = profileSnap.val() || {};
       
       // Update UI with worker info
-      const fullName = workerProfile.fullNameUpper || 
+      const fullName = workerProfile.fullNameUpper ||
         [workerProfile.firstName, workerProfile.middleName, workerProfile.lastName]
-          .filter(Boolean).join(' ').toUpperCase();
+          .filter(Boolean).join(' ').toUpperCase() ||
+        'TEACHER';
       
       teacherName.textContent = fullName;
       localStorage.setItem('somap_workerName', fullName);
@@ -1216,7 +1394,9 @@
       sessionStorage.removeItem('dashboardReadOnly');
       sessionStorage.removeItem('dashboardAccessedBy');
       sessionStorage.removeItem('teacherWorkerId');
-      
+
+      updateSchoolDisplay();
+      maybeRunRollover();
       setup().catch(err => {
         console.error('Setup error:', err);
         toast(err.message || 'Error loading dashboard', 'error');
