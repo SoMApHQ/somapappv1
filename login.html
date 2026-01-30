@@ -381,6 +381,79 @@
         }
         return count;
       }
+      function normalizeWorkerNameInput(value) {
+        return String(value || "").replace(/\s+/g, " ").trim().toUpperCase();
+      }
+      function resolveSchoolPath(subPath) {
+        if (!subPath) return "";
+        const trimmed = String(subPath).replace(/^\/+/, "");
+        if (window.SOMAP && typeof window.SOMAP.P === "function") {
+          try {
+            return window.SOMAP.P(trimmed);
+          } catch (err) {
+            console.warn("Failed to resolve school path", trimmed, err);
+          }
+        }
+        return trimmed;
+      }
+      function getWorkerLookupYears() {
+        const years = new Set();
+        years.add(String(new Date().getFullYear()));
+        const contextYear = window.somapYearContext?.getSelectedYear?.();
+        if (contextYear) years.add(String(contextYear));
+        const persisted = localStorage.getItem("somapSelectedYear");
+        if (persisted) years.add(String(persisted));
+        return Array.from(years).filter((y) => /^\d{4}$/.test(y));
+      }
+      function buildWorkerLookupPaths() {
+        const paths = new Set();
+        const years = getWorkerLookupYears();
+        for (const year of years) {
+          const yearPath = resolveSchoolPath(`years/${year}/workers`);
+          if (yearPath) paths.add(yearPath);
+        }
+        const legacyPath = resolveSchoolPath("workers");
+        if (legacyPath) paths.add(legacyPath);
+        return Array.from(paths);
+      }
+      function extractWorkerYearFromPath(path) {
+        const match = String(path || "").match(/years\/(\d{4})\/workers/);
+        return match ? match[1] : "";
+      }
+      async function findWorkerByNameAndPhone(name, phone) {
+        const normalizedName = normalizeWorkerNameInput(name);
+        const normalizedPhone = normalizePhone(phone);
+        if (!normalizedName || !normalizedPhone) return null;
+        const paths = buildWorkerLookupPaths();
+        for (const path of paths) {
+          if (!path) continue;
+          try {
+            const snap = await db.ref(path).once("value");
+            if (!snap.exists()) continue;
+            let found = null;
+            snap.forEach((child) => {
+              const profile = child.val()?.profile || {};
+              const candidatePhone = normalizePhone(profile.phone);
+              if (
+                profile.fullNameUpper === normalizedName &&
+                candidatePhone === normalizedPhone
+              ) {
+                found = child.key;
+                return true;
+              }
+            });
+            if (found) {
+              return {
+                workerId: found,
+                workerYear: extractWorkerYearFromPath(path),
+              };
+            }
+          } catch (err) {
+            console.error("Worker lookup failed for", path, err);
+          }
+        }
+        return null;
+      }
 
       /* STAFF LOGIN */
       googleLogin.onclick = async () => {
@@ -518,27 +591,20 @@
       workerForm.onsubmit = async (e) => {
         e.preventDefault();
 
-        const name = workerName.value.trim().toUpperCase();
-        const phone = workerPhone.value.trim();
+        const name = workerName.value;
+        const phone = workerPhone.value;
 
         workerError.classList.add("hidden");
 
-        const snap = await db.ref("workers").once("value");
-        let found = null;
-
-        snap.forEach((w) => {
-          const p = w.val().profile || {};
-          if (p.fullNameUpper === name && p.phone === phone) found = w.key;
-        });
-
-        if (!found) {
+        const workerRecord = await findWorkerByNameAndPhone(name, phone);
+        if (!workerRecord) {
           workerError.textContent = "Worker not found";
           workerError.classList.remove("hidden");
           return;
         }
 
         localStorage.setItem("role", "worker");
-        localStorage.setItem("workerId", found);
+        localStorage.setItem("workerId", workerRecord.workerId);
         location.href = "workershtml/workersdashboard.html";
       };
       function shakeField(id) {
