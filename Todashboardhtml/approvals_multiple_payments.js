@@ -69,6 +69,32 @@
     return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
   }
 
+  function joinPath(...segments) {
+    return segments
+      .map((segment) => String(segment || '').replace(/^\/+|\/+$/g, ''))
+      .filter(Boolean)
+      .join('/');
+  }
+
+  function collectSnapshotEntries(snapshot, source, { basePath = '', year = '', month = '', seen } = {}) {
+    const results = [];
+    if (!snapshot || typeof snapshot.forEach !== 'function') return results;
+    snapshot.forEach((child) => {
+      if (!child.key) return;
+      if (seen && seen.has(child.key)) return;
+      const recordPath = joinPath(basePath, child.key);
+      const row = toRowModel(child.val() || {}, source, {
+        id: child.key,
+        path: recordPath,
+        year,
+        month,
+      });
+      results.push(row);
+      if (seen) seen.add(child.key);
+    });
+    return results;
+  }
+
   function getWorkingYear() {
     const apiYear = window.SomapApprovals?.getSelectedYear?.();
     if (apiYear) return Number(apiYear);
@@ -187,46 +213,77 @@
   }
 
   async function fetchPending(year) {
-    let snap = await db.ref(P('approvalsPending')).once('value');
-    let data = snap.val() || {};
-    if (isSocratesSchool()) {
-      const legacySnap = await legacyRef('approvalsPending').once('value');
-      const legacyData = legacySnap.val() || {};
-      data = { ...legacyData, ...data };
+    const rows = [];
+    const seen = new Set();
+    const scopedBase = P('approvalsPending');
+    const scopedSnap = await db.ref(scopedBase).once('value');
+    if (scopedSnap.exists()) {
+      rows.push(
+        ...collectSnapshotEntries(scopedSnap, 'pending', {
+          basePath: scopedBase,
+          year,
+          seen,
+        }),
+      );
     }
-    if (!data || Object.keys(data).length === 0) return [];
-    return Object.entries(data).map(([key, value]) =>
-      toRowModel(value || {}, 'pending', {
-        id: key,
-        path: P(`approvalsPending/${key}`),
-        year,
-      })
-    );
+
+    if (isSocratesSchool()) {
+      const legacyBase = normalizePath('approvalsPending');
+      const legacySnap = await legacyRef('approvalsPending').once('value');
+      if (legacySnap.exists()) {
+        rows.push(
+          ...collectSnapshotEntries(legacySnap, 'pending', {
+            basePath: legacyBase,
+            year,
+            seen,
+          }),
+        );
+      }
+    }
+
+    return rows;
   }
 
   async function fetchHistory(year) {
-    let yearSnap = await db.ref(P('approvalsHistory')).child(String(year)).once('value');
-    let yearTree = yearSnap.val() || {};
-    if (isSocratesSchool()) {
-      const legacySnap = await legacyRef('approvalsHistory').child(String(year)).once('value');
-      const legacyTree = legacySnap.val() || {};
-      yearTree = { ...legacyTree, ...yearTree };
-    }
-    if (!yearTree || Object.keys(yearTree).length === 0) return [];
-    const list = [];
-    Object.entries(yearTree).forEach(([monthKey, records]) => {
-      Object.entries(records || {}).forEach(([entryKey, entry]) => {
-        list.push(
-          toRowModel(entry || {}, 'history', {
-            id: entryKey,
-            path: P(`approvalsHistory/${year}/${monthKey}/${entryKey}`),
+    const rows = [];
+    const seen = new Set();
+    const scopedRoot = P('approvalsHistory');
+    const scopedSnap = await db.ref(scopedRoot).child(String(year)).once('value');
+    if (scopedSnap.exists()) {
+      scopedSnap.forEach((monthNode) => {
+        const monthKey = monthNode.key;
+        const monthBase = joinPath(scopedRoot, year, monthKey);
+        rows.push(
+          ...collectSnapshotEntries(monthNode, 'history', {
+            basePath: monthBase,
             year,
             month: monthKey,
-          })
+            seen,
+          }),
         );
       });
-    });
-    return list;
+    }
+
+    if (isSocratesSchool()) {
+      const legacyRoot = normalizePath('approvalsHistory');
+      const legacySnap = await legacyRef('approvalsHistory').child(String(year)).once('value');
+      if (legacySnap.exists()) {
+        legacySnap.forEach((monthNode) => {
+          const monthKey = monthNode.key;
+          const monthBase = joinPath(legacyRoot, year, monthKey);
+          rows.push(
+            ...collectSnapshotEntries(monthNode, 'history', {
+              basePath: monthBase,
+              year,
+              month: monthKey,
+              seen,
+            }),
+          );
+        });
+      }
+    }
+
+    return rows;
   }
 
   function groupByFingerprint(records) {
