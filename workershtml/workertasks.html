@@ -1312,15 +1312,85 @@
 
         // Load worker profile and config (with previous-year fallback)
         const previousYear = String(Number(currentYear) - 1);
+        console.log('Looking for worker:', currentWorkerId, 'in year:', currentYear);
+        
         let workerSnap = await scopedOrSocratesLegacy(
           `years/${currentYear}/workers/${currentWorkerId}`,
           `workers/${currentWorkerId}`
         );
+        
+        console.log('Worker snapshot (current year):', {
+          exists: workerSnap?.exists(),
+          hasData: !!workerSnap?.val(),
+          keys: workerSnap?.exists() ? Object.keys(workerSnap.val() || {}) : []
+        });
+        
         if (!workerSnap.exists()) {
+          console.log('Not found in current year, trying previous year:', previousYear);
           workerSnap = await scopedOrSocratesLegacy(
             `years/${previousYear}/workers/${currentWorkerId}`,
             `workers/${currentWorkerId}`
           );
+          console.log('Worker snapshot (previous year):', {
+            exists: workerSnap?.exists(),
+            hasData: !!workerSnap?.val()
+          });
+        }
+        
+        // If still not found, try searching all workers by ID in current year
+        if (!workerSnap.exists()) {
+          console.log('Worker not found by direct ID, searching in all workers...');
+          const allWorkersSnap = await scopedOrSocratesLegacy(
+            `years/${currentYear}/workers`,
+            `workers`
+          );
+          if (allWorkersSnap.exists()) {
+            let foundWorker = null;
+            allWorkersSnap.forEach((child) => {
+              if (child.key === currentWorkerId) {
+                foundWorker = child;
+                console.log('Found worker by searching all workers with matching key');
+              }
+            });
+            if (foundWorker) {
+              // Create a snapshot-like object that properly implements exists()
+              const workerData = foundWorker.val();
+              workerSnap = {
+                exists: function() { return true; },
+                val: function() { return workerData; },
+                key: foundWorker.key
+              };
+            } else {
+              // Last resort: check if there's a worker with matching profile data
+              // This handles cases where workerId doesn't match but worker exists
+              console.log('Worker ID not found, checking if worker exists with different ID...');
+              const storedName = localStorage.getItem('somap_workerName') || '';
+              const storedPhone = localStorage.getItem('somap_workerPhone') || '';
+              if (storedName || storedPhone) {
+                allWorkersSnap.forEach((child) => {
+                  const workerData = child.val() || {};
+                  const profile = workerData.profile || workerData || {};
+                  const nameMatch = storedName && profile.fullNameUpper === storedName.toUpperCase();
+                  const phoneMatch = storedPhone && (profile.phone === storedPhone || profile.phoneNumber === storedPhone);
+                  if (nameMatch || phoneMatch) {
+                    foundWorker = child;
+                    console.log('Found worker by name/phone match:', child.key);
+                    // Update localStorage with correct workerId
+                    localStorage.setItem('workerId', child.key);
+                    currentWorkerId = child.key;
+                  }
+                });
+                if (foundWorker) {
+                  const workerData = foundWorker.val();
+                  workerSnap = {
+                    exists: function() { return true; },
+                    val: function() { return workerData; },
+                    key: foundWorker.key
+                  };
+                }
+              }
+            }
+          }
         }
 
         let configSnap = await scopedOrSocratesLegacy(
@@ -1338,10 +1408,34 @@
           }
         }
 
+        if (!workerSnap || !workerSnap.exists()) {
+          console.error('Worker profile not found for ID:', currentWorkerId);
+          console.error('Checked paths:');
+          console.error(`  - years/${currentYear}/workers/${currentWorkerId}`);
+          console.error(`  - years/${previousYear}/workers/${currentWorkerId}`);
+          console.error(`  - workers/${currentWorkerId}`);
+          toast('Worker profile not found. Showing setup form - please complete your profile.', 'warning');
+          // Still show setup form even if profile not found
+          workerProfile = {};
+          setupSection.classList.remove('hidden');
+          mainDashboard.classList.add('hidden');
+          classSubjectMappings.innerHTML = '';
+          classSubjectMap = [];
+          addClassMapping();
+          return;
+        }
+
         console.log('Profile and config loaded');
         // Extract profile from worker object (structure: { profile: {...}, docs: {...}, contract: {...} })
         const workerData = workerSnap.val() || {};
         workerProfile = workerData.profile || workerData || {};
+        
+        console.log('Extracted worker profile:', {
+          hasProfile: !!workerData.profile,
+          hasData: !!workerData,
+          profileKeys: Object.keys(workerProfile),
+          fullName: workerProfile.fullNameUpper || workerProfile.firstName
+        });
       
       // Update UI with worker info
       const fullName = workerProfile.fullNameUpper ||
