@@ -639,7 +639,7 @@
     </div>
 
     <!-- Setup Section (shown only on first visit) -->
-    <div class="setup-section" id="setupSection">
+    <div class="setup-section hidden" id="setupSection">
       <h2>🎓 Welcome! Let's Set Up Your Profile</h2>
       <p>Please select your role, then add each class you teach with the specific subjects you teach in that class.</p>
 
@@ -676,7 +676,7 @@
     </div>
 
     <!-- Main Dashboard (shown after setup) -->
-    <div id="mainDashboard" class="hidden">
+    <div id="mainDashboard">
       <div id="setupReminder" class="setup-reminder hidden">
         <span>Need to update your classes or subjects?</span>
         <button type="button" id="openSetupFormBtn" class="btn btn-secondary">
@@ -782,358 +782,857 @@
     </div>
   </div>
 
- <script>
-(() => {
-  // -----------------------------
-  // Tiny safe UI helpers (no-crash)
-  // -----------------------------
-  function toast(message, type = 'info') {
-    const container = document.getElementById('toastContainer');
-    if (!container) {
-      console.error('[TOAST missing]', message);
-      return;
+  <script>
+    console.log('Script loading...');
+    const db = firebase.database();
+    const school = SOMAP.getSchool();
+    if (!school || !school.id) {
+      window.location.href = '../somapappv1multischool/multischool.html';
     }
-    const toastEl = document.createElement('div');
-    toastEl.className = `toast ${type}`;
-    const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : type === 'warning' ? '⚠️' : 'ℹ️';
-    toastEl.innerHTML = `<span>${icon}</span><span>${message}</span>`;
-    container.appendChild(toastEl);
-    setTimeout(() => toastEl.classList.add('show'), 50);
-    setTimeout(() => {
-      toastEl.classList.remove('show');
-      setTimeout(() => toastEl.remove(), 250);
-    }, 3500);
-  }
+    const schoolRef = (p) => db.ref(SOMAP.P(p));
+    const schoolPath = (p) => SOMAP.P(p);
 
-  function hardFail(message, err) {
-    console.error('[TeacherDashboard HARD FAIL]', message, err || '');
-    const dateLabel = document.getElementById('dateLabel');
-    if (dateLabel) dateLabel.textContent = message;
-    toast(message, 'error');
-  }
-
-  function onReady(fn) {
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', fn, { once: true });
-    } else {
-      fn();
+    function isSocratesSchool(id) {
+      return ['socrates-school', 'default', 'socrates'].includes(id);
     }
-  }
 
-  // -----------------------------
-  // Date label (always)
-  // -----------------------------
-  onReady(() => {
+    async function updateSchoolDisplay() {
+      const nameEl = document.getElementById('schoolNameDisplay');
+      if (nameEl) nameEl.textContent = school.name || school.id || 'School';
+
+      const logoEl = document.getElementById('school-logo-display');
+      if (!logoEl) return;
+      if (isSocratesSchool(school?.id)) {
+        logoEl.src = '../images/socrates_logo.png';
+        return;
+      }
+      try {
+        const logoSnap = await schoolRef('profile/logoUrl').once('value');
+        const logoUrl = logoSnap.exists() ? logoSnap.val() : '';
+        logoEl.src = logoUrl || '../images/socrates_logo.png';
+      } catch (err) {
+        console.warn('Failed to load school logo', err);
+        logoEl.src = '../images/socrates_logo.png';
+      }
+    }
+
+    function maybeAutoAdvanceYear() {
+      const ctx = window.somapYearContext;
+      if (!ctx || typeof ctx.getSelectedYear !== 'function') return;
+      const current = String(new Date().getFullYear());
+      const selected = String(ctx.getSelectedYear());
+      if (Number(current) > Number(selected)) {
+        if (typeof ctx.resetToCurrentYear === 'function') {
+          ctx.resetToCurrentYear();
+        } else if (typeof ctx.setSelectedYear === 'function') {
+          ctx.setSelectedYear(current, { manual: false, forceDispatch: true });
+        }
+      }
+    }
+
+    const getYear = () => window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
+    const getNormalizedYear = (rawYear) => String(rawYear ?? window.somapYearContext?.getSelectedYear?.() ?? new Date().getFullYear());
+    let yearSelectorInitialized = false;
+
+    function initYearSelector() {
+      if (!yearSelect || !window.somapYearContext) return;
+      window.somapYearContext.attachYearDropdown?.(yearSelect);
+      const sync = (rawYear) => {
+        const normalized = getNormalizedYear(rawYear);
+        if (yearSelect.value !== normalized) {
+          yearSelect.value = normalized;
+        }
+      };
+      if (yearSelectorInitialized) {
+        sync();
+        return;
+      }
+      yearSelectorInitialized = true;
+      window.somapYearContext.onYearChanged(sync);
+    }
+
+    async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
+      const scopedSnap = await schoolRef(scopedSubPath).once('value');
+      if (scopedSnap.exists()) return scopedSnap;
+      const isSocrates = isSocratesSchool(school?.id);
+      if (isSocrates) {
+        const legacySnap = await db.ref(legacyPath).once('value');
+        if (legacySnap.exists()) return legacySnap;
+      }
+      return scopedSnap;
+    }
+
+    function normalizeClassKey(value = '') {
+      return String(value || '')
+        .replace(/\s+/g, '')
+        .replace(/[-_/]/g, '')
+        .toLowerCase();
+    }
+
+    function getPromotedClassName(current = '') {
+      const key = normalizeClassKey(current);
+      const ladder = {
+        baby: 'Middle',
+        middle: 'Preunit',
+        preunit: 'Class1',
+        class1: 'Class2',
+        class2: 'Class3',
+        class3: 'Class4',
+        class4: 'Class5',
+        class5: 'Class6',
+        class6: 'Class7',
+        class7: 'Graduated/Archive'
+      };
+      return ladder[key] || current || '';
+    }
+
+    async function maybeRunRollover() {
+      const systemYear = String(new Date().getFullYear());
+      const flagRef = schoolRef(meta/rolloverDone/${systemYear});
+      try {
+        const flagSnap = await flagRef.once('value');
+        if (flagSnap.exists()) return;
+
+        const previousYear = String(Number(systemYear) - 1);
+        const prevEnrollSnap = await scopedOrSocratesLegacy(
+          years/${previousYear}/enrollments,
+          enrollments/${previousYear}
+        );
+        const prevEnrollments = prevEnrollSnap.val() || {};
+        const updates = {};
+
+        Object.entries(prevEnrollments).forEach(([studentKey, record]) => {
+          const baseClass = (record && (record.className || record.classLevel || record.class)) || '';
+          const nextClass = getPromotedClassName(baseClass);
+          updates[schoolPath(years/${systemYear}/enrollments/${studentKey})] = {
+            className: nextClass,
+            promotedFrom: baseClass,
+            fromYear: Number(previousYear),
+            at: firebase.database.ServerValue.TIMESTAMP
+          };
+        });
+
+        updates[schoolPath(meta/rolloverDone/${systemYear})] = true;
+        await db.ref().update(updates);
+      } catch (err) {
+        console.warn('Year rollover skipped/failed:', err);
+      }
+    }
+    
+    function inferTeacherTypeFromProfile(profile = {}) {
+      const candidate = String(profile?.role || profile?.designation || '').trim();
+      if (!candidate) return 'Teacher';
+      return candidate
+        .split(/[\s_-]+/)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+        .join(' ');
+    }
+
+    // Simple helper functions (no imports needed!)
+    function todayYMD() {
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return ${y}-${m}-${day};
+    }
+
+    function localTs() {
+      return Date.now();
+    }
+
+    // Classes and Subjects Configuration
+    const SUBJECTS_BY_CLASS = {
+      'Baby Class': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
+      'Baby': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
+      'Middle Class': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
+      'Middle': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
+      'Preunit Class': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
+      'Preunit': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
+      'Pre-Unit': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
+      'Class 1': ['Writing Skills','Arithmetic','Developing Sports & Arts','Health.AREC','Kusoma','Listening'],
+      'Class 1 AB': ['Writing Skills','Arithmetic','Developing Sports & Arts','Health.AREC','Kusoma','Listening'],
+      'Class 2': ['Writing Skills','Arithmetic','Developing Sports & Arts','Health.AREC','Kusoma','Listening'],
+      'Class 2 AB': ['Writing Skills','Arithmetic','Developing Sports & Arts','Health.AREC','Kusoma','Listening'],
+      'Class 3': ['Math','English','Kiswahili','Science','Geography','Arts','History','French'],
+      'Class 4': ['Math','English','Kiswahili','Science','Geography','Arts','History','French'],
+      'Class 5': ['Math','English','Kiswahili','Science','Geography','Arts','History','French'],
+      'Class 6': ['Math','English','Kiswahili','Science','Social Studies','Civics & Morals'],
+      'Class 7': ['Math','English','Kiswahili','Science','Social Studies','Civics & Morals']
+    };
+
+    const ALL_CLASSES = Object.keys(SUBJECTS_BY_CLASS);
+
+    function normalizeWorkerId(rawId) {
+      if (!rawId) return null;
+      const normalized = String(rawId).trim();
+      if (!normalized) return null;
+      localStorage.setItem('workerId', normalized);
+      sessionStorage.setItem('workerId', normalized);
+      return normalized;
+    }
+
+    function getWorkerIdSafe() {
+      const urlParams = new URLSearchParams(window.location.search || '');
+      const candidates = [
+        { name: 'localStorage', value: localStorage.getItem('workerId') },
+        { name: 'sessionStorage', value: sessionStorage.getItem('workerId') },
+        { name: 'url', value: urlParams.get('id') }
+      ];
+
+      for (const candidate of candidates) {
+        const normalized = normalizeWorkerId(candidate.value);
+        if (normalized) {
+          console.info(Resolved workerId from ${candidate.name}:, normalized);
+          return normalized;
+        }
+      }
+
+      console.warn('No workerId found in localStorage/sessionStorage/url');
+      return null;
+    }
+
+    // State
+    let currentWorkerId = null;
+    let workerProfile = null;
+    let teacherConfig = null;
+
+    // UI Elements
+    const setupSection = document.getElementById('setupSection');
+    const mainDashboard = document.getElementById('mainDashboard');
+    const teacherTypeSelect = document.getElementById('teacherTypeSelect');
+    const classSubjectMappings = document.getElementById('classSubjectMappings');
+    const addClassBtn = document.getElementById('addClassBtn');
+    const saveSetupBtn = document.getElementById('saveSetupBtn');
+    const teacherName = document.getElementById('teacherName');
+    const teacherRole = document.getElementById('teacherRole');
+    const userAvatar = document.getElementById('userAvatar');
     const dateLabel = document.getElementById('dateLabel');
-    if (dateLabel) {
-      dateLabel.textContent = new Date().toLocaleDateString('en-US', {
+    const yearSelect = document.getElementById('yearSelect');
+    const managementHubCard = document.getElementById('managementHubCard');
+    const openManagementHub = document.getElementById('openManagementHub');
+    const academicMaterialsCard = document.getElementById('academicMaterialsCard');
+    const headteacherApprovalsCard = document.getElementById('headteacherApprovalsCard');
+    const headteacherContractsCard = document.getElementById('headteacherContractsCard');
+    const openHeadteacherApprovals = document.getElementById('openHeadteacherApprovals');
+    const openHeadteacherContracts = document.getElementById('openHeadteacherContracts');
+    const setupReminder = document.getElementById('setupReminder');
+    const openSetupFormBtn = document.getElementById('openSetupFormBtn');
+
+    let classSubjectMap = []; // Array of {class: 'Class 1', subjects: ['Math', 'English']}
+
+    function toggleSetupReminder(show) {
+      if (!setupReminder) return;
+      setupReminder.classList.toggle('hidden', !show);
+    }
+
+    if (openSetupFormBtn) {
+      openSetupFormBtn.addEventListener('click', () => {
+        mainDashboard.classList.add('hidden');
+        setupSection.classList.remove('hidden');
+        toggleSetupReminder(false);
+      });
+    }
+
+    async function reloadForYear() {
+      try {
+        classSubjectMappings.innerHTML = '';
+        classSubjectMap = [];
+        teacherConfig = null;
+        setupSection.classList.add('hidden');
+        mainDashboard.classList.add('hidden');
+        await maybeRunRollover();
+        await setup();
+      } catch (err) {
+        console.error('Failed to reload year data', err);
+        toast('Failed to reload selected year data.', 'error');
+      }
+    }
+
+    let currentYear = String(getYear());
+    // ✅ Register year-change AFTER DOM refs exist (yearContext invokes handler immediately)
+    maybeAutoAdvanceYear();
+    if (window.somapYearContext?.onYearChanged) {
+      window.somapYearContext.onYearChanged((y) => {
+        const nextYear = String(y);
+        if (nextYear === String(currentYear)) return;
+        currentYear = nextYear;
+        reloadForYear();
+      });
+    }
+
+    // Toast function
+    function toast(message, type = 'info') {
+      const container = document.getElementById('toastContainer');
+      const toastEl = document.createElement('div');
+      toastEl.className = toast ${type};
+      toastEl.innerHTML = 
+        <span>${type === 'success' ? '✅' : type === 'error' ? '❌' : type === 'warning' ? '⚠️' : 'ℹ️'}</span>
+        <span>${message}</span>
+      ;
+      container.appendChild(toastEl);
+      
+      setTimeout(() => toastEl.classList.add('show'), 100);
+      setTimeout(() => {
+        toastEl.classList.remove('show');
+        setTimeout(() => toastEl.remove(), 300);
+      }, 3000);
+    }
+
+    // Initialize date
+    dateLabel.textContent = new Date().toLocaleDateString('en-US', {
         timeZone: 'Africa/Nairobi',
         weekday: 'long',
         year: 'numeric',
         month: 'long',
         day: 'numeric'
       });
-    }
-  });
 
-  // -----------------------------
-  // Dependency checks (prevents silent "Loading...")
-  // -----------------------------
-  function ensureDeps() {
-    if (typeof firebase === 'undefined') {
-      hardFail('Firebase SDK not loaded. Check the firebase <script> tags.', null);
-      return null;
-    }
-    // If firebase.js did not initialize the app, this throws later.
-    if (!firebase.apps || !firebase.apps.length) {
-      hardFail('Firebase not initialized. Check ../firebase.js path + initializeApp().', null);
-      return null;
-    }
-    if (!window.SOMAP || typeof SOMAP.getSchool !== 'function' || typeof SOMAP.P !== 'function') {
-      hardFail('SOMAP context not loaded. Check ../somapappv1multischool/js/context.js path.', null);
-      return null;
-    }
-    return true;
-  }
+    // Add class mapping
+    function addClassMapping(existingClass = null, existingSubjects = []) {
+      const cardIndex = classSubjectMap.length;
+      const card = document.createElement('div');
+      card.className = 'class-mapping-card';
+      card.dataset.index = cardIndex;
 
-  // -----------------------------
-  // Main app
-  // -----------------------------
-  onReady(async () => {
-    try {
-      // Clear read-only flags
+      const classOptions = ALL_CLASSES.map(c => 
+        <option value="${c}" ${c === existingClass ? 'selected' : ''}>${c}</option>
+      ).join('');
+
+      card.innerHTML = 
+        <button type="button" class="remove-class-btn" onclick="removeClassMapping(${cardIndex})">🗑️ Remove</button>
+        <h4>📚 Class & Subjects</h4>
+        <div class="form-group">
+          <label>Select Class *</label>
+          <select class="class-select" data-index="${cardIndex}">
+            <option value="">-- Select Class --</option>
+            ${classOptions}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Select Subjects You Teach in This Class *</label>
+          <div class="subjects-checkbox-grid" id="subjects-grid-${cardIndex}">
+            <!-- Subjects will be populated when class is selected -->
+          </div>
+        </div>
+      ;
+
+      classSubjectMappings.appendChild(card);
+
+      // Add entry to map
+      classSubjectMap.push({
+        class: existingClass || '',
+        subjects: existingSubjects || []
+      });
+
+      // Listen for class selection
+      const classSelect = card.querySelector('.class-select');
+      classSelect.addEventListener('change', (e) => {
+        updateSubjectsForClass(cardIndex, e.target.value);
+      });
+
+      // If editing existing, populate subjects
+      if (existingClass) {
+        updateSubjectsForClass(cardIndex, existingClass, existingSubjects);
+      }
+    }
+
+    // Remove class mapping
+    window.removeClassMapping = function(index) {
+      const card = document.querySelector([data-index="${index}"]);
+      if (card) {
+        card.remove();
+        classSubjectMap[index] = null; // Mark as deleted
+      }
+    };
+
+    // Update subjects for a specific class
+    function updateSubjectsForClass(cardIndex, className, preselectedSubjects = []) {
+      const subjectsGrid = document.getElementById(subjects-grid-${cardIndex});
+      if (!subjectsGrid) return;
+
+      const subjects = SUBJECTS_BY_CLASS[className] || [];
+      
+      if (subjects.length === 0) {
+        subjectsGrid.innerHTML = '<p style="color: rgba(255,255,255,0.6); font-size: 0.9rem;">Please select a class first</p>';
+        return;
+      }
+
+      subjectsGrid.innerHTML = '';
+      subjects.forEach(subject => {
+        const isChecked = preselectedSubjects.includes(subject);
+        const item = document.createElement('div');
+        item.className = 'checkbox-item';
+        item.innerHTML = 
+          <input type="checkbox" id="subject-${cardIndex}-${subject}" value="${subject}" ${isChecked ? 'checked' : ''}>
+          <label for="subject-${cardIndex}-${subject}">${subject}</label>
+        ;
+        subjectsGrid.appendChild(item);
+
+        // Update map when checkbox changes
+        item.querySelector('input').addEventListener('change', (e) => {
+          updateClassSubjectMap(cardIndex, className);
+        });
+      });
+
+      // Update the class in the map
+      if (classSubjectMap[cardIndex]) {
+        classSubjectMap[cardIndex].class = className;
+        updateClassSubjectMap(cardIndex, className);
+      }
+    }
+
+    // Update the class-subject map when checkboxes change
+    function updateClassSubjectMap(cardIndex, className) {
+      const subjectsGrid = document.getElementById(subjects-grid-${cardIndex});
+      if (!subjectsGrid) return;
+
+      const selectedSubjects = Array.from(subjectsGrid.querySelectorAll('input:checked'))
+        .map(cb => cb.value);
+
+      if (classSubjectMap[cardIndex]) {
+        classSubjectMap[cardIndex].class = className;
+        classSubjectMap[cardIndex].subjects = selectedSubjects;
+      }
+    }
+
+    // Add class button - with error handling
+    if (addClassBtn) {
+      console.log('✅ Add Class button found, attaching event listener');
+      addClassBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        console.log('🖱️ Add Class button clicked');
+        try {
+          addClassMapping();
+          toast('Class card added! Select the class and subjects.', 'info');
+        } catch (error) {
+          console.error('❌ Error adding class:', error);
+          toast('Error adding class. Please refresh the page.', 'error');
+        }
+      });
+    } else {
+      console.error('❌ Add Class button not found!');
+    }
+
+    // Save setup - with error handling
+    if (saveSetupBtn) {
+      console.log('✅ Save button found, attaching event listener');
+      saveSetupBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        console.log('🖱️ Save button clicked');
+      
+      try {
+      const teacherType = teacherTypeSelect.value;
+
+      if (!teacherType) {
+        toast('Please select your teacher type', 'warning');
+        return;
+      }
+
+      // Filter out removed/null entries and validate
+      const validMappings = classSubjectMap.filter(mapping => {
+        return mapping !== null && mapping.class && mapping.subjects && mapping.subjects.length > 0;
+      });
+
+      if (validMappings.length === 0) {
+        toast('Please add at least one class with subjects', 'warning');
+        return;
+      }
+
+      // Extract unique classes and subjects
+      const allClasses = [...new Set(validMappings.map(m => m.class))];
+      const allSubjects = [...new Set(validMappings.flatMap(m => m.subjects))];
+
+      // Save configuration to Firebase
+      const config = {
+        teacherType,
+        classSubjectMappings: validMappings, // Store the full mapping
+        classes: allClasses,                  // For quick reference
+        subjects: allSubjects,                // For quick reference
+        setupCompleted: true,
+        setupDate: localTs()
+      };
+
+        await schoolRef(years/${currentYear}/teachers_config/${currentWorkerId}).set(config);
+        teacherConfig = config;
+        localStorage.setItem('somap_role', teacherType);
+        toast('Profile saved successfully! Welcome to your dashboard!', 'success');
+        
+        // Update UI
+        teacherRole.textContent = teacherType;
+        
+        // Show dashboard
+        setupSection.classList.add('hidden');
+        mainDashboard.classList.remove('hidden');
+        
+        // Load dashboard data
+        loadDashboard();
+      } catch (error) {
+        console.error('❌ Error in save handler:', error);
+        toast('Failed to save configuration. Please try again.', 'error');
+      }
+      });
+    } else {
+      console.error('❌ Save button not found!');
+    }
+
+    // Load dashboard
+    function loadDashboard() {
+      // Update stats
+      document.getElementById('totalClasses').textContent = teacherConfig.classes.length;
+      document.getElementById('totalSubjects').textContent = teacherConfig.subjects.length;
+      
+      // Calculate total students (mock for now - you can calculate from actual data)
+      const avgStudentsPerClass = 30;
+      document.getElementById('totalStudents').textContent = teacherConfig.classes.length * avgStudentsPerClass;
+
+      const canUploadAcademic = teacherConfig.teacherType === 'Academic Teacher' || teacherConfig.teacherType === 'Assistant Headteacher';
+      if (academicMaterialsCard) {
+        academicMaterialsCard.classList.toggle('hidden', !canUploadAcademic);
+      }
+
+      // Show management hub for Head Teacher and Management Teacher
+      if (teacherConfig.teacherType === 'Head Teacher' || teacherConfig.teacherType === 'Management Teacher') {
+        managementHubCard.classList.remove('hidden');
+        
+        // Customize description based on teacher type
+        const managementHubDesc = document.getElementById('managementHubDescription');
+        if (teacherConfig.teacherType === 'Head Teacher') {
+          managementHubDesc.innerHTML = 
+            Access school management dashboard with <strong>Read-Only Access</strong> to statistics and reports.<br>
+            <span style="color: #10b981; font-weight: 600;">✓ Head Teachers can access Workers Hub for staff registration</span>
+          ;
+        } else {
+          managementHubDesc.innerHTML = 
+            Access school management dashboard, statistics, and administrative tools<br>
+            <span style="color: #f59e0b;">(View-Only Access)</span>
+          ;
+        }
+      }
+
+      const isHead = teacherConfig.teacherType === 'Head Teacher';
+      if (headteacherApprovalsCard) {
+        headteacherApprovalsCard.classList.toggle('hidden', !isHead);
+      }
+
+      if (headteacherContractsCard) {
+        headteacherContractsCard.classList.toggle('hidden', !isHead);
+      }
+      // Load tasks (from existing tasks system)
+      loadTodayTasks();
+      toggleSetupReminder(!teacherConfig?.setupCompleted);
+    }
+
+    // Load today's tasks
+    async function loadTodayTasks() {
+      try {
+        const today = todayYMD();
+        const snap = await schoolRef(years/${currentYear}/workerTasks/${currentWorkerId}/${today.replace(/-/g, '')}).once('value');
+        const tasks = snap.val() || {};
+        const pendingTasks = Object.values(tasks).filter(task => !task.completedTs).length;
+        document.getElementById('todayTasks').textContent = pendingTasks;
+      } catch (error) {
+        console.error('Error loading tasks:', error);
+        document.getElementById('todayTasks').textContent = '0';
+      }
+    }
+
+    // Open Management Hub
+    if (openManagementHub) {
+      openManagementHub.addEventListener('click', () => {
+        // Check if teacher has completed setup
+        if (!teacherConfig || !teacherConfig.teacherType) {
+          toast('Please complete your teacher profile setup first.', 'warning');
+          return;
+        }
+        
+        // Store read-only flag for dashboard
+        sessionStorage.setItem('dashboardReadOnly', 'true');
+        sessionStorage.setItem('dashboardAccessedBy', teacherConfig.teacherType);
+        sessionStorage.setItem('teacherWorkerId', currentWorkerId);
+        
+        console.log('🚀 Opening Management Dashboard in read-only mode');
+        console.log('👤 Teacher Type:', teacherConfig.teacherType);
+        
+        // Navigate to dashboard
+        window.location.href = '../dashboard.html';
+      });
+    }
+
+    if (openHeadteacherContracts) {
+      openHeadteacherContracts.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (!teacherConfig || teacherConfig.teacherType !== 'Head Teacher') {
+          toast('Contract hub inapatikana kwa Head Teacher pekee.', 'warning');
+          return;
+        }
+        window.location.href = 'workers_contract_hub.html';
+      });
+    }
+    // Open Headteacher Approvals anchor
+    if (openHeadteacherApprovals) {
+      openHeadteacherApprovals.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (!teacherConfig || teacherConfig.teacherType !== 'Head Teacher') {
+          toast('Approvals zinapatikana kwa Head Teacher pekee.', 'warning');
+          return;
+        }
+        const approvalsSection = document.getElementById('headteacher-approvals-card');
+        if (approvalsSection) {
+          window.dispatchEvent(new Event('headteacher-approvals-open'));
+          approvalsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } else {
+          window.location.href = 'headteacherapprovals.html';
+        }
+      });
+    }
+
+    // Initialize
+    async function setup() {
+      console.log('Setup function started');
+      currentYear = String(getYear());
+      initYearSelector();
+      
+      try {
+        // Resolve known workerId (localStorage → sessionStorage → URL param)
+        currentWorkerId = getWorkerIdSafe();
+        console.log('Resolved workerId for setup:', currentWorkerId);
+        if (currentWorkerId) {
+          localStorage.setItem('workerId', currentWorkerId);
+          sessionStorage.setItem('workerId', currentWorkerId);
+        }
+
+        if (!currentWorkerId) {
+          console.error('No workerId found in storage');
+          toast('Please login first. Redirecting...', 'warning');
+          setTimeout(() => window.location.href = '../index.html', 2000);
+          return;
+        }
+
+        // Load worker profile and config (with previous-year fallback)
+        const previousYear = String(Number(currentYear) - 1);
+        console.log('Looking for worker:', currentWorkerId, 'in year:', currentYear);
+        
+        let workerSnap = await scopedOrSocratesLegacy(
+          years/${currentYear}/workers/${currentWorkerId},
+          workers/${currentWorkerId}
+        );
+        
+        console.log('Worker snapshot (current year):', {
+          exists: workerSnap?.exists(),
+          hasData: !!workerSnap?.val(),
+          keys: workerSnap?.exists() ? Object.keys(workerSnap.val() || {}) : []
+        });
+        
+        if (!workerSnap.exists()) {
+          console.log('Not found in current year, trying previous year:', previousYear);
+          workerSnap = await scopedOrSocratesLegacy(
+            years/${previousYear}/workers/${currentWorkerId},
+            workers/${currentWorkerId}
+          );
+          console.log('Worker snapshot (previous year):', {
+            exists: workerSnap?.exists(),
+            hasData: !!workerSnap?.val()
+          });
+        }
+        
+        // If still not found, try searching all workers by ID in current year
+        if (!workerSnap.exists()) {
+          console.log('Worker not found by direct ID, searching in all workers...');
+          const allWorkersSnap = await scopedOrSocratesLegacy(
+            years/${currentYear}/workers,
+            workers
+          );
+          if (allWorkersSnap.exists()) {
+            let foundWorker = null;
+            allWorkersSnap.forEach((child) => {
+              if (child.key === currentWorkerId) {
+                foundWorker = child;
+                console.log('Found worker by searching all workers with matching key');
+              }
+            });
+            if (foundWorker) {
+              // Create a snapshot-like object that properly implements exists()
+              const workerData = foundWorker.val();
+              workerSnap = {
+                exists: function() { return true; },
+                val: function() { return workerData; },
+                key: foundWorker.key
+              };
+            } else {
+              // Last resort: check if there's a worker with matching profile data
+              // This handles cases where workerId doesn't match but worker exists
+              console.log('Worker ID not found, checking if worker exists with different ID...');
+              const storedName = localStorage.getItem('somap_workerName') || '';
+              const storedPhone = localStorage.getItem('somap_workerPhone') || '';
+              if (storedName || storedPhone) {
+                allWorkersSnap.forEach((child) => {
+                  const workerData = child.val() || {};
+                  const profile = workerData.profile || workerData || {};
+                  const nameMatch = storedName && profile.fullNameUpper === storedName.toUpperCase();
+                  const phoneMatch = storedPhone && (profile.phone === storedPhone || profile.phoneNumber === storedPhone);
+                  if (nameMatch || phoneMatch) {
+                    foundWorker = child;
+                    console.log('Found worker by name/phone match:', child.key);
+                    // Update localStorage with correct workerId
+                    localStorage.setItem('workerId', child.key);
+                    currentWorkerId = child.key;
+                  }
+                });
+                if (foundWorker) {
+                  const workerData = foundWorker.val();
+                  workerSnap = {
+                    exists: function() { return true; },
+                    val: function() { return workerData; },
+                    key: foundWorker.key
+                  };
+                }
+              }
+            }
+          }
+        }
+
+        let configSnap = await scopedOrSocratesLegacy(
+          years/${currentYear}/teachers_config/${currentWorkerId},
+          teachers_config/${currentWorkerId}
+        );
+        let fallbackConfig = null;
+        if (!configSnap.exists()) {
+          const prevConfigSnap = await scopedOrSocratesLegacy(
+            years/${previousYear}/teachers_config/${currentWorkerId},
+            teachers_config/${currentWorkerId}
+          );
+          if (prevConfigSnap.exists()) {
+            fallbackConfig = prevConfigSnap.val();
+          }
+        }
+
+        if (!workerSnap || !workerSnap.exists()) {
+          console.error('Worker profile not found for ID:', currentWorkerId);
+          console.error('Checked paths:');
+          console.error(  - years/${currentYear}/workers/${currentWorkerId});
+          console.error(  - years/${previousYear}/workers/${currentWorkerId});
+          console.error(  - workers/${currentWorkerId});
+          toast('Worker profile not found. Showing setup form - please complete your profile.', 'warning');
+          // Still show setup form even if profile not found
+          workerProfile = {};
+          setupSection.classList.remove('hidden');
+          mainDashboard.classList.add('hidden');
+          classSubjectMappings.innerHTML = '';
+          classSubjectMap = [];
+          addClassMapping();
+          toggleSetupReminder(false);
+          return;
+        }
+
+        console.log('Profile and config loaded');
+        // Extract profile from worker object (structure: { profile: {...}, docs: {...}, contract: {...} })
+        const workerData = workerSnap.val() || {};
+        workerProfile = workerData.profile || workerData || {};
+        
+        console.log('Extracted worker profile:', {
+          hasProfile: !!workerData.profile,
+          hasData: !!workerData,
+          profileKeys: Object.keys(workerProfile),
+          fullName: workerProfile.fullNameUpper || workerProfile.firstName
+        });
+      
+      // Update UI with worker info
+      const fullName = workerProfile.fullNameUpper ||
+        [workerProfile.firstName, workerProfile.middleName, workerProfile.lastName]
+          .filter(Boolean).join(' ').toUpperCase() ||
+        'TEACHER';
+      
+      teacherName.textContent = fullName;
+      localStorage.setItem('somap_workerName', fullName);
+      if (workerProfile.phone || workerProfile.phoneNumber) {
+        localStorage.setItem('somap_workerPhone', workerProfile.phone || workerProfile.phoneNumber);
+      }
+      
+      // Set avatar
+      const initials = (workerProfile.firstName || 'T').charAt(0) + 
+                      (workerProfile.lastName || 'T').charAt(0);
+      userAvatar.textContent = initials.toUpperCase();
+
+        // Check if setup is complete
+        if (configSnap.exists() && configSnap.val().setupCompleted) {
+          // User has completed setup - go straight to dashboard
+          console.log('Setup completed, loading dashboard');
+          teacherConfig = configSnap.val();
+          teacherRole.textContent = teacherConfig.teacherType;
+          localStorage.setItem('somap_role', teacherConfig.teacherType || '');
+          setupSection.classList.add('hidden');
+          mainDashboard.classList.remove('hidden');
+          loadDashboard();
+        } else if ((configSnap.exists() && !configSnap.val().setupCompleted) || fallbackConfig) {
+          // Has partial or previous-year config, pre-populate the form
+          console.log('Config found, pre-populating');
+          teacherConfig = configSnap.exists() ? configSnap.val() : fallbackConfig;
+          teacherTypeSelect.value = teacherConfig.teacherType || '';
+          if (teacherConfig.teacherType) {
+            localStorage.setItem('somap_role', teacherConfig.teacherType);
+          }
+          
+          // Clear any existing class mappings
+          classSubjectMappings.innerHTML = '';
+          classSubjectMap = [];
+          
+          // Load existing mappings
+          if (teacherConfig.classSubjectMappings && teacherConfig.classSubjectMappings.length > 0) {
+            teacherConfig.classSubjectMappings.forEach(mapping => {
+              addClassMapping(mapping.class, mapping.subjects);
+            });
+          } else {
+            // Add one empty mapping
+            addClassMapping();
+          }
+          
+          setupSection.classList.remove('hidden');
+          mainDashboard.classList.add('hidden');
+          toggleSetupReminder(false);
+        } else {
+          // First time - no saved config yet
+          console.log('First time setup (no config) - inferring defaults for dashboard');
+          const inferredTeacherType = inferTeacherTypeFromProfile(workerProfile);
+          teacherConfig = {
+            teacherType: inferredTeacherType,
+            classSubjectMappings: [],
+            classes: [],
+            subjects: [],
+            setupCompleted: false
+          };
+          teacherRole.textContent = teacherConfig.teacherType;
+          localStorage.setItem('somap_role', teacherConfig.teacherType);
+          setupSection.classList.add('hidden');
+          mainDashboard.classList.remove('hidden');
+          loadDashboard();
+          toast('Profile setup is optional. Edit your classes/subjects anytime using the button above.', 'info');
+        }
+      } catch (error) {
+        console.error('Error in setup:', error);
+        toast('Error loading profile. Please refresh the page.', 'error');
+      }
+    }
+
+    // Start app when page loads
+    window.addEventListener('DOMContentLoaded', () => {
+      console.log('DOM loaded, starting setup...');
+      
+      // Clear any previous dashboard read-only flags
       sessionStorage.removeItem('dashboardReadOnly');
       sessionStorage.removeItem('dashboardAccessedBy');
       sessionStorage.removeItem('teacherWorkerId');
 
-      if (!ensureDeps()) return;
-
-      const db = firebase.database();
-
-      const school = SOMAP.getSchool();
-      if (!school || !school.id) {
-        // No school selected → go multischool
-        window.location.href = '../somapappv1multischool/multischool.html';
-        return;
-      }
-
-      const schoolRef = (p) => db.ref(SOMAP.P(p));
-      const schoolPath = (p) => SOMAP.P(p);
-
-      function isSocratesSchool(id) {
-        return ['socrates-school', 'default', 'socrates'].includes(id);
-      }
-
-      async function updateSchoolDisplay() {
-        const nameEl = document.getElementById('schoolNameDisplay');
-        if (nameEl) nameEl.textContent = school.name || school.id || 'School';
-
-        const logoEl = document.getElementById('school-logo-display');
-        if (!logoEl) return;
-
-        if (isSocratesSchool(school?.id)) {
-          logoEl.src = '../images/socrates_logo.png';
-          return;
-        }
-        try {
-          const logoSnap = await schoolRef('profile/logoUrl').once('value');
-          const logoUrl = logoSnap.exists() ? logoSnap.val() : '';
-          logoEl.src = logoUrl || '../images/socrates_logo.png';
-        } catch (err) {
-          console.warn('Failed to load school logo', err);
-          logoEl.src = '../images/socrates_logo.png';
-        }
-      }
-
-      // --- WorkerId resolver (workers-task style) ---
-      function normalizeWorkerId(rawId) {
-        if (!rawId) return null;
-        const normalized = String(rawId).trim();
-        if (!normalized) return null;
-        localStorage.setItem('workerId', normalized);
-        sessionStorage.setItem('workerId', normalized);
-        return normalized;
-      }
-
-      function getWorkerIdSafe() {
-        const urlParams = new URLSearchParams(window.location.search || '');
-        const candidates = [
-          { name: 'localStorage', value: localStorage.getItem('workerId') },
-          { name: 'sessionStorage', value: sessionStorage.getItem('workerId') },
-          { name: 'url', value: urlParams.get('id') }
-        ];
-        for (const c of candidates) {
-          const n = normalizeWorkerId(c.value);
-          if (n) return n;
-        }
-        return null;
-      }
-
-      // --- Year helpers ---
-      const getYear = () => window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
-      const getNormalizedYear = (raw) => String(raw ?? window.somapYearContext?.getSelectedYear?.() ?? new Date().getFullYear());
-
-      const yearSelect = document.getElementById('yearSelect');
-      function initYearSelector() {
-        if (!yearSelect || !window.somapYearContext) return;
-        window.somapYearContext.attachYearDropdown?.(yearSelect);
-        const sync = (y) => {
-          const v = getNormalizedYear(y);
-          if (yearSelect.value !== v) yearSelect.value = v;
-        };
-        window.somapYearContext.onYearChanged?.(sync);
-        sync(getYear());
-      }
-
-      // --- UI elements ---
-      const setupSection = document.getElementById('setupSection');
-      const mainDashboard = document.getElementById('mainDashboard');
-      const teacherNameEl = document.getElementById('teacherName');
-      const teacherRoleEl = document.getElementById('teacherRole');
-      const userAvatarEl = document.getElementById('userAvatar');
-
-      const totalClassesEl = document.getElementById('totalClasses');
-      const totalSubjectsEl = document.getElementById('totalSubjects');
-      const totalStudentsEl = document.getElementById('totalStudents');
-      const todayTasksEl = document.getElementById('todayTasks');
-
-      const managementHubCard = document.getElementById('managementHubCard');
-      const openManagementHub = document.getElementById('openManagementHub');
-
-      const academicMaterialsCard = document.getElementById('academicMaterialsCard');
-      const headteacherApprovalsCard = document.getElementById('headteacherApprovalsCard');
-      const headteacherContractsCard = document.getElementById('headteacherContractsCard');
-      const openHeadteacherApprovals = document.getElementById('openHeadteacherApprovals');
-      const openHeadteacherContracts = document.getElementById('openHeadteacherContracts');
-
-      // Always show dashboard (workers task style)
-      if (mainDashboard) mainDashboard.classList.remove('hidden');
-
-      // --- Read worker profile (with Socrates legacy fallback) ---
-      async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
-        const scopedSnap = await schoolRef(scopedSubPath).once('value');
-        if (scopedSnap.exists()) return scopedSnap;
-        if (isSocratesSchool(school?.id)) {
-          const legacySnap = await db.ref(legacyPath).once('value');
-          if (legacySnap.exists()) return legacySnap;
-        }
-        return scopedSnap;
-      }
-
-      function inferTeacherTypeFromProfile(profile = {}) {
-        const candidate = String(profile?.role || profile?.designation || '').trim();
-        if (!candidate) return 'Teacher';
-        return candidate
-          .split(/[\s_-]+/)
-          .map((p) => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
-          .join(' ');
-      }
-
-      function todayYMD() {
-        const d = new Date();
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        return `${y}-${m}-${day}`;
-      }
-
-      // --- Load tasks count (workerTasks) ---
-      async function loadTodayTasks(currentYear, workerId) {
-        try {
-          const today = todayYMD();
-          const snap = await schoolRef(`years/${currentYear}/workerTasks/${workerId}/${today.replace(/-/g, '')}`).once('value');
-          const tasks = snap.val() || {};
-          const pending = Object.values(tasks).filter(t => !t.completedTs).length;
-          if (todayTasksEl) todayTasksEl.textContent = String(pending);
-        } catch (e) {
-          console.error('loadTodayTasks failed', e);
-          if (todayTasksEl) todayTasksEl.textContent = '0';
-        }
-      }
-
-      // --- Main load (workers task style) ---
-      let currentWorkerId = getWorkerIdSafe();
-      if (!currentWorkerId) {
-        toast('No workerId found. Please login again.', 'warning');
-        setTimeout(() => window.location.href = '../index.html', 900);
-        return;
-      }
-
-      let currentYear = String(getYear());
-      initYearSelector();
-
-      await updateSchoolDisplay();
-
-      // Fetch worker (current year → prev year → legacy)
-      const prevYear = String(Number(currentYear) - 1);
-      let workerSnap = await scopedOrSocratesLegacy(`years/${currentYear}/workers/${currentWorkerId}`, `workers/${currentWorkerId}`);
-      if (!workerSnap.exists()) {
-        workerSnap = await scopedOrSocratesLegacy(`years/${prevYear}/workers/${currentWorkerId}`, `workers/${currentWorkerId}`);
-      }
-
-      let workerProfile = {};
-      if (workerSnap.exists()) {
-        const workerData = workerSnap.val() || {};
-        workerProfile = workerData.profile || workerData || {};
-      } else {
-        // Don’t block dashboard; just label user
-        toast('Worker profile not found for this ID. Dashboard still available.', 'warning');
-      }
-
-      const fullName =
-        workerProfile.fullNameUpper ||
-        [workerProfile.firstName, workerProfile.middleName, workerProfile.lastName].filter(Boolean).join(' ').toUpperCase() ||
-        'TEACHER';
-
-      if (teacherNameEl) teacherNameEl.textContent = fullName;
-
-      const initials =
-        ((workerProfile.firstName || 'T').charAt(0) + (workerProfile.lastName || 'T').charAt(0)).toUpperCase();
-      if (userAvatarEl) userAvatarEl.textContent = initials;
-
-      // Teacher type (simple)
-      const inferredType = inferTeacherTypeFromProfile(workerProfile);
-      if (teacherRoleEl) teacherRoleEl.textContent = inferredType;
-
-      // Basic stats (safe defaults)
-      if (totalClassesEl) totalClassesEl.textContent = '0';
-      if (totalSubjectsEl) totalSubjectsEl.textContent = '0';
-      if (totalStudentsEl) totalStudentsEl.textContent = '0';
-
-      await loadTodayTasks(currentYear, currentWorkerId);
-
-      // Feature visibility (same as before, but safe)
-      const canUploadAcademic = inferredType === 'Academic Teacher' || inferredType === 'Assistant Headteacher';
-      if (academicMaterialsCard) academicMaterialsCard.classList.toggle('hidden', !canUploadAcademic);
-
-      const isHead = inferredType === 'Head Teacher';
-      if (headteacherApprovalsCard) headteacherApprovalsCard.classList.toggle('hidden', !isHead);
-      if (headteacherContractsCard) headteacherContractsCard.classList.toggle('hidden', !isHead);
-
-      if (managementHubCard) {
-        const showMgmt = inferredType === 'Head Teacher' || inferredType === 'Management Teacher';
-        managementHubCard.classList.toggle('hidden', !showMgmt);
-      }
-
-      if (openManagementHub) {
-        openManagementHub.addEventListener('click', () => {
-          sessionStorage.setItem('dashboardReadOnly', 'true');
-          sessionStorage.setItem('dashboardAccessedBy', inferredType);
-          sessionStorage.setItem('teacherWorkerId', currentWorkerId);
-          window.location.href = '../dashboard.html';
-        });
-      }
-
-      if (openHeadteacherContracts) {
-        openHeadteacherContracts.addEventListener('click', (e) => {
-          e.preventDefault();
-          if (!isHead) return toast('Contract hub inapatikana kwa Head Teacher pekee.', 'warning');
-          window.location.href = 'workers_contract_hub.html';
-        });
-      }
-
-      if (openHeadteacherApprovals) {
-        openHeadteacherApprovals.addEventListener('click', (e) => {
-          e.preventDefault();
-          if (!isHead) return toast('Approvals zinapatikana kwa Head Teacher pekee.', 'warning');
-          const approvalsSection = document.getElementById('headteacher-approvals-card');
-          if (approvalsSection) {
-            window.dispatchEvent(new Event('headteacher-approvals-open'));
-            approvalsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-          } else {
-            window.location.href = 'headteacherapprovals.html';
-          }
-        });
-      }
-
-      // ---- Year change reload (REGISTER LAST, ignore first fire) ----
-      let yearWatchArmed = false;
-      if (window.somapYearContext?.onYearChanged) {
-        window.somapYearContext.onYearChanged((y) => {
-          const next = getNormalizedYear(y);
-          if (!yearWatchArmed) {
-            currentYear = next;
-            yearWatchArmed = true;
-            return; // ignore first immediate callback
-          }
-          if (next === String(currentYear)) return;
-          currentYear = next;
-          toast(`Year changed to ${currentYear}`, 'info');
-          // lightweight reload: just refresh tasks count
-          loadTodayTasks(currentYear, currentWorkerId);
-        });
-      }
-
-      // Setup form becomes optional only (not blocking)
-      if (setupSection) setupSection.classList.add('hidden');
-
-      console.log('✅ Teacher Dashboard boot OK (workers-task mode)');
-    } catch (err) {
-      hardFail('Dashboard JS crashed. Open Console → see error.', err);
-    }
-  });
-})();
-</script>
+      updateSchoolDisplay();
+      maybeRunRollover();
+      setup().catch(err => {
+        console.error('Setup error:', err);
+        toast(err.message || 'Error loading dashboard', 'error');
+      });
+    });
+  </script>
   <script src="./scripts/headteacherapprovals.js"></script>
 </body>
 </html>
