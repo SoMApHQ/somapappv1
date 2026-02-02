@@ -51,7 +51,61 @@
     }
   `;
 
-  const showToast = window.toast ? window.toast : (msg, type = 'info') => console.log(`[${type}] ${msg}`);
+  const fallbackToast = (msg, type = 'info') => {
+    const colors = {
+      success: 'rgba(16, 185, 129, 0.95)',
+      error: 'rgba(239, 68, 68, 0.95)',
+      warning: 'rgba(245, 158, 11, 0.95)',
+      info: 'rgba(37, 99, 235, 0.95)'
+    };
+    let container = document.getElementById('toastContainer');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'toastContainer';
+      container.className = 'toast-container';
+      container.style.position = 'fixed';
+      container.style.top = '20px';
+      container.style.right = '20px';
+      container.style.zIndex = '9999';
+      container.style.display = 'flex';
+      container.style.flexDirection = 'column';
+      container.style.gap = '8px';
+      container.style.alignItems = 'flex-end';
+      document.body.appendChild(container);
+    }
+    const toastEl = document.createElement('div');
+    toastEl.textContent = msg;
+    toastEl.style.padding = '12px 16px';
+    toastEl.style.borderRadius = '10px';
+    toastEl.style.background = colors[type] || colors.info;
+    toastEl.style.color = '#fff';
+    toastEl.style.fontWeight = '600';
+    toastEl.style.boxShadow = '0 6px 18px rgba(0,0,0,0.2)';
+    toastEl.style.transform = 'translateX(20px)';
+    toastEl.style.opacity = '0';
+    toastEl.style.transition = 'transform 0.25s ease, opacity 0.25s ease';
+    container.appendChild(toastEl);
+    requestAnimationFrame(() => {
+      toastEl.style.transform = 'translateX(0)';
+      toastEl.style.opacity = '1';
+    });
+    setTimeout(() => {
+      toastEl.style.opacity = '0';
+      toastEl.style.transform = 'translateX(20px)';
+      setTimeout(() => toastEl.remove(), 250);
+    }, 3200);
+  };
+  const showToast = (msg, type = 'info') => {
+    const toastImpl = window.toast || fallbackToast;
+    try {
+      toastImpl(msg, type);
+    } catch (err) {
+      console.warn('Toast handler failed', err);
+      if (toastImpl !== fallbackToast) {
+        fallbackToast(msg, type);
+      }
+    }
+  };
   const todayYMD = (date = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(date);
   const localTs = () => new Date(new Date().toLocaleString('en-US', { timeZone: TZ })).getTime();
   const formatTime = (ts) => ts ? new Date(ts).toLocaleTimeString('sw-TZ', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }) : '-';
@@ -172,8 +226,13 @@
           deductionLabel: els.deductionLabel.value.trim() || 'Posho ya Uwajibikaji',
           updatedTs: localTs()
         };
-        await rulesRef.set(payload);
-        showToast('Kanuni za mahudhurio zimehifadhiwa', 'success');
+        try {
+          await rulesRef.set(payload);
+          showToast('Imehifadhiwa ✅', 'success');
+        } catch (err) {
+          console.error('Failed to save attendance rules', err);
+          showToast('Hifadhi haikuweza kukamilika. Jaribu tena.', 'error');
+        }
       });
     }
     const snap = await rulesRef.get();
@@ -361,21 +420,26 @@
 
       if (els.list && !els.list.hasAttribute('data-listening')) {
         els.list.setAttribute('data-listening', 'true');
-        els.list.addEventListener('click', async (event) => {
-          const btn = event.target.closest('button[data-action]');
-          if (!btn) return;
-          const targetWorker = btn.dataset.worker;
-          const approveValue = btn.dataset.action === 'approve';
-          const { monthKey, todayKey } = latestKeys;
-          if (!monthKey || !todayKey) return;
-          const refPath = lastAttendanceSource === 'legacy'
-            ? `attendance/${targetWorker}/${monthKey}/${todayKey}`
-            : SOMAP.P(`years/${currentYear}/workerAttendance/${targetWorker}/${monthKey}/${todayKey}`);
+      els.list.addEventListener('click', async (event) => {
+        const btn = event.target.closest('button[data-action]');
+        if (!btn) return;
+        const targetWorker = btn.dataset.worker;
+        const approveValue = btn.dataset.action === 'approve';
+        const { monthKey, todayKey } = latestKeys;
+        if (!monthKey || !todayKey) return;
+        const refPath = lastAttendanceSource === 'legacy'
+          ? `attendance/${targetWorker}/${monthKey}/${todayKey}`
+          : SOMAP.P(`years/${currentYear}/workerAttendance/${targetWorker}/${monthKey}/${todayKey}`);
+        try {
           const ref = db.ref(refPath);
           await ref.update({ approved: approveValue, approvedTs: localTs() });
           showToast(`Entry ${approveValue ? 'approved' : 'rejected'}`, approveValue ? 'success' : 'warning');
           render();
-        });
+        } catch (err) {
+          console.error('Failed to update approval', err);
+          showToast('Imeshindwa kuhifadhi maamuzi. Jaribu tena.', 'error');
+        }
+      });
       }
 
       await render();

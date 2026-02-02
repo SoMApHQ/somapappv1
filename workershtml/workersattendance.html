@@ -12,7 +12,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
-  <script src="../firebase/firebase-config.js"></script>
+  <script src="../firebase.js"></script>
   <style>
     :root {
       --bg: #0b1220;
@@ -194,6 +194,15 @@
     const statEarly = document.getElementById('statEarly');
     const statFines = document.getElementById('statFines');
 
+    const DEFAULT_RULES = {
+      requireWifi: true,
+      allowedSsids: [],
+      lateThreshold: 3,
+      earlyThreshold: 3,
+      deductionAmount: 1000,
+      deductionLabel: 'Posho ya Uwajibikaji'
+    };
+
     const state = {
       school: null,
       schoolId: '',
@@ -213,14 +222,6 @@
 
     const DAY_START = '07:20';
     const DAY_END = '16:30';
-    const DEFAULT_RULES = {
-      requireWifi: true,
-      allowedSsids: [],
-      lateThreshold: 3,
-      earlyThreshold: 3,
-      deductionAmount: 1000,
-      deductionLabel: 'Posho ya Uwajibikaji'
-    };
 
     ensureAnonymousAuth()
       .then(init)
@@ -251,6 +252,17 @@
       state.monthKey = `${targetYear}${month}`;
     }
 
+    async function ensureSystemYearForCheck() {
+      const systemYear = String(new Date().getFullYear());
+      if (state.year === systemYear) return;
+      state.year = systemYear;
+      if (yearLabel) {
+        yearLabel.textContent = `Mwaka: ${state.year}`;
+      }
+      window.somapYearContext?.setSelectedYear?.(systemYear, { manual: false, forceDispatch: true });
+      await loadSettings();
+    }
+
     function setBranding() {
       if (schoolNameEl) schoolNameEl.textContent = state.schoolName;
       if (window.SomapLogo?.loadSchoolLogo) {
@@ -274,8 +286,8 @@
     function initYearContext() {
       const yearCtx = window.somapYearContext || null;
       const systemYear = String(new Date().getFullYear());
-      const selected = String(yearCtx?.getSelectedYear?.() || systemYear);
-      state.year = selected !== systemYear ? yearCtx.resetToCurrentYear?.() || systemYear : selected;
+      const selected = String(yearCtx?.getSelectedYear?.() ?? systemYear);
+      state.year = selected;
       const month = String(new Date().getMonth() + 1).padStart(2, '0');
       state.monthKey = `${state.year}${month}`;
       yearCtx?.attachYearDropdown?.(yearSelect);
@@ -318,7 +330,6 @@
 
       checkInBtn.addEventListener('click', () => handleCheck('in'));
       checkOutBtn.addEventListener('click', () => handleCheck('out'));
-      wifiStatus.textContent = 'Wi-Fi check (beta): tutaunganisha SSID ya shule kuthibitisha uwepo. Kwa sasa, check-in hutumia kifaa hiki tu.';
     }
 
     async function loadProfile() {
@@ -361,7 +372,11 @@
       const rules = state.rules || DEFAULT_RULES;
       if (!rules.requireWifi) return true;
       const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-      if (!connection || connection.type !== 'wifi') {
+      if (!connection || typeof connection.type === 'undefined') {
+        toast('Kivinjari hakiwezi kuthibitisha aina ya Wi-Fi; SSID haiwezi kuthibitishwa kwenye kivinjari. Hakikisha una Wi-Fi ya shule unayojua.', 'warning');
+        return true;
+      }
+      if (connection.type !== 'wifi') {
         toast('Unganisha kwenye Wi-Fi ya shule ili kuhudhuria.', 'warning');
         return false;
       }
@@ -369,11 +384,7 @@
     }
 
     async function handleCheck(direction) {
-      const systemYear = String(new Date().getFullYear());
-      if (state.year !== systemYear) {
-        state.year = systemYear;
-        window.somapYearContext?.setSelectedYear?.(systemYear, { manual: false, forceDispatch: true });
-      }
+      await ensureSystemYearForCheck();
       normalizeNow(false);
       const onWifi = await enforceWifi();
       if (!onWifi) return;
