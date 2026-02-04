@@ -819,6 +819,95 @@
             return index.byAdmission[admissionNo];
           return {};
         }
+        const getEnrollmentClassFromRecord = (entry = {}) => {
+          if (!entry || typeof entry !== "object") return "";
+          return (
+            entry.className ||
+            entry.classLevel ||
+            entry.class ||
+            entry.grade ||
+            ""
+          );
+        };
+        const getStudentClassFromRecord = (student = {}) => {
+          if (!student || typeof student !== "object") return "Unknown";
+          return (
+            student.className ||
+            student.classLevel ||
+            student.class ||
+            student.grade ||
+            student.gradeLevel ||
+            "Unknown"
+          );
+        };
+        const parseYearFromValue = (value) => {
+          if (value == null) return null;
+          if (typeof value === "number" && Number.isFinite(value)) {
+            const dt = new Date(value);
+            if (!Number.isNaN(dt.getTime())) return dt.getFullYear();
+          }
+          if (typeof value === "string") {
+            const trimmed = value.trim();
+            if (!trimmed) return null;
+            if (/^\d{4}$/.test(trimmed)) return Number(trimmed);
+            const numeric = Number(trimmed);
+            if (!Number.isNaN(numeric)) {
+              const dt = new Date(numeric);
+              if (!Number.isNaN(dt.getTime())) return dt.getFullYear();
+            }
+            const parsed = Date.parse(trimmed);
+            if (!Number.isNaN(parsed)) return new Date(parsed).getFullYear();
+          }
+          if (typeof value === "object") {
+            const yearField = value.year ?? value.y ?? null;
+            if (typeof yearField === "number" && Number.isFinite(yearField)) {
+              return yearField;
+            }
+            if (
+              typeof yearField === "string" &&
+              /^\d{4}$/.test(yearField.trim())
+            ) {
+              return Number(yearField.trim());
+            }
+            const seconds = Number(
+              value.seconds ?? value._seconds ?? value.secondsValue ?? NaN
+            );
+            if (!Number.isNaN(seconds)) {
+              const nanos = Number(
+                value.nanoseconds ?? value._nanoseconds ?? 0
+              );
+              const millis =
+                seconds * 1000 +
+                Math.floor((Number.isFinite(nanos) ? nanos : 0) / 1e6);
+              const dt = new Date(millis);
+              if (!Number.isNaN(dt.getTime())) return dt.getFullYear();
+            }
+            if (typeof value.toDate === "function") {
+              const dt = value.toDate();
+              if (dt instanceof Date && !Number.isNaN(dt.getTime()))
+                return dt.getFullYear();
+            }
+          }
+          return null;
+        };
+        const inferAdmissionYear = (student = {}) => {
+          const sources = [
+            student.createdTs,
+            student.admissionTs,
+            student.createdAt,
+            student.created_at,
+            student.admissionDate,
+            student.admission_date,
+            student.admissionYear,
+            student.admYear,
+            student.admissionYearValue || student.yearOfAdmission,
+          ];
+          for (const candidate of sources) {
+            const year = parseYearFromValue(candidate);
+            if (Number.isFinite(year)) return Number(year);
+          }
+          return null;
+        };
 
         async function loadStudentsFromDb(year) {
           if (!db) return [];
@@ -897,24 +986,40 @@
                     k,
                     admissionNo
                   );
-                  const yearClass =
-                    yearEnrollment.className ||
-                    yearEnrollment.classLevel ||
-                    yearEnrollment.class ||
-                    "";
-                  const baseClass =
-                    anchorEnrollment.className ||
-                    anchorEnrollment.classLevel ||
-                    s.class ||
-                    s.classLevel ||
-                    s.grade ||
-                    "";
+                  const yearClass = getEnrollmentClassFromRecord(yearEnrollment);
+                  const admissionYear = inferAdmissionYear(s);
+                  const anchorClass = getEnrollmentClassFromRecord(anchorEnrollment);
+                  const hasAnchorRecord =
+                    anchorEnrollment &&
+                    typeof anchorEnrollment === "object" &&
+                    Object.keys(anchorEnrollment).length > 0;
+                  const studentClass = getStudentClassFromRecord(s);
+                  const baseClass = anchorClass || studentClass || "Unknown";
+                  const oldAdmission =
+                    Number.isFinite(admissionYear) &&
+                    admissionYear <= SOMAP_DEFAULT_YEAR;
+                  const shouldShift = hasAnchorRecord || oldAdmission;
+
+                  let computedClass = yearClass;
+                  if (!computedClass) {
+                    if (shouldShift) {
+                      computedClass = shiftClass(baseClass, delta);
+                    } else {
+                      computedClass = baseClass;
+                    }
+                  }
+                  const finalClass = computedClass || "Unknown";
+                  if (
+                    String(finalClass).trim().toUpperCase() === "GRADUATED"
+                  ) {
+                    return null;
+                  }
 
                   return {
                     id: k,
                     admissionNo,
                     name,
-                    class: yearClass || shiftClass(baseClass, delta),
+                    class: finalClass,
                     feeDue: 0,
                     feePaid: 0,
                     balance: 0,
@@ -987,9 +1092,7 @@
           if (!db || !cls) return;
           const yymm = toMonthKey(dateStr);
           try {
-            const snap = await db
-              .ref(`attendance/${cls}/${yymm}/${dateStr}`)
-              .get();
+            const snap = await schoolRef(`attendance/${cls}/${yymm}/${dateStr}`).get();
             const d = snap.exists() ? snap.val() : {};
             Object.keys(d).forEach((k) => (attendanceCache[k] = d[k]));
           } catch (e) {

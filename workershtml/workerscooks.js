@@ -439,10 +439,27 @@ function App() {
   }
 
   async function loadAttendance(dateKey, schoolId, yearKey) {
-    const scopedPath = `years/${yearKey}/attendance_students/${dateKey}`;
-    const snap = await scopedOrSocratesLegacy(scopedPath, `attendance_students/${dateKey}`).catch(() => null);
-    if (snap && snap.exists()) return snap.val() || {};
-    return {};
+    if (!dateKey) return {};
+    const yymm = `${dateKey.slice(0, 4)}${dateKey.slice(5, 7)}`;
+    const attendanceMap = {};
+    for (const cls of CLASS_ORDER) {
+      try {
+        const snap = await schoolRef(`attendance/${cls}/${yymm}/${dateKey}`).get();
+        const records = snap.exists() ? snap.val() : {};
+        Object.entries(records || {}).forEach(([studentId, rec]) => {
+          attendanceMap[studentId] = {
+            ...(attendanceMap[studentId] || {}),
+            ...(rec || {}),
+          };
+        });
+      } catch (err) {
+        console.warn(
+          `Failed to load attendance for ${cls} on ${dateKey}:`,
+          err?.message || err
+        );
+      }
+    }
+    return attendanceMap;
   }
 
   async function loadRegister(dateKey, studentMap = students) {
