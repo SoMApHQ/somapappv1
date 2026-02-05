@@ -97,82 +97,26 @@ function normalizeEnrollments(raw) {
   return normalized;
 }
 
-function normalizeGender(value = '') {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (!normalized) return 'unknown';
-  if (normalized.startsWith('m') || normalized.startsWith('b')) return 'boys';
-  if (normalized.startsWith('f') || normalized.startsWith('g')) return 'girls';
-  return 'unknown';
+function buildEnrollmentIndex(enrollments) {
+  const byId = enrollments || {};
+  const byAdmission = {};
+  Object.entries(enrollments || {}).forEach(([key, value]) => {
+    if (!value || typeof value !== 'object') return;
+    const admission = value.admissionNumber || value.admissionNo || value.admNo || '';
+    if (admission && !byAdmission[admission]) {
+      byAdmission[admission] = value;
+    }
+    if (!byId[key]) byId[key] = value;
+  });
+  return { byId, byAdmission };
 }
 
-function parseYearFromValue(value) {
-  if (value == null) return null;
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    const dt = new Date(value);
-    if (!Number.isNaN(dt.getTime())) return dt.getFullYear();
-  }
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    if (/^\d{4}$/.test(trimmed)) return Number(trimmed);
-    const numeric = Number(trimmed);
-    if (!Number.isNaN(numeric)) {
-      const dt = new Date(numeric);
-      if (!Number.isNaN(dt.getTime())) return dt.getFullYear();
-    }
-    const parsed = Date.parse(trimmed);
-    if (!Number.isNaN(parsed)) return new Date(parsed).getFullYear();
-  }
-  if (typeof value === 'object') {
-    const yearField = value.year ?? value.y ?? null;
-    if (typeof yearField === 'number' && Number.isFinite(yearField)) {
-      return yearField;
-    }
-    if (typeof yearField === 'string' && /^\d{4}$/.test(yearField.trim())) {
-      return Number(yearField.trim());
-    }
-    const seconds = Number(value.seconds ?? value._seconds ?? value.secondsValue ?? NaN);
-    if (!Number.isNaN(seconds)) {
-      const nanos = Number(value.nanoseconds ?? value._nanoseconds ?? 0);
-      const millis = seconds * 1000 + Math.floor((Number.isFinite(nanos) ? nanos : 0) / 1e6);
-      const dt = new Date(millis);
-      if (!Number.isNaN(dt.getTime())) return dt.getFullYear();
-    }
-    if (typeof value.toDate === 'function') {
-      const dt = value.toDate();
-      if (dt instanceof Date && !Number.isNaN(dt.getTime())) return dt.getFullYear();
-    }
-  }
-  return null;
-}
-
-function inferAdmissionYear(student = {}) {
-  const sources = [
-    student.createdTs,
-    student.admissionTs,
-    student.createdAt,
-    student.created_at,
-    student.admissionDate,
-    student.admission_date,
-    student.admissionYear,
-    student.admYear,
-    student.admissionYearValue || student.yearOfAdmission
-  ];
-  for (const candidate of sources) {
-    const year = parseYearFromValue(candidate);
-    if (Number.isFinite(year)) return Number(year);
-  }
-  return null;
-}
-
-function getEnrollmentClass(entry = {}) {
-  if (!entry || typeof entry !== 'object') return '';
-  return entry.className || entry.classLevel || entry.class || entry.grade || '';
-}
-
-function getStudentClassFromRecord(student = {}) {
-  if (!student || typeof student !== 'object') return 'Unknown';
-  return student.className || student.classLevel || student.class || student.grade || 'Unknown';
+function lookupEnrollment(index, studentId, admissionNo) {
+  if (!index) return {};
+  if (studentId && index.byId?.[studentId]) return index.byId[studentId];
+  if (admissionNo && index.byId?.[admissionNo]) return index.byId[admissionNo];
+  if (admissionNo && index.byAdmission?.[admissionNo]) return index.byAdmission[admissionNo];
+  return {};
 }
 
 function getPromotedClassName(current = '') {
@@ -252,20 +196,19 @@ function getWorkerSession() {
 }
 
 function normalizeStudent(id, data = {}) {
-  const classRaw = data.className || data.classLevel || data.class || data.grade || 'Unknown';
-  const friendlyClass = normalizeClassName(classRaw);
+  const gender = (data.gender || '').toString().toLowerCase();
+  const className = data.className || data.classLevel || data.class || data.grade || 'Unknown';
   const fullName = [data.firstName, data.middleName, data.lastName, data.fullName, data.name]
     .filter(Boolean)
     .join(' ')
     .trim() || id;
   const admissionNo = data.admissionNumber || data.admissionNo || data.admNo || '';
-  const gender = normalizeGender(data.gender || data.Gender || data.sex || data.Sex || '');
   return {
     id,
-    gender,
-    className: friendlyClass,
-    class: friendlyClass,
-    classLevel: friendlyClass,
+    gender: gender.startsWith('m') || gender.startsWith('b') ? 'boys'
+      : gender.startsWith('f') || gender.startsWith('g') ? 'girls'
+      : 'unknown',
+    className,
     fullName,
     admissionNo
   };
@@ -450,160 +393,37 @@ function App() {
 
   async function loadStudents(schoolId, yearKey) {
     const selectedYear = String(yearKey || SOMAP_DEFAULT_YEAR);
-    const targetYear = Number.isFinite(Number(selectedYear)) ? Number(selectedYear) : SOMAP_DEFAULT_YEAR;
-    const deltaYears = targetYear - SOMAP_DEFAULT_YEAR;
     const baseSnap = await scopedOrSocratesLegacy('students', 'students').catch(() => null);
     const baseStudents = baseSnap?.exists() ? baseSnap.val() || {} : {};
-
-    const toStudentRecord = (id, data) => {
-      const source = data || {};
-      const status = String(source.status || '').toLowerCase();
-      if (status === 'shifted') return null;
-      const fullName = [source.firstName, source.middleName, source.lastName, source.fullName, source.name]
-        .filter(Boolean)
-        .join(' ')
-        .trim() || id;
-      const admissionId = source.admissionNumber || source.admissionNo || source.admNo || '';
-      const studentId = source.studentId || source.studentID || source.id || '';
-      const classRaw = source.className || source.classLevel || source.class || source.grade || 'Unknown';
-      const friendlyClass = normalizeClassName(classRaw);
-      return {
-        id: source.id || id,
-        studentId,
-        admissionNo: admissionId,
-        admissionNumber: admissionId,
-        admNo: admissionId,
-        name: fullName,
-        gender: normalizeGender(
-          source.gender || source.Gender || source.sex || source.Sex || ''
-        ),
-        className: friendlyClass,
-        class: friendlyClass,
-        classLevel: friendlyClass,
-        feeDue: Number(source.totalFee || source.feePerYear || source.feeDue || 0),
-        feePaid: Number(source.feesPaid || source.feePaid || source.paidAmount || 0),
-        balance: Number(source.balance || (source.feeDue || 0) - (source.paidAmount || 0) || 0) || 0,
-        parentName: source.primaryParentName || source.parentName || source.guardianName || '',
-        parentContact: source.primaryParentContact || source.parentPhone || source.parentContact || source.guardianContact || '',
-        status: status || 'active'
-      };
-    };
-
-    const baseList = Object.entries(baseStudents)
-      .map(([id, data]) => toStudentRecord(id, data))
-      .filter(Boolean);
-
-    const [yearSnap, anchorSnap] = await Promise.all([
+    const deltaYears = Number(selectedYear) - SOMAP_DEFAULT_YEAR;
+    const [yearEnrollSnap, anchorEnrollSnap] = await Promise.all([
       scopedOrSocratesLegacy(`enrollments/${selectedYear}`, `enrollments/${selectedYear}`).catch(() => null),
       scopedOrSocratesLegacy(`enrollments/${SOMAP_DEFAULT_YEAR}`, `enrollments/${SOMAP_DEFAULT_YEAR}`).catch(() => null)
     ]);
-    const yearEnrollmentIndex = normalizeEnrollments(yearSnap?.exists() ? yearSnap.val() : {});
-    const anchorIndex = normalizeEnrollments(anchorSnap?.exists() ? anchorSnap.val() : {});
+    const yearIndex = buildEnrollmentIndex(normalizeEnrollments(yearEnrollSnap?.exists() ? yearEnrollSnap.val() : {}));
+    const anchorIndex = buildEnrollmentIndex(normalizeEnrollments(anchorEnrollSnap?.exists() ? anchorEnrollSnap.val() : {}));
 
-    const enrollmentKeySet = (() => {
-      const keys = new Set();
-      const addKey = (value) => {
-        if (value == null) return;
-        const str = String(value).trim();
-        if (!str) return;
-        keys.add(str);
-      };
-      Object.entries(yearEnrollmentIndex).forEach(([key, entry]) => {
-        addKey(key);
-        if (entry && typeof entry === 'object') {
-          addKey(entry.id);
-          addKey(entry.studentId);
-          addKey(entry.admissionNo);
-          addKey(entry.admissionNumber);
-        }
-      });
-      return keys;
-    })();
-
-    const normalizeAdmission = (value) => String(value || '').trim();
-
-    const createRosterEntry = (student) => {
-      const sid = String(student.id || '').trim();
-      if (!sid) return null;
-      const admissionKey = normalizeAdmission(student.admissionNo);
-      const yearEnroll =
-        yearEnrollmentIndex[sid] ||
-        (admissionKey ? yearEnrollmentIndex[admissionKey] : null) ||
-        {};
-      let classRaw = getEnrollmentClass(yearEnroll);
-      const admissionYear = inferAdmissionYear(student);
-
-      const anchor =
-        anchorIndex[sid] ||
-        (admissionKey ? anchorIndex[admissionKey] : null) ||
-        {};
-      const anchorClass = getEnrollmentClass(anchor);
-      const hasAnchorRecord =
-        anchor && typeof anchor === 'object' && Object.keys(anchor).length > 0;
-      const studentClass = getStudentClassFromRecord(student);
-      const baseClass = anchorClass || studentClass || 'Unknown';
-      const oldAdmission =
-        Number.isFinite(admissionYear) && admissionYear <= SOMAP_DEFAULT_YEAR;
-      const shouldShift = hasAnchorRecord || oldAdmission;
-
+    const normalized = {};
+    Object.entries(baseStudents).forEach(([id, data]) => {
+      const status = String(data?.status || '').toLowerCase();
+      if (status === 'shifted') return;
+      const admissionNo = data?.admissionNumber || data?.admissionNo || data?.admNo || '';
+      const yearEnroll = lookupEnrollment(yearIndex, id, admissionNo);
+      let classRaw = yearEnroll.className || yearEnroll.classLevel || yearEnroll.class || yearEnroll.grade || '';
       if (!classRaw) {
-        if (shouldShift) {
-          const shifted = shiftClass(baseClass, deltaYears);
-          if (shifted === 'GRADUATED') return null;
-          classRaw = shifted;
-        } else {
-          classRaw = baseClass;
-        }
+        const anchorEnroll = lookupEnrollment(anchorIndex, id, admissionNo);
+        const baseClass = anchorEnroll.className || anchorEnroll.classLevel || anchorEnroll.class || anchorEnroll.grade ||
+          data.className || data.classLevel || data.class || data.grade || 'Unknown';
+        classRaw = shiftClass(baseClass, deltaYears);
+        if (classRaw === 'GRADUATED') return;
+      } else if (String(classRaw).trim().toUpperCase() === 'GRADUATED') {
+        return;
       }
-      if (String(classRaw).trim().toUpperCase() === 'GRADUATED') {
-        return null;
-      }
-
-      const classLevel = normalizeClassName(classRaw);
-      return {
-        ...student,
-        class: classLevel,
-        className: classLevel,
-        classLevel
-      };
-    };
-
-    const roster = baseList.map(createRosterEntry).filter(Boolean);
-
-    const matchesYearEnrollment = (student) => {
-      const candidates = [
-        student.id,
-        student.studentId,
-        student.admissionNo,
-        student.admissionNumber,
-        student.admNo
-      ];
-      return candidates.some((val) => {
-        const str = String(val || '').trim();
-        return str && enrollmentKeySet.has(str);
-      });
-    };
-
-    let yearRoster = [];
-    if (enrollmentKeySet.size) {
-      yearRoster = roster.filter(matchesYearEnrollment);
-    } else {
-      yearRoster = roster.filter((student) => {
-        const admissionYear = inferAdmissionYear(student);
-        return Number.isFinite(admissionYear) && admissionYear <= targetYear;
-      });
-    }
-
-    if (!yearRoster.length) {
-      yearRoster = roster;
-    }
-
-    const rosterMap = {};
-    yearRoster.forEach((student) => {
-      rosterMap[student.id] = student;
+      const className = normalizeClassName(classRaw);
+      normalized[id] = normalizeStudent(id, { ...data, className, class: className, grade: className, admissionNo });
     });
 
-    if (Object.keys(rosterMap).length) return rosterMap;
+    if (Object.keys(normalized).length) return normalized;
 
     const scopedPath = `years/${yearKey}/students`;
     const snap = await scopedOrSocratesLegacy(scopedPath, 'students').catch(() => null);
@@ -618,13 +438,11 @@ function App() {
     return {};
   }
 
-  async function loadAttendance(dateKey, classes = []) {
+  async function loadAttendance(dateKey, schoolId, yearKey) {
     if (!dateKey) return {};
     const yymm = `${dateKey.slice(0, 4)}${dateKey.slice(5, 7)}`;
     const attendanceMap = {};
-    const targets = Array.from(new Set(classes || [])).filter(Boolean);
-    const classList = targets.length ? targets : CLASS_ORDER;
-    for (const cls of classList) {
+    for (const cls of CLASS_ORDER) {
       try {
         const snap = await schoolRef(`attendance/${cls}/${yymm}/${dateKey}`).get();
         const records = snap.exists() ? snap.val() : {};
@@ -648,10 +466,7 @@ function App() {
     setRegisterLoading(true);
     setRegisterError('');
     try {
-      const classNames = Array.from(
-        new Set(Object.values(studentMap || {}).map((s) => s.className || 'Unknown'))
-      );
-      const attendance = await loadAttendance(dateKey, classNames);
+      const attendance = await loadAttendance(dateKey, workerSession.schoolId, currentYear);
       const stats = buildRegisterStats(studentMap, attendance);
       setRegisterStats(stats);
     } catch (err) {
