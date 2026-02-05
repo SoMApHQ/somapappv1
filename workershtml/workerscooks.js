@@ -440,25 +440,28 @@ function App() {
 
   async function loadAttendance(dateKey, schoolId, yearKey) {
     if (!dateKey) return {};
-    const yymm = `${dateKey.slice(0, 4)}${dateKey.slice(5, 7)}`;
+    const monthKey = String(dateKey.slice(0, 7)).replace('-', '');
     const attendanceMap = {};
-    for (const cls of CLASS_ORDER) {
-      try {
-        const snap = await schoolRef(`attendance/${cls}/${yymm}/${dateKey}`).get();
-        const records = snap.exists() ? snap.val() : {};
-        Object.entries(records || {}).forEach(([studentId, rec]) => {
-          attendanceMap[studentId] = {
-            ...(attendanceMap[studentId] || {}),
-            ...(rec || {}),
-          };
-        });
-      } catch (err) {
-        console.warn(
-          `Failed to load attendance for ${cls} on ${dateKey}:`,
-          err?.message || err
-        );
-      }
-    }
+    await Promise.all(
+      CLASS_ORDER.map(async (cls) => {
+        try {
+          const snap = await schoolRef(`attendance/${cls}/${monthKey}/${dateKey}`).get();
+          const records = snap.exists() ? snap.val() : {};
+          Object.entries(records || {}).forEach(([studentId, rec]) => {
+            if (!studentId) return;
+            attendanceMap[studentId] = {
+              ...(attendanceMap[studentId] || {}),
+              ...(rec || {}),
+            };
+          });
+        } catch (err) {
+          console.warn(
+            `Failed to load attendance for ${cls} on ${dateKey}:`,
+            err?.message || err
+          );
+        }
+      })
+    );
     return attendanceMap;
   }
 
@@ -489,28 +492,21 @@ function App() {
       if (student.gender === 'girls') perClass[cls].registered.girls += 1;
     });
 
-    const presentSet = new Set();
     Object.entries(attendanceMap || {}).forEach(([id, rec]) => {
       const student = studentMap[id] || normalizeStudent(id, rec);
       const cls = student.className || 'Unknown';
       if (!perClass[cls]) perClass[cls] = makeBlankCounts();
       classNamesSet.add(cls);
-      if (isPresent(rec)) {
-        perClass[cls].present.total += 1;
-        if (student.gender === 'boys') perClass[cls].present.boys += 1;
-        if (student.gender === 'girls') perClass[cls].present.girls += 1;
-        presentSet.add(id);
-      }
+      if (!isPresent(rec)) return;
+      perClass[cls].present.total += 1;
+      if (student.gender === 'boys') perClass[cls].present.boys += 1;
+      if (student.gender === 'girls') perClass[cls].present.girls += 1;
     });
 
-    Object.entries(studentMap || {}).forEach(([id, student]) => {
-      const cls = student.className || 'Unknown';
-      if (!perClass[cls]) perClass[cls] = makeBlankCounts();
-      if (!presentSet.has(id)) {
-        perClass[cls].absent.total += 1;
-        if (student.gender === 'boys') perClass[cls].absent.boys += 1;
-        if (student.gender === 'girls') perClass[cls].absent.girls += 1;
-      }
+    Object.keys(perClass).forEach(cls => {
+      perClass[cls].absent.total = Math.max(0, perClass[cls].registered.total - perClass[cls].present.total);
+      perClass[cls].absent.boys = Math.max(0, perClass[cls].registered.boys - perClass[cls].present.boys);
+      perClass[cls].absent.girls = Math.max(0, perClass[cls].registered.girls - perClass[cls].present.girls);
     });
 
     const classNames = Array.from(classNamesSet).sort();
