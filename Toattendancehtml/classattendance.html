@@ -512,6 +512,14 @@
         let db = null;
         let currentSchool = null;
         let isSocrates = false;
+        const LOGO_CANDIDATES = [
+          "../images/socrates-school-logo.png",
+          "../images/socrates-school-logo.jpg",
+          "../images/socrates-logo.png",
+          "../images/socrates-logo.jpg",
+          "../images/somap-logo.png.jpg",
+        ];
+        let cachedSchoolLogo = null;
 
     // Multi-school helpers (requires ../somapappv1multischool/js/context.js)
     const P = (path) =>
@@ -608,6 +616,18 @@
           const y = Number(year);
           if (!Number.isFinite(y)) return String(SOMAP_DEFAULT_YEAR);
           return String(y);
+        }
+        function normalizeGenderValue(value) {
+          const raw = String(value || "").trim().toLowerCase();
+          if (!raw) return "U";
+          if (["m", "male", "boy", "man"].includes(raw)) return "M";
+          if (["f", "female", "girl", "woman"].includes(raw)) return "F";
+          return "U";
+        }
+        function genderSectionLabel(code) {
+          if (code === "M") return "BOYS";
+          if (code === "F") return "GIRLS";
+          return "UNSPECIFIED";
         }
         function canonicalClassKey(str) {
           const api = window.SomapSubjects || {};
@@ -1015,6 +1035,10 @@
                     return null;
                   }
 
+                  const rawGender =
+                    s.gender || s.sex || s.Gender || s.Sex || "";
+                  const normalizedGender = normalizeGenderValue(rawGender);
+                  const genderSection = genderSectionLabel(normalizedGender);
                   return {
                     id: k,
                     admissionNo,
@@ -1023,6 +1047,9 @@
                     feeDue: 0,
                     feePaid: 0,
                     balance: 0,
+                    gender: normalizedGender,
+                    genderSection,
+                    genderRaw: rawGender,
                     parentName,
                     parentContact,
                     status: status || "active",
@@ -1575,118 +1602,1178 @@
         }
 
         // ---------- Export features ----------
-        async function exportDailyPDF() {
-          const { jsPDF } = window.jspdf;
-          const doc = new jsPDF({ orientation: "landscape" });
-          doc.setFontSize(12);
-          doc.text(
-            `SoMAp Daily Attendance — ${currentClass} — ${currentDateStr}`,
-            14,
-            14
-          );
-          let y = 24;
-          doc.setFontSize(10);
-          [
-            "No",
-            "Adm",
-            "Name",
-            "AM",
-            "PM",
-            "Daily",
-            "Due",
-            "Paid",
-            "Bal",
-          ].forEach((h, i) => doc.text(h, 14 + i * 30, y));
-          y += 6;
-          filtered.forEach((s, i) => {
-            const rec = attendanceCache[s.id] || {};
-            if (y > 180) {
-              doc.addPage("landscape");
-              y = 20;
-            }
-            doc.text(String(i + 1), 14, y);
-            doc.text(String(s.admissionNo || ""), 44, y);
-            doc.text(String(s.name || ""), 74, y);
-            doc.text(String(rec.am || ""), 134, y);
-            doc.text(String(rec.pm || ""), 164, y);
-            doc.text(String(rec.daily || ""), 194, y);
-            doc.text(String(s.feeDue || 0), 224, y);
-            doc.text(String(s.feePaid || 0), 254, y);
-            doc.text(String(s.balance || 0), 284, y);
-            y += 6;
+        const REGISTER_LEGEND = [
+          "P = Present (tick)",
+          "A = Absent",
+          "S = Sick",
+          "LE = Late Excuse",
+          "MT = Meeting",
+          "PG = Permission",
+        ];
+        const GROUP_BAND_COLORS = {
+          BOYS: [219, 234, 254],
+          GIRLS: [254, 226, 226],
+          UNSPECIFIED: [241, 245, 249],
+        };
+        function blobToDataUrl(blob) {
+          return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
           });
-          doc.save(`SoMAp_Daily_${currentClass}_${currentDateStr}.pdf`);
+        }
+        async function resolveSchoolLogoData() {
+          if (cachedSchoolLogo) return cachedSchoolLogo;
+          for (const path of LOGO_CANDIDATES) {
+            try {
+              const response = await fetch(path);
+              if (!response.ok) continue;
+              const dataUrl = await blobToDataUrl(await response.blob());
+              if (dataUrl) {
+                cachedSchoolLogo = dataUrl;
+                return cachedSchoolLogo;
+              }
+            } catch (error) {
+              console.warn("Logo fetch failed:", path, error?.message || error);
+            }
+          }
+          if (currentSchool?.logoUrl) {
+            try {
+              const response = await fetch(currentSchool.logoUrl);
+              if (response.ok) {
+                const dataUrl = await blobToDataUrl(await response.blob());
+                if (dataUrl) {
+                  cachedSchoolLogo = dataUrl;
+                  return cachedSchoolLogo;
+                }
+              }
+            } catch (error) {
+              console.warn("School logo fetch failed:", error?.message || error);
+            }
+          }
+          return null;
+        }
+        function formatMonthLabel(dateStr) {
+          const dt = new Date((dateStr || currentDateStr) + "T00:00:00");
+          if (Number.isNaN(dt.getTime())) return "";
+          return dt.toLocaleDateString("en-GB", {
+            month: "long",
+            year: "numeric",
+          });
+        }
+        function formatDateLong(dateStr) {
+          const dt = new Date(dateStr + "T00:00:00");
+          if (Number.isNaN(dt.getTime())) return dateStr;
+          return dt.toLocaleDateString("en-GB", {
+            day: "numeric",
+            month: "long",
+            year: "numeric",
+          });
+        }
+        function getDaysForMonth(dateStr) {
+          const dt = new Date((dateStr || currentDateStr) + "T00:00:00");
+          if (Number.isNaN(dt.getTime())) return [];
+          const year = dt.getFullYear();
+          const month = dt.getMonth();
+          const days = [];
+          for (let day = 1; day <= 31; day++) {
+            const candidate = new Date(year, month, day);
+            if (candidate.getMonth() !== month) break;
+            days.push({
+              day,
+              date: fmtDate(candidate),
+              weekday: candidate.toLocaleDateString("en-GB", {
+                weekday: "short",
+              }),
+              isWorkingDay: !isWeekend(candidate) && !isHoliday(candidate),
+            });
+          }
+          return days;
+        }
+        function getDailyRangeDates() {
+          const fromCandidates = [
+            "rangeFromDate",
+            "dailyFromDate",
+            "dateRangeFrom",
+          ];
+          const toCandidates = ["rangeToDate", "dailyToDate", "dateRangeTo"];
+          const fromValue =
+            fromCandidates
+              .map((id) => el(id))
+              .filter(Boolean)
+              .map((element) => element.value)
+              .find(Boolean) || currentDateStr;
+          const toValue =
+            toCandidates
+              .map((id) => el(id))
+              .filter(Boolean)
+              .map((element) => element.value)
+              .find(Boolean) ||
+            fromValue;
+          const start = new Date(fromValue + "T00:00:00");
+          let end = new Date(toValue + "T00:00:00");
+          if (Number.isNaN(start.getTime())) return [currentDateStr];
+          if (Number.isNaN(end.getTime()) || end < start) end = new Date(start);
+          const dates = [];
+          for (
+            let pointer = new Date(start);
+            pointer <= end;
+            pointer.setDate(pointer.getDate() + 1)
+          ) {
+            dates.push(fmtDate(new Date(pointer)));
+          }
+          return dates;
+        }
+        function getStudentsForExport() {
+          if (!currentClass) return [];
+          const key = canonicalClassKey(currentClass);
+          return students
+            .filter((s) =>
+              key ? classMatches(currentClass, s.class) : s.class === currentClass
+            )
+            .sort((a, b) => {
+              const order = { M: 0, F: 1, U: 2 };
+              const ga = order[a.gender] ?? 2;
+              const gb = order[b.gender] ?? 2;
+              if (ga !== gb) return ga - gb;
+              return (a.name || "").localeCompare(b.name || "", undefined, {
+                sensitivity: "base",
+              });
+            });
+        }
+        function getAttendanceRecord(studentId, dateKey) {
+          const base = monthAttendance[studentId]?.[dateKey] || {};
+          const record = { ...base };
+          if (dateKey === currentDateStr && attendanceCache[studentId]) {
+            const live = attendanceCache[studentId];
+            record.am = live.am ?? record.am;
+            record.pm = live.pm ?? record.pm;
+          }
+          record.daily = record.daily || deriveDaily(record.am, record.pm);
+          return record;
+        }
+        function drawTickMark(doc, x, y, size) {
+          doc.setLineWidth(0.8);
+          doc.line(x, y, x + size * 0.35, y + size * 0.7);
+          doc.line(x + size * 0.35, y + size * 0.7, x + size, y - size * 0.5);
+        }
+        function drawSessionIndicator(doc, x, y, width, height, mark, session) {
+          if (!mark) return;
+          const normalized = String(mark || "").toUpperCase();
+          const centerX = x + width / 2;
+          const centerY =
+            y + (session === "am" ? height * 0.25 : height * 0.75);
+          doc.setFontSize(5.5);
+          if (normalized === "P") {
+            const tickSize = Math.min(
+              3.6,
+              Math.min(width, height) * 0.45
+            );
+            drawTickMark(
+              doc,
+              centerX - tickSize * 0.4,
+              centerY + tickSize * 0.1,
+              tickSize
+            );
+          } else if (normalized === "A") {
+            doc.text("A", centerX, centerY + 1, { align: "center" });
+          } else {
+            doc.text(normalized, centerX, centerY + 1, { align: "center" });
+          }
+        }
+        function computeMonthlyLayout(doc, dayCount) {
+          const margin = 10;
+          const pageWidth = doc.internal.pageSize.getWidth();
+          const noWidth = 8;
+          const admWidth = 26;
+          const nameWidth = 44;
+          const presentColWidth = 26;
+          const absentColWidth = 22;
+          const percentColWidth = 20;
+          const leftWidth = noWidth + admWidth + nameWidth;
+          const summaryWidth =
+            presentColWidth + absentColWidth + percentColWidth;
+          const availableDayWidth =
+            pageWidth - margin * 2 - leftWidth - summaryWidth;
+          const dayColWidth = availableDayWidth / Math.max(dayCount, 1);
+          const totalDayWidth = dayColWidth * dayCount;
+          const tableStartX = margin;
+          const noX = tableStartX;
+          const admX = noX + noWidth;
+          const nameX = admX + admWidth;
+          const dayStartX = nameX + nameWidth;
+          const presentColX = dayStartX + totalDayWidth;
+          const absentColX = presentColX + presentColWidth;
+          const percentColX = absentColX + absentColWidth;
+          return {
+            margin,
+            noWidth,
+            admWidth,
+            nameWidth,
+            presentColWidth,
+            absentColWidth,
+            percentColWidth,
+            dayColWidth,
+            totalDayWidth,
+            dayStartX,
+            presentColX,
+            absentColX,
+            percentColX,
+            tableRight: percentColX + percentColWidth,
+            tableStartY: 60,
+            columnHeaderHeight: 8,
+            rowHeight: 7,
+            groupRowHeight: 6,
+            bottomMargin: 40,
+            noX,
+            admX,
+            nameX,
+          };
+        }
+        function drawMonthlyHeader(doc, layout, meta) {
+          const headerTop = 12;
+          if (meta.logo) {
+            try {
+              doc.addImage(meta.logo, layout.margin, headerTop, 22, 22);
+            } catch (error) {
+              console.warn("Unable to render logo", error?.message || error);
+            }
+          }
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(16);
+          doc.text(
+            meta.schoolName || "Socrates School",
+            layout.margin + 24,
+            headerTop + 8
+          );
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(10);
+          doc.text(
+            `Monthly Class Register`,
+            layout.margin + 24,
+            headerTop + 16
+          );
+          doc.text(
+            `Class: ${meta.className || "—"}`,
+            layout.margin + 24,
+            headerTop + 26
+          );
+          doc.text(
+            `Month: ${meta.monthLabel || "—"}`,
+            layout.margin + 24,
+            headerTop + 32
+          );
+          doc.text(
+            `Academic Year: ${meta.academicYear || currentYear}`,
+            layout.margin + 24,
+            headerTop + 38
+          );
+          doc.text(
+            `Printed: ${meta.printedAt}`,
+            layout.margin + 24,
+            headerTop + 44
+          );
+          doc.setFontSize(9);
+          const teacherX = doc.internal.pageSize.getWidth() - layout.margin - 110;
+          doc.text(
+            `Teacher: ${meta.teacherName || "____________________"}`,
+            teacherX,
+            headerTop + 26
+          );
+          doc.text(
+            "Signature: __________________________",
+            teacherX,
+            headerTop + 32
+          );
+        }
+        function drawMonthlyColumnHeaders(doc, layout, days) {
+          const y = layout.tableStartY;
+          doc.setFontSize(6.5);
+          doc.setDrawColor(110);
+          doc.setLineWidth(0.3);
+          doc.rect(layout.noX, y, layout.noWidth, layout.columnHeaderHeight);
+          doc.text("No", layout.noX + layout.noWidth / 2, y + 5.4, {
+            align: "center",
+          });
+          doc.rect(layout.admX, y, layout.admWidth, layout.columnHeaderHeight);
+          doc.text(
+            "Adm No",
+            layout.admX + layout.admWidth / 2,
+            y + 5.4,
+            { align: "center" }
+          );
+          doc.rect(layout.nameX, y, layout.nameWidth, layout.columnHeaderHeight);
+          doc.text(
+            "Student Name",
+            layout.nameX + layout.nameWidth / 2,
+            y + 5.4,
+            { align: "center" }
+          );
+          for (let i = 0; i < days.length; i++) {
+            const x = layout.dayStartX + i * layout.dayColWidth;
+            doc.rect(x, y, layout.dayColWidth, layout.columnHeaderHeight);
+            doc.setLineWidth(0.2);
+            doc.text(
+              String(days[i].day),
+              x + layout.dayColWidth / 2,
+              y + 4,
+              { align: "center" }
+            );
+            doc.setFontSize(5.2);
+            doc.text(
+              days[i].weekday,
+              x + layout.dayColWidth / 2,
+              y + 7,
+              { align: "center" }
+            );
+            doc.setFontSize(6.5);
+          }
+          doc.rect(
+            layout.presentColX,
+            y,
+            layout.presentColWidth,
+            layout.columnHeaderHeight
+          );
+          doc.text(
+            "Present",
+            layout.presentColX + layout.presentColWidth / 2,
+            y + 5.4,
+            { align: "center" }
+          );
+          doc.rect(
+            layout.absentColX,
+            y,
+            layout.absentColWidth,
+            layout.columnHeaderHeight
+          );
+          doc.text(
+            "Absent",
+            layout.absentColX + layout.absentColWidth / 2,
+            y + 5.4,
+            { align: "center" }
+          );
+          doc.rect(
+            layout.percentColX,
+            y,
+            layout.percentColWidth,
+            layout.columnHeaderHeight
+          );
+          doc.text(
+            "%",
+            layout.percentColX + layout.percentColWidth / 2,
+            y + 5.4,
+            { align: "center" }
+          );
+        }
+        function drawMonthlyGroupRow(doc, layout, y, label, color = [226, 232, 240]) {
+          doc.setFillColor(color[0], color[1], color[2]);
+          doc.rect(
+            layout.noX,
+            y,
+            layout.tableRight - layout.noX,
+            layout.groupRowHeight,
+            "F"
+          );
+          doc.setDrawColor(90);
+          doc.rect(
+            layout.noX,
+            y,
+            layout.tableRight - layout.noX,
+            layout.groupRowHeight
+          );
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(8);
+          doc.text(label, layout.noX + 3, y + layout.groupRowHeight * 0.65);
+          doc.setFont("helvetica", "normal");
+        }
+        function drawMonthlyStudentRow(doc, layout, y, row, days) {
+          const fillColor =
+            row.genderSection === "BOYS"
+              ? [229, 244, 255]
+              : row.genderSection === "GIRLS"
+              ? [255, 235, 238]
+              : [245, 245, 248];
+          doc.setFillColor(fillColor[0], fillColor[1], fillColor[2]);
+          doc.rect(
+            layout.noX,
+            y,
+            layout.dayStartX - layout.noX,
+            layout.rowHeight,
+            "F"
+          );
+          doc.setDrawColor(120);
+          doc.rect(layout.noX, y, layout.noWidth, layout.rowHeight);
+          doc.rect(layout.admX, y, layout.admWidth, layout.rowHeight);
+          doc.rect(layout.nameX, y, layout.nameWidth, layout.rowHeight);
+          doc.setFontSize(7);
+          doc.text(
+            String(row.seq),
+            layout.noX + layout.noWidth / 2,
+            y + layout.rowHeight / 2 + 1,
+            { align: "center" }
+          );
+          doc.text(
+            row.admissionNo || "",
+            layout.admX + layout.admWidth / 2,
+            y + layout.rowHeight / 2 + 1,
+            { align: "center" }
+          );
+          doc.text(
+            row.name || "",
+            layout.nameX + 2,
+            y + layout.rowHeight / 2 + 1,
+            { maxWidth: layout.nameWidth - 4 }
+          );
+          let dayX = layout.dayStartX;
+          for (let i = 0; i < days.length; i++) {
+            doc.rect(dayX, y, layout.dayColWidth, layout.rowHeight);
+            doc.line(
+              dayX,
+              y + layout.rowHeight / 2,
+              dayX + layout.dayColWidth,
+              y + layout.rowHeight / 2
+            );
+            const record = row.records[i] || {};
+            drawSessionIndicator(
+              doc,
+              dayX,
+              y,
+              layout.dayColWidth,
+              layout.rowHeight,
+              record.am,
+              "am"
+            );
+            drawSessionIndicator(
+              doc,
+              dayX,
+              y,
+              layout.dayColWidth,
+              layout.rowHeight,
+              record.pm,
+              "pm"
+            );
+            dayX += layout.dayColWidth;
+          }
+          doc.rect(
+            layout.presentColX,
+            y,
+            layout.presentColWidth,
+            layout.rowHeight
+          );
+          doc.rect(
+            layout.absentColX,
+            y,
+            layout.absentColWidth,
+            layout.rowHeight
+          );
+          doc.rect(
+            layout.percentColX,
+            y,
+            layout.percentColWidth,
+            layout.rowHeight
+          );
+          doc.text(
+            row.presentFraction,
+            layout.presentColX + layout.presentColWidth / 2,
+            y + layout.rowHeight / 2 + 1,
+            { align: "center" }
+          );
+          doc.text(
+            String(row.absentSessions),
+            layout.absentColX + layout.absentColWidth / 2,
+            y + layout.rowHeight / 2 + 1,
+            { align: "center" }
+          );
+          doc.text(
+            `${row.attendancePercent.toFixed(1)}%`,
+            layout.percentColX + layout.percentColWidth / 2,
+            y + layout.rowHeight / 2 + 1,
+            { align: "center" }
+          );
+        }
+        function drawMonthlySummary(doc, layout, summary) {
+          const y = doc.internal.pageSize.getHeight() - 48;
+          doc.setFontSize(7);
+          doc.text(`Total Boys: ${summary.totalBoys}`, layout.margin, y);
+          doc.text(
+            `Total Girls: ${summary.totalGirls}`,
+            layout.margin + 60,
+            y
+          );
+          doc.text(
+            `Total Class: ${summary.totalStudents}`,
+            layout.margin + 140,
+            y
+          );
+          doc.text(
+            `AM Present: ${summary.totalAmPresent}`,
+            layout.margin,
+            y + 5
+          );
+          doc.text(
+            `PM Present: ${summary.totalPmPresent}`,
+            layout.margin + 80,
+            y + 5
+          );
+          doc.text(
+            `Overall Attendance: ${summary.overallPercent.toFixed(1)}%`,
+            layout.margin + 160,
+            y + 5
+          );
+          doc.text(
+            `Possible Sessions: ${summary.possibleSessions}`,
+            layout.margin,
+            y + 10
+          );
+          const legendY = y + 14;
+          REGISTER_LEGEND.forEach((entry, index) => {
+            const column = index % 3;
+            const rowOffset = Math.floor(index / 3);
+            doc.text(
+              entry,
+              layout.margin + column * 80,
+              legendY + rowOffset * 4
+            );
+          });
+          const signatureY = doc.internal.pageSize.getHeight() - 10;
+          doc.setLineWidth(0.6);
+          doc.line(layout.margin, signatureY - 4, layout.margin + 80, signatureY - 4);
+          doc.text("Headteacher / Inspector", layout.margin, signatureY);
+          doc.line(
+            layout.margin + 110,
+            signatureY - 4,
+            layout.margin + 195,
+            signatureY - 4
+          );
+          doc.text("Teacher", layout.margin + 110, signatureY);
+        }
+        function drawMonthlyRegister(doc, payload) {
+          const layout = computeMonthlyLayout(doc, payload.days.length);
+          let y = layout.tableStartY;
+          drawMonthlyHeader(doc, layout, payload.meta);
+          drawMonthlyColumnHeaders(doc, layout, payload.days);
+          y += layout.columnHeaderHeight;
+          payload.groupSequence.forEach((entry) => {
+            const rowHeight =
+              entry.type === "group" ? layout.groupRowHeight : layout.rowHeight;
+            if (
+              y + rowHeight >
+              doc.internal.pageSize.getHeight() - layout.bottomMargin
+            ) {
+              doc.addPage();
+              drawMonthlyHeader(doc, layout, payload.meta);
+              drawMonthlyColumnHeaders(doc, layout, payload.days);
+              y = layout.tableStartY + layout.columnHeaderHeight;
+            }
+            if (entry.type === "group") {
+              drawMonthlyGroupRow(
+                doc,
+                layout,
+                y,
+                entry.label,
+                GROUP_BAND_COLORS[entry.label] || [226, 232, 240]
+              );
+            } else {
+              drawMonthlyStudentRow(doc, layout, y, entry.row, payload.days);
+            }
+            y += rowHeight;
+          });
+          drawMonthlySummary(doc, layout, payload.summary);
+        }
+        function drawDailyRegister(doc, payload) {
+          const margin = 12;
+          const pageWidth = doc.internal.pageSize.getWidth();
+          const columns = {
+            no: 10,
+            adm: 30,
+            name: 65,
+            am: 28,
+            pm: 28,
+            daily: 24,
+          };
+          const rowHeight = 8;
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(14);
+          doc.text(payload.schoolName || "Socrates School", margin, 22);
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(10);
+          doc.text(`Date: ${formatDateLong(payload.date)}`, margin, 30);
+          doc.text(`Class: ${payload.className || "—"}`, margin, 36);
+          doc.text(
+            `Academic Year: ${payload.academicYear || currentYear}`,
+            margin,
+            42
+          );
+          doc.text(`Printed: ${payload.printedAt}`, margin, 48);
+          if (payload.logo) {
+            try {
+              doc.addImage(payload.logo, pageWidth - margin - 32, 12, 32, 32);
+            } catch (error) {
+              console.warn(
+                "Daily register logo error",
+                error?.message || error
+              );
+            }
+          }
+          let y = 60;
+          doc.setFontSize(8.5);
+          doc.setDrawColor(120);
+          doc.rect(margin, y, columns.no, rowHeight);
+          doc.text("No", margin + columns.no / 2, y + 5, { align: "center" });
+          doc.rect(margin + columns.no, y, columns.adm, rowHeight);
+          doc.text(
+            "Adm",
+            margin + columns.no + columns.adm / 2,
+            y + 5,
+            { align: "center" }
+          );
+          doc.rect(
+            margin + columns.no + columns.adm,
+            y,
+            columns.name,
+            rowHeight
+          );
+          doc.text(
+            "Student",
+            margin + columns.no + columns.adm + columns.name / 2,
+            y + 5,
+            { align: "center" }
+          );
+          const amX = margin + columns.no + columns.adm + columns.name;
+          doc.rect(amX, y, columns.am, rowHeight);
+          doc.text(
+            "AM",
+            amX + columns.am / 2,
+            y + 5,
+            { align: "center" }
+          );
+          const pmX = amX + columns.am;
+          doc.rect(pmX, y, columns.pm, rowHeight);
+          doc.text(
+            "PM",
+            pmX + columns.pm / 2,
+            y + 5,
+            { align: "center" }
+          );
+          const dailyX = pmX + columns.pm;
+          doc.rect(dailyX, y, columns.daily, rowHeight);
+          doc.text(
+            "Daily",
+            dailyX + columns.daily / 2,
+            y + 5,
+            { align: "center" }
+          );
+          y += rowHeight;
+          doc.setFontSize(7.5);
+          payload.rows.forEach((row) => {
+            doc.rect(margin, y, columns.no, rowHeight);
+            doc.text(
+              String(row.seq),
+              margin + columns.no / 2,
+              y + 5,
+              { align: "center" }
+            );
+            doc.rect(margin + columns.no, y, columns.adm, rowHeight);
+            doc.text(
+              row.admissionNo || "",
+              margin + columns.no + columns.adm / 2,
+              y + 5,
+              { align: "center" }
+            );
+            doc.rect(
+              margin + columns.no + columns.adm,
+              y,
+              columns.name,
+              rowHeight
+            );
+            doc.text(
+              row.name || "",
+              margin + columns.no + columns.adm + 2,
+              y + 5,
+              { maxWidth: columns.name - 4 }
+            );
+            doc.rect(amX, y, columns.am, rowHeight);
+            drawSessionIndicator(doc, amX, y, columns.am, rowHeight, row.am, "am");
+            doc.rect(pmX, y, columns.pm, rowHeight);
+            drawSessionIndicator(doc, pmX, y, columns.pm, rowHeight, row.pm, "pm");
+            doc.rect(dailyX, y, columns.daily, rowHeight);
+            doc.text(
+              row.daily || "",
+              dailyX + columns.daily / 2,
+              y + 5,
+              { align: "center" }
+            );
+            y += rowHeight;
+          });
+          const summaryY = doc.internal.pageSize.getHeight() - 58;
+          doc.setFontSize(8);
+          doc.text(
+            `Registered: ${payload.summary.registered}`,
+            margin,
+            summaryY
+          );
+          doc.text(
+            `Present AM: ${payload.summary.presentAm}`,
+            margin + 90,
+            summaryY
+          );
+          doc.text(
+            `Present PM: ${payload.summary.presentPm}`,
+            margin + 170,
+            summaryY
+          );
+          doc.text(
+            `Absent AM: ${payload.summary.absentAm}`,
+            margin,
+            summaryY + 6
+          );
+          doc.text(
+            `Absent PM: ${payload.summary.absentPm}`,
+            margin + 90,
+            summaryY + 6
+          );
+          doc.text(
+            `% AM: ${payload.summary.percentAm}%`,
+            margin,
+            summaryY + 12
+          );
+          doc.text(
+            `% PM: ${payload.summary.percentPm}%`,
+            margin + 90,
+            summaryY + 12
+          );
+          doc.text(
+            `Overall: ${payload.summary.overallPercent}%`,
+            margin + 170,
+            summaryY + 12
+          );
+          const legendY = summaryY + 20;
+          REGISTER_LEGEND.forEach((entry, index) => {
+            const column = index % 3;
+            const rowOffset = Math.floor(index / 3);
+            doc.text(
+              entry,
+              margin + column * 80,
+              legendY + rowOffset * 4
+            );
+          });
+          const signatureY = doc.internal.pageSize.getHeight() - 10;
+          doc.setLineWidth(0.6);
+          doc.line(margin, signatureY - 3, margin + 80, signatureY - 3);
+          doc.text("Teacher", margin, signatureY);
+          doc.line(margin + 120, signatureY - 3, margin + 240, signatureY - 3);
+          doc.text("Headteacher / Inspector", margin + 120, signatureY);
+        }
+        function drawStudentRegister(doc, payload) {
+          const margin = 12;
+          const pageWidth = doc.internal.pageSize.getWidth();
+          const columns = {
+            day: 24,
+            weekday: 28,
+            am: 30,
+            pm: 30,
+            daily: 30,
+          };
+          const rowHeight = 8;
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(14);
+          doc.text(payload.schoolName || "Socrates School", margin, 22);
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(10);
+          doc.text(`Student: ${payload.studentName}`, margin, 30);
+          doc.text(`Adm No: ${payload.admissionNo || "—"}`, margin, 36);
+          doc.text(`Class: ${payload.className || "—"}`, margin, 42);
+          doc.text(`Range: ${payload.rangeLabel}`, margin, 48);
+          doc.text(`Printed: ${payload.printedAt}`, margin, 54);
+          if (payload.logo) {
+            try {
+              doc.addImage(payload.logo, pageWidth - margin - 32, 12, 32, 32);
+            } catch (error) {
+              console.warn(
+                "Student register logo error",
+                error?.message || error
+              );
+            }
+          }
+          let y = 70;
+          doc.setFontSize(8.5);
+          doc.setDrawColor(120);
+          doc.rect(margin, y, columns.day, rowHeight);
+          doc.text("Day", margin + columns.day / 2, y + 5, { align: "center" });
+          doc.rect(margin + columns.day, y, columns.weekday, rowHeight);
+          doc.text(
+            "Weekday",
+            margin + columns.day + columns.weekday / 2,
+            y + 5,
+            { align: "center" }
+          );
+          const amX = margin + columns.day + columns.weekday;
+          doc.rect(amX, y, columns.am, rowHeight);
+          doc.text("AM", amX + columns.am / 2, y + 5, { align: "center" });
+          const pmX = amX + columns.am;
+          doc.rect(pmX, y, columns.pm, rowHeight);
+          doc.text("PM", pmX + columns.pm / 2, y + 5, { align: "center" });
+          const dailyX = pmX + columns.pm;
+          doc.rect(dailyX, y, columns.daily, rowHeight);
+          doc.text("Daily", dailyX + columns.daily / 2, y + 5, {
+            align: "center",
+          });
+          y += rowHeight;
+          doc.setFontSize(7.5);
+          payload.rows.forEach((row) => {
+            doc.rect(margin, y, columns.day, rowHeight);
+            doc.text(
+              row.dayLabel,
+              margin + columns.day / 2,
+              y + 5,
+              { align: "center" }
+            );
+            doc.rect(margin + columns.day, y, columns.weekday, rowHeight);
+            doc.text(
+              row.weekday,
+              margin + columns.day + columns.weekday / 2,
+              y + 5,
+              { align: "center" }
+            );
+            doc.rect(amX, y, columns.am, rowHeight);
+            drawSessionIndicator(doc, amX, y, columns.am, rowHeight, row.am, "am");
+            doc.rect(pmX, y, columns.pm, rowHeight);
+            drawSessionIndicator(doc, pmX, y, columns.pm, rowHeight, row.pm, "pm");
+            doc.rect(dailyX, y, columns.daily, rowHeight);
+            doc.text(
+              row.daily || "",
+              dailyX + columns.daily / 2,
+              y + 5,
+              { align: "center" }
+            );
+            y += rowHeight;
+          });
+          const summaryY = doc.internal.pageSize.getHeight() - 60;
+          doc.setFontSize(8);
+          doc.text(
+            `Workdays: ${payload.summary.workDays}`,
+            margin,
+            summaryY
+          );
+          doc.text(
+            `Sessions: ${payload.summary.presentSessions}/${payload.summary.possibleSessions}`,
+            margin + 100,
+            summaryY
+          );
+          doc.text(
+            `Attendance: ${payload.summary.attendancePercent}%`,
+            margin + 250,
+            summaryY
+          );
+          doc.text(
+            `AM Present: ${payload.summary.amPresent}`,
+            margin,
+            summaryY + 6
+          );
+          doc.text(
+            `PM Present: ${payload.summary.pmPresent}`,
+            margin + 120,
+            summaryY + 6
+          );
+          const legendY = summaryY + 20;
+          REGISTER_LEGEND.forEach((entry, index) => {
+            const column = index % 3;
+            const rowOffset = Math.floor(index / 3);
+            doc.text(
+              entry,
+              margin + column * 90,
+              legendY + rowOffset * 4
+            );
+          });
+          const signatureY = doc.internal.pageSize.getHeight() - 10;
+          doc.setLineWidth(0.6);
+          doc.line(margin, signatureY - 3, margin + 90, signatureY - 3);
+          doc.text("Teacher", margin, signatureY);
+          doc.line(
+            margin + 160,
+            signatureY - 3,
+            margin + 280,
+            signatureY - 3
+          );
+          doc.text("Headteacher / Inspector", margin + 160, signatureY);
         }
         async function exportMonthlyPDF() {
+          if (!currentClass) return alert("Pick a class first");
+          const studentsList = getStudentsForExport();
+          if (!studentsList.length)
+            return alert("No students found in the selected class");
           const { jsPDF } = window.jspdf;
-          const doc = new jsPDF();
-          doc.setFontSize(12);
-          doc.text(`SoMAp Monthly — ${currentClass} — ${monthKey}`, 14, 14);
-          let y = 28;
-          const workdays = monthWorkingDays(currentDateStr);
-          filtered.forEach((s, i) => {
-            if (y > 270) {
-              doc.addPage();
-              y = 20;
-            }
-            const dates = monthAttendance[s.id] || {};
-            let present = 0,
-              absent = 0;
-            Object.keys(dates).forEach((dk) => {
-              const r = dates[dk];
-              if (r && r.daily === "P") present++;
-              if (r && (r.daily || "").includes("A")) absent++;
-            });
-            doc.text(
-              `${i + 1}. ${s.name} (${
-                s.admissionNo
-              }) — Present: ${present}/${workdays} Absent: ${absent} => ${
-                workdays ? Math.round((present / workdays) * 100) : 0
-              }%`,
-              14,
-              y
-            );
-            y += 6;
+          const doc = new jsPDF({
+            orientation: "landscape",
+            unit: "mm",
+            format: "a4",
           });
-          doc.save(`SoMAp_Monthly_${currentClass}_${monthKey}.pdf`);
+          const logo = await resolveSchoolLogoData();
+          const days = getDaysForMonth(currentDateStr);
+          const workdays = days.filter((d) => d.isWorkingDay).length;
+          const possiblePerStudent = workdays * 2;
+          let seq = 1;
+          const groups = { BOYS: [], GIRLS: [], UNSPECIFIED: [] };
+          let totalAmPresent = 0;
+          let totalPmPresent = 0;
+          let totalPresentSessions = 0;
+          studentsList.forEach((student) => {
+            const records = [];
+            let presentSessions = 0;
+            let absentSessions = 0;
+            let amPresent = 0;
+            let pmPresent = 0;
+            days.forEach((day) => {
+              const rec = getAttendanceRecord(student.id, day.date);
+              const am = (rec.am || "").toUpperCase();
+              const pm = (rec.pm || "").toUpperCase();
+              if (am === "P") {
+                presentSessions++;
+                amPresent++;
+              } else if (am === "A") {
+                absentSessions++;
+              }
+              if (pm === "P") {
+                presentSessions++;
+                pmPresent++;
+              } else if (pm === "A") {
+                absentSessions++;
+              }
+              records.push({ am, pm });
+            });
+            totalAmPresent += amPresent;
+            totalPmPresent += pmPresent;
+            totalPresentSessions += presentSessions;
+            const row = {
+              seq: seq++,
+              admissionNo: student.admissionNo,
+              name: student.name,
+              genderSection: student.genderSection || "UNSPECIFIED",
+              records,
+              presentSessions,
+              absentSessions,
+              amPresent,
+              pmPresent,
+              presentFraction: `${presentSessions}/${possiblePerStudent || 0}`,
+              attendancePercent: possiblePerStudent
+                ? Math.round((presentSessions / possiblePerStudent) * 10) / 10
+                : 0,
+            };
+            const bucket = groups[row.genderSection] || groups.UNSPECIFIED;
+            bucket.push(row);
+          });
+          const groupOrder = ["BOYS", "GIRLS", "UNSPECIFIED"];
+          const groupSequence = [];
+          groupOrder.forEach((label) => {
+            const list = groups[label];
+            if (!list.length) return;
+            groupSequence.push({ type: "group", label });
+            list.forEach((row) => groupSequence.push({ type: "student", row }));
+          });
+          const totalStudents = studentsList.length;
+          const overallPercent =
+            totalStudents && possiblePerStudent
+              ? Math.round(
+                  (totalPresentSessions / (possiblePerStudent * totalStudents)) *
+                    10
+                ) / 10
+              : 0;
+          const summary = {
+            totalBoys: groups.BOYS.length,
+            totalGirls: groups.GIRLS.length,
+            totalUnspecified: groups.UNSPECIFIED.length,
+            totalStudents,
+            totalAmPresent,
+            totalPmPresent,
+            totalPresentSessions,
+            possibleSessions: possiblePerStudent * totalStudents,
+            overallPercent,
+          };
+          const printedAt = new Date().toLocaleString("en-GB", {
+            dateStyle: "medium",
+            timeStyle: "short",
+          });
+          drawMonthlyRegister(doc, {
+            meta: {
+              logo,
+              schoolName: currentSchool?.name || "Socrates School",
+              className: currentClass,
+              academicYear: currentYear,
+              monthLabel: formatMonthLabel(currentDateStr),
+              printedAt,
+              teacherName: lockedTeacherStorage,
+            },
+            days,
+            groupSequence,
+            summary,
+          });
+          const filename = `Socrates_Monthly_Register_${currentClass}_${
+            monthKey || currentDateStr
+          }.pdf`;
+          doc.save(filename);
+        }
+        async function exportDailyPDF() {
+          if (!currentClass) return alert("Pick a class first");
+          const dates = getDailyRangeDates();
+          if (!dates.length) return alert("Select a date range");
+          const studentsList = getStudentsForExport();
+          if (!studentsList.length)
+            return alert("No students found for the selected class");
+          const { jsPDF } = window.jspdf;
+          const doc = new jsPDF({
+            orientation: "portrait",
+            unit: "mm",
+            format: "a4",
+          });
+          const logo = await resolveSchoolLogoData();
+          const printedAt = new Date().toLocaleString("en-GB", {
+            dateStyle: "medium",
+            timeStyle: "short",
+          });
+          dates.forEach((dateKey, index) => {
+            if (index) doc.addPage();
+            const rows = studentsList.map((student, idx) => {
+              const record = getAttendanceRecord(student.id, dateKey);
+              const am = (record.am || "").toUpperCase();
+              const pm = (record.pm || "").toUpperCase();
+              const daily = record.daily || deriveDaily(am, pm);
+              return {
+                seq: idx + 1,
+                admissionNo: student.admissionNo,
+                name: student.name,
+                am,
+                pm,
+                daily,
+              };
+            });
+            let presentAm = 0;
+            let presentPm = 0;
+            let absentAm = 0;
+            let absentPm = 0;
+            rows.forEach((row) => {
+              if (row.am === "P") presentAm++;
+              if (row.pm === "P") presentPm++;
+              if (row.am === "A") absentAm++;
+              if (row.pm === "A") absentPm++;
+            });
+            const summary = {
+              registered: rows.length,
+              presentAm,
+              presentPm,
+              absentAm,
+              absentPm,
+              percentAm: rows.length
+                ? Math.round((presentAm / rows.length) * 10) / 10
+                : 0,
+              percentPm: rows.length
+                ? Math.round((presentPm / rows.length) * 10) / 10
+                : 0,
+              overallPercent: rows.length
+                ? Math.round(
+                    ((presentAm + presentPm) / (rows.length * 2)) * 10
+                  ) / 10
+                : 0,
+            };
+            drawDailyRegister(doc, {
+              logo,
+              schoolName: currentSchool?.name || "Socrates School",
+              className: currentClass,
+              academicYear: currentYear,
+              date: dateKey,
+              rows,
+              summary,
+              printedAt,
+            });
+          });
+          const suffix =
+            dates.length > 1
+              ? `${dates[0]}_to_${dates[dates.length - 1]}`
+              : dates[0];
+          doc.save(
+            `Socrates_Daily_Register_${currentClass}_${suffix}.pdf`
+          );
         }
         async function exportPdfForStudent(studentId) {
-          const s = students.find((x) => x.id === studentId);
-          if (!s) return alert("Student not found");
+          const student =
+            students.find((x) => x.id === studentId) ||
+            students.find((x) => (x.admissionNo || "") === studentId);
+          if (!student) return alert("Student not found");
           const { jsPDF } = window.jspdf;
-          const doc = new jsPDF();
-          doc.setFontSize(14);
-          doc.text(`Attendance for ${s.name}`, 14, 18);
-          doc.setFontSize(11);
-          doc.text(`Admission No: ${s.admissionNo}`, 14, 28);
-          const dates = monthAttendance[studentId] || {};
-          let y = 40;
-          const workdays = monthWorkingDays(currentDateStr);
-          Object.keys(dates)
-            .sort()
-            .forEach((dk) => {
-              const r = dates[dk];
-              doc.text(
-                `${dk}: AM=${r.am || ""} PM=${r.pm || ""} Daily=${
-                  r.daily || ""
-                }`,
-                14,
-                y
-              );
-              y += 6;
-              if (y > 270) {
-                doc.addPage();
-                y = 20;
-              }
-            });
-          doc.text(
-            `Summary: ${workdays ? "Workdays: " + workdays : ""}`,
-            14,
-            y + 6
-          );
-          doc.save(`Attendance_${s.admissionNo || s.id}_${monthKey}.pdf`);
+          const doc = new jsPDF({
+            orientation: "portrait",
+            unit: "mm",
+            format: "a4",
+          });
+          const logo = await resolveSchoolLogoData();
+          const days = getDaysForMonth(currentDateStr);
+          if (!days.length) return alert("No days available for this month");
+          const rows = days.map((day) => {
+            const record = getAttendanceRecord(student.id, day.date);
+            const am = (record.am || "").toUpperCase();
+            const pm = (record.pm || "").toUpperCase();
+            const daily = record.daily || deriveDaily(am, pm);
+            return {
+              dayLabel: String(day.day),
+              weekday: day.weekday,
+              am,
+              pm,
+              daily,
+            };
+          });
+          let presentSessions = 0;
+          let amPresent = 0;
+          let pmPresent = 0;
+          rows.forEach((row) => {
+            if (row.am === "P") {
+              presentSessions++;
+              amPresent++;
+            }
+            if (row.pm === "P") {
+              presentSessions++;
+              pmPresent++;
+            }
+          });
+          const workDays = days.filter((d) => d.isWorkingDay).length;
+          const possibleSessions = workDays * 2;
+          const attendancePercent = possibleSessions
+            ? Math.round((presentSessions / possibleSessions) * 10) / 10
+            : 0;
+          const summary = {
+            workDays,
+            presentSessions,
+            possibleSessions,
+            attendancePercent,
+            amPresent,
+            pmPresent,
+          };
+          const startLabel = days[0]
+            ? formatDateLong(days[0].date)
+            : formatDateLong(currentDateStr);
+          const endLabel = days[days.length - 1]
+            ? formatDateLong(days[days.length - 1].date)
+            : formatDateLong(currentDateStr);
+          const rangeLabel = `${startLabel} – ${endLabel}`;
+          const printedAt = new Date().toLocaleString("en-GB", {
+            dateStyle: "medium",
+            timeStyle: "short",
+          });
+          drawStudentRegister(doc, {
+            logo,
+            schoolName: currentSchool?.name || "Socrates School",
+            studentName: student.name,
+            admissionNo: student.admissionNo,
+            className: student.class,
+            rangeLabel,
+            printedAt,
+            rows,
+            summary,
+          });
+          const filename = `Socrates_Student_Register_${
+            student.admissionNo || student.id
+          }_${monthKey}.pdf`;
+          doc.save(filename);
         }
-
         // ---------- UI wiring ----------
         async function activateClass(cls) {
           if (!cls) return;
@@ -2048,6 +3135,8 @@
     </script>
   </body>
 </html>
+
+
 
 
 
