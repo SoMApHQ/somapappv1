@@ -352,13 +352,12 @@ function App() {
   }, [headcount.breakfast, headcount.lunch, menuSelections, logicRules, inventoryItems]);
 
   useEffect(() => {
-    if (!existingReport && registerStats.totals.present.total > 0 && !headcountLocked) {
-      setHeadcount({
-        breakfast: registerStats.totals.present.total,
-        lunch: registerStats.totals.present.total
-      });
-    }
-  }, [existingReport, registerStats, headcountLocked]);
+    const presentTotal = registerStats.totals.present.total || 0;
+    setHeadcount({
+      breakfast: presentTotal,
+      lunch: presentTotal
+    });
+  }, [registerStats.totals.present.total]);
 
   async function loadBootstrap() {
     try {
