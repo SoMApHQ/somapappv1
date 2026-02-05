@@ -604,40 +604,6 @@
             .toUpperCase()
             .replace(/[\s\-\._]/g, "");
         }
-        const formatFriendlyClassName = (name) => {
-          const s = String(name || "").trim();
-          if (!s) return "Unknown";
-          const lower = s.toLowerCase();
-          if (lower.includes("baby")) return "Baby Class";
-          if (lower.includes("middle")) return "Middle Class";
-          if (lower.includes("pre") || lower.includes("nursery") || lower.includes("unit"))
-            return "Pre Unit Class";
-          const m = lower.match(/class\s*(\d+)/) || lower.match(/\b(\d+)\b/);
-          if (m) return `Class ${parseInt(m[1], 10)}`;
-          return s.replace(/\s+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-        };
-        const normalizeEnrollments = (raw) => {
-          if (!raw || typeof raw !== "object") return {};
-          const normalized = {};
-          Object.entries(raw).forEach(([key, value]) => {
-            if (value && typeof value === "object" && (value.studentId || value.id || value.className || value.classLevel || value.class || value.grade)) {
-              const entryId = value.id || value.studentId || key;
-              normalized[entryId] = { ...value };
-              return;
-            }
-            if (value && typeof value === "object") {
-              Object.entries(value).forEach(([stuId, stuVal]) => {
-                const entry = (stuVal && typeof stuVal === "object") ? { ...stuVal } : {};
-                if (!entry.className && !entry.classLevel && !entry.class && !entry.grade) {
-                  entry.className = key;
-                }
-                const entryId = entry.id || entry.studentId || stuId;
-                normalized[entryId] = Object.assign(normalized[entryId] || {}, entry);
-              });
-            }
-          });
-          return normalized;
-        };
         function normalizeYearValue(year) {
           const y = Number(year);
           if (!Number.isFinite(y)) return String(SOMAP_DEFAULT_YEAR);
@@ -830,6 +796,29 @@
           return CLASS_ORDER[j];
         }
 
+        function buildEnrollmentIndex(enrollments) {
+          const byId = enrollments || {};
+          const byAdmission = {};
+          Object.entries(enrollments || {}).forEach(([key, value]) => {
+            if (!value || typeof value !== "object") return;
+            const admission =
+              value.admissionNumber || value.admissionNo || value.admNo || "";
+            if (admission && !byAdmission[admission]) {
+              byAdmission[admission] = value;
+            }
+            if (!byId[key]) byId[key] = value;
+          });
+          return { byId, byAdmission };
+        }
+        function lookupEnrollment(index, studentId, admissionNo) {
+          if (!index) return {};
+          if (studentId && index.byId?.[studentId]) return index.byId[studentId];
+          if (admissionNo && index.byId?.[admissionNo])
+            return index.byId[admissionNo];
+          if (admissionNo && index.byAdmission?.[admissionNo])
+            return index.byAdmission[admissionNo];
+          return {};
+        }
         const getEnrollmentClassFromRecord = (entry = {}) => {
           if (!entry || typeof entry !== "object") return "";
           return (
@@ -928,202 +917,125 @@
               window.somapYearContext?.getSelectedYear?.() ||
               SOMAP_DEFAULT_YEAR
           );
-          const targetYear = Number.isFinite(Number(selectedYear))
-            ? Number(selectedYear)
-            : SOMAP_DEFAULT_YEAR;
-          const delta = targetYear - SOMAP_DEFAULT_YEAR;
-
+          const delta = Number(selectedYear) - SOMAP_DEFAULT_YEAR;
           const tryPaths = ["students", "Students", "StudentsList", "Students_List"];
-          const baseMap = {};
+
+          const [anchorEnrollSnap, yearEnrollSnap] = await Promise.all([
+            scopedOrSocratesLegacy(
+              `enrollments/${SOMAP_DEFAULT_YEAR}`,
+              `enrollments/${SOMAP_DEFAULT_YEAR}`
+            ).catch(() => null),
+            scopedOrSocratesLegacy(
+              `enrollments/${selectedYear}`,
+              `enrollments/${selectedYear}`
+            ).catch(() => null),
+          ]);
+          const anchorIndex = buildEnrollmentIndex(
+            anchorEnrollSnap?.exists() ? anchorEnrollSnap.val() : {}
+          );
+          const yearIndex = buildEnrollmentIndex(
+            yearEnrollSnap?.exists() ? yearEnrollSnap.val() : {}
+          );
 
           for (const p of tryPaths) {
             try {
               const snap = await scopedOrSocratesLegacy(p, p);
               if (!snap.exists()) continue;
-              const data = snap.val() || {};
-              Object.keys(data).forEach((k) => {
-                const s = data[k] || {};
-                const status = String(s.status || "").toLowerCase();
-                if (status === "shifted") return;
-                const existing = baseMap[k] || {};
-                const source = existing.__source || p;
-                baseMap[k] = Object.assign({}, existing, s, { __source: source });
-              });
+
+              const data = snap.val();
+
+              return Object.keys(data)
+                .map((k) => {
+                  const s = data[k] || {};
+
+                  const status = String(s.status || "").toLowerCase();
+                  if (status === "shifted") return null;
+
+                  const name =
+                    [s.firstName, s.middleName, s.lastName]
+                      .filter(Boolean)
+                      .join(" ")
+                      .trim() ||
+                    s.name ||
+                    s.fullName ||
+                    "";
+
+                  const parentName =
+                    s.primaryParentName ||
+                    s.parentName ||
+                    s.guardianName ||
+                    "";
+
+                  const parentContact =
+                    s.primaryParentContact ||
+                    s.parentPhone ||
+                    s.parentContact ||
+                    s.guardianContact ||
+                    "";
+
+                  const admissionNo =
+                    s.admissionNumber || s.admNo || s.admissionNo || "";
+
+                  const anchorEnrollment = lookupEnrollment(
+                    anchorIndex,
+                    k,
+                    admissionNo
+                  );
+                  const yearEnrollment = lookupEnrollment(
+                    yearIndex,
+                    k,
+                    admissionNo
+                  );
+                  const yearClass = getEnrollmentClassFromRecord(yearEnrollment);
+                  const admissionYear = inferAdmissionYear(s);
+                  const anchorClass = getEnrollmentClassFromRecord(anchorEnrollment);
+                  const hasAnchorRecord =
+                    anchorEnrollment &&
+                    typeof anchorEnrollment === "object" &&
+                    Object.keys(anchorEnrollment).length > 0;
+                  const studentClass = getStudentClassFromRecord(s);
+                  const baseClass = anchorClass || studentClass || "Unknown";
+                  const oldAdmission =
+                    Number.isFinite(admissionYear) &&
+                    admissionYear <= SOMAP_DEFAULT_YEAR;
+                  const shouldShift = hasAnchorRecord || oldAdmission;
+
+                  let computedClass = yearClass;
+                  if (!computedClass) {
+                    if (shouldShift) {
+                      computedClass = shiftClass(baseClass, delta);
+                    } else {
+                      computedClass = baseClass;
+                    }
+                  }
+                  const finalClass = computedClass || "Unknown";
+                  if (
+                    String(finalClass).trim().toUpperCase() === "GRADUATED"
+                  ) {
+                    return null;
+                  }
+
+                  return {
+                    id: k,
+                    admissionNo,
+                    name,
+                    class: finalClass,
+                    feeDue: 0,
+                    feePaid: 0,
+                    balance: 0,
+                    parentName,
+                    parentContact,
+                    status: status || "active",
+                  };
+                })
+                .filter(Boolean);
             } catch (e) {
-              console.warn("Failed to load students from", p, e.message);
+              console.warn("Failed to load path", p, e.message);
             }
           }
 
-          const toStudent = (id, raw) => {
-            const s = raw || {};
-            const name = [s.firstName, s.middleName, s.lastName]
-              .filter(Boolean)
-              .join(" ")
-              .trim()
-              || s.name || s.fullName || "";
-            const gender = s.gender || s.Gender || s.sex || s.Sex || s.genderType || "";
-            const className = s.className || s.classLevel || s.class || s.grade || "Unknown";
-            const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || 0);
-            const feePaid = Number(s.feesPaid || s.feePaid || s.paidAmount || 0);
-            const balance = Number(s.balance || (feeDue - feePaid) || 0);
-            const status = String(s.status || "").toLowerCase();
-            const parentName = s.primaryParentName || s.parentName || s.guardianName || "";
-            const parentContact =
-              s.primaryParentContact || s.parentPhone || s.parentContact || s.guardianContact || "";
-            const admissionId = s.admissionNumber || s.admNo || s.admissionNo || "";
-            const studentId = s.studentId || s.studentID || s.id || "";
-            return {
-              id: s.id || id,
-              admissionNo: admissionId,
-              admissionNumber: admissionId,
-              admNo: admissionId,
-              studentId,
-              name,
-              gender,
-              class: className,
-              className,
-              feeDue,
-              feePaid,
-              balance,
-              parentName,
-              parentContact,
-              status: status || "active",
-              __source: s.__source || ""
-            };
-          };
-
-          const baseStudents = Object.keys(baseMap)
-            .map((k) => toStudent(k, baseMap[k]))
-            .filter(Boolean);
-
-          const normalizeAdmission = (value) => String(value || "").trim();
-
-          let yearEnrollmentIndex = {};
-          let anchorIndex = {};
-          try {
-            const yearSnap = await scopedOrSocratesLegacy(
-              `enrollments/${selectedYear}`,
-              `enrollments/${selectedYear}`
-            );
-            if (yearSnap && yearSnap.exists()) {
-              yearEnrollmentIndex = normalizeEnrollments(yearSnap.val());
-            }
-          } catch (e) {
-            console.warn("Failed to load enrollment year", e.message);
-          }
-          try {
-            const anchorSnap = await scopedOrSocratesLegacy(
-              `enrollments/${SOMAP_DEFAULT_YEAR}`,
-              `enrollments/${SOMAP_DEFAULT_YEAR}`
-            );
-            if (anchorSnap && anchorSnap.exists()) {
-              anchorIndex = normalizeEnrollments(anchorSnap.val());
-            }
-          } catch (e) {
-            console.warn("Failed to load anchor enrollments", e.message);
-          }
-
-          const enrollmentKeySet = (() => {
-            const keys = new Set();
-            const addKey = (value) => {
-              if (value == null) return;
-              const str = String(value).trim();
-              if (!str) return;
-              keys.add(str);
-            };
-            Object.entries(yearEnrollmentIndex).forEach(([key, entry]) => {
-              addKey(key);
-              if (entry && typeof entry === "object") {
-                addKey(entry.id);
-                addKey(entry.studentId);
-                addKey(entry.admissionNo);
-                addKey(entry.admissionNumber);
-              }
-            });
-            return keys;
-          })();
-
-          const createRosterEntry = (student) => {
-            const sid = String(student.id || "").trim();
-            if (!sid) return null;
-            const admissionKey = normalizeAdmission(student.admissionNo);
-            const yearEnroll =
-              yearEnrollmentIndex[sid] ||
-              (admissionKey ? yearEnrollmentIndex[admissionKey] : null) ||
-              {};
-            let classRaw = getEnrollmentClassFromRecord(yearEnroll);
-            const admissionYear = inferAdmissionYear(student);
-
-            const anchor =
-              anchorIndex[sid] ||
-              (admissionKey ? anchorIndex[admissionKey] : null) ||
-              {};
-            const anchorClass = getEnrollmentClassFromRecord(anchor);
-            const hasAnchorRecord =
-              anchor && typeof anchor === "object" && Object.keys(anchor).length > 0;
-            const studentClass = getStudentClassFromRecord(student);
-            const baseClass = anchorClass || studentClass || "Unknown";
-            const oldAdmission =
-              Number.isFinite(admissionYear) &&
-              admissionYear <= SOMAP_DEFAULT_YEAR;
-            const shouldShift = hasAnchorRecord || oldAdmission;
-
-            if (!classRaw) {
-              if (shouldShift) {
-                const shifted = shiftClass(baseClass, delta);
-                if (shifted === "GRADUATED") return null;
-                classRaw = shifted;
-              } else {
-                classRaw = baseClass;
-              }
-            }
-            if (String(classRaw).trim().toUpperCase() === "GRADUATED") {
-              return null;
-            }
-
-            const classLevel = formatFriendlyClassName(classRaw);
-            return {
-              ...student,
-              id: sid,
-              class: classLevel,
-              className: classLevel,
-              classLevel,
-            };
-          };
-
-          const roster = baseStudents
-            .map(createRosterEntry)
-            .filter(Boolean);
-
-          const matchesEnrollment = (student) => {
-            const candidates = [
-              student.id,
-              student.studentId,
-              student.admissionNo,
-              student.admissionNumber,
-              student.admNo,
-            ];
-            return candidates.some((val) => {
-              const str = String(val || "").trim();
-              return str && enrollmentKeySet.has(str);
-            });
-          };
-
-          let yearStudents = [];
-          if (enrollmentKeySet.size) {
-            yearStudents = roster.filter(matchesEnrollment);
-          } else {
-            yearStudents = roster.filter((student) => {
-              const admissionYear = inferAdmissionYear(student);
-              return Number.isFinite(admissionYear) && admissionYear <= targetYear;
-            });
-          }
-
-          if (!yearStudents.length) {
-            yearStudents = roster;
-          }
-
-          return yearStudents;
+          console.error("No students data found");
+          return [];
         }
 
         async function attachFinanceDataForYear(year) {
