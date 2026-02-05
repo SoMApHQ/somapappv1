@@ -440,7 +440,7 @@ function App() {
 
   async function loadAttendance(dateKey, schoolId, yearKey) {
     if (!dateKey) return {};
-    const monthKey = String(dateKey.slice(0, 7)).replace('-', '');
+    const monthKey = `${dateKey.slice(0, 4)}-${dateKey.slice(5, 7)}`;
     const attendanceMap = {};
     await Promise.all(
       CLASS_ORDER.map(async (cls) => {
