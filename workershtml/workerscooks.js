@@ -231,13 +231,13 @@ function App() {
     perClass: {},
     totals: { registered: { boys: 0, girls: 0, total: 0 }, present: { boys: 0, girls: 0, total: 0 }, absent: { boys: 0, girls: 0, total: 0 } }
   });
+  const autoPax = Number(registerStats?.totals?.present?.total || 0);
   const [registerLoading, setRegisterLoading] = useState(true);
   const [registerError, setRegisterError] = useState('');
 
   const [inventoryItems, setInventoryItems] = useState([]);
   const [logicRules, setLogicRules] = useState({});
 
-  const [headcount, setHeadcount] = useState({ breakfast: '', lunch: '' });
   const [headcountLocked, setHeadcountLocked] = useState(false);
   const [menuSelections, setMenuSelections] = useState({ breakfast: [], lunch: [] });
   const [menuText, setMenuText] = useState({ breakfast: '', lunch: '' });
@@ -323,41 +323,29 @@ function App() {
   }, [currentYear]);
 
   useEffect(() => {
-    const breakfast = safeNumber(headcount.breakfast);
-    const lunch = safeNumber(headcount.lunch);
-    computeCookProjection({ breakfastPax: breakfast, lunchPax: lunch })
+    computeCookProjection({ breakfastPax: autoPax, lunchPax: autoPax })
       .then(setExpectedPolicy)
       .catch(err => console.error(err));
-  }, [headcount.breakfast, headcount.lunch]);
+  }, [autoPax]);
 
   useEffect(() => {
-    const breakfast = safeNumber(headcount.breakfast);
-    const lunch = safeNumber(headcount.lunch);
     const rules = logicRules || {};
     const breakfastList = computeExpectedList({
-      pax: breakfast,
+      pax: autoPax,
       selections: menuSelections.breakfast,
       rules,
       meal: 'breakfast',
       inventoryItems
     });
     const lunchList = computeExpectedList({
-      pax: lunch,
+      pax: autoPax,
       selections: menuSelections.lunch,
       rules,
       meal: 'lunch',
       inventoryItems
     });
     setExpectedList(aggregateExpected([...breakfastList, ...lunchList]));
-  }, [headcount.breakfast, headcount.lunch, menuSelections, logicRules, inventoryItems]);
-
-  useEffect(() => {
-    const presentTotal = registerStats.totals.present.total || 0;
-    setHeadcount({
-      breakfast: presentTotal,
-      lunch: presentTotal
-    });
-  }, [registerStats.totals.present.total]);
+  }, [autoPax, menuSelections, logicRules, inventoryItems]);
 
   async function loadBootstrap() {
     try {
@@ -551,10 +539,6 @@ function buildRegisterStats(studentMap, attendanceByClass) {
         const data = snap.val();
         setExistingReport(data);
         setReportStatus(data.status || 'ok');
-        setHeadcount({
-          breakfast: data.headcount?.breakfast ?? '',
-          lunch: data.headcount?.lunch ?? ''
-        });
         setHeadcountLocked(true);
         setMenuSelections({
           breakfast: data.menuIds?.breakfast || [],
@@ -576,7 +560,6 @@ function buildRegisterStats(studentMap, attendanceByClass) {
       } else {
         setExistingReport(null);
         setReportStatus('pending');
-        setHeadcountLocked(false);
         setKitchenDaily(mergeDailyWithItems({}, kitchenItems));
       }
     } catch (err) {
@@ -775,10 +758,11 @@ function buildRegisterStats(studentMap, attendanceByClass) {
   }
 
   async function handleSave() {
-    const breakfast = safeNumber(headcount.breakfast);
-    const lunch = safeNumber(headcount.lunch);
-    if (!breakfast && !lunch) {
-      toast('Weka idadi ya walioshiriki mlo.', 'warning');
+    const breakfast = autoPax;
+    const lunch = autoPax;
+
+    if (!autoPax || autoPax <= 0) {
+      toast('Hakuna waliopo kwa tarehe hii. Pakia Daily Register kwanza.', 'warning');
       return;
     }
 
@@ -1142,8 +1126,9 @@ function buildRegisterStats(studentMap, attendanceByClass) {
             h('input', {
               type: 'number',
               min: 0,
-              value: headcount.breakfast,
-              onChange: e => setHeadcount({ ...headcount, breakfast: e.target.value })
+              value: autoPax,
+              readOnly: true,
+              disabled: true
             })
           ]),
           h('label', null, [
@@ -1151,8 +1136,9 @@ function buildRegisterStats(studentMap, attendanceByClass) {
             h('input', {
               type: 'number',
               min: 0,
-              value: headcount.lunch,
-              onChange: e => setHeadcount({ ...headcount, lunch: e.target.value })
+              value: autoPax,
+              readOnly: true,
+              disabled: true
             })
           ])
         ]),
