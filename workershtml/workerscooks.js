@@ -215,15 +215,9 @@ function normalizeStudent(id, data = {}) {
 }
 
 function isPresent(rec = {}) {
-  const raw = (rec.status || rec.daily || rec.value || '').toString().toUpperCase();
-  return (
-    rec.present === true ||
-    rec.am === 'P' ||
-    rec.pm === 'P' ||
-    raw === 'P' ||
-    raw === 'PRESENT' ||
-    raw === 'PR'
-  );
+  // Must match attendance.html Daily Register logic exactly
+  const dailyCode = String(rec?.daily || rec?.status || '').toUpperCase();
+  return dailyCode.startsWith('P');
 }
 
 function App() {
@@ -438,39 +432,37 @@ function App() {
     return {};
   }
 
-  async function loadAttendance(dateKey, schoolId, yearKey) {
-    if (!dateKey) return {};
-    const monthKey = `${dateKey.slice(0, 4)}-${dateKey.slice(5, 7)}`;
-    const attendanceMap = {};
-    await Promise.all(
-      CLASS_ORDER.map(async (cls) => {
-        try {
-          const snap = await schoolRef(`attendance/${cls}/${monthKey}/${dateKey}`).get();
-          const records = snap.exists() ? snap.val() : {};
-          Object.entries(records || {}).forEach(([studentId, rec]) => {
-            if (!studentId) return;
-            attendanceMap[studentId] = {
-              ...(attendanceMap[studentId] || {}),
-              ...(rec || {}),
-            };
-          });
-        } catch (err) {
-          console.warn(
-            `Failed to load attendance for ${cls} on ${dateKey}:`,
-            err?.message || err
-          );
+async function loadAttendance(dateKey) {
+  if (!dateKey) return {};
+  const monthKeyDash = String(dateKey.slice(0, 7)); // "2026-02"
+  const monthKeyCompact = `${dateKey.slice(0, 4)}${dateKey.slice(5, 7)}`; // fallback "202602" (legacy)
+  const byClass = {};
+
+  await Promise.all(
+    CLASS_ORDER.map(async (cls) => {
+      try {
+        let snap = await schoolRef(`attendance/${cls}/${monthKeyDash}/${dateKey}`).get();
+        if (!snap.exists()) {
+          // fallback for any legacy stored monthKey formats
+          snap = await schoolRef(`attendance/${cls}/${monthKeyCompact}/${dateKey}`).get();
         }
-      })
-    );
-    return attendanceMap;
-  }
+        byClass[cls] = snap.exists() ? (snap.val() || {}) : {};
+      } catch (err) {
+        console.warn(`Failed to load attendance for ${cls} on ${dateKey}:`, err?.message || err);
+        byClass[cls] = {};
+      }
+    })
+  );
+
+  return byClass;
+}
 
   async function loadRegister(dateKey, studentMap = students) {
     setRegisterLoading(true);
     setRegisterError('');
     try {
-      const attendance = await loadAttendance(dateKey, workerSession.schoolId, currentYear);
-      const stats = buildRegisterStats(studentMap, attendance);
+      const attendanceByClass = await loadAttendance(dateKey);
+      const stats = buildRegisterStats(studentMap, attendanceByClass);
       setRegisterStats(stats);
     } catch (err) {
       console.error(err);
@@ -480,7 +472,7 @@ function App() {
     }
   }
 
-  function buildRegisterStats(studentMap, attendanceMap) {
+function buildRegisterStats(studentMap, attendanceByClass) {
     const perClass = { Unknown: makeBlankCounts() };
     const classNamesSet = new Set(['Unknown']);
     Object.values(studentMap || {}).forEach(student => {
@@ -492,15 +484,24 @@ function App() {
       if (student.gender === 'girls') perClass[cls].registered.girls += 1;
     });
 
-    Object.entries(attendanceMap || {}).forEach(([id, rec]) => {
-      const student = studentMap[id] || normalizeStudent(id, rec);
-      const cls = student.className || 'Unknown';
+    // Present counts MUST follow attendance.html:
+    // present if String(record.daily||\"\").toUpperCase().startsWith(\"P\")
+    Object.entries(attendanceByClass || {}).forEach(([cls, records]) => {
       if (!perClass[cls]) perClass[cls] = makeBlankCounts();
       classNamesSet.add(cls);
-      if (!isPresent(rec)) return;
-      perClass[cls].present.total += 1;
-      if (student.gender === 'boys') perClass[cls].present.boys += 1;
-      if (student.gender === 'girls') perClass[cls].present.girls += 1;
+
+      Object.entries(records || {}).forEach(([key, rec]) => {
+        if (!isPresent(rec)) return;
+
+        perClass[cls].present.total += 1;
+
+        // Gender: prefer roster lookup, fallback to record
+        const rosterStudent = studentMap[key];
+        const gender = rosterStudent?.gender || normalizeStudent(key, rec).gender;
+
+        if (gender === 'boys') perClass[cls].present.boys += 1;
+        if (gender === 'girls') perClass[cls].present.girls += 1;
+      });
     });
 
     Object.keys(perClass).forEach(cls => {
