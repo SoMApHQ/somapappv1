@@ -27,6 +27,7 @@
     body { background: #f8fafc; }
     .table-header { background: #eef2ff; color: #1f2937; }
     .table-row:nth-child(even) { background: #ffffff; }
+    .table-row-overdue { background: #fef2f2 !important; }
     .modal { display:none; position:fixed; inset:0; background: rgba(0,0,0,0.5); z-index:1000; }
     .modal-content { background:#fff; max-width:800px; margin:4% auto; padding:18px; border-radius:8px; height:80vh; overflow:auto; }
     .expander { cursor: pointer; transition: transform .2s ease; }
@@ -600,16 +601,22 @@
   function getConfig(student) {
     const plan = (student.paymentPlan || '').toLowerCase();
     const c = (student.classLevel || '').toLowerCase();
+    const isFourInst = plan.includes('(4)') || /\b4\s*inst/.test(plan) || /mku\.?\s*4/.test(plan);
+    const isSixInst = plan.includes('(6)') || /\b6\s*inst/.test(plan) || /dirisha la malipo\s*\(6\)/.test(plan);
     if (plan.includes('monthly')) return installmentConfigs.monthly;
     if (plan.includes('2')) return installmentConfigs['2inst'];
     if (plan.includes('full')) return installmentConfigs.full;
-    if (plan.includes('4') || (plan.includes('inst') && (c === 'class 4' || c === 'class 7'))) return installmentConfigs.class4_7;
-    if (plan.includes('inst')) {
+    if (isFourInst || (plan.includes('inst') && (c === 'class 4' || c === 'class 7'))) return installmentConfigs.class4_7;
+    if (isSixInst || plan.includes('inst')) {
       if (c === 'class 1' || c === 'class 2' || c === 'class 3') return installmentConfigs.lower;
       if (c === 'class 5') return installmentConfigs.class5;
       if (c === 'class 6') return installmentConfigs.class6;
     }
-    return installmentConfigs.full;
+    if (c === 'class 1' || c === 'class 2' || c === 'class 3') return installmentConfigs.lower;
+    if (c === 'class 4' || c === 'class 7') return installmentConfigs.class4_7;
+    if (c === 'class 5') return installmentConfigs.class5;
+    if (c === 'class 6') return installmentConfigs.class6;
+    return installmentConfigs.lower;
   }
 
   function buildSchedule(student) {
@@ -736,11 +743,15 @@
       const remaining = Math.max(0, Number(it.amount || 0) - Number(it.paidAllocated || 0));
       return Number(it.toTS || 0) > 0 && isPast(Number(it.toTS)) && remaining > 0;
     });
-    const overdueThroughTs = overdueRows.length
-      ? Math.max(...overdueRows.map((it) => Number(it.toTS || 0)))
-      : 0;
+    const latestOverdue = overdueRows.length
+      ? overdueRows.reduce((latest, row) => (Number(row.toTS || 0) > Number(latest.toTS || 0) ? row : latest), overdueRows[0])
+      : null;
+    const overdueThroughTs = latestOverdue ? Number(latestOverdue.toTS || 0) : 0;
     const isOverdueDebt = overdueThroughTs > 0 && alloc.debtTillNow > 0;
     const periodDebtLabel = isOverdueDebt ? new Date(overdueThroughTs).toLocaleDateString() : '-';
+    const overdueWindowLabel = (isOverdueDebt && latestOverdue)
+      ? `${new Date(Number(latestOverdue.fromTS || 0)).toLocaleDateString()} - ${new Date(Number(latestOverdue.toTS || 0)).toLocaleDateString()}`
+      : '-';
     return {
       feePerYear,
       previousDebt,
@@ -750,6 +761,7 @@
       periodDebtValue: isOverdueDebt ? alloc.debtTillNow : 0,
       isOverdueDebt,
       overdueThroughTs,
+      overdueWindowLabel,
       credit: alloc.credit,
       scheduleItems: alloc.scheduleItems
     };
@@ -1426,7 +1438,7 @@ function buildFinanceStudents(
         : `<button class="payBtn px-2 py-1 text-xs bg-indigo-600 text-white rounded ml-1" data-id="${id}">Pay</button>`;
 
       const tr = document.createElement('tr');
-      tr.className = 'table-row';
+      tr.className = debtIsOverdue ? 'table-row table-row-overdue' : 'table-row';
       tr.dataset.studentId = id;
       tr.innerHTML = `
         <td class="p-2 border text-center align-top">
@@ -1443,7 +1455,7 @@ function buildFinanceStudents(
         <td class="p-2 border align-top text-right">${fmt(fin.balance)}</td>
         <td class="p-2 border align-top">
           <div class="flex items-center justify-between gap-2">
-            <span>${debtLabel}</span>
+            <span>${debtLabel}${debtIsOverdue && fin.overdueWindowLabel && fin.overdueWindowLabel !== '-' ? `<div class="text-xs text-red-700">${fin.overdueWindowLabel}</div>` : ''}</span>
             <span class="font-semibold ${debtIsOverdue ? 'text-red-700' : ''}">${fmt(fin.periodDebtValue)}</span>
           </div>
         </td>
