@@ -475,7 +475,24 @@
       d: now.getDate(),
     };
   }
-  function dateFromYMD(y, m, d) { return new Date(y, m - 1, d).getTime(); }
+  function dateFromYMD(y, m, d, endOfDay = false) {
+    if (endOfDay) return new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
+    return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+  }
+  function parseScheduleTS(raw, endOfDay = false) {
+    if (!raw) return 0;
+    const value = String(raw).trim();
+    if (!value) return 0;
+    const ts = Date.parse(value);
+    if (!Number.isFinite(ts)) return 0;
+    if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(value)) {
+      const d = new Date(ts);
+      return endOfDay
+        ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999).getTime()
+        : new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
+    }
+    return ts;
+  }
   function isPast(ts) { return Date.now() > ts; }
   function apportion(total, weights) {
     if (!weights.length) return [];
@@ -608,8 +625,8 @@
         .map((it, idx) => ({
           key: `custom${idx+1}`,
           label: String(it.label || 'Item'),
-          fromTS: new Date(it.from).getTime() || 0,
-          toTS: new Date(it.to).getTime() || 0,
+          fromTS: parseScheduleTS(it.from, false),
+          toTS: parseScheduleTS(it.to, true),
           amount: Math.max(0, Math.round(Number(it.amount) || 0)),
           paidAllocated: 0,
           status: 'Pending'
@@ -633,8 +650,8 @@
       const sc = student._planSchedule.map((s, i) => ({
         key: `inst${i+1}`,
         label: s.label || `Inst ${i+1}`,
-        fromTS: s.from ? new Date(s.from).getTime() : 0,
-        toTS: s.to ? new Date(s.to).getTime() : 0,
+        fromTS: parseScheduleTS(s.from, false),
+        toTS: parseScheduleTS(s.to, true),
         amount: Math.max(0, amounts[i] || 0),
         paidAllocated: 0,
         status: 'Pending'
@@ -662,8 +679,8 @@
       const toM = config.windows[i].to[0], toD = config.windows[i].to[1];
       if (fromM === 12) fromY = y - 1;
       if (toM === 12) toY = y - 1;
-      const fromTS = dateFromYMD(fromY, fromM, fromD);
-      const toTS = dateFromYMD(toY, toM, toD);
+      const fromTS = dateFromYMD(fromY, fromM, fromD, false);
+      const toTS = dateFromYMD(toY, toM, toD, true);
       sc.push({ key: `inst${i + 1}`, label, fromTS, toTS, amount: amounts[i] || 0, paidAllocated:0, status:'Pending' });
     });
     let lastDueIndex = -1, periodLabel = '-', expectedToDate = 0;
@@ -715,13 +732,24 @@
     const alloc = allocatePayments(student, schedule);
     const paidAfterPrev = Math.max(0, alloc.totalPaid - (previousDebt - alloc.prevDebtAfter));
     const yearBalance = Math.max(0, feePerYear - paidAfterPrev);
+    const overdueRows = (alloc.scheduleItems || []).filter((it) => {
+      const remaining = Math.max(0, Number(it.amount || 0) - Number(it.paidAllocated || 0));
+      return Number(it.toTS || 0) > 0 && isPast(Number(it.toTS)) && remaining > 0;
+    });
+    const overdueThroughTs = overdueRows.length
+      ? Math.max(...overdueRows.map((it) => Number(it.toTS || 0)))
+      : 0;
+    const isOverdueDebt = overdueThroughTs > 0 && alloc.debtTillNow > 0;
+    const periodDebtLabel = isOverdueDebt ? new Date(overdueThroughTs).toLocaleDateString() : '-';
     return {
       feePerYear,
       previousDebt,
       paidAmount: alloc.totalPaid,
       balance: yearBalance,
-      periodDebtLabel: schedule.periodLabelNow || '-',
-      periodDebtValue: alloc.debtTillNow,
+      periodDebtLabel,
+      periodDebtValue: isOverdueDebt ? alloc.debtTillNow : 0,
+      isOverdueDebt,
+      overdueThroughTs,
       credit: alloc.credit,
       scheduleItems: alloc.scheduleItems
     };
@@ -1379,7 +1407,8 @@ function buildFinanceStudents(
       totalCollected += fin.paidAmount;
 
       const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
-      const debtLabel = fin.periodDebtValue > 0 ? `Debt till ${fin.periodDebtLabel}` : '-';
+      const debtIsOverdue = Boolean(fin.isOverdueDebt && fin.periodDebtValue > 0);
+      const debtLabel = debtIsOverdue ? `Overdue till ${fin.periodDebtLabel}` : '-';
       const prevYearNum = Number(financeYear) - 1;
       const carryYearLabel = Number.isFinite(prevYearNum) ? prevYearNum : `${financeYear}-1`;
       const carryNote = student.carryAmount > 0
@@ -1415,7 +1444,7 @@ function buildFinanceStudents(
         <td class="p-2 border align-top">
           <div class="flex items-center justify-between gap-2">
             <span>${debtLabel}</span>
-            <span class="font-semibold ${fin.periodDebtValue > 0 ? 'text-red-700' : ''}">${fmt(fin.periodDebtValue)}</span>
+            <span class="font-semibold ${debtIsOverdue ? 'text-red-700' : ''}">${fmt(fin.periodDebtValue)}</span>
           </div>
         </td>
         <td class="p-2 border align-top">
