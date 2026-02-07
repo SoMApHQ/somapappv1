@@ -355,6 +355,26 @@
           return index;
         }
 
+        function baseIndexByStudent(baseStudents) {
+          const index = {};
+          Object.entries(baseStudents || {}).forEach(([k, v]) => {
+            if (!isObject(v) || isDeletedLike(v)) return;
+            const keys = [
+              k,
+              v.studentId,
+              v.id,
+              v.admissionNo,
+              v.admissionNumber,
+              v.pupilId,
+              v.adm
+            ].map((x) => norm(x)).filter((x) => !isPlaceholder(x));
+            keys.forEach((key) => {
+              if (!index[key]) index[key] = v;
+            });
+          });
+          return index;
+        }
+
         function pick(...values) {
           for (const v of values) {
             if (!isPlaceholder(v)) return norm(v);
@@ -362,16 +382,32 @@
           return "";
         }
 
-        function composeName(base, enr) {
+        function composeName(base, enr, roster) {
           const direct = pick(
+            roster?.fullName, roster?.name,
             enr?.fullName, enr?.name,
             base?.fullName, base?.name
           );
           if (!isPlaceholder(direct)) return direct;
-          const joined = `${pick(enr?.firstName, base?.firstName)} ${pick(enr?.middleName, base?.middleName)} ${pick(enr?.lastName, base?.lastName)}`
+          const joined = `${pick(roster?.firstName, enr?.firstName, base?.firstName)} ${pick(roster?.middleName, enr?.middleName, base?.middleName)} ${pick(roster?.lastName, enr?.lastName, base?.lastName)}`
             .replace(/\s+/g, " ")
             .trim();
           return isPlaceholder(joined) ? "" : joined;
+        }
+
+        function rosterIndexByStudent(roster) {
+          const index = {};
+          Object.entries(roster || {}).forEach(([k, v]) => {
+            if (!v || isDeletedLike(v)) return;
+            const key = norm(k);
+            if (isPlaceholder(key)) return;
+            if (v === true) {
+              if (!index[key]) index[key] = {};
+              return;
+            }
+            if (!index[key]) index[key] = v;
+          });
+          return index;
         }
 
         function admissionYearOf(base, enr) {
@@ -513,11 +549,21 @@
             const enrollments = enrollSnap.val() || {};
             const yearRoster = rosterSnap.val() || {};
             const graduated = gradSnap.val() || {};
+            const baseByStudent = baseIndexByStudent(baseStudents);
             const enrollmentByStudent = enrollmentIndexByStudent(enrollments);
+            const rosterByStudent = rosterIndexByStudent(yearRoster);
 
             const rosterIds = truthyMapKeys(yearRoster);
             const enrolledIds = enrollmentKeys(enrollments);
             const candidateIds = rosterIds.length ? rosterIds : (enrolledIds.length ? enrolledIds : Object.keys(baseStudents || {}));
+            console.info("[studentlist] source counts", {
+              year: workingYear,
+              base: Object.keys(baseStudents || {}).length,
+              roster: rosterIds.length,
+              enrollments: enrolledIds.length,
+              graduated: truthyMapKeys(graduated).length,
+              candidates: candidateIds.length
+            });
 
             const yearNum = Number(workingYear);
             const graduatedIds = new Set(truthyMapKeys(graduated));
@@ -525,26 +571,27 @@
             const rows = [];
 
             deduped.forEach((id) => {
-              const base = isObject(baseStudents[id]) ? baseStudents[id] : {};
+              const base = isObject(baseByStudent[id]) ? baseByStudent[id] : {};
               const enr = isObject(enrollmentByStudent[id]) ? enrollmentByStudent[id] : {};
+              const roster = isObject(rosterByStudent[id]) ? rosterByStudent[id] : {};
 
-              if (isDeletedLike(base) || isDeletedLike(enr)) return;
+              if (isDeletedLike(base) || isDeletedLike(enr) || isDeletedLike(roster)) return;
               if (graduatedIds.has(id)) return;
 
-              const admissionYear = admissionYearOf(base, enr);
+              const admissionYear = admissionYearOf(base, enr) || asYear(roster?.admissionYear) || asYear(roster?.registrationYear) || asYear(roster?.year);
               if (!rosterIds.length && !enrolledIds.length && Number.isFinite(yearNum) && Number.isFinite(admissionYear) && admissionYear > yearNum) {
                 return;
               }
 
-              const admissionNo = pick(enr.admissionNo, enr.admissionNumber, base.admissionNo, base.admissionNumber, base.pupilId, base.adm, id);
-              const fullName = composeName(base, enr);
-              const className = pick(enr.className, enr.class, enr.currentClass, base.className, base.class, base.currentClass);
-              const parentContact = pick(enr.parentContact, enr.parentPhone, enr.phone, base.parentContact, base.parentPhone, base.phone);
-              const photoUrl = pick(enr.photoUrl, enr.passportPhotoUrl, enr.passportPhotoURL, base.photoUrl, base.passportPhotoUrl, base.passportPhotoURL);
-              const regDateRaw = pick(enr.regDate, enr.dateOfRegistration, enr.registeredAt, enr.createdAt, enr.timestamp, base.regDate, base.dateOfRegistration, base.registeredAt, base.createdAt, base.timestamp);
-              const gender = normalizeGender(pick(enr.gender, base.gender));
+              const admissionNo = pick(roster.admissionNo, roster.admissionNumber, enr.admissionNo, enr.admissionNumber, base.admissionNo, base.admissionNumber, base.pupilId, base.adm, id);
+              const fullName = composeName(base, enr, roster);
+              const className = pick(roster.className, roster.class, roster.currentClass, enr.className, enr.class, enr.currentClass, base.className, base.class, base.currentClass) || "Unassigned";
+              const parentContact = pick(roster.parentContact, roster.parentPhone, roster.phone, enr.parentContact, enr.parentPhone, enr.phone, base.parentContact, base.parentPhone, base.phone);
+              const photoUrl = pick(roster.photoUrl, roster.passportPhotoUrl, roster.passportPhotoURL, enr.photoUrl, enr.passportPhotoUrl, enr.passportPhotoURL, base.photoUrl, base.passportPhotoUrl, base.passportPhotoURL);
+              const regDateRaw = pick(roster.regDate, roster.dateOfRegistration, roster.registeredAt, roster.createdAt, roster.timestamp, enr.regDate, enr.dateOfRegistration, enr.registeredAt, enr.createdAt, enr.timestamp, base.regDate, base.dateOfRegistration, base.registeredAt, base.createdAt, base.timestamp);
+              const gender = normalizeGender(pick(roster.gender, enr.gender, base.gender));
 
-              if (isPlaceholder(admissionNo) || isPlaceholder(fullName) || isPlaceholder(className)) return;
+              if (isPlaceholder(admissionNo) || isPlaceholder(fullName)) return;
 
               rows.push({
                 id: pick(base.studentId, base.id, id),
@@ -563,6 +610,7 @@
               if (classCmp) return classCmp;
               return a.fullName.localeCompare(b.fullName);
             });
+            console.info("[studentlist] rendered rows", { year: workingYear, rows: rows.length });
 
             lastAllRows = rows;
             updateClassFilterOptions(rows);
