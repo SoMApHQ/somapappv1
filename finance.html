@@ -326,6 +326,7 @@
   if (!currentSchool || !currentSchool.id) {
     window.location.href = "somapappv1multischool/multischool.html";
   }
+  const isSocratesSchool = String(currentSchool?.id || '').trim().toLowerCase() === 'socrates-school';
   window.currentSchoolId = currentSchool?.id;
   const financeSchoolLabel = document.getElementById('financeSchoolLabel');
   if (financeSchoolLabel) {
@@ -788,9 +789,79 @@ function buildFinanceStudents(
 ) {
     const targetYear = String(year || activeYear || SOMAP_DEFAULT_YEAR);
     const targetYearNum = Number(targetYear);
-    const anchorYearNum = Number(SOMAP_DEFAULT_YEAR);
+    const BASE_YEAR = Number(SOMAP_DEFAULT_YEAR);
 
     const isNonEmptyObj = (o) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).length > 0;
+    const toMs = (value) => {
+      if (value === null || value === undefined) return null;
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        if (value > 1e12) return value;
+        if (value > 1e10) return value;
+        if (value > 1e9) return value * 1000;
+        return value;
+      }
+      const s = String(value).trim();
+      if (!s) return null;
+      if (/^\d{10,13}$/.test(s)) {
+        const n = Number(s);
+        if (!Number.isFinite(n)) return null;
+        return n > 1e12 ? n : n * 1000;
+      }
+      const parsed = Date.parse(s);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const getRegistrationMs = (stu) => {
+      if (!stu || typeof stu !== 'object') return null;
+      return (
+        toMs(stu.timestamp) ??
+        toMs(stu.createdAt) ??
+        toMs(stu.registeredAt) ??
+        toMs(stu.regTimestamp) ??
+        toMs(stu.dateRegistered) ??
+        toMs(stu.dateOfRegistration) ??
+        null
+      );
+    };
+    const getRegistrationYear = (stu) => {
+      const ms = getRegistrationMs(stu);
+      if (!ms) return null;
+      const d = new Date(ms);
+      const y = d.getFullYear();
+      return Number.isFinite(y) ? y : null;
+    };
+    const looksDeleted = (stu) => {
+      const status = String(stu?.status || '').trim().toLowerCase();
+      return Boolean(
+        stu?.deleted === true ||
+        stu?.isDeleted === true ||
+        stu?.archived === true ||
+        stu?.isArchived === true ||
+        stu?.removed === true ||
+        stu?.isRemoved === true ||
+        stu?.active === false ||
+        status === 'deleted' ||
+        status === 'archived' ||
+        status === 'removed'
+      );
+    };
+    const isCompleteStudent = (stu) => {
+      if (!stu || typeof stu !== 'object') return false;
+      if (looksDeleted(stu)) return false;
+      const sid = String(stu.schoolId || '').trim();
+      if (sid && sid !== String(currentSchool?.id || '')) return false;
+      const admission = String(stu.admissionNumber || '').trim();
+      const first = String(stu.firstName || '').trim();
+      const last = String(stu.lastName || '').trim();
+      if (!admission || norm(admission) === 'n/a' || norm(admission) === 'na') return false;
+      if (!first || norm(first) === 'n/a' || norm(first) === 'na') return false;
+      if (!last || norm(last) === 'n/a' || norm(last) === 'na') return false;
+      return Number.isFinite(getRegistrationYear(stu));
+    };
+    const belongsToSelectedYear = (stu, selectedYear) => {
+      const regYear = getRegistrationYear(stu);
+      if (!regYear || !Number.isFinite(selectedYear)) return false;
+      return regYear >= BASE_YEAR && regYear <= selectedYear;
+    };
     const hasPaymentsForYear = (paymentsObj, yNum) => {
       if (!paymentsObj || typeof paymentsObj !== 'object') return false;
       return Object.values(paymentsObj).some((p) => {
@@ -824,11 +895,13 @@ function buildFinanceStudents(
       const override = overrides[id] || {};
       const ledgerEntry = ledgers[id] || {};
       const carry = carryForward[id] || {};
+      const registrationYear = getRegistrationYear(base);
+
+      if (!isCompleteStudent(base)) return;
+      if (!belongsToSelectedYear(base, targetYearNum)) return;
 
       const hasTargetEnroll = isNonEmptyObj(enrollment);
-      const hasAnchorEnroll = isNonEmptyObj(anchor);
       const carryAmount = Math.max(0, Number(carry.amount ?? carry.balance ?? 0));
-      const hasOverride = isNonEmptyObj(override);
 
       let studentFeeOverride = studentFees[id];
       if (!studentFeeOverride) {
@@ -856,47 +929,22 @@ function buildFinanceStudents(
       };
       const explicitStudentFee = coerceFee(studentFeeOverride);
 
-      const ledgerHasThisYear =
-        (ledgerEntry && typeof ledgerEntry === 'object' && (
-          (ledgerEntry[targetYear] && isNonEmptyObj(ledgerEntry[targetYear])) ||
-          (ledgerEntry[String(targetYear)] && isNonEmptyObj(ledgerEntry[String(targetYear)])) ||
-          (ledgerEntry[Number(targetYear)] && isNonEmptyObj(ledgerEntry[Number(targetYear)])) ||
-          isNonEmptyObj(ledgerEntry.payments) ||
-          isNonEmptyObj(ledgerEntry.entries) ||
-          isNonEmptyObj(ledgerEntry.records)
-        ));
       const baseHasYearPayments = hasPaymentsForYear(base.payments, targetYearNum);
 
-      const existsInYear =
-        hasTargetEnroll ||
-        (hasAnchorEnroll && targetYearNum >= anchorYearNum) ||
-        hasOverride ||
-        carryAmount > 0 ||
-        explicitStudentFee != null ||
-        ledgerHasThisYear ||
-        baseHasYearPayments;
-      if (!existsInYear) return;
-
       let baseClass = '';
-      let delta = 0;
       if (hasTargetEnroll) {
         baseClass = enrollment.className || enrollment.classLevel || enrollment.class || '';
-        delta = 0;
-      } else if (hasAnchorEnroll) {
-        baseClass = anchor.className || anchor.classLevel || anchor.class || '';
-        delta = targetYearNum - anchorYearNum;
       } else {
-        baseClass = base.classLevel || base.class || '';
-        delta = 0;
+        baseClass = base.classLevel || base.class || anchor.className || anchor.classLevel || anchor.class || '';
       }
       baseClass = canonClass(baseClass);
-      if (hasAnchorEnroll) {
-        const anchorClass = canonClass(anchor.className || anchor.classLevel || anchor.class || '');
-        if (norm(anchorClass) === norm('Class 7') && targetYearNum > anchorYearNum) {
-          delta = 999;
+
+      let delta = 0;
+      if (!hasTargetEnroll) {
+        if (Number.isFinite(registrationYear) && Number.isFinite(targetYearNum)) {
+          delta = targetYearNum - registrationYear;
         }
       }
-
       const classLevel = shiftClass(baseClass, delta);
       const classDefaults = classFees[classLevel] || classFees[baseClass] || {};
       const resolvedPlanId = override.planId || classDefaults.defaultPlanId || null;
@@ -1012,7 +1060,15 @@ function buildFinanceStudents(
         academicYear: targetYear,
         primaryParentContact: parentContact || base.primaryParentContact,
         admissionNumber: admissionNumber || id,
-        hasYearData: existsInYear,
+        hasYearData: Boolean(
+          isNonEmptyObj(enrollment) ||
+          isNonEmptyObj(override) ||
+          isNonEmptyObj(classDefaults) ||
+          carryAmount > 0 ||
+          effectiveFee > 0 ||
+          Object.keys(payments || {}).length > 0 ||
+          baseHasYearPayments
+        ),
         isGraduated: classLevel === 'GRADUATED',
       };
 
@@ -1107,7 +1163,7 @@ function buildFinanceStudents(
           plansSnap,
         ledgerSnap,
         carrySnap,
-      ] = await Promise.all([
+        ] = await Promise.all([
         schoolRef('students').once('value'),
         schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
         schoolRef(`enrollments/${key}`).once('value'),
@@ -1119,32 +1175,54 @@ function buildFinanceStudents(
         schoolRef(`financeCarryForward/${key}`).once('value'),
         ]);
 
-        const baseStudents = baseSnap.val() || {};
-        let ledgerData = ledgerSnap.val() || {};
-        if (!Object.keys(ledgerData || {}).length) {
+        let baseStudents = baseSnap.val() || {};
+        let anchorEnrollments = anchorEnrollSnap.val() || {};
+        let yearEnrollments = enrollmentSnap.val() || {};
+        if (isSocratesSchool) {
           try {
-            const legacyLedgerSnap = await schoolRef('financeLedgers').once('value');
-            ledgerData = legacyLedgerSnap.val() || {};
-          } catch (legacyErr) {
-            console.warn('Legacy financeLedgers read failed (helper)', legacyErr?.message || legacyErr);
+            const [legacyBaseSnap, legacyAnchorEnrollSnap, legacyYearEnrollSnap] = await Promise.all([
+              db.ref('students').once('value'),
+              db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
+              db.ref(`enrollments/${key}`).once('value'),
+            ]);
+            baseStudents = { ...(legacyBaseSnap.val() || {}), ...(baseStudents || {}) };
+            anchorEnrollments = { ...(legacyAnchorEnrollSnap.val() || {}), ...(anchorEnrollments || {}) };
+            yearEnrollments = { ...(legacyYearEnrollSnap.val() || {}), ...(yearEnrollments || {}) };
+          } catch (legacyReadErr) {
+            console.warn('Legacy students/enrollments read failed (helper)', legacyReadErr?.message || legacyReadErr);
           }
+        }
+        let ledgerData = ledgerSnap.val() || {};
+        try {
+          const legacyLedgerSnap = await schoolRef('financeLedgers').once('value');
+          const legacyLedgerData = legacyLedgerSnap.val() || {};
+          if (isSocratesSchool) {
+            ledgerData = { ...(legacyLedgerData || {}), ...(ledgerData || {}) };
+          } else if (!Object.keys(ledgerData || {}).length) {
+            ledgerData = legacyLedgerData;
+          }
+        } catch (legacyErr) {
+          console.warn('Legacy financeLedgers read failed (helper)', legacyErr?.message || legacyErr);
         }
 
         let studentFeesData = studentFeesSnap.val() || {};
-        if (!Object.keys(studentFeesData || {}).length) {
-          try {
-            const legacyStudentFeesSnap = await schoolRef(`finance/${key}/studentFees`).once('value');
-            studentFeesData = legacyStudentFeesSnap.val() || {};
-          } catch (studentFeesErr) {
-            console.warn('Student fee override read failed (helper)', studentFeesErr?.message || studentFeesErr);
+        try {
+          const legacyStudentFeesSnap = await schoolRef(`finance/${key}/studentFees`).once('value');
+          const legacyStudentFeesData = legacyStudentFeesSnap.val() || {};
+          if (isSocratesSchool) {
+            studentFeesData = { ...(legacyStudentFeesData || {}), ...(studentFeesData || {}) };
+          } else if (!Object.keys(studentFeesData || {}).length) {
+            studentFeesData = legacyStudentFeesData;
           }
+        } catch (studentFeesErr) {
+          console.warn('Student fee override read failed (helper)', studentFeesErr?.message || studentFeesErr);
         }
 
         const approvalsByStudent = await loadApprovedFinanceApprovals(key);
         const built = buildFinanceStudents(
           baseStudents,
-          anchorEnrollSnap.val() || {},
-          enrollmentSnap.val() || {},
+          anchorEnrollments,
+          yearEnrollments,
           classFeesSnap.val() || {},
           stOverridesSnap.val() || {},
           plansSnap.val() || {},
@@ -2189,30 +2267,52 @@ function buildFinanceStudents(
         schoolRef(`financeCarryForward/${targetYear}`).once('value'),
         schoolRef(`studentFees/${targetYear}`).once('value'),
       ]);
-      const baseStudents = baseSnap.val() || {};
-      let ledgerData = ledgerSnap.val() || {};
-      if (!Object.keys(ledgerData || {}).length) {
+      let baseStudents = baseSnap.val() || {};
+      let anchorEnrollments = anchorEnrollSnap.val() || {};
+      let yearEnrollments = enrollmentSnap.val() || {};
+      if (isSocratesSchool) {
         try {
-          const legacyLedgerSnap = await schoolRef('financeLedgers').once('value');
-          ledgerData = legacyLedgerSnap.val() || {};
-        } catch (legacyErr) {
-          console.warn('Legacy financeLedgers read failed', legacyErr?.message || legacyErr);
+          const [legacyBaseSnap, legacyAnchorEnrollSnap, legacyYearEnrollSnap] = await Promise.all([
+            db.ref('students').once('value'),
+            db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
+            db.ref(`enrollments/${targetYear}`).once('value'),
+          ]);
+          baseStudents = { ...(legacyBaseSnap.val() || {}), ...(baseStudents || {}) };
+          anchorEnrollments = { ...(legacyAnchorEnrollSnap.val() || {}), ...(anchorEnrollments || {}) };
+          yearEnrollments = { ...(legacyYearEnrollSnap.val() || {}), ...(yearEnrollments || {}) };
+        } catch (legacyReadErr) {
+          console.warn('Legacy students/enrollments read failed', legacyReadErr?.message || legacyReadErr);
         }
       }
-      let studentFeesData = studentFeesSnap.val() || {};
-      if (!Object.keys(studentFeesData || {}).length) {
-        try {
-          const legacyStudentFeesSnap = await schoolRef(`finance/${targetYear}/studentFees`).once('value');
-          studentFeesData = legacyStudentFeesSnap.val() || {};
-        } catch (studentFeesErr) {
-          console.warn('Student fee override read failed', studentFeesErr?.message || studentFeesErr);
+      let ledgerData = ledgerSnap.val() || {};
+      try {
+        const legacyLedgerSnap = await schoolRef('financeLedgers').once('value');
+        const legacyLedgerData = legacyLedgerSnap.val() || {};
+        if (isSocratesSchool) {
+          ledgerData = { ...(legacyLedgerData || {}), ...(ledgerData || {}) };
+        } else if (!Object.keys(ledgerData || {}).length) {
+          ledgerData = legacyLedgerData;
         }
+      } catch (legacyErr) {
+        console.warn('Legacy financeLedgers read failed', legacyErr?.message || legacyErr);
+      }
+      let studentFeesData = studentFeesSnap.val() || {};
+      try {
+        const legacyStudentFeesSnap = await schoolRef(`finance/${targetYear}/studentFees`).once('value');
+        const legacyStudentFeesData = legacyStudentFeesSnap.val() || {};
+        if (isSocratesSchool) {
+          studentFeesData = { ...(legacyStudentFeesData || {}), ...(studentFeesData || {}) };
+        } else if (!Object.keys(studentFeesData || {}).length) {
+          studentFeesData = legacyStudentFeesData;
+        }
+      } catch (studentFeesErr) {
+        console.warn('Student fee override read failed', studentFeesErr?.message || studentFeesErr);
       }
       const approvalsByStudent = await loadApprovedFinanceApprovals(targetYear, true);
       cachedStudents = buildFinanceStudents(
         baseStudents,
-        anchorEnrollSnap.val() || {},
-        enrollmentSnap.val() || {},
+        anchorEnrollments,
+        yearEnrollments,
         classFeesSnap.val() || {},
         stOverridesSnap.val() || {},
         plansSnap.val() || {},
@@ -2222,9 +2322,6 @@ function buildFinanceStudents(
         approvalsByStudent,
         targetYear
       );
-      if (!Object.keys(cachedStudents).length) {
-        cachedStudents = baseStudents;
-      }
 
       // ===== Parent mode: filter to single learner =====
       if (parentCtx.enabled) {
