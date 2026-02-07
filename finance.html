@@ -739,6 +739,9 @@
     const alloc = allocatePayments(student, schedule);
     const paidAfterPrev = Math.max(0, alloc.totalPaid - (previousDebt - alloc.prevDebtAfter));
     const yearBalance = Math.max(0, feePerYear - paidAfterPrev);
+    const carryAmount = Math.max(0, Number(student.carryAmount || 0));
+    const carryOutstanding = Math.max(0, carryAmount - Math.max(0, Number(alloc.totalPaid || 0)));
+    const hasCarryOutstanding = carryOutstanding > 0;
     const overdueRows = (alloc.scheduleItems || []).filter((it) => {
       const remaining = Math.max(0, Number(it.amount || 0) - Number(it.paidAllocated || 0));
       return Number(it.toTS || 0) > 0 && isPast(Number(it.toTS)) && remaining > 0;
@@ -748,20 +751,28 @@
       : null;
     const overdueThroughTs = latestOverdue ? Number(latestOverdue.toTS || 0) : 0;
     const isOverdueDebt = overdueThroughTs > 0 && alloc.debtTillNow > 0;
-    const periodDebtLabel = isOverdueDebt ? new Date(overdueThroughTs).toLocaleDateString() : '-';
+    const periodDebtLabel = isOverdueDebt
+      ? new Date(overdueThroughTs).toLocaleDateString()
+      : (hasCarryOutstanding ? 'Carry Forward' : '-');
     const overdueWindowLabel = (isOverdueDebt && latestOverdue)
       ? `${new Date(Number(latestOverdue.fromTS || 0)).toLocaleDateString()} - ${new Date(Number(latestOverdue.toTS || 0)).toLocaleDateString()}`
       : '-';
+    const debtForCollection = Math.max(
+      hasCarryOutstanding ? carryOutstanding : 0,
+      isOverdueDebt ? Math.max(0, Number(alloc.debtTillNow || 0)) : 0
+    );
     return {
       feePerYear,
       previousDebt,
       paidAmount: alloc.totalPaid,
       balance: yearBalance,
       periodDebtLabel,
-      periodDebtValue: isOverdueDebt ? alloc.debtTillNow : 0,
+      periodDebtValue: debtForCollection,
       isOverdueDebt,
       overdueThroughTs,
       overdueWindowLabel,
+      hasCarryOutstanding,
+      carryOutstanding,
       credit: alloc.credit,
       scheduleItems: alloc.scheduleItems
     };
@@ -1420,7 +1431,11 @@ function buildFinanceStudents(
 
       const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
       const debtIsOverdue = Boolean(fin.isOverdueDebt && fin.periodDebtValue > 0);
-      const debtLabel = debtIsOverdue ? `Overdue till ${fin.periodDebtLabel}` : '-';
+      const debtIsCarry = Boolean(fin.hasCarryOutstanding && fin.periodDebtValue > 0);
+      const debtNeedsAction = debtIsOverdue || debtIsCarry;
+      const debtLabel = debtIsOverdue
+        ? `Overdue till ${fin.periodDebtLabel}`
+        : (debtIsCarry ? 'Carry Forward due' : '-');
       const prevYearNum = Number(financeYear) - 1;
       const carryYearLabel = Number.isFinite(prevYearNum) ? prevYearNum : `${financeYear}-1`;
       const carryNote = student.carryAmount > 0
@@ -1438,7 +1453,7 @@ function buildFinanceStudents(
         : `<button class="payBtn px-2 py-1 text-xs bg-indigo-600 text-white rounded ml-1" data-id="${id}">Pay</button>`;
 
       const tr = document.createElement('tr');
-      tr.className = debtIsOverdue ? 'table-row table-row-overdue' : 'table-row';
+      tr.className = debtNeedsAction ? 'table-row table-row-overdue' : 'table-row';
       tr.dataset.studentId = id;
       tr.innerHTML = `
         <td class="p-2 border text-center align-top">
@@ -1455,8 +1470,8 @@ function buildFinanceStudents(
         <td class="p-2 border align-top text-right">${fmt(fin.balance)}</td>
         <td class="p-2 border align-top">
           <div class="flex items-center justify-between gap-2">
-            <span>${debtLabel}${debtIsOverdue && fin.overdueWindowLabel && fin.overdueWindowLabel !== '-' ? `<div class="text-xs text-red-700">${fin.overdueWindowLabel}</div>` : ''}</span>
-            <span class="font-semibold ${debtIsOverdue ? 'text-red-700' : ''}">${fmt(fin.periodDebtValue)}</span>
+            <span>${debtLabel}${debtIsOverdue && fin.overdueWindowLabel && fin.overdueWindowLabel !== '-' ? `<div class="text-xs text-red-700">${fin.overdueWindowLabel}</div>` : ''}${debtIsCarry && !debtIsOverdue ? `<div class="text-xs text-red-700">Carry outstanding: ${fmt(fin.carryOutstanding || 0)}</div>` : ''}</span>
+            <span class="font-semibold ${debtNeedsAction ? 'text-red-700' : ''}">${fmt(fin.periodDebtValue)}</span>
           </div>
         </td>
         <td class="p-2 border align-top">
@@ -2035,7 +2050,8 @@ function buildFinanceStudents(
     const totalDue = baseFee + effectiveCarry;
     const paidTotal = Math.max(0, Number(fin.paidAmount || 0));
     const balanceDisplay = Math.max(0, totalDue - paidTotal);
-    const debtWithCarry = Math.max(0, Number(fin.periodDebtValue || 0) + carryForwardPrev);
+    const carryNotYetMerged = Math.max(0, Number(carryForwardPrev || 0) - Math.max(0, Number(s.carryAmount || 0)));
+    const debtWithCarry = Math.max(0, Number(fin.periodDebtValue || 0) + carryNotYetMerged);
 
     let carryLine = '';
     if (carryForwardPrev > 0 || dbCarry > 0) {
