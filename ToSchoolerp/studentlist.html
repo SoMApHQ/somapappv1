@@ -279,12 +279,12 @@
         let activeStudentsRef = null;
         let activeStudentsHandler = null;
 
-        const getYear = () => String(window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR);
-        const updateYearUI = () => {
-          const year = getYear();
-          if (yearHint) yearHint.textContent = year;
-          if (yearSelect && yearSelect.value !== year) yearSelect.value = year;
-        };
+          const getYear = () => String(window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR);
+          const updateYearUI = (yearOverride) => {
+            const year = String(yearOverride ?? getYear());
+            if (yearHint) yearHint.textContent = year;
+            if (yearSelect && yearSelect.value !== year) yearSelect.value = year;
+          };
 
         function schoolRef(path) {
           return db.ref(SOMAP.P(path));
@@ -323,6 +323,26 @@
           activeStudentsHandler = null;
         }
 
+        function selectBestYearBlob(student, currentYear) {
+          const numericYear = Number(currentYear);
+          if (!Number.isFinite(numericYear)) return null;
+          const entries = [];
+          const collect = (source) => {
+            if (!source || typeof source !== "object") return;
+            Object.entries(source).forEach(([year, value]) => {
+              if (!value) return;
+              const parsed = Number(year);
+              if (!Number.isFinite(parsed) || parsed > numericYear) return;
+              entries.push({ year: parsed, value });
+            });
+          };
+          collect(student.years);
+          collect(student.yearData);
+          if (!entries.length) return null;
+          entries.sort((a, b) => b.year - a.year);
+          return entries[0];
+        }
+
         function normalizeStudents(rawObj, { currentYear, mode }) {
           const arr = [];
           for (const [key, s] of Object.entries(rawObj || {})) {
@@ -332,22 +352,31 @@
             let klass = (s.class || s.currentClass || s.klass || "").toString().trim();
             let gender = (s.gender || "").toString().trim().toLowerCase();
             let parentContact = (s.parentContact || s.phone || s.parentPhone || "").toString().trim();
+            let matchedYear = null;
             if (mode === "root") {
-              const yearBlob = s.years?.[currentYear] || s.yearData?.[currentYear] || null;
-              if (yearBlob) {
-                klass = (yearBlob.class || yearBlob.currentClass || klass || "").toString().trim();
-                gender = (yearBlob.gender || gender || "").toString().trim().toLowerCase();
-              } else {
+              const best = selectBestYearBlob(s, currentYear);
+              if (!best) {
                 continue;
               }
+              matchedYear = best.year;
+              const yearBlob = best.value;
+              klass = (yearBlob.class || yearBlob.currentClass || klass || "").toString().trim();
+              gender = (yearBlob.gender || gender || "").toString().trim().toLowerCase();
             }
             const status = (s.status || s.state || "").toString().trim().toLowerCase();
             const badStatus = ["archived", "graduated", "transferred", "left", "deleted"].includes(status);
+            const numericMatchedYear = matchedYear !== null ? Number(matchedYear) : Number(currentYear);
+            const isPriorClassSeven =
+              Number.isFinite(numericMatchedYear) &&
+              Number.isFinite(Number(currentYear)) &&
+              numericMatchedYear < Number(currentYear) &&
+              klass.toUpperCase() === "CLASS 7";
             if (!admissionNo || admissionNo === "N/A") continue;
             if (!fullName || fullName === "N/A") continue;
             if (!klass || klass === "N/A") continue;
             if (klass.toUpperCase() === "GRADUATED") continue;
             if (badStatus) continue;
+            if (isPriorClassSeven) continue;
             arr.push({
               id: s.studentId || s.id || key,
               admissionNo: admissionNo.toString().trim(),
@@ -500,26 +529,26 @@
           URL.revokeObjectURL(url);
         }
 
-        classFilter?.addEventListener("change", () => renderAll());
-        downloadCsvBtn?.addEventListener("click", (event) => {
-          event.preventDefault();
-          downloadCsv();
-        });
+          classFilter?.addEventListener("change", () => renderAll());
+          downloadCsvBtn?.addEventListener("click", (event) => {
+            event.preventDefault();
+            downloadCsv();
+          });
 
-        const refreshStudents = () =>
-          attachStudentsListener().catch((err) => console.error("Failed to refresh student roster", err));
+          const refreshStudents = () =>
+            attachStudentsListener().catch((err) => console.error("Failed to refresh student roster", err));
 
-        updateYearUI();
-        refreshStudents();
-
-        if (window.somapYearContext?.onChange) {
-          window.somapYearContext.onChange(() => {
+          if (window.somapYearContext?.onYearChanged) {
+            window.somapYearContext.onYearChanged((year) => {
+              updateYearUI(year);
+              refreshStudents();
+            });
+          } else {
             updateYearUI();
             refreshStudents();
-          });
-        }
-      });
-    </script>
+          }
+        });
+      </script>
 
 </body>
 </html>
