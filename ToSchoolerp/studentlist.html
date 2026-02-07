@@ -72,7 +72,7 @@
     <!-- Student Count Card -->
     <div id="studentCountCard" class="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-lg shadow-lg p-6 mb-4 text-white" style="display:none;">
       <h4 class="text-lg font-semibold mb-4">Student Statistics</h4>
-    <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div class="bg-white/20 rounded-lg p-4 backdrop-blur-sm">
           <div class="text-sm opacity-90 mb-1">Total Students</div>
           <div class="text-2xl font-bold" id="countTotal">0</div>
@@ -84,10 +84,6 @@
         <div class="bg-white/20 rounded-lg p-4 backdrop-blur-sm">
           <div class="text-sm opacity-90 mb-1">Girls</div>
           <div class="text-2xl font-bold" id="countGirls">0</div>
-        </div>
-        <div class="bg-white/20 rounded-lg p-4 backdrop-blur-sm">
-          <div class="text-sm opacity-90 mb-1">Unknown Gender</div>
-          <div class="text-2xl font-bold" id="countUnknown">0</div>
         </div>
         <div class="bg-white/20 rounded-lg p-4 backdrop-blur-sm">
           <div class="text-sm opacity-90 mb-1">Current Class Filter</div>
@@ -233,461 +229,542 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="../firebase.js"></script> <!-- Adjusted path to firebase.js in root -->
-    <!-- Students List Logic -->
-    <script>
-      document.addEventListener("DOMContentLoaded", () => {
-        const db = window.db || (window.firebase && window.firebase.database ? window.firebase.database() : null);
-        if (!db) {
-          console.error("Firebase Realtime Database not available. Ensure ../firebase.js and Firebase SDKs are loaded.");
-          return;
+
+  <!-- Students List Logic -->
+  <script type="module">
+    import { resolveEffectiveFinance, readPlan } from '../js/financeplans.js';
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const db = window.db || (window.firebase && firebase.database ? firebase.database() : null);
+      if (!db) {
+        console.error('Firebase Realtime Database not available. Ensure ../firebase.js and Firebase SDKs are loaded.');
+        return;
+      }
+
+      const school = window.SOMAP?.getSchool?.();
+      if (!school || !school.id) {
+        window.location.href = '../somapappv1multischool/multischool.html';
+        return;
+      }
+      if (!window.SOMAP?.P) {
+        console.error('Missing SOMAP path helper; redirecting to school selector.');
+        window.location.href = '../somapappv1multischool/multischool.html';
+        return;
+      }
+      window.currentSchoolId = school.id;
+      const schoolRef = (subPath) => db.ref(window.SOMAP.P(subPath));
+      const isSocrates = school.id === 'socrates-school';
+      const schoolLabel = document.getElementById('currentSchoolLabel');
+      if (schoolLabel) {
+        const schoolName = school.name || school.id;
+        schoolLabel.textContent = `Current school: ${schoolName}`;
+      }
+
+      const pickRefWithLegacy = async (scopedSubPath, legacyPath) => {
+        const scopedRef = schoolRef(scopedSubPath);
+        if (!isSocrates || !legacyPath) return scopedRef;
+        try {
+          const snap = await scopedRef.get();
+          if (snap.exists()) return scopedRef;
+        } catch (err) {
+          console.warn('Scoped read failed; falling back to legacy path.', err);
         }
+        return db.ref(legacyPath);
+      };
 
-        const SOMAP = window.SOMAP;
-        if (!SOMAP?.getSchool?.() || !SOMAP?.P) {
-          window.location.href = "../somapappv1multischool/multischool.html";
-          return;
-        }
-        const school = SOMAP.getSchool();
-        if (!school?.id) {
-          window.location.href = "../somapappv1multischool/multischool.html";
-          return;
-        }
+      const mergeSnapshots = (scopedSnap, legacySnap) => {
+        if (!isSocrates) return scopedSnap?.val?.() || {};
+        const scopedVal = scopedSnap && scopedSnap.exists() ? (scopedSnap.val() || {}) : {};
+        const legacyVal = legacySnap && legacySnap.exists() ? (legacySnap.val() || {}) : {};
+        return { ...legacyVal, ...scopedVal };
+      };
 
-        const schoolLabel = document.getElementById("currentSchoolLabel");
-        if (schoolLabel) schoolLabel.textContent = `Current school: ${school.name || school.id}`;
+      const elements = {
+        listBody: document.getElementById('studentListBody'),
+        schoolReportBody: document.getElementById('schoolReportBody'),
+        reportFormBody: document.getElementById('reportFormBody'),
+        classFilter: document.getElementById('student-list-class'),
+        downloadCsvBtn: document.getElementById('downloadCsvBtn'),
+        downloadPdfBtn: document.getElementById('downloadPdfBtn'),
+        schoolDownloadCsv: document.getElementById('schoolDownloadCsv'),
+        schoolDownloadPdf: document.getElementById('schoolDownloadPdf'),
+        reportDownloadCsv: document.getElementById('reportDownloadCsv'),
+        reportDownloadPdf: document.getElementById('reportDownloadPdf'),
+      };
 
-        const yearSelect = document.querySelector("[data-somap-year-select]");
-        const yearHint = document.getElementById("somapYearHint");
-        const classFilter = document.getElementById("student-list-class");
-        const studentsBody = document.getElementById("studentListBody");
-        const countCard = document.getElementById("studentCountCard");
-        const downloadCsvBtn = document.getElementById("downloadCsvBtn");
-        const downloadPdfBtn = document.getElementById("downloadPdfBtn");
+      const currencyFormatter = new Intl.NumberFormat('en-US', { minimumFractionDigits: 0 });
+      const fmtCurrency = (value) => `TSh ${currencyFormatter.format(Number(value) || 0)}`;
+      const normalize = (value) => String(value || '').trim().toLowerCase();
+      const yearSelect = document.querySelector('[data-somap-year-select]');
+      const yearHint = document.getElementById('somapYearHint');
+      const getWorkingYear = () => {
+        const fromCtx = window.somapYearContext?.getSelectedYear?.();
+        return String(fromCtx || SOMAP_DEFAULT_YEAR);
+      };
+      if (yearSelect && window.somapYearContext?.attachYearDropdown) {
+        window.somapYearContext.attachYearDropdown(yearSelect);
+      }
 
-        if (yearSelect && window.somapYearContext?.attachYearDropdown) {
-          window.somapYearContext.attachYearDropdown(yearSelect);
-        }
-
-        let lastAllRows = [];
-        let workingYear = String(window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear());
-        let loadToken = 0;
-
-        function schoolRef(path) {
-          return db.ref(SOMAP.P(path));
-        }
-
-        function isObject(value) {
-          return !!value && typeof value === "object";
-        }
-
-        function norm(value) {
-          return String(value ?? "").trim();
-        }
-
-        function isPlaceholder(value) {
-          const raw = norm(value).toLowerCase();
-          return !raw || ["n/a", "na", "null", "undefined", "-", "--"].includes(raw);
-        }
-
-        function asYear(value) {
-          if (value == null || value === "") return null;
-          if (typeof value === "number" && Number.isFinite(value)) {
-            if (value >= 2000 && value <= 2100) return Math.trunc(value);
-            if (value > 1000000000000) return new Date(value).getFullYear();
-            return null;
-          }
-          const raw = norm(value);
-          if (/^\d{4}$/.test(raw)) return Number(raw);
-          const asNum = Number(raw);
-          if (Number.isFinite(asNum) && asNum > 1000000000000) return new Date(asNum).getFullYear();
-          const d = new Date(raw);
-          return Number.isNaN(d.getTime()) ? null : d.getFullYear();
-        }
-
-        function isDeletedLike(record) {
-          if (!isObject(record)) return false;
-          if (record.deleted === true || record.isDeleted === true) return true;
-          const status = norm(record.status || record.state).toLowerCase();
-          return ["deleted", "inactive", "removed", "archived"].includes(status);
-        }
-
-        function truthyMapKeys(obj) {
-          const keys = [];
-          Object.entries(obj || {}).forEach(([k, v]) => {
-            if (!v) return;
-            if (v === true) {
-              keys.push(k);
-              return;
-            }
-            if (isObject(v) && !isDeletedLike(v)) {
-              keys.push(k);
-            }
-          });
-          return keys;
-        }
-
-        function enrollmentKeys(enrollments) {
-          const keys = [];
-          Object.entries(enrollments || {}).forEach(([k, v]) => {
-            if (!v || isDeletedLike(v)) return;
-            if (v === true) {
-              keys.push(k);
-              return;
-            }
-            const sid = norm(v.studentId || v.studentKey || v.studentRef || v.id || k);
-            if (!isPlaceholder(sid)) keys.push(sid);
-          });
-          return keys;
-        }
-
-        function enrollmentIndexByStudent(enrollments) {
-          const index = {};
-          Object.entries(enrollments || {}).forEach(([k, v]) => {
-            if (!v || isDeletedLike(v)) return;
-            if (v === true) {
-              const key = norm(k);
-              if (!isPlaceholder(key)) index[key] = {};
-              return;
-            }
-            const sid = norm(v.studentId || v.studentKey || v.studentRef || v.id || k);
-            if (!isPlaceholder(sid) && !index[sid]) index[sid] = v;
-          });
-          return index;
-        }
-
-        function baseIndexByStudent(baseStudents) {
-          const index = {};
-          Object.entries(baseStudents || {}).forEach(([k, v]) => {
-            if (!isObject(v) || isDeletedLike(v)) return;
-            const keys = [
-              k,
-              v.studentId,
-              v.id,
-              v.admissionNo,
-              v.admissionNumber,
-              v.pupilId,
-              v.adm
-            ].map((x) => norm(x)).filter((x) => !isPlaceholder(x));
-            keys.forEach((key) => {
-              if (!index[key]) index[key] = v;
-            });
-          });
-          return index;
-        }
-
-        function pick(...values) {
-          for (const v of values) {
-            if (!isPlaceholder(v)) return norm(v);
-          }
-          return "";
-        }
-
-        function composeName(base, enr, roster) {
-          const direct = pick(
-            roster?.fullName, roster?.name,
-            enr?.fullName, enr?.name,
-            base?.fullName, base?.name
-          );
-          if (!isPlaceholder(direct)) return direct;
-          const joined = `${pick(roster?.firstName, enr?.firstName, base?.firstName)} ${pick(roster?.middleName, enr?.middleName, base?.middleName)} ${pick(roster?.lastName, enr?.lastName, base?.lastName)}`
-            .replace(/\s+/g, " ")
-            .trim();
-          return isPlaceholder(joined) ? "" : joined;
-        }
-
-        function rosterIndexByStudent(roster) {
-          const index = {};
-          Object.entries(roster || {}).forEach(([k, v]) => {
-            if (!v || isDeletedLike(v)) return;
-            const key = norm(k);
-            if (isPlaceholder(key)) return;
-            if (v === true) {
-              if (!index[key]) index[key] = {};
-              return;
-            }
-            if (!index[key]) index[key] = v;
-          });
-          return index;
-        }
-
-        function admissionYearOf(base, enr) {
-          const candidates = [
-            enr?.admissionYear, base?.admissionYear, enr?.registrationYear, base?.registrationYear,
-            enr?.registeredYear, base?.registeredYear, enr?.year, base?.year,
-            enr?.regDate, base?.regDate, enr?.dateOfRegistration, base?.dateOfRegistration,
-            enr?.createdAt, base?.createdAt, enr?.timestamp, base?.timestamp
-          ];
-          for (const c of candidates) {
-            const y = asYear(c);
-            if (Number.isFinite(y)) return y;
-          }
-          return null;
-        }
-
-        function formatDate(value) {
-          if (isPlaceholder(value)) return "N/A";
-          const n = Number(value);
-          const d = Number.isFinite(n) ? new Date(n) : new Date(value);
-          if (Number.isNaN(d.getTime())) return "N/A";
-          return d.toLocaleDateString();
-        }
-
-        function escapeHtml(str) {
-          return String(str || "").replace(/[&<>"']/g, (m) => ({
-            "&": "&amp;",
-            "<": "&lt;",
-            ">": "&gt;",
-            "\"": "&quot;",
-            "'": "&#039;"
-          }[m]));
-        }
-
-        function getFilterValue() {
-          const v = norm(classFilter?.value || "");
-          return !v || v === "All Classes" ? "" : v;
-        }
-
-        function normalizeGender(value) {
-          const g = norm(value).toLowerCase();
-          if (["male", "m", "boy"].includes(g)) return "male";
-          if (["female", "f", "girl"].includes(g)) return "female";
-          return "unknown";
-        }
-
-        function updateClassFilterOptions(rows) {
-          if (!classFilter) return;
-          const classes = Array.from(new Set((rows || []).map((r) => r.className).filter((x) => !isPlaceholder(x)))).sort();
-          const options = ["All Classes", ...classes];
-          const current = classFilter.value || "All Classes";
-          classFilter.innerHTML = "";
-          options.forEach((label) => {
-            const o = document.createElement("option");
-            o.value = label;
-            o.textContent = label;
-            classFilter.appendChild(o);
-          });
-          classFilter.value = options.includes(current) ? current : "All Classes";
-        }
-
-        function renderTable(rows) {
-          if (!studentsBody) return;
-          if (!rows.length) {
-            studentsBody.innerHTML = `<tr><td colspan="11" class="text-center text-sm text-slate-500 py-4">No students for ${escapeHtml(workingYear)} yet.</td></tr>`;
-            return;
-          }
-          const frag = document.createDocumentFragment();
-          rows.forEach((row) => {
-            const tr = document.createElement("tr");
-            const photoCell = row.photoUrl
-              ? `<img src="${escapeHtml(row.photoUrl)}" alt="photo" style="width:50px;height:50px;object-fit:cover;border-radius:4px"/>`
-              : "N/A";
-            const viewUrl = row.id ? `generateid.html?key=${encodeURIComponent(row.id)}` : "#";
-            tr.innerHTML = `
-              <td>${escapeHtml(row.admissionNo)}</td>
-              <td>${escapeHtml(row.fullName)}</td>
-              <td>${escapeHtml(row.className)}</td>
-              <td>${escapeHtml(row.regDate)}</td>
-              <td>${photoCell}</td>
-              <td>${escapeHtml(row.parentContact || "N/A")}</td>
-              <td>N/A</td>
-              <td>N/A</td>
-              <td>N/A</td>
-              <td>N/A</td>
-              <td>
-                <a href="${viewUrl}" target="_blank" class="py-1 px-2 border rounded text-indigo-600 inline-block" title="Open student profile">
-                  <i class="fas fa-eye"></i>
-                </a>
-              </td>
-            `;
-            frag.appendChild(tr);
-          });
-          studentsBody.replaceChildren(frag);
-        }
-
-        function renderCounts(filteredRows) {
-          const boys = filteredRows.filter((r) => r.gender === "male").length;
-          const girls = filteredRows.filter((r) => r.gender === "female").length;
-          const unknown = filteredRows.length - boys - girls;
-          const setText = (id, value) => {
-            const el = document.getElementById(id);
-            if (el) el.textContent = String(value);
-          };
-          setText("countTotal", filteredRows.length);
-          setText("countBoys", boys);
-          setText("countGirls", girls);
-          setText("countUnknown", unknown);
-          setText("countClassFilter", getFilterValue() || "All Classes");
-          if (countCard) countCard.style.display = "block";
-        }
-
-        function renderFromCache() {
-          const fv = getFilterValue();
-          const rows = fv ? lastAllRows.filter((r) => r.className === fv) : lastAllRows;
-          renderCounts(rows);
-          renderTable(rows);
-        }
-
-        async function loadStudents(yearOverride) {
-          const thisLoad = ++loadToken;
-          workingYear = String(yearOverride || window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear());
-          if (yearHint) yearHint.textContent = workingYear;
-          if (yearSelect && yearSelect.value !== workingYear) yearSelect.value = workingYear;
-          if (studentsBody) {
-            studentsBody.innerHTML = `<tr><td colspan="11" class="text-center text-sm text-slate-500 py-4">Loading students for ${escapeHtml(workingYear)}...</td></tr>`;
-          }
-
-          try {
-            const [studentsSnap, enrollSnap, rosterSnap, gradSnap] = await Promise.all([
-              schoolRef("students").once("value"),
-              schoolRef(`years/${workingYear}/enrollments`).once("value"),
-              schoolRef(`years/${workingYear}/students`).once("value"),
-              schoolRef(`years/${workingYear}/graduated`).once("value")
-            ]);
-            if (thisLoad !== loadToken) return;
-
-            const baseStudents = studentsSnap.val() || {};
-            const enrollments = enrollSnap.val() || {};
-            const yearRoster = rosterSnap.val() || {};
-            const graduated = gradSnap.val() || {};
-            const baseByStudent = baseIndexByStudent(baseStudents);
-            const enrollmentByStudent = enrollmentIndexByStudent(enrollments);
-            const rosterByStudent = rosterIndexByStudent(yearRoster);
-
-            const rosterIds = truthyMapKeys(yearRoster);
-            const enrolledIds = enrollmentKeys(enrollments);
-            const candidateIds = rosterIds.length ? rosterIds : (enrolledIds.length ? enrolledIds : Object.keys(baseStudents || {}));
-            console.info("[studentlist] source counts", {
-              year: workingYear,
-              base: Object.keys(baseStudents || {}).length,
-              roster: rosterIds.length,
-              enrollments: enrolledIds.length,
-              graduated: truthyMapKeys(graduated).length,
-              candidates: candidateIds.length
-            });
-
-            const yearNum = Number(workingYear);
-            const graduatedIds = new Set(truthyMapKeys(graduated));
-            const deduped = Array.from(new Set(candidateIds.map((v) => norm(v)).filter(Boolean)));
-            const rows = [];
-
-            deduped.forEach((id) => {
-              const base = isObject(baseByStudent[id]) ? baseByStudent[id] : {};
-              const enr = isObject(enrollmentByStudent[id]) ? enrollmentByStudent[id] : {};
-              const roster = isObject(rosterByStudent[id]) ? rosterByStudent[id] : {};
-
-              if (isDeletedLike(base) || isDeletedLike(enr) || isDeletedLike(roster)) return;
-              if (graduatedIds.has(id)) return;
-
-              const admissionYear = admissionYearOf(base, enr) || asYear(roster?.admissionYear) || asYear(roster?.registrationYear) || asYear(roster?.year);
-              if (!rosterIds.length && !enrolledIds.length && Number.isFinite(yearNum) && Number.isFinite(admissionYear) && admissionYear > yearNum) {
-                return;
-              }
-
-              const admissionNo = pick(roster.admissionNo, roster.admissionNumber, enr.admissionNo, enr.admissionNumber, base.admissionNo, base.admissionNumber, base.pupilId, base.adm, id);
-              const fullName = composeName(base, enr, roster);
-              const className = pick(roster.className, roster.class, roster.currentClass, enr.className, enr.class, enr.currentClass, base.className, base.class, base.currentClass) || "Unassigned";
-              const parentContact = pick(roster.parentContact, roster.parentPhone, roster.phone, enr.parentContact, enr.parentPhone, enr.phone, base.parentContact, base.parentPhone, base.phone);
-              const photoUrl = pick(roster.photoUrl, roster.passportPhotoUrl, roster.passportPhotoURL, enr.photoUrl, enr.passportPhotoUrl, enr.passportPhotoURL, base.photoUrl, base.passportPhotoUrl, base.passportPhotoURL);
-              const regDateRaw = pick(roster.regDate, roster.dateOfRegistration, roster.registeredAt, roster.createdAt, roster.timestamp, enr.regDate, enr.dateOfRegistration, enr.registeredAt, enr.createdAt, enr.timestamp, base.regDate, base.dateOfRegistration, base.registeredAt, base.createdAt, base.timestamp);
-              const gender = normalizeGender(pick(roster.gender, enr.gender, base.gender));
-
-              if (isPlaceholder(admissionNo) || isPlaceholder(fullName)) return;
-
-              rows.push({
-                id: pick(base.studentId, base.id, id),
-                admissionNo,
-                fullName,
-                className,
-                regDate: formatDate(regDateRaw),
-                photoUrl: isPlaceholder(photoUrl) ? "" : photoUrl,
-                parentContact: isPlaceholder(parentContact) ? "" : parentContact,
-                gender
-              });
-            });
-
-            rows.sort((a, b) => {
-              const classCmp = a.className.localeCompare(b.className);
-              if (classCmp) return classCmp;
-              return a.fullName.localeCompare(b.fullName);
-            });
-            console.info("[studentlist] rendered rows", { year: workingYear, rows: rows.length });
-
-            lastAllRows = rows;
-            updateClassFilterOptions(rows);
-            renderFromCache();
-          } catch (err) {
-            console.error("Failed loading students list", err);
-            if (thisLoad !== loadToken) return;
-            lastAllRows = [];
-            updateClassFilterOptions([]);
-            renderFromCache();
-          }
-        }
-
-        function getFilteredRows() {
-          const fv = getFilterValue();
-          return fv ? lastAllRows.filter((r) => r.className === fv) : lastAllRows.slice();
-        }
-
-        function downloadCsv() {
-          const rows = getFilteredRows();
-          if (!rows.length) {
-            alert("No students to download for the current filter and year.");
-            return;
-          }
-          const lines = [["Admission No", "Full Name", "Class", "Date of Registration", "Parent Contact", "Gender"]];
-          rows.forEach((r) => {
-            lines.push([r.admissionNo, r.fullName, r.className, r.regDate, r.parentContact || "N/A", r.gender]);
-          });
-          const csv = lines
-            .map((line) => line.map((v) => `"${String(v ?? "").replace(/"/g, "\"\"")}"`).join(","))
-            .join("\n");
-          const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = `students_${workingYear}.csv`;
-          a.click();
-          URL.revokeObjectURL(a.href);
-        }
-
-        function downloadPdf() {
-          const rows = getFilteredRows();
-          if (!rows.length) {
-            alert("No students to download for the current filter and year.");
-            return;
-          }
-          const jsPDFCtor = window.jspdf?.jsPDF;
-          if (!jsPDFCtor) {
-            alert("PDF library is unavailable.");
-            return;
-          }
-          const doc = new jsPDFCtor({ orientation: "landscape" });
-          doc.text(`Students List - ${workingYear}`, 14, 12);
-          doc.autoTable({
-            startY: 16,
-            head: [["Admission No", "Full Name", "Class", "Date of Registration", "Parent Contact", "Gender"]],
-            body: rows.map((r) => [r.admissionNo, r.fullName, r.className, r.regDate, r.parentContact || "N/A", r.gender])
-          });
-          doc.save(`students_${workingYear}.pdf`);
-        }
-
-        classFilter?.addEventListener("change", renderFromCache);
-        downloadCsvBtn?.addEventListener("click", (e) => {
-          e.preventDefault();
-          downloadCsv();
-        });
-        downloadPdfBtn?.addEventListener("click", (e) => {
-          e.preventDefault();
-          downloadPdf();
-        });
-
-        if (window.somapYearContext?.onYearChanged) {
-          window.somapYearContext.onYearChanged((year) => loadStudents(String(year || "")));
-        }
-        loadStudents(workingYear);
+      const state = {
+        students: new Map(),
+        scopedStudents: new Map(),
+        legacyStudents: new Map(),
+        anchorEnrollments: {},
+        yearEnrollments: {},
+        yearStudentIndex: {},
+        ledger: {},
+        planCache: new Map(),
+        latestRecords: [],
+        latestYear: getWorkingYear(),
+        renderToken: 0,
+        yearEnrollRef: null,
+        legacyYearEnrollRef: null,
+        yearStudentsRef: null,
+        anchorEnrollRef: null,
+        legacyAnchorEnrollRef: null,
+        ledgerRef: null,
+        legacyLedgerRef: null,
+        studentsRef: null,
+        legacyStudentsRef: null,
+      };
+      const queueRender = () => {
+        renderAllTables().catch((err) => console.error('Render error', err));
+      };
+      const updateYearUI = (year) => {
+        const yearStr = String(year || SOMAP_DEFAULT_YEAR);
+        if (yearHint) yearHint.textContent = yearStr;
+        if (yearSelect && yearSelect.value !== yearStr) yearSelect.value = yearStr;
+      };
+      window.somapYearContext?.onYearChanged?.(async (year) => {
+        const yearStr = String(year || SOMAP_DEFAULT_YEAR);
+        updateYearUI(yearStr);
+        state.planCache.clear();
+        await attachYearListeners(yearStr);
+        state.latestYear = yearStr;
+        queueRender();
       });
-    </script>
+      updateYearUI(getWorkingYear());
+      if (!state.yearEnrollRef) {
+        attachYearListeners(getWorkingYear()).catch((err) => console.error('Year listener attach failed', err));
+      }
+
+      function resolveClassForYear(studentId, fallbackClass, year) {
+        const override = state.yearEnrollments[studentId] || {};
+        if (override && (override.className || override.classLevel)) {
+          return override.className || override.classLevel;
+        }
+        const anchor = state.anchorEnrollments[studentId] || {};
+        const baseClass = anchor.className || anchor.classLevel || fallbackClass || '';
+        const delta = Number(year) - SOMAP_DEFAULT_YEAR;
+        return shiftClass(baseClass, delta);
+      }
+
+      async function planLabelFor(planId, year) {
+        if (!planId) return '';
+        const key = `${year}::${planId}`;
+        if (state.planCache.has(key)) return state.planCache.get(key);
+        try {
+          const plan = await readPlan(planId, { year });
+          const label = plan?.name || planId;
+          state.planCache.set(key, label);
+          return label;
+        } catch (err) {
+          console.warn('Plan lookup failed', planId, err);
+          return planId;
+        }
+      }
+
+      function sumPayments(ledgerEntry) {
+        if (!ledgerEntry || typeof ledgerEntry !== 'object') return 0;
+        const source = ledgerEntry.payments || ledgerEntry.entries || ledgerEntry.records || ledgerEntry;
+        return Object.values(source || {}).reduce((total, entry) => {
+          const amount = Number(entry?.amount ?? entry?.value ?? entry?.paid ?? entry?.total ?? 0);
+          return Number.isFinite(amount) && amount > 0 ? total + amount : total;
+        }, 0);
+      }
+
+      function escapeHtml(text) {
+        if (text === undefined || text === null) return '';
+        return String(text).replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[m]));
+      }
+
+      async function attachYearListeners(year) {
+        const yearStr = String(year);
+        if (state.yearEnrollRef) state.yearEnrollRef.off();
+        if (state.ledgerRef) state.ledgerRef.off();
+        if (state.yearStudentsRef) state.yearStudentsRef.off();
+
+        const scopedYearEnrollRef = schoolRef(`enrollments/${yearStr}`);
+        const legacyYearEnrollRef = isSocrates ? db.ref(`enrollments/${yearStr}`) : null;
+        if (state.yearEnrollRef) state.yearEnrollRef.off();
+        if (state.legacyYearEnrollRef) state.legacyYearEnrollRef.off();
+        state.yearEnrollRef = scopedYearEnrollRef;
+        state.legacyYearEnrollRef = legacyYearEnrollRef;
+        state.yearEnrollRef.on('value', (snap) => {
+          state.yearEnrollRef._lastSnap = snap;
+          state.yearEnrollments = mergeSnapshots(snap, state.legacyYearEnrollRef?._lastSnap);
+          queueRender();
+        });
+        if (state.legacyYearEnrollRef) {
+          state.legacyYearEnrollRef.on('value', (snap) => {
+            state.legacyYearEnrollRef._lastSnap = snap;
+            state.yearEnrollments = mergeSnapshots(state.yearEnrollRef?._lastSnap, snap);
+            queueRender();
+          });
+        }
+
+        const scopedLedgerRef = schoolRef(`financeLedgers/${yearStr}`);
+        const legacyLedgerRef = isSocrates ? db.ref(`financeLedgers/${yearStr}`) : null;
+        if (state.ledgerRef) state.ledgerRef.off();
+        if (state.legacyLedgerRef) state.legacyLedgerRef.off();
+        state.ledgerRef = scopedLedgerRef;
+        state.legacyLedgerRef = legacyLedgerRef;
+        state.ledgerRef.on('value', (snap) => {
+          state.ledgerRef._lastSnap = snap;
+          state.ledger = mergeSnapshots(snap, state.legacyLedgerRef?._lastSnap);
+          queueRender();
+        });
+        if (state.legacyLedgerRef) {
+          state.legacyLedgerRef.on('value', (snap) => {
+            state.legacyLedgerRef._lastSnap = snap;
+            state.ledger = mergeSnapshots(state.ledgerRef?._lastSnap, snap);
+            queueRender();
+          });
+        }
+
+        // Year student index (scoped only)
+        state.yearStudentsRef = schoolRef(`years/${yearStr}/students`);
+        state.yearStudentsRef.on('value', (snap) => {
+          state.yearStudentIndex = snap.val() || {};
+          queueRender();
+        });
+      }
+
+      (async () => {
+        try {
+          const scopedRef = schoolRef('students');
+          const legacyRef = isSocrates ? db.ref('students') : null;
+          if (state.studentsRef) state.studentsRef.off();
+          if (state.legacyStudentsRef) state.legacyStudentsRef.off();
+          state.studentsRef = scopedRef;
+          state.legacyStudentsRef = legacyRef;
+          const rebuildMerged = () => {
+            const merged = mergeSnapshots(state.studentsRef?._lastSnap, state.legacyStudentsRef?._lastSnap);
+            state.students.clear();
+            Object.entries(merged).forEach(([key, value]) => {
+              state.students.set(key, { key, ...(value || {}) });
+            });
+            queueRender();
+          };
+          state.studentsRef.on('value', (snapshot) => {
+            state.studentsRef._lastSnap = snapshot;
+            state.scopedStudents.clear();
+            Object.entries(snapshot.val() || {}).forEach(([key, value]) => {
+              state.scopedStudents.set(key, { key, ...(value || {}) });
+            });
+            rebuildMerged();
+          });
+          if (state.legacyStudentsRef) {
+            state.legacyStudentsRef.on('value', (snapshot) => {
+              state.legacyStudentsRef._lastSnap = snapshot;
+              state.legacyStudents.clear();
+              Object.entries(snapshot.val() || {}).forEach(([key, value]) => {
+                state.legacyStudents.set(key, { key, ...(value || {}), _legacy: true });
+              });
+              rebuildMerged();
+            });
+          }
+        } catch (err) {
+          console.error('Failed to attach students listener', err);
+        }
+      })();
+
+      (async () => {
+        try {
+          const scopedAnchorRef = schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`);
+          const legacyAnchorRef = isSocrates ? db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`) : null;
+          if (state.anchorEnrollRef) state.anchorEnrollRef.off();
+          if (state.legacyAnchorEnrollRef) state.legacyAnchorEnrollRef.off();
+          state.anchorEnrollRef = scopedAnchorRef;
+          state.legacyAnchorEnrollRef = legacyAnchorRef;
+          const updateAnchor = () => {
+            state.anchorEnrollments = mergeSnapshots(state.anchorEnrollRef?._lastSnap, state.legacyAnchorEnrollRef?._lastSnap);
+            queueRender();
+          };
+          state.anchorEnrollRef.on('value', (snapshot) => {
+            state.anchorEnrollRef._lastSnap = snapshot;
+            updateAnchor();
+          });
+          if (state.legacyAnchorEnrollRef) {
+            state.legacyAnchorEnrollRef.on('value', (snapshot) => {
+              state.legacyAnchorEnrollRef._lastSnap = snapshot;
+              updateAnchor();
+            });
+          }
+        } catch (err) {
+          console.error('Failed to attach anchor enrollment listener', err);
+        }
+      })();
+
+      if (elements.classFilter) {
+        elements.classFilter.addEventListener('change', queueRender);
+      }
+
+      [
+        [elements.downloadCsvBtn, () => downloadCSV('student-list')],
+        [elements.downloadPdfBtn, () => downloadPDF('student-list')],
+        [elements.schoolDownloadCsv, () => downloadCSV('school-reports')],
+        [elements.schoolDownloadPdf, () => downloadPDF('school-reports')],
+        [elements.reportDownloadCsv, () => downloadCSV('report-forms')],
+        [elements.reportDownloadPdf, () => downloadPDF('report-forms')],
+      ].forEach(([btn, handler]) => {
+        if (btn) btn.addEventListener('click', handler);
+      });
+
+      queueRender();
+
+      async function renderAllTables() {
+        const listBody = elements.listBody;
+        const schoolReportBody = elements.schoolReportBody;
+        const reportFormBody = elements.reportFormBody;
+        if (!listBody || !schoolReportBody || !reportFormBody) return;
+
+        const year = getWorkingYear();
+        state.latestYear = year;
+        const generation = ++state.renderToken;
+
+        const studentsArray = Array.from(state.students.values());
+        const legacyArray = Array.from(state.legacyStudents.values());
+        const scopedArray = Array.from(state.scopedStudents.values());
+        const hasIndex = state.yearStudentIndex && Object.keys(state.yearStudentIndex).length > 0;
+        const scopedInYear = hasIndex ? scopedArray.filter((stu) => state.yearStudentIndex[stu.key]) : scopedArray;
+        const visibleStudents = hasIndex
+          ? (isSocrates ? scopedInYear.concat(legacyArray) : scopedInYear)
+          : (isSocrates ? legacyArray : []);
+        const records = await Promise.all(visibleStudents.map(async (stu) => {
+          const fallbackClass = stu.classLevel || stu.className || '';
+          const resolvedClass = resolveClassForYear(stu.key, fallbackClass, year) || fallbackClass || 'N/A';
+          const anchorClass = state.anchorEnrollments[stu.key]?.className || state.anchorEnrollments[stu.key]?.classLevel || fallbackClass;
+          let finance = { fee: 0, planId: null, feeOverride: null };
+          try {
+            finance = await resolveEffectiveFinance(stu.key, resolvedClass, { anchorClass, year });
+          } catch (err) {
+            console.error('resolveEffectiveFinance error', stu.key, err);
+          }
+          const planLabel = await planLabelFor(finance.planId, year);
+          const ledgerEntry = state.ledger?.[stu.key] || {};
+          const paidAmount = sumPayments(ledgerEntry);
+          const feeValue = Number(finance.fee || 0);
+          const debtAmount = Math.max(0, feeValue - paidAmount);
+          const fullName = `${stu.firstName || ''} ${stu.middleName || ''} ${stu.lastName || ''}`.replace(/\s+/g, ' ').trim();
+          const registrationDate = stu.timestamp
+            ? new Date(stu.timestamp).toLocaleDateString()
+            : (stu.createdAt ? new Date(stu.createdAt).toLocaleDateString() : 'N/A');
+          const photoURL = stu.passportPhotoUrl || stu.passportPhotoURL || 'https://via.placeholder.com/50';
+          const isOverrideLocked = finance.feeOverride && (finance.feeOverride.locked !== false);
+          const feeSource = isOverrideLocked ? 'Override' : 'Class default';
+          return {
+            key: stu.key,
+            admissionNo: stu.admissionNumber || 'N/A',
+            fullName: fullName || 'N/A',
+            classLabel: resolvedClass === 'GRADUATED' ? `Graduated (${year})` : resolvedClass,
+            rawClass: resolvedClass,
+            registrationDate,
+            photoURL,
+            contact: stu.primaryParentContact || 'N/A',
+            fee: feeValue,
+            paid: paidAmount,
+            debt: debtAmount,
+            planId: finance.planId || null,
+            planLabel,
+            isGraduated: resolvedClass === 'GRADUATED',
+            feeSource,
+            gender: stu.gender || stu.sex || '',
+          };
+        }));
+
+        if (generation !== state.renderToken) return;
+
+        state.latestRecords = records;
+
+        const filterValue = elements.classFilter ? elements.classFilter.value || '' : '';
+        const filteredRecords = records.filter((rec) => {
+          if (rec.isGraduated) return false;
+          if (!filterValue) return true;
+          return normalize(rec.classLabel) === normalize(filterValue);
+        });
+
+        // Update student count card
+        const activeRecordsForCount = records.filter((rec) => !rec.isGraduated);
+        let boysCount = 0;
+        let girlsCount = 0;
+        
+        // Count boys and girls from filtered records (or all if no filter)
+        const recordsToCount = filterValue ? filteredRecords : activeRecordsForCount;
+        recordsToCount.forEach((rec) => {
+          // Get gender from the record (already included when building records)
+          const gender = String(rec.gender || '').trim().toLowerCase();
+          if (gender.startsWith('m')) boysCount++;
+          else if (gender.startsWith('f')) girlsCount++;
+        });
+
+        // Update count card display
+        const countCard = document.getElementById('studentCountCard');
+        const countTotal = document.getElementById('countTotal');
+        const countBoys = document.getElementById('countBoys');
+        const countGirls = document.getElementById('countGirls');
+        const countClassFilter = document.getElementById('countClassFilter');
+        
+        if (countCard && countTotal && countBoys && countGirls && countClassFilter) {
+          countCard.style.display = 'block';
+          if (filterValue) {
+            // When a class is selected, show count for that class
+            countTotal.textContent = filteredRecords.length;
+            countClassFilter.textContent = filterValue;
+          } else {
+            // When showing all classes, show total count
+            countTotal.textContent = activeRecordsForCount.length;
+            countClassFilter.textContent = 'All Classes';
+          }
+          countBoys.textContent = boysCount;
+          countGirls.textContent = girlsCount;
+        }
+
+        const buildRow = (rec) => `
+  <td>${escapeHtml(rec.admissionNo)}</td>
+  <td>${escapeHtml(rec.fullName)}</td>
+  <td>${escapeHtml(rec.classLabel)}</td>
+  <td>${escapeHtml(rec.registrationDate)}</td>
+  <td><img src="${escapeHtml(rec.photoURL)}" alt="photo" style="width:50px;height:50px;object-fit:cover;border-radius:4px"/></td>
+  <td>${escapeHtml(rec.contact)}</td>
+  <td>${escapeHtml(fmtCurrency(rec.fee))}</td>
+  <td>${escapeHtml(fmtCurrency(rec.paid))}</td>
+  <td>${escapeHtml(fmtCurrency(rec.debt))}</td>
+  <td>${escapeHtml(rec.planLabel || rec.planId || 'Class default')}</td>
+  <td>
+    <a href="generateid.html?key=${encodeURIComponent(rec.key)}" target="_blank"
+       class="py-1 px-2 border rounded text-indigo-600 inline-block" title="Open details & generate ID">
+      <i class="fas fa-eye"></i>
+    </a>
+  </td>
+`;
+
+        listBody.innerHTML = '';
+        if (!filteredRecords.length) {
+          listBody.innerHTML = `<tr><td colspan="11" class="text-center text-sm text-slate-500 py-4">No students for ${escapeHtml(String(year))} yet.</td></tr>`;
+        } else {
+          filteredRecords.forEach((rec) => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = buildRow(rec);
+            listBody.appendChild(tr);
+          });
+        }
+
+        const simpleRow = (rec) => `
+          <td>${escapeHtml(rec.admissionNo)}</td>
+          <td>${escapeHtml(rec.fullName)}</td>
+          <td>${escapeHtml(rec.classLabel)}</td>
+          <td>${escapeHtml(rec.contact)}</td>
+          <td>${escapeHtml(fmtCurrency(rec.fee))}</td>
+          <td>${escapeHtml(fmtCurrency(rec.paid))}</td>
+          <td>${escapeHtml(fmtCurrency(rec.debt))}</td>
+        `;
+
+        const activeRecords = records.filter((rec) => !rec.isGraduated);
+
+        [schoolReportBody, reportFormBody].forEach((tbody) => {
+          tbody.innerHTML = '';
+          if (!activeRecords.length) {
+            tbody.innerHTML = `<tr><td colspan="7" class="text-center text-sm text-slate-500 py-4">No student data for ${escapeHtml(String(year))}.</td></tr>`;
+          } else {
+            activeRecords.forEach((rec) => {
+              const tr = document.createElement('tr');
+              tr.innerHTML = simpleRow(rec);
+              tbody.appendChild(tr);
+            });
+          }
+        });
+      }
+
+      function getRecordsForExport(kind) {
+        const year = state.latestYear || getWorkingYear();
+        const filterValue = elements.classFilter ? elements.classFilter.value || '' : '';
+        let records = state.latestRecords.filter((rec) => !rec.isGraduated);
+        if (!records.length) return { year, records: [] };
+        if (kind === 'student-list' && filterValue) {
+          records = records.filter((rec) => normalize(rec.classLabel) === normalize(filterValue));
+        }
+        return { year, records };
+      }
+
+      function downloadCSV(kind) {
+        const { year, records } = getRecordsForExport(kind);
+        if (!records.length) {
+          alert('No data to download for the selected year.');
+          return;
+        }
+        if (!window.Papa) {
+          alert('CSV library not loaded.');
+          return;
+        }
+        const rows = records.map((rec) => ({
+          'Admission No': rec.admissionNo,
+          'Full Name': rec.fullName,
+          'Class': rec.classLabel,
+          'Date of Registration': rec.registrationDate,
+          'Parent Contact': rec.contact,
+          'Fee Total': rec.fee,
+          'Paid Amount': rec.paid,
+          'Debt': rec.debt,
+          'Payment Plan': rec.planLabel || rec.planId || 'Class default',
+          'Fee Source': rec.feeSource,
+        }));
+        const csv = window.Papa.unparse(rows);
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${kind}_${year}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function downloadPDF(kind) {
+        const { year, records } = getRecordsForExport(kind);
+        if (!records.length) {
+          alert('No data to download for the selected year.');
+          return;
+        }
+        const jsPDFLib = window.jspdf?.jsPDF;
+        if (!jsPDFLib) {
+          alert('jsPDF not loaded');
+          return;
+        }
+        const doc = new jsPDFLib({ orientation: 'landscape' });
+        doc.setFontSize(14);
+        doc.text(`${kind.replace('-', ' ')} Report (${year})`, 14, 10);
+        const body = records.map((rec) => [
+          rec.admissionNo,
+          rec.fullName,
+          rec.classLabel,
+          rec.registrationDate,
+          rec.contact,
+          fmtCurrency(rec.fee),
+          fmtCurrency(rec.paid),
+          fmtCurrency(rec.debt),
+          rec.planLabel || rec.planId || 'Class default',
+        ]);
+        doc.autoTable({
+          head: [['Admission No','Full Name','Class','Date of Registration','Parent Contact','Fee Total','Paid Amount','Debt','Payment Plan']],
+          body,
+          startY: 18,
+          styles: { fontSize: 8 },
+        });
+        doc.save(`${kind}_${year}.pdf`);
+      }
+    });
+  </script>
 </body>
 </html>
-
-
