@@ -254,15 +254,6 @@
 
 <script>
 (function () {
-  'use strict';
-
-  /* ============================================================
-   * SoMAp Finance — FULL DROP-IN JS (includes integrated carry-forward)
-   * - Fixes carry-forward consistency (fee/balance/debt/schedule/KPIs)
-   * - Parent mode loads ONLY the learner (no mass reads)
-   * - Fixes legacy financeLedgers fallback shape
-   * ============================================================ */
-
   /* ===== Parent mode detection (non-destructive) ===== */
   const parentCtx = { enabled:false, studentId:null, adm:null, year:null, className:null };
   (function detectParentMode(){
@@ -291,10 +282,9 @@
   })();
 
   const SOMAP_DEFAULT_YEAR = 2025;
-  const CARRY_FORWARD_START_YEAR = 2025; // start carrying from balances of >= 2025
+  const CARRY_FORWARD_START_YEAR = 2025;
   const FINANCE_ADMIN_EMAIL = 'socratesschool2020@gmail.com';
   const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
-
   const norm = (s) => String(s || '').trim().toLowerCase();
   function shiftClass(baseName, deltaYears) {
     const i = CLASS_ORDER.findIndex((c) => norm(c) === norm(baseName));
@@ -305,36 +295,45 @@
     return CLASS_ORDER[j];
   }
 
+  function resolveFinanceSchoolId() {
+    if (window.currentSchoolId) return window.currentSchoolId;
+    const params = new URLSearchParams(location.search || '');
+    const candidate = params.get('school') || params.get('schoolId') || (function () {
+      try { return localStorage.getItem('somap_school'); } catch (_) { return ''; }
+    })() || 'socrates';
+    const normalized = String(candidate || '').trim() || 'socrates';
+    window.currentSchoolId = normalized;
+    return normalized;
+  }
+
   const db = window.db || null;
   const currentSchool = window.SOMAP && SOMAP.getSchool();
   if (!currentSchool || !currentSchool.id) {
     window.location.href = "somapappv1multischool/multischool.html";
-    return;
   }
-  window.currentSchoolId = currentSchool.id;
-
+  window.currentSchoolId = currentSchool?.id;
   const financeSchoolLabel = document.getElementById('financeSchoolLabel');
-  if (financeSchoolLabel) financeSchoolLabel.textContent = currentSchool.name || currentSchool.code || currentSchool.id || 'School';
+  if (financeSchoolLabel) {
+    financeSchoolLabel.textContent = currentSchool.name || currentSchool.code || currentSchool.id || 'School';
+  }
 
   function schoolRef(subPath) {
     return db.ref(SOMAP.P(subPath));
   }
-
   const yearContext = window.somapYearContext || null;
   const yearSelectEl = document.querySelector('[data-somap-year-select]');
   const financeQuery = new URLSearchParams(location.search);
-
   let financeYear = financeQuery.get('year')
     || (yearContext?.getSelectedYear?.())
     || (() => { try { return sessionStorage.getItem('somap_selected_year'); } catch (_) { return null; } })()
     || SOMAP_DEFAULT_YEAR;
-
   financeYear = String(financeYear);
   let activeYear = financeYear;
-
+  const activeSchoolId = resolveFinanceSchoolId();
   try { sessionStorage.setItem('somap_selected_year', financeYear); } catch (_) {}
-  if (yearContext?.setSelectedYear) yearContext.setSelectedYear(financeYear, { manual: false });
-
+  if (yearContext?.setSelectedYear) {
+    yearContext.setSelectedYear(financeYear, { manual: false });
+  }
   if (yearSelectEl) {
     yearSelectEl.value = financeYear;
     yearSelectEl.addEventListener('change', (e) => {
@@ -348,27 +347,41 @@
     });
   }
 
-  const yearHint = document.getElementById('financeYearLabel');
-  function updateYearHint() {
-    if (yearHint) yearHint.textContent = `${financeYear}`;
+  function hasFinanceAdminAccess() {
+    try {
+      const role = sessionStorage.getItem('somap_role');
+      if (role && String(role).toLowerCase() === 'admin') return true;
+    } catch (_) {}
+    const emails = [];
+    if (window.currentUserEmail) emails.push(window.currentUserEmail);
+    try {
+      const stored = sessionStorage.getItem('somapUserEmail');
+      if (stored) emails.push(stored);
+    } catch (_) {}
+    try {
+      const storedLegacy = sessionStorage.getItem('userEmail');
+      if (storedLegacy) emails.push(storedLegacy);
+    } catch (_) {}
+    try {
+      const authEmail = firebase?.auth?.()?.currentUser?.email;
+      if (authEmail) emails.push(authEmail);
+    } catch (_) {}
+    return emails.some((email) => String(email).toLowerCase() === FINANCE_ADMIN_EMAIL.toLowerCase());
   }
 
-  /* ===== UI refs ===== */
   const tbody = document.querySelector('#financeTable tbody');
   const studentSelect = document.getElementById('studentSelect');
   const paymentModal = document.getElementById('paymentModal');
   const closePaymentModal = document.getElementById('closePaymentModal');
   const paymentForm = document.getElementById('paymentForm');
   const cancelPayment = document.getElementById('cancelPayment');
-
   const detailsModal = document.getElementById('detailsModal');
   const closeDetailsModal = document.getElementById('closeDetailsModal');
   const detailsContent = document.getElementById('detailsContent');
-
   const CLASS_FILTERS = ['All Classes','Baby Class','Middle Class','Pre Unit','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
   const classFilter = document.getElementById('classFilter');
   const showOnlyDebtorsBtn = document.getElementById('showOnlyDebtors');
-
+  const yearHint = document.getElementById('financeYearLabel');
   const downloadCsvBtn = document.getElementById('downloadCsv');
   const downloadPdfBtn = document.getElementById('downloadPdf');
   const downloadDebtNowCsvBtn = document.getElementById('downloadDebtNowCsv');
@@ -377,21 +390,25 @@
   const downloadBreakdownPdfBtn = document.getElementById('downloadBreakdownPdf');
   const reloadBtn = document.getElementById('reloadBtn');
 
-  if (!db) {
-    console.error('DB not found.');
-    alert('DB not ready. Ensure firebase.js initializes window.db.');
-    return;
-  }
-
-  /* ===== State ===== */
   let cachedStudents = {};
+  let financeAggregateSnapshot = { totalStudents: 0, totalDue: 0, totalCollected: 0, totalOutstanding: 0, totalExpenses: 0 };
+  function lookupStudentByAdmission(adm) {
+    const normalized = String(adm || '').trim();
+    if (!normalized) return null;
+    if (cachedStudents[normalized]) {
+      return { id: normalized, student: cachedStudents[normalized] };
+    }
+    const matchKey = Object.keys(cachedStudents || {}).find((key) => {
+      const entry = cachedStudents[key] || {};
+      return String(entry.admissionNumber || entry.admissionNo || key).trim() === normalized;
+    });
+    if (!matchKey) return null;
+    return { id: matchKey, student: cachedStudents[matchKey] };
+  }
+  window.__finance_lookupStudent = lookupStudentByAdmission;
   let showingDebtorsOnly = false;
 
-  // Used for iframes / details modal / carry-forward badge lookups
-  const sharedCarryCache = window.__financeCarryForwardVisual || (window.__financeCarryForwardVisual = {});
-  const financeYearDataCache = new Map();
-  const financeApprovalsCache = new Map();
-  const financeBalanceCache = new Map();
+  populateClassFilterDropdown();
 
   function populateClassFilterDropdown() {
     if (!classFilter) return;
@@ -410,11 +427,18 @@
       classFilter.value = '';
     }
   }
-  populateClassFilterDropdown();
 
-  /* ===== Helpers ===== */
+  function updateYearHint() {
+    if (yearHint) yearHint.textContent = `${financeYear}`;
+  }
+
+  if (!db) {
+    console.error('DB not found.');
+    alert('DB not ready. Ensure firebase.js initializes window.db.');
+  }
+
+  // ===== Helpers (kept as-is) =====
   function fmt(n) { n = Number(n) || 0; return n.toLocaleString(); }
-
   function parseMoney(value) {
     if (value == null) return 0;
     if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
@@ -426,9 +450,6 @@
     return 0;
   }
   function clamp(n) { return Math.max(0, Math.round(parseMoney(n))); }
-  function dateFromYMD(y, m, d) { return new Date(y, m - 1, d).getTime(); }
-  function isPast(ts) { return Date.now() > ts; }
-
   function todayYMD() {
     const now = new Date();
     const selectedYear = Number(financeYear);
@@ -438,10 +459,11 @@
       d: now.getDate(),
     };
   }
-
+  function dateFromYMD(y, m, d) { return new Date(y, m - 1, d).getTime(); }
+  function isPast(ts) { return Date.now() > ts; }
   function apportion(total, weights) {
     if (!weights.length) return [];
-    const sumW = weights.reduce((a, b) => a + b, 0) || 1;
+    const sumW = weights.reduce((a, b) => a + b, 0);
     let amounts = weights.map(w => Math.floor((w * total) / sumW));
     let sumA = amounts.reduce((a, b) => a + b, 0);
     let rem = total - sumA;
@@ -452,25 +474,7 @@
     return amounts;
   }
 
-  function hasFinanceAdminAccess() {
-    try {
-      const role = sessionStorage.getItem('somap_role');
-      if (role && String(role).toLowerCase() === 'admin') return true;
-    } catch (_) {}
-    const emails = [];
-    if (window.currentUserEmail) emails.push(window.currentUserEmail);
-    try {
-      const stored = sessionStorage.getItem('somapUserEmail');
-      if (stored) emails.push(stored);
-    } catch (_) {}
-    try {
-      const storedLegacy = sessionStorage.getItem('userEmail');
-      if (storedLegacy) emails.push(storedLegacy);
-    } catch (_) {}
-    return emails.some((email) => String(email).toLowerCase() === FINANCE_ADMIN_EMAIL.toLowerCase());
-  }
-
-  /* ===== Installment config (DISCOUNTS REMOVED) ===== */
+  // ===== Installment config (DISCOUNTS REMOVED) =====
   const installmentConfigs = {
     lower: {
       type: '6',
@@ -541,6 +545,7 @@
     },
     '2inst': {
       type: '2',
+      // discount removed
       weights: [1, 1],
       labels: ['1st Half', '2nd Half'],
       windows: [
@@ -550,6 +555,7 @@
     },
     full: {
       type: 'full',
+      // discount removed
       weights: [1],
       labels: ['Full Year'],
       windows: [
@@ -561,7 +567,7 @@
   function getConfig(student) {
     const plan = (student.paymentPlan || '').toLowerCase();
     const c = (student.classLevel || '').toLowerCase();
-    if (plan.includes('monthly') || plan.includes('mwezi')) return installmentConfigs.monthly;
+    if (plan.includes('monthly')) return installmentConfigs.monthly;
     if (plan.includes('2')) return installmentConfigs['2inst'];
     if (plan.includes('full')) return installmentConfigs.full;
     if (plan.includes('4') || (plan.includes('inst') && (c === 'class 4' || c === 'class 7'))) return installmentConfigs.class4_7;
@@ -574,7 +580,9 @@
   }
 
   function buildSchedule(student) {
-    if (!student || student.isGraduated) return { items: [], periodLabelNow: '-', expectedToDate: 0 };
+    if (!student || student.isGraduated) {
+      return { items: [], periodLabelNow: '-', expectedToDate: 0 };
+    }
     const { y } = todayYMD();
 
     // 1) Student-level custom schedule wins
@@ -597,7 +605,7 @@
       return { items: sc, periodLabelNow: periodLabel, expectedToDate };
     }
 
-    // 2) Year plan schedule
+    // 2) Year plan schedule (from installmentPlans/{y})
     if (Array.isArray(student._planSchedule) && student._planSchedule.length) {
       const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
       const carryAmount = Math.max(0, Number(student.carryAmount || 0));
@@ -622,15 +630,15 @@
       return { items: sc, periodLabelNow: periodLabel, expectedToDate };
     }
 
-    // 3) Fallback static configs
+    // 3) Fallback to existing static configs by class/plan
     const config = getConfig(student);
     const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
     const carryAmount = Math.max(0, Number(student.carryAmount || 0));
     const amounts = apportion(baseFee, config.weights);
     if (carryAmount > 0) {
-      if (amounts.length) amounts[0] += carryAmount; else amounts.push(carryAmount);
+      if (amounts.length) amounts[0] += carryAmount;
+      else amounts.push(carryAmount);
     }
-
     const sc = [];
     config.labels.forEach((label, i) => {
       let fromY = y, toY = y;
@@ -642,7 +650,6 @@
       const toTS = dateFromYMD(toY, toM, toD);
       sc.push({ key: `inst${i + 1}`, label, fromTS, toTS, amount: amounts[i] || 0, paidAllocated:0, status:'Pending' });
     });
-
     let lastDueIndex = -1, periodLabel = '-', expectedToDate = 0;
     const now = Date.now();
     sc.forEach((it, idx) => { if (it.toTS < now) { lastDueIndex = idx; expectedToDate += it.amount; } });
@@ -658,10 +665,8 @@
       });
     }
     payList.sort((a, b) => a.ts - b.ts);
-
     let pot = payList.reduce((s, p) => s + p.amount, 0);
     const totalPaid = pot;
-
     let prevDebt = clamp(student.previousDebt || 0);
     let toPrev = Math.min(prevDebt, pot); prevDebt -= toPrev; pot -= toPrev;
 
@@ -673,7 +678,6 @@
       it.paidAllocated += use;
       pot -= use;
     }
-
     const credit = Math.max(0, pot);
     const now = Date.now();
     for (const it of schedule.items) {
@@ -682,11 +686,9 @@
       else if (isPast(it.toTS)) it.status = a > 0 ? 'Partially Paid (Overdue)' : 'Overdue';
       else it.status = a > 0 ? 'Partially Paid' : 'Pending';
     }
-
     const expectedToDate = schedule.items.filter(it => it.toTS < now).reduce((s, it) => s + it.amount, 0);
     const paidConsumed = totalPaid - credit;
     const debtTillNow = Math.max(0, expectedToDate - paidConsumed);
-
     return { scheduleItems: schedule.items, prevDebtAfter: prevDebt, credit, totalPaid, debtTillNow };
   }
 
@@ -697,7 +699,6 @@
     const alloc = allocatePayments(student, schedule);
     const paidAfterPrev = Math.max(0, alloc.totalPaid - (previousDebt - alloc.prevDebtAfter));
     const yearBalance = Math.max(0, feePerYear - paidAfterPrev);
-
     return {
       feePerYear,
       previousDebt,
@@ -710,129 +711,69 @@
     };
   }
 
-  /* ===== Normalizers / legacy fix ===== */
-  function pickYearBucket(tree, year) {
-    if (!tree || typeof tree !== 'object') return {};
-    const y = String(year);
-    return tree[y] || tree[Number(y)] || tree[String(Number(y))] || {};
-  }
-
   function normalizePayments(source, targetYear) {
     if (!source) return {};
     let bucket = source;
-    if (source && typeof source === 'object' && !Array.isArray(source) && source.payments) bucket = source.payments;
+    if (source && typeof source === 'object' && !Array.isArray(source) && source.payments) {
+      bucket = source.payments;
+    }
     if (!bucket || typeof bucket !== 'object') return {};
     const normalized = {};
     const desiredYear = Number(targetYear);
-
     Object.entries(bucket).forEach(([key, raw]) => {
       if (raw == null) return;
-
       if (typeof raw === 'number' || typeof raw === 'string') {
         const amount = parseMoney(raw);
         if (!(amount > 0)) return;
-        normalized[key] = { amount, timestamp: Date.now(), academicYear: Number.isFinite(desiredYear) ? desiredYear : undefined };
+        normalized[key] = {
+          amount,
+          timestamp: Date.now(),
+          academicYear: Number.isFinite(desiredYear) ? desiredYear : undefined,
+        };
         return;
       }
-
       const amount = parseMoney(raw.amount ?? raw.value ?? raw.paid ?? raw.payment ?? raw.total ?? 0);
       if (!(amount > 0)) return;
-
-      const timestamp = Number(raw.timestamp ?? raw.datePaid ?? raw.createdAt ?? raw.updatedAt ?? raw.recordedAt ?? raw.time ?? Date.now());
-
-      let paymentYear = Number(raw.academicYear ?? raw.financeYear ?? raw.feeYear ?? raw.year ?? raw._year ?? raw.academic_session);
+      const timestamp = Number(
+        raw.timestamp ?? raw.datePaid ?? raw.createdAt ?? raw.updatedAt ?? raw.recordedAt ?? raw.time ?? Date.now()
+      );
+      let paymentYear = Number(
+        raw.academicYear ??
+        raw.financeYear ??
+        raw.feeYear ??
+        raw.year ??
+        raw._year ??
+        raw.academic_session
+      );
       if (!Number.isFinite(paymentYear)) {
         const tsDate = new Date(timestamp);
         if (!Number.isNaN(tsDate.getTime())) paymentYear = tsDate.getFullYear();
       }
       if (Number.isFinite(desiredYear) && Number.isFinite(paymentYear) && paymentYear !== desiredYear) return;
-
       const payload = { ...raw, amount, timestamp };
       if (Number.isFinite(paymentYear)) payload.academicYear = paymentYear;
       else if (Number.isFinite(desiredYear)) payload.academicYear = desiredYear;
-
       normalized[key] = payload;
     });
-
     return normalized;
   }
 
-  /* ===== Approvals history (admin / internal only) ===== */
-  async function loadApprovedFinanceApprovals(year, force = false) {
-    if (!db) return {};
-    const targetYear = String(year || financeYear || SOMAP_DEFAULT_YEAR);
-    if (parentCtx.enabled) return {}; // never read approvalsHistory in parent scope
-    if (!force && financeApprovalsCache.has(targetYear)) return financeApprovalsCache.get(targetYear);
-
-    try {
-      const snapshot = await schoolRef('approvalsHistory').once('value');
-      const tree = snapshot.val() || {};
-      const grouped = {};
-      const normalizedTargetYear = Number(targetYear);
-
-      Object.entries(tree).forEach(([_, months]) => {
-        Object.entries(months || {}).forEach(([__, records]) => {
-          Object.entries(records || {}).forEach(([key, record]) => {
-            if (!record) return;
-            const recordYear = Number(record.forYear ?? record.academicYear ?? record.year);
-            if (!Number.isFinite(recordYear) || recordYear !== normalizedTargetYear) return;
-
-            const finalStatus = String(record.finalStatus || record.status || '').toLowerCase();
-            if (!['approved', 'completed'].includes(finalStatus)) return;
-
-            const moduleSource = String(record.sourceModule || record.module || '').toLowerCase();
-            if (!moduleSource.includes('finance')) return;
-
-            const studentKey = record.studentId || record.modulePayload?.studentKey || record.studentAdm;
-            if (!studentKey) return;
-
-            const amount = Number(record.amountPaidNow ?? record.amount ?? record.paidAmount ?? 0);
-            if (!(amount > 0)) return;
-
-            const timestamp = Number(record.approvedAt || record.datePaid || record.createdAt || Date.now());
-
-            if (!grouped[studentKey]) grouped[studentKey] = [];
-            grouped[studentKey].push({
-              approvalId: key,
-              amount,
-              timestamp,
-              method: record.method || record.paymentMethod || record.modulePayload?.payment?.method || '',
-              note: record.note || record.modulePayload?.payment?.note || '',
-              referenceCode: record.referenceCode || record.paymentReferenceCode || record.modulePayload?.payment?.referenceCode || '',
-              academicYear: normalizedTargetYear,
-              approvedAt: timestamp,
-            });
-          });
-        });
-      });
-
-      financeApprovalsCache.set(targetYear, grouped);
-      return grouped;
-    } catch (err) {
-      console.warn('Finance: approvals history read failed', err?.message || err);
-      financeApprovalsCache.set(targetYear, {});
-      return {};
-    }
-  }
-
-  /* ===== Build finance students (same spirit as yours, with minor safety) ===== */
-  function buildFinanceStudents(
-    baseStudents = {},
-    anchorEnrollments = {},
-    enrollments = {},
-    classFees = {},
-    overrides = {},
-    plans = {},
-    ledgers = {},
-    carryForward = {},
-    studentFees = {},
-    approvalsByStudent = {},
-    year = activeYear
-  ) {
+function buildFinanceStudents(
+  baseStudents = {},
+  anchorEnrollments = {},
+  enrollments = {},
+  classFees = {},
+  overrides = {},
+  plans = {},
+  ledgers = {},
+  carryForward = {},
+  studentFees = {},
+  approvalsByStudent = {},
+  year = activeYear
+) {
     const targetYear = String(year || activeYear || SOMAP_DEFAULT_YEAR);
     const deltaYears = Number(targetYear) - SOMAP_DEFAULT_YEAR;
     const map = {};
-
     const ids = new Set([
       ...Object.keys(baseStudents || {}),
       ...Object.keys(anchorEnrollments || {}),
@@ -850,7 +791,6 @@
       const override = overrides[id] || {};
       const ledgerEntry = ledgers[id] || {};
       const carry = carryForward[id] || {};
-
       let studentFeeOverride = studentFees[id];
       if (!studentFeeOverride) {
         const admKey =
@@ -861,7 +801,9 @@
           enrollment.admissionNumber ||
           enrollment.admissionNo ||
           '';
-        if (admKey && studentFees[admKey]) studentFeeOverride = studentFees[admKey];
+        if (admKey && studentFees[admKey]) {
+          studentFeeOverride = studentFees[admKey];
+        }
       }
 
       const baseClass =
@@ -877,11 +819,12 @@
 
       const resolvedPlanId = override.planId || classDefaults.defaultPlanId || null;
       const resolvedPlan = resolvedPlanId ? plans[resolvedPlanId] : null;
-
-      const isMonthlyPlan = resolvedPlan?.schedule && Array.isArray(resolvedPlan.schedule) &&
-        resolvedPlan.schedule.length > 0 &&
+      
+      // Check if this is a monthly plan (schedule has "Monthly:" labels)
+      const isMonthlyPlan = resolvedPlan?.schedule && Array.isArray(resolvedPlan.schedule) && 
+        resolvedPlan.schedule.length > 0 && 
         resolvedPlan.schedule.some(row => String(row.label || '').includes('Monthly:'));
-
+      
       let paymentPlan =
         (resolvedPlan && resolvedPlan.name) ||
         override.planName ||
@@ -891,8 +834,11 @@
         classDefaults.defaultPlan ||
         base.paymentPlan ||
         '6-instalments';
-
-      if (isMonthlyPlan) paymentPlan = 'Malipo kwa mwezi';
+      
+      // Override plan name for monthly plans
+      if (isMonthlyPlan) {
+        paymentPlan = 'Malipo kwa mwezi';
+      }
 
       const admissionNumber =
         enrollment.admissionNumber ||
@@ -902,7 +848,9 @@
 
       const coerceFee = (value) => {
         if (value == null) return null;
-        if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+        if (typeof value === 'number') {
+          return Number.isFinite(value) ? value : null;
+        }
         if (typeof value === 'string') {
           const cleaned = value.replace(/[^\d.-]/g, '');
           if (!cleaned) return null;
@@ -910,7 +858,12 @@
           return Number.isFinite(parsed) ? parsed : null;
         }
         if (typeof value === 'object') {
-          const maybe = value.feePerYear ?? value.baseFee ?? value.amount ?? value.total ?? value.value;
+          const maybe =
+            value.feePerYear ??
+            value.baseFee ??
+            value.amount ??
+            value.total ??
+            value.value;
           return coerceFee(maybe);
         }
         return null;
@@ -926,32 +879,41 @@
         base.feeDue ??
         base.requiredFee ??
         0;
-
+      
+      // If monthly plan, calculate total from schedule if fee is not set
       if (isMonthlyPlan && (!baseFeeCandidate || baseFeeCandidate === 0) && resolvedPlan?.schedule) {
         const totalFromSchedule = resolvedPlan.schedule.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
-        if (totalFromSchedule > 0) baseFeeCandidate = totalFromSchedule;
+        if (totalFromSchedule > 0) {
+          baseFeeCandidate = totalFromSchedule;
+        }
       }
-
+      
       const baseFee = Math.max(0, Math.round(Number(baseFeeCandidate) || 0));
       const carryAmount = Math.max(0, Number(carry.amount ?? carry.balance ?? 0));
       const effectiveFee = Math.max(0, baseFee + carryAmount);
 
-      // Payments source resolution (year-scoped)
       let paymentsSource = {};
       if (ledgerEntry && typeof ledgerEntry === 'object') {
-        const yearBucket = ledgerEntry[targetYear] || ledgerEntry[String(targetYear)] || ledgerEntry[Number(targetYear)];
+        const yearBucket =
+          ledgerEntry[targetYear] ||
+          ledgerEntry[String(targetYear)] ||
+          ledgerEntry[Number(targetYear)];
         if (yearBucket && typeof yearBucket === 'object') {
-          paymentsSource = yearBucket.payments || yearBucket.entries || yearBucket.records || yearBucket || {};
+          if (yearBucket.payments) paymentsSource = yearBucket.payments;
+          else if (yearBucket.entries) paymentsSource = yearBucket.entries;
+          else if (yearBucket.records) paymentsSource = yearBucket.records;
+          else paymentsSource = yearBucket;
         } else if (ledgerEntry.payments || ledgerEntry.entries || ledgerEntry.records) {
-          paymentsSource = ledgerEntry.payments || ledgerEntry.entries || ledgerEntry.records;
+          paymentsSource =
+            ledgerEntry.payments ||
+            ledgerEntry.entries ||
+            ledgerEntry.records;
         } else {
           paymentsSource = ledgerEntry;
         }
       } else if (ledgerEntry != null) {
         paymentsSource = ledgerEntry;
       }
-
-      // Fallback to approved payments on base student only when no ledgers exist (admin mode)
       if (!Object.keys(paymentsSource || {}).length && base.payments) {
         const approvedFallback = {};
         Object.entries(base.payments).forEach(([key, entry]) => {
@@ -959,11 +921,11 @@
           const approvedMarker = Number(entry.approvedAt || entry.approved || 0);
           if (approvedMarker > 0) approvedFallback[key] = entry;
         });
-        if (Object.keys(approvedFallback).length) paymentsSource = approvedFallback;
+        if (Object.keys(approvedFallback).length) {
+          paymentsSource = approvedFallback;
+        }
       }
-
-      // ApprovalsHistory fallback (admin only)
-      if (!parentCtx.enabled && !Object.keys(paymentsSource || {}).length) {
+      if (!Object.keys(paymentsSource || {}).length) {
         const fallbackEntries = approvalsByStudent[id] || [];
         if (fallbackEntries.length) {
           paymentsSource = {};
@@ -981,11 +943,9 @@
           });
         }
       }
-
       const dedupedPayments = window.SOMAP_FINANCE?.dedupePaymentMap
         ? window.SOMAP_FINANCE.dedupePaymentMap(paymentsSource, targetYear, admissionNumber || id)
         : paymentsSource;
-
       const payments = normalizePayments(dedupedPayments, targetYear);
 
       const parentContact =
@@ -1021,120 +981,87 @@
         admissionNumber: admissionNumber || id,
         hasYearData,
         isGraduated: classLevel === 'GRADUATED',
-        previousDebt: 0,
       };
 
-      // Attach schedule sources
+      // Attach scheduling sources for downstream schedule builder
       if (Array.isArray(override.customSchedule) && override.customSchedule.length) {
-        record._customSchedule = override.customSchedule;
+        record._customSchedule = override.customSchedule; // [{label, from, to, amount}]
       } else if (resolvedPlan && Array.isArray(resolvedPlan.schedule)) {
-        record._planSchedule = resolvedPlan.schedule;
+        record._planSchedule = resolvedPlan.schedule; // [{label, from, to, weight}]
       }
 
+      record.previousDebt = 0;
       if (!record.firstName && enrollment.firstName) record.firstName = enrollment.firstName;
       if (!record.lastName && enrollment.lastName) record.lastName = enrollment.lastName;
       if (!record.middleName && enrollment.middleName) record.middleName = enrollment.middleName;
       if (override && Object.keys(override).length) record.override = override;
       record._classDefaults = classDefaults;
-
       map[id] = record;
     });
 
     return map;
   }
 
-  /* ===== Carry-forward integration (consistent for fee/balance/debt/schedule) ===== */
-  function indexByAdmission(dataset) {
-    const idx = new Map();
-    Object.entries(dataset || {}).forEach(([sid, st]) => {
-      const adm = String(st?.admissionNumber || st?.admissionNo || sid || '').trim();
-      if (adm) idx.set(adm, { sid, st });
-    });
-    return idx;
-  }
+  const financeYearDataCache = new Map();
+  const financeApprovalsCache = new Map();
+  const financeBalanceCache = new Map();
 
-  async function applyCarryForwardOverlay(targetYear) {
-    if (parentCtx.enabled) return; // never do school-wide overlay in parent mode
-    const y = Number(targetYear);
-    if (!Number.isFinite(y)) return;
-    const prevYear = y - 1;
-    if (!Number.isFinite(prevYear) || prevYear < CARRY_FORWARD_START_YEAR) return;
-
-    // Load previous year dataset once (cached)
-    const prevDataset = await loadFinanceStudentsForYearCached(String(prevYear));
-    if (!prevDataset || !Object.keys(prevDataset).length) return;
-
-    const prevIndex = indexByAdmission(prevDataset);
-
-    // Temporarily set global year for correct schedule windows while computing prev balance
-    const prevFinanceYear = financeYear;
-    const prevActiveYear = activeYear;
-
+  async function loadApprovedFinanceApprovals(year, force = false) {
+    if (!db) return {};
+    const targetYear = String(year || financeYear || SOMAP_DEFAULT_YEAR);
+    if (!force && financeApprovalsCache.has(targetYear)) return financeApprovalsCache.get(targetYear);
     try {
-      financeYear = String(prevYear);
-      activeYear = String(prevYear);
-
-      Object.entries(cachedStudents || {}).forEach(([id, cur]) => {
-        const adm = String(cur?.admissionNumber || id || '').trim();
-        if (!adm) return;
-
-        const prevHit = prevIndex.get(adm);
-        if (!prevHit?.st) return;
-
-        const prevFin = computeStudentFinancials(prevHit.st);
-        const prevBalance = Math.max(0, Number(prevFin?.balance) || 0);
-
-        // Store for details + iframes
-        const storeKey = `${y}::${adm}`;
-        if (prevBalance > 0) {
-          sharedCarryCache[storeKey] = { carry: prevBalance, prevYear, total: null };
-        } else {
-          delete sharedCarryCache[storeKey];
-        }
-
-        // Merge overlay into current year only if it is not already captured
-        const existingCarry = Math.max(0, Number(cur.carryAmount || 0));
-        const baseFee = Math.max(0, Number(cur.baseFee || 0));
-        const expectedCarry = prevBalance;
-
-        if (expectedCarry > 0) {
-          // If DB already has carry >= expected, do nothing
-          if (existingCarry >= expectedCarry) {
-            cur.__carryOverlayAmount = expectedCarry;
-            cur.__carryOverlayPrevYear = prevYear;
-            cur.__carryOverlayMerged = false;
-            cur.feePerYear = Math.max(0, baseFee + existingCarry);
-            sharedCarryCache[storeKey] = { carry: expectedCarry, prevYear, total: cur.feePerYear };
-            return;
-          }
-
-          // Otherwise, overlay the missing difference (visual-only, no DB write)
-          const delta = expectedCarry - existingCarry;
-          cur.__carryOverlayAmount = expectedCarry;
-          cur.__carryOverlayPrevYear = prevYear;
-          cur.__carryOverlayMerged = true;
-
-          cur.carryAmount = existingCarry + delta;
-          cur.feePerYear = Math.max(0, baseFee + cur.carryAmount);
-
-          sharedCarryCache[storeKey] = { carry: expectedCarry, prevYear, total: cur.feePerYear };
-        }
+      const snapshot = await schoolRef('approvalsHistory').once('value');
+      const tree = snapshot.val() || {};
+      const grouped = {};
+      const normalizedTargetYear = Number(targetYear);
+      Object.entries(tree).forEach(([_, months]) => {
+        Object.entries(months || {}).forEach(([__, records]) => {
+          Object.entries(records || {}).forEach(([key, record]) => {
+            if (!record) return;
+            const recordYear = Number(record.forYear ?? record.academicYear ?? record.year);
+            if (!Number.isFinite(recordYear) || recordYear !== normalizedTargetYear) return;
+            const finalStatus = String(record.finalStatus || record.status || '').toLowerCase();
+            if (!['approved', 'completed'].includes(finalStatus)) return;
+            const moduleSource = String(record.sourceModule || record.module || '').toLowerCase();
+            if (!moduleSource.includes('finance')) return;
+            const studentKey = record.studentId || record.modulePayload?.studentKey || record.studentAdm;
+            if (!studentKey) return;
+            const amount = Number(record.amountPaidNow ?? record.amount ?? record.paidAmount ?? 0);
+            if (!(amount > 0)) return;
+            const timestamp = Number(record.approvedAt || record.datePaid || record.createdAt || Date.now());
+            if (!grouped[studentKey]) grouped[studentKey] = [];
+            grouped[studentKey].push({
+              approvalId: key,
+              amount,
+              timestamp,
+              method: record.method || record.paymentMethod || record.modulePayload?.payment?.method || '',
+              note: record.note || record.modulePayload?.payment?.note || '',
+              referenceCode: record.referenceCode || record.paymentReferenceCode || record.modulePayload?.payment?.referenceCode || '',
+              academicYear: normalizedTargetYear,
+              approvedAt: timestamp,
+            });
+          });
+        });
       });
-    } finally {
-      financeYear = prevFinanceYear;
-      activeYear = prevActiveYear;
+      financeApprovalsCache.set(targetYear, grouped);
+      return grouped;
+    } catch (err) {
+      console.warn('Finance: approvals history read failed', err?.message || err);
+      financeApprovalsCache.set(targetYear, {});
+      return {};
     }
   }
 
-  /* ===== Cached dataset loader for other years (used by carry-forward + details) ===== */
   async function loadFinanceStudentsForYearCached(year) {
     const key = String(year || activeYear || SOMAP_DEFAULT_YEAR);
     if (!db) return {};
-
-    // If asking for current active year dataset, use current cache
-    if (key === String(activeYear) || key === String(financeYear)) return cachedStudents || {};
-
-    if (financeYearDataCache.has(key)) return financeYearDataCache.get(key);
+    if (key === String(activeYear) || key === String(financeYear)) {
+      return cachedStudents || {};
+    }
+    if (financeYearDataCache.has(key)) {
+      return financeYearDataCache.get(key);
+    }
 
     const promise = (async () => {
       try {
@@ -1146,29 +1073,26 @@
           stOverridesSnap,
           studentFeesSnap,
           plansSnap,
-          ledgerSnap,
-          carrySnap,
-        ] = await Promise.all([
-          schoolRef('students').once('value'),
-          schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
-          schoolRef(`enrollments/${key}`).once('value'),
-          schoolRef(`feesStructure/${key}`).once('value'),
-          schoolRef(`studentOverrides/${key}`).once('value'),
-          schoolRef(`studentFees/${key}`).once('value'),
-          schoolRef(`installmentPlans/${key}`).once('value'),
-          schoolRef(`financeLedgers/${key}`).once('value'),
-          schoolRef(`financeCarryForward/${key}`).once('value'),
+        ledgerSnap,
+        carrySnap,
+      ] = await Promise.all([
+        schoolRef('students').once('value'),
+        schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
+        schoolRef(`enrollments/${key}`).once('value'),
+        schoolRef(`feesStructure/${key}`).once('value'),
+        schoolRef(`studentOverrides/${key}`).once('value'),
+        schoolRef(`studentFees/${key}`).once('value'),
+        schoolRef(`installmentPlans/${key}`).once('value'),
+        schoolRef(`financeLedgers/${key}`).once('value'),
+        schoolRef(`financeCarryForward/${key}`).once('value'),
         ]);
 
         const baseStudents = baseSnap.val() || {};
         let ledgerData = ledgerSnap.val() || {};
-
-        // Legacy fallback fix: if root financeLedgers is {year:{student:{...}}}, pick the year bucket
         if (!Object.keys(ledgerData || {}).length) {
           try {
             const legacyLedgerSnap = await schoolRef('financeLedgers').once('value');
-            const legacy = legacyLedgerSnap.val() || {};
-            ledgerData = pickYearBucket(legacy, key);
+            ledgerData = legacyLedgerSnap.val() || {};
           } catch (legacyErr) {
             console.warn('Legacy financeLedgers read failed (helper)', legacyErr?.message || legacyErr);
           }
@@ -1185,7 +1109,6 @@
         }
 
         const approvalsByStudent = await loadApprovedFinanceApprovals(key);
-
         const built = buildFinanceStudents(
           baseStudents,
           anchorEnrollSnap.val() || {},
@@ -1199,8 +1122,10 @@
           approvalsByStudent,
           key
         );
-
-        return Object.keys(built || {}).length ? built : baseStudents;
+        if (!Object.keys(built || {}).length) {
+          return baseStudents;
+        }
+        return built;
       } catch (err) {
         console.warn('Carry-forward helper failed to load year dataset', key, err);
         return {};
@@ -1211,22 +1136,20 @@
     return promise;
   }
 
-  /* ===== Balance lookup (used by other modules/iframes if needed) ===== */
   window.__finance_getBalanceForYearAdmission = async function (year, admissionNo) {
     const normalizedYear = String(year || '');
     const normalizedAdm = String(admissionNo || '').trim();
     if (!normalizedAdm) return 0;
-
     const cacheKey = `${normalizedYear}::${normalizedAdm}`;
-    if (financeBalanceCache.has(cacheKey)) return financeBalanceCache.get(cacheKey);
-
+    if (financeBalanceCache.has(cacheKey)) {
+      return financeBalanceCache.get(cacheKey);
+    }
     try {
       const dataset = await loadFinanceStudentsForYearCached(normalizedYear);
       if (!dataset || !Object.keys(dataset).length) {
         financeBalanceCache.set(cacheKey, 0);
         return 0;
       }
-
       let student = dataset[normalizedAdm];
       if (!student) {
         const matchKey = Object.keys(dataset).find((key) => {
@@ -1239,9 +1162,8 @@
         financeBalanceCache.set(cacheKey, 0);
         return 0;
       }
-
-      const prevFinanceYear = financeYear;
-      const prevActiveYear = activeYear;
+      const previousFinanceYear = financeYear;
+      const previousActiveYear = activeYear;
       try {
         financeYear = normalizedYear;
         activeYear = normalizedYear;
@@ -1250,22 +1172,21 @@
         financeBalanceCache.set(cacheKey, balanceValue);
         return balanceValue;
       } finally {
-        financeYear = prevFinanceYear;
-        activeYear = prevActiveYear;
+        financeYear = previousFinanceYear;
+        activeYear = previousActiveYear;
       }
     } catch (err) {
-      console.warn('Balance lookup failed', year, admissionNo, err);
+      console.warn('Carry-forward helper balance lookup failed', year, admissionNo, err);
       financeBalanceCache.set(cacheKey, 0);
       return 0;
     }
   };
 
-  /* ===== Summary getter for payment iframe ===== */
+  // Expose a summary getter so child iframes (payment.html) can stay in sync with the finance table.
   window.__finance_getStudentFinanceSummary = async function (year, studentIdOrAdm) {
     const targetYear = String(year || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
     const identifier = String(studentIdOrAdm || '').trim();
     if (!identifier) return null;
-
     try {
       const dataset = await loadFinanceStudentsForYearCached(targetYear);
       let student = dataset[identifier];
@@ -1305,23 +1226,7 @@
     }
   };
 
-  /* ===== Lookup helper (admission->record) ===== */
-  function lookupStudentByAdmission(adm) {
-    const normalized = String(adm || '').trim();
-    if (!normalized) return null;
-
-    if (cachedStudents[normalized]) return { id: normalized, student: cachedStudents[normalized] };
-
-    const matchKey = Object.keys(cachedStudents || {}).find((key) => {
-      const entry = cachedStudents[key] || {};
-      return String(entry.admissionNumber || entry.admissionNo || key).trim() === normalized;
-    });
-    if (!matchKey) return null;
-    return { id: matchKey, student: cachedStudents[matchKey] };
-  }
-  window.__finance_lookupStudent = lookupStudentByAdmission;
-
-  /* ====== SPEED: placeholder breakdown row ====== */
+  // ====== SPEED FIX: placeholder breakdown row (no iframe yet) ======
   function breakdownRowHTML(id) {
     return `
       <tr id="br-${id}" class="hidden bg-slate-50">
@@ -1334,12 +1239,11 @@
     `;
   }
 
-  /* ===== Render table ===== */
+  // ===== Render table (unchanged except: uses placeholder breakdown row) =====
   function renderTable() {
     tbody.innerHTML = '';
     let totalDue = 0, totalCollected = 0;
-
-    const filterClass = classFilter?.value || '';
+    const filterClass = classFilter.value;
     const isParentScope = parentCtx.enabled;
 
     Object.entries(cachedStudents).forEach(([id, student]) => {
@@ -1348,44 +1252,45 @@
 
       let fin = computeStudentFinancials(student);
       if (student.isGraduated) {
-        fin = { feePerYear: 0, paidAmount: 0, balance: 0, periodDebtLabel: '-', periodDebtValue: 0, credit: 0, scheduleItems: [] };
+        const effectiveFee = 0;
+        fin = {
+          feePerYear: isParentScope ? 0 : effectiveFee,
+          previousDebt: 0,
+          paidAmount: 0,
+          balance: isParentScope ? 0 : effectiveFee,
+          periodDebtLabel: '-',
+          periodDebtValue: 0,
+          credit: 0,
+          scheduleItems: []
+        };
       }
 
       if (showingDebtorsOnly && (fin.balance <= 0 && fin.periodDebtValue <= 0)) return;
 
-      totalDue += Number(fin.feePerYear) || 0;
-      totalCollected += Number(fin.paidAmount) || 0;
+      totalDue += fin.feePerYear;
+      totalCollected += fin.paidAmount;
 
       const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
       const debtLabel = fin.periodDebtValue > 0 ? `Debt till ${fin.periodDebtLabel}` : '-';
-
       const prevYearNum = Number(financeYear) - 1;
       const carryYearLabel = Number.isFinite(prevYearNum) ? prevYearNum : `${financeYear}-1`;
-
       const carryNote = student.carryAmount > 0
         ? `<div class="text-xs text-slate-500 text-right mt-1">Includes carry-forward from ${carryYearLabel}: ${fmt(student.carryAmount)}</div>`
         : '';
-
       const statusNote = student.isGraduated
         ? `<div class="mt-1 text-xs font-semibold text-emerald-600 uppercase">Graduated</div>`
         : (!student.hasYearData && Object.keys(student.payments || {}).length === 0
             ? `<div class="mt-1 text-xs text-slate-500">No finance records captured for ${financeYear} yet.</div>`
             : '');
 
-      // Parent scope: no Pay button
-      const actionsHtml = parentCtx.enabled
-        ? `<button class="viewBtn px-2 py-1 text-xs border rounded" data-id="${id}">View</button>`
-        : `<button class="viewBtn px-2 py-1 text-xs border rounded" data-id="${id}">View</button>
-           <button class="payBtn px-2 py-1 text-xs bg-indigo-600 text-white rounded ml-1" data-id="${id}">Pay</button>`;
+      const disablePay = student.isGraduated;
+      const payBtnHtml = disablePay
+        ? `<button class="payBtn px-2 py-1 text-xs bg-slate-200 text-slate-500 rounded ml-1 cursor-not-allowed" data-id="${id}" disabled>Pay</button>`
+        : `<button class="payBtn px-2 py-1 text-xs bg-indigo-600 text-white rounded ml-1" data-id="${id}">Pay</button>`;
 
       const tr = document.createElement('tr');
       tr.className = 'table-row';
       tr.dataset.studentId = id;
-
-      // carry overlay info for details modal + other uses
-      tr.dataset.carryForward = String(student.__carryOverlayAmount || 0);
-      tr.dataset.carryForwardYear = String(student.__carryOverlayPrevYear || '');
-
       tr.innerHTML = `
         <td class="p-2 border text-center align-top">
           <button class="expander text-indigo-600 hover:text-indigo-800" data-id="${id}" title="Expand/Collapse">
@@ -1405,7 +1310,10 @@
             <span class="font-semibold ${fin.periodDebtValue > 0 ? 'text-red-700' : ''}">${fmt(fin.periodDebtValue)}</span>
           </div>
         </td>
-        <td class="p-2 border align-top">${actionsHtml}</td>
+        <td class="p-2 border align-top">
+          <button class="viewBtn px-2 py-1 text-xs border rounded" data-id="${id}">View</button>
+          ${payBtnHtml}
+        </td>
       `;
       tbody.appendChild(tr);
 
@@ -1415,42 +1323,54 @@
     });
 
     const totalOutstanding = totalDue - totalCollected;
-
     const totalDueEl = document.getElementById('totalDue');
-    if (totalDueEl) { totalDueEl.textContent = fmt(totalDue); totalDueEl.dataset.amount = String(totalDue); }
-
+    if (totalDueEl) {
+      totalDueEl.textContent = fmt(totalDue);
+      totalDueEl.dataset.amount = String(totalDue);
+    }
     const totalCollectedEl = document.getElementById('totalCollected');
-    if (totalCollectedEl) { totalCollectedEl.textContent = fmt(totalCollected); totalCollectedEl.dataset.amount = String(totalCollected); }
-
+    if (totalCollectedEl) {
+      totalCollectedEl.textContent = fmt(totalCollected);
+      totalCollectedEl.dataset.amount = String(totalCollected);
+    }
     const totalOutstandingEl = document.getElementById('totalOutstanding');
-    if (totalOutstandingEl) { totalOutstandingEl.textContent = fmt(totalOutstanding); totalOutstandingEl.dataset.amount = String(totalOutstanding); }
+    if (totalOutstandingEl) {
+      totalOutstandingEl.textContent = fmt(totalOutstanding);
+      totalOutstandingEl.dataset.amount = String(totalOutstanding);
+    }
 
-    // row actions (delegated would be faster, but keeping simple)
-    tbody.querySelectorAll('.payBtn').forEach(btn => btn.addEventListener('click', (e) => openPaymentModalFor(e.currentTarget.dataset.id)));
+    tbody.querySelectorAll('.payBtn').forEach(btn => btn.addEventListener('click', (e) => {
+      if (btn.disabled) return;
+      openPaymentModalFor(e.currentTarget.dataset.id);
+    }));
     tbody.querySelectorAll('.viewBtn').forEach(btn => btn.addEventListener('click', e => openDetailsModal(e.target.dataset.id)));
-
     try {
       document.dispatchEvent(new CustomEvent('finance:tableRendered', { detail: { year: financeYear } }));
-    } catch (err) {}
+    } catch (eventErr) {
+      console.warn('finance:tableRendered dispatch failed', eventErr);
+    }
+    // NOTE: no per-row expander listeners added here (we use a single global delegated listener below)
 
     updateFinanceAggregates();
   }
 
-  /* ===== Aggregates sync (admin only) ===== */
-  let financeAggregateSnapshot = { totalStudents: 0, totalDue: 0, totalCollected: 0, totalOutstanding: 0, totalExpenses: 0 };
-
   function computeAggregateTotals() {
     const totals = { totalStudents: 0, totalDue: 0, totalCollected: 0, totalOutstanding: 0, totalExpenses: 0 };
     if (!cachedStudents || !Object.keys(cachedStudents).length) return totals;
-
     Object.values(cachedStudents).forEach((student) => {
       if (!parentCtx.enabled && student.isGraduated) return;
-      const fin = computeStudentFinancials(student);
+      let fin = computeStudentFinancials(student);
+      if (!student.hasYearData || student.isGraduated) {
+        const effectiveFee = student.isGraduated ? 0 : Number(student.feePerYear) || 0;
+        fin = {
+          feePerYear: effectiveFee,
+          paidAmount: 0,
+        };
+      }
       totals.totalStudents += 1;
       totals.totalDue += Number(fin.feePerYear) || 0;
       totals.totalCollected += Number(fin.paidAmount) || 0;
     });
-
     totals.totalOutstanding = totals.totalDue - totals.totalCollected;
     const totalExpensesEl = document.getElementById('totalExpenses');
     totals.totalExpenses = Number(totalExpensesEl?.dataset.amount || 0);
@@ -1460,6 +1380,7 @@
   async function updateFinanceAggregates() {
     if (parentCtx.enabled) return;
     financeAggregateSnapshot = computeAggregateTotals();
+    if (!activeSchoolId || !db) return;
     try {
       const summaryRef = schoolRef(`financials/${financeYear}/financeAggregates`);
       await summaryRef.update({
@@ -1475,7 +1396,7 @@
     }
   }
 
-  /* ====== SPEED: lazy-load one iframe on expand ====== */
+  // ====== SPEED FIX: lazy-load a single iframe when clicked, and close others ======
   function injectIframeIfNeeded(id) {
     const row = document.getElementById(`br-${id}`);
     if (!row) return;
@@ -1502,13 +1423,15 @@
     const row = document.getElementById(`br-${id}`);
     if (!row) return;
 
-    // close others
-    document.querySelectorAll('tr[id^="br-"]:not(.hidden)').forEach(r => { if (r !== row) r.classList.add('hidden'); });
+    // Close any other open breakdown rows
+    document.querySelectorAll('tr[id^="br-"]:not(.hidden)').forEach(r => {
+      if (r !== row) r.classList.add('hidden');
+    });
+    // Reset other chevrons
     document.querySelectorAll('button.expander.open').forEach(b => {
       if (b !== btn) {
         b.classList.remove('open');
-        const ic = b.querySelector('i');
-        if (ic) { ic.classList.remove('fa-chevron-up'); ic.classList.add('fa-chevron-down'); }
+        const ic = b.querySelector('i'); if (ic) ic.classList.remove('fa-chevron-up'); if (ic) ic.classList.add('fa-chevron-down');
       }
     });
 
@@ -1526,6 +1449,7 @@
     }
   });
 
+  // Auto-resize when child posts its height
   window.addEventListener('message', (e) => {
     const d = e.data || {};
     if (d.type === 'resizeIframe' && d.id) {
@@ -1534,20 +1458,19 @@
     }
   });
 
-  /* ===== Expenses ===== */
+  // ===== Expenses + exports (unchanged) =====
   const expenseForm = document.getElementById('expenseForm');
   const expenseTableBody = document.querySelector('#expenseTable tbody');
 
   async function loadExpenses(year = activeYear) {
-    if (parentCtx.enabled) return; // never show expenses to parents
     try {
       const targetYear = String(year || activeYear);
       const snap = await schoolRef(`expenses/${targetYear}`).once('value');
       const raw = snap.val() || {};
+      // Year-scoped only: do NOT fall back to unscoped /expenses, otherwise year switching shows wrong data.
       const expenseValues = Array.isArray(raw) ? raw.filter(Boolean) : Object.values(raw || {});
       expenseTableBody.innerHTML = '';
       let total = 0;
-
       if (!expenseValues.length) {
         expenseTableBody.innerHTML = `
           <tr>
@@ -1555,10 +1478,11 @@
           </tr>
         `;
       }
-
       expenseValues.forEach(exp => {
         total += Number(exp.amount) || 0;
-        const dateLabel = exp.timestamp ? new Date(exp.timestamp).toLocaleDateString() : (exp.date || '');
+        const dateLabel = exp.timestamp
+          ? new Date(exp.timestamp).toLocaleDateString()
+          : (exp.date || '');
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td class="p-2 border">${exp.category || ''}</td>
@@ -1568,13 +1492,11 @@
         `;
         expenseTableBody.appendChild(tr);
       });
-
       const totalExpensesEl = document.getElementById('totalExpenses');
       if (totalExpensesEl) {
         totalExpensesEl.textContent = fmt(total);
         totalExpensesEl.dataset.amount = String(total);
       }
-
       const collectedEl = document.getElementById('totalCollected');
       const collected = Number(collectedEl?.dataset.amount || 0);
       const net = collected - total;
@@ -1583,7 +1505,6 @@
         netEl.textContent = fmt(net);
         netEl.dataset.amount = String(net);
       }
-
       updateFinanceAggregates();
     } catch (err) {
       console.error('Error loading expenses:', err);
@@ -1594,8 +1515,6 @@
   if (expenseForm) {
     expenseForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      if (parentCtx.enabled) return;
-
       const category = (document.getElementById('expenseCategory')?.value || '').trim();
       const description = (document.getElementById('expenseDescription')?.value || '').trim();
       const amount = Number(document.getElementById('expenseAmount')?.value || 0);
@@ -1608,7 +1527,6 @@
 
       const year = String(activeYear || yearContext?.getSelectedYear?.() || new Date().getFullYear());
       const timestamp = new Date(`${date}T00:00:00`).getTime();
-
       await schoolRef(`expenses/${year}`).push({
         category,
         description,
@@ -1623,261 +1541,172 @@
     });
   }
 
-  /* ===== Parent mode UI lockdown ===== */
-  function applyParentModeUI(){
-    if (!parentCtx.enabled) return;
-
-    const fsCard = document.getElementById('financialStatementsCard');
-    if (fsCard) fsCard.style.display = 'none';
-
-    ['classFilter','showOnlyDebtors','downloadDebtNowCsv','downloadDebtNowPdf','downloadBreakdownCsv','downloadBreakdownPdf']
-      .forEach(id=>{
-        const el = document.getElementById(id);
-        if (el) el.style.display = 'none';
-      });
-
-    // Hide expenses KPIs
-    const kpiCards = document.querySelectorAll('.bg-white.p-4.rounded.shadow');
-    if (kpiCards[3]) kpiCards[3].style.display = 'none'; // Total Expenses
-    if (kpiCards[4]) kpiCards[4].style.display = 'none'; // Net Balance
-
-    // Hide expenses section
-    const expenseSections = document.querySelectorAll('.bg-white.rounded.shadow.p-4.mt-6');
-    expenseSections.forEach(section => {
-      if (section.querySelector('#expenseForm') || section.querySelector('#expenseTable')) section.style.display = 'none';
-    });
-
-    // Rename KPI headers
-    const kpiHeaders = document.querySelectorAll('.bg-white.p-4.rounded.shadow h3');
-    if (kpiHeaders[0]) kpiHeaders[0].textContent = 'Your Total Due (Year)';
-    if (kpiHeaders[1]) kpiHeaders[1].textContent = 'Paid (Total)';
-    if (kpiHeaders[2]) kpiHeaders[2].textContent = 'Balance';
-
-    // Auto-open the lone breakdown row
-    setTimeout(() => {
-      const onlyId = Object.keys(cachedStudents||{})[0];
-      if (onlyId) {
-        const br = document.getElementById(`br-${onlyId}`);
-        if (br) {
-          br.classList.remove('hidden');
-          injectIframeIfNeeded(onlyId);
-          const expandBtn = document.querySelector(`button.expander[data-id="${onlyId}"]`);
-          if (expandBtn) {
-            expandBtn.classList.add('open');
-            const icon = expandBtn.querySelector('i');
-            if (icon) { icon.classList.remove('fa-chevron-down'); icon.classList.add('fa-chevron-up'); }
-          }
-        }
-      }
-    }, 100);
-  }
-
-  /* ===== Data loading (Parent mode loads only one learner) ===== */
-  async function findStudentIdByAdmission(adm) {
-    const target = String(adm || '').trim();
-    if (!target) return null;
-
-    // Try admissionNumber
-    try {
-      const q1 = schoolRef('students').orderByChild('admissionNumber').equalTo(target);
-      const s1 = await q1.once('value');
-      const v1 = s1.val() || {};
-      const k1 = Object.keys(v1)[0];
-      if (k1) return k1;
-    } catch (_) {}
-
-    // Try admissionNo
-    try {
-      const q2 = schoolRef('students').orderByChild('admissionNo').equalTo(target);
-      const s2 = await q2.once('value');
-      const v2 = s2.val() || {};
-      const k2 = Object.keys(v2)[0];
-      if (k2) return k2;
-    } catch (_) {}
-
-    return null;
-  }
-
-  async function loadSingleStudentDataset(targetYear) {
-    const year = String(targetYear || activeYear);
-    let id = parentCtx.studentId ? String(parentCtx.studentId).trim() : '';
-    if (!id && parentCtx.adm) id = await findStudentIdByAdmission(parentCtx.adm);
-
-    if (!id) return null;
-
-    const [
-      studentSnap,
-      anchorEnrollSnap,
-      enrollSnap,
-      classFeesSnap,
-      overrideSnap,
-      studentFeeSnap,
-      plansSnap,
-      ledgerSnap,
-      carrySnap,
-    ] = await Promise.all([
-      schoolRef(`students/${id}`).once('value'),
-      schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}/${id}`).once('value'),
-      schoolRef(`enrollments/${year}/${id}`).once('value'),
-      schoolRef(`feesStructure/${year}`).once('value'),
-      schoolRef(`studentOverrides/${year}/${id}`).once('value'),
-      schoolRef(`studentFees/${year}/${id}`).once('value'),
-      schoolRef(`installmentPlans/${year}`).once('value'),
-      schoolRef(`financeLedgers/${year}/${id}`).once('value'),
-      schoolRef(`financeCarryForward/${year}/${id}`).once('value'),
-    ]);
-
-    const baseStudents = studentSnap.exists() ? { [id]: studentSnap.val() } : {};
-    const anchorEnroll = anchorEnrollSnap.exists() ? { [id]: anchorEnrollSnap.val() } : {};
-    const enrollments  = enrollSnap.exists() ? { [id]: enrollSnap.val() } : {};
-    const overrides    = overrideSnap.exists() ? { [id]: overrideSnap.val() } : {};
-    const ledgers      = ledgerSnap.exists() ? { [id]: ledgerSnap.val() } : {};
-    const carryForward = carrySnap.exists() ? { [id]: carrySnap.val() } : {};
-    const studentFees  = studentFeeSnap.exists() ? { [id]: studentFeeSnap.val() } : {};
-    const plans        = plansSnap.val() || {};
-    const classFees    = classFeesSnap.val() || {};
-
-    const built = buildFinanceStudents(
-      baseStudents,
-      anchorEnroll,
-      enrollments,
-      classFees,
-      overrides,
-      plans,
-      ledgers,
-      carryForward,
-      studentFees,
-      {}, // approvalsByStudent (never in parent)
-      year
-    );
-
-    return built;
-  }
-
-  async function loadAllStudentsDataset(targetYear) {
-    const year = String(targetYear || activeYear);
-
-    const [
-      baseSnap,
-      anchorEnrollSnap,
-      enrollmentSnap,
-      classFeesSnap,
-      stOverridesSnap,
-      plansSnap,
-      ledgerSnap,
-      carrySnap,
-      studentFeesSnap
-    ] = await Promise.all([
-      schoolRef('students').once('value'),
-      schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
-      schoolRef(`enrollments/${year}`).once('value'),
-      schoolRef(`feesStructure/${year}`).once('value'),
-      schoolRef(`studentOverrides/${year}`).once('value'),
-      schoolRef(`installmentPlans/${year}`).once('value'),
-      schoolRef(`financeLedgers/${year}`).once('value'),
-      schoolRef(`financeCarryForward/${year}`).once('value'),
-      schoolRef(`studentFees/${year}`).once('value'),
-    ]);
-
-    const baseStudents = baseSnap.val() || {};
-    let ledgerData = ledgerSnap.val() || {};
-
-    // Legacy fallback fix
-    if (!Object.keys(ledgerData || {}).length) {
-      try {
-        const legacyLedgerSnap = await schoolRef('financeLedgers').once('value');
-        const legacy = legacyLedgerSnap.val() || {};
-        ledgerData = pickYearBucket(legacy, year);
-      } catch (legacyErr) {
-        console.warn('Legacy financeLedgers read failed', legacyErr?.message || legacyErr);
-      }
-    }
-
-    let studentFeesData = studentFeesSnap.val() || {};
-    if (!Object.keys(studentFeesData || {}).length) {
-      try {
-        const legacyStudentFeesSnap = await schoolRef(`finance/${year}/studentFees`).once('value');
-        studentFeesData = legacyStudentFeesSnap.val() || {};
-      } catch (studentFeesErr) {
-        console.warn('Student fee override read failed', studentFeesErr?.message || studentFeesErr);
-      }
-    }
-
-    const approvalsByStudent = await loadApprovedFinanceApprovals(year, true);
-
-    const built = buildFinanceStudents(
-      baseStudents,
-      anchorEnrollSnap.val() || {},
-      enrollmentSnap.val() || {},
-      classFeesSnap.val() || {},
-      stOverridesSnap.val() || {},
-      plansSnap.val() || {},
-      ledgerData,
-      carrySnap.val() || {},
-      studentFeesData,
-      approvalsByStudent,
-      year
-    );
-
-    return Object.keys(built || {}).length ? built : baseStudents;
-  }
-
-  async function loadStudents(year = activeYear) {
-    if (!db) return;
-    const targetYear = String(year || activeYear);
-
-    activeYear = targetYear;
-    financeYear = targetYear;
-    try { sessionStorage.setItem('somap_selected_year', targetYear); } catch (_) {}
-    updateYearHint();
-
-    if (yearSelectEl && yearSelectEl.value !== targetYear) yearSelectEl.value = targetYear;
-
-    try {
-      const dataset = parentCtx.enabled
-        ? await loadSingleStudentDataset(targetYear)
-        : await loadAllStudentsDataset(targetYear);
-
-      if (!dataset || !Object.keys(dataset).length) {
-        // Parent mode must never leak other records — show friendly message
-        if (parentCtx.enabled) {
-          if (tbody) tbody.innerHTML =
-            `<tr><td colspan="10" class="p-4 text-center text-sm text-slate-600">No finance record found for this learner.</td></tr>`;
-          ['totalDue','totalCollected','totalOutstanding'].forEach(id=>{
-            const el = document.getElementById(id);
-            if (el){ el.textContent = '0'; el.dataset.amount = '0'; }
-          });
-          applyParentModeUI();
-          return;
-        }
-        cachedStudents = {};
-        renderTable();
-        return;
-      }
-
-      cachedStudents = dataset;
-
-      // Apply integrated carry-forward overlay (admin scope only) BEFORE rendering
-      await applyCarryForwardOverlay(targetYear);
-
-      populateStudentSelect();
-      renderTable();
-
-      if (parentCtx.enabled) applyParentModeUI();
-    } catch (err) {
-      console.error('Error loading students:', err);
-      alert('Error loading students: ' + err.message);
-    }
-  }
-
   async function refreshFinanceData(year = activeYear) {
     await loadStudents(year);
     await loadExpenses(year);
   }
 
-  /* ===== Payments & modals ===== */
+  // ===== CSV/PDF downloaders (parent-scoped) =====
+  function downloadCSV_Main() {
+    const rows = [['Admission No', 'Full Name', 'Class', 'Fee (Year)', 'Plan', 'Paid', 'Balance (Year)', 'Debt till …', 'Debt Amount']];
+    let totalFee = 0, totalPaid = 0, totalBal = 0, totalDebt = 0;
+    const filterClass = classFilter.value;
+    Object.entries(cachedStudents).forEach(([id, s]) => {
+      if (filterClass && s.classLevel !== filterClass) return;
+      const fin = computeStudentFinancials(s);
+      if (showingDebtorsOnly && (fin.balance <= 0 && fin.periodDebtValue <= 0)) return;
+      const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
+      rows.push([s.admissionNumber || '', fullName, s.classLevel || '', fin.feePerYear, s.paymentPlan || '', fin.paidAmount, fin.balance, fin.periodDebtLabel, fin.periodDebtValue]);
+      totalFee += fin.feePerYear; totalPaid += fin.paidAmount; totalBal += fin.balance; totalDebt += fin.periodDebtValue;
+    });
+    rows.push(['TOTAL', '', '', totalFee, '', totalPaid, totalBal, '', totalDebt]);
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Finance');
+    
+    // Parent mode: use child-specific filename
+    let filename = `finance_export_${Date.now()}.xlsx`;
+    if (parentCtx.enabled) {
+      const onlyId = Object.keys(cachedStudents||{})[0];
+      const only = cachedStudents[onlyId] || {};
+      const adm = only.admissionNumber || onlyId;
+      filename = `finance_${adm}_${(parentCtx.year||financeYear)}.xlsx`;
+    }
+    XLSX.writeFile(wb, filename);
+  }
+
+  function downloadPDF_Main() {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'landscape' });
+    const headers = [['Admission No', 'Full Name', 'Class', 'Fee (Year)', 'Plan', 'Paid', 'Balance (Year)', 'Debt till …', 'Debt Amount']];
+    const body = [];
+    let totalFee = 0, totalPaid = 0, totalBal = 0, totalDebt = 0;
+    const filterClass = classFilter.value;
+    Object.entries(cachedStudents).forEach(([id, s]) => {
+      if (filterClass && s.classLevel !== filterClass) return;
+      const fin = computeStudentFinancials(s);
+      if (showingDebtorsOnly && (fin.balance <= 0 && fin.periodDebtValue <= 0)) return;
+      const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
+      body.push([s.admissionNumber || '', fullName, s.classLevel || '', fin.feePerYear, s.paymentPlan || '', fin.paidAmount, fin.balance, fin.periodDebtLabel, fin.periodDebtValue]);
+      totalFee += fin.feePerYear; totalPaid += fin.paidAmount; totalBal += fin.balance; totalDebt += fin.periodDebtValue;
+    });
+    body.push(['TOTAL', '', '', totalFee, '', totalPaid, totalBal, '', totalDebt]);
+    doc.setFontSize(14); doc.text('SoMAp Finance Report', 14, 14);
+    doc.autoTable({ head: headers, body, startY: 20, styles: { fontSize: 8 } });
+    
+    // Parent mode: use child-specific filename
+    let filename = `finance_report_${Date.now()}.pdf`;
+    if (parentCtx.enabled) {
+      const onlyId = Object.keys(cachedStudents||{})[0];
+      const only = cachedStudents[onlyId] || {};
+      const adm = only.admissionNumber || onlyId;
+      filename = `finance_${adm}_${(parentCtx.year||financeYear)}.pdf`;
+    }
+    doc.save(filename);
+  }
+
+  function _gatherDebtNow() {
+    const rows = []; let totalDebt = 0;
+    const filterClass = classFilter.value;
+    Object.entries(cachedStudents).forEach(([id, s]) => {
+      if (filterClass && s.classLevel !== filterClass) return;
+      const fin = computeStudentFinancials(s);
+      if (fin.periodDebtValue > 0) {
+        const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
+        rows.push([s.admissionNumber || '', fullName, s.classLevel || '', s.paymentPlan || '', fin.periodDebtLabel, fin.periodDebtValue]);
+        totalDebt += fin.periodDebtValue;
+      }
+    });
+    return { rows, totalDebt };
+  }
+
+  function downloadCSV_DebtNow() {
+    const header = ['Admission No', 'Full Name', 'Class', 'Plan', 'Debt till …', 'Debt Amount'];
+    const { rows, totalDebt } = _gatherDebtNow();
+    const data = [header, ...rows, ['TOTAL', '', '', '', '', totalDebt]];
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Debt Now');
+    XLSX.writeFile(wb, `debt_now_${Date.now()}.xlsx`);
+  }
+
+  function downloadPDF_DebtNow() {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'landscape' });
+    const header = [['Admission No', 'Full Name', 'Class', 'Plan', 'Debt till …', 'Debt Amount']];
+    const { rows, totalDebt } = _gatherDebtNow();
+    const body = [...rows, ['TOTAL', '', '', '', '', totalDebt]];
+    doc.setFontSize(14); doc.text('Debt List (Current Period)', 14, 14);
+    doc.autoTable({ head: header, body: body, startY: 20, styles: { fontSize: 8 } });
+    doc.save(`debt_now_${Date.now()}.pdf`);
+  }
+
+  function _gatherBreakdown() {
+    const sheets = [];
+    const filterClass = classFilter.value;
+    Object.entries(cachedStudents).forEach(([id, s]) => {
+      if (filterClass && s.classLevel !== filterClass) return;
+      const fin = computeStudentFinancials(s);
+      const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
+      const rows = [['Period', 'Expected', 'Allocated Paid', 'Remaining', 'Status', 'Window']];
+      let totalExp = 0, totalPaid = 0;
+      fin.scheduleItems.forEach(it => {
+        const need = it.amount, got = it.paidAllocated, rem = Math.max(0, need - got);
+        totalExp += need; totalPaid += got;
+        rows.push([it.label, need, got, rem, it.status, `${new Date(it.fromTS).toLocaleDateString()} – ${new Date(it.toTS).toLocaleDateString()}`]);
+      });
+      const totalRem = Math.max(0, totalExp - totalPaid);
+      rows.push(['TOTAL', totalExp, totalPaid, totalRem, '', '']);
+      sheets.push({ title: `${fullName} (${s.admissionNumber || ''})`, rows });
+    });
+    return sheets;
+  }
+
+  function downloadCSV_Breakdown() {
+    const wb = XLSX.utils.book_new();
+    const sheets = _gatherBreakdown();
+    if (!sheets.length) return alert('No students to export.');
+    sheets.forEach(sh => {
+      const ws = XLSX.utils.aoa_to_sheet(sh.rows);
+      XLSX.utils.book_append_sheet(wb, ws, sh.title.slice(0, 31));
+    });
+    
+    // Parent mode: use child-specific filename
+    let filename = `breakdowns_${Date.now()}.xlsx`;
+    if (parentCtx.enabled) {
+      const onlyId = Object.keys(cachedStudents||{})[0];
+      const only = cachedStudents[onlyId] || {};
+      const adm = only.admissionNumber || onlyId;
+      filename = `breakdown_${adm}_${(parentCtx.year||financeYear)}.xlsx`;
+    }
+    XLSX.writeFile(wb, filename);
+  }
+
+  function downloadPDF_Breakdown() {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'landscape' });
+    const sheets = _gatherBreakdown();
+    if (!sheets.length) return alert('No students to export.');
+    sheets.forEach((sh, idx) => {
+      if (idx > 0) doc.addPage();
+      doc.setFontSize(14);
+      doc.text(`Installment Breakdown — ${sh.title}`, 14, 14);
+      doc.autoTable({ head: [['Period', 'Expected', 'Allocated Paid', 'Remaining', 'Status', 'Window']], body: sh.rows.slice(1), startY: 20, styles: { fontSize: 8 } });
+    });
+    
+    // Parent mode: use child-specific filename
+    let filename = `breakdowns_${Date.now()}.pdf`;
+    if (parentCtx.enabled) {
+      const onlyId = Object.keys(cachedStudents||{})[0];
+      const only = cachedStudents[onlyId] || {};
+      const adm = only.admissionNumber || onlyId;
+      filename = `breakdown_${adm}_${(parentCtx.year||financeYear)}.pdf`;
+    }
+    doc.save(filename);
+  }
+
+  // ===== Payments & modals (unchanged) =====
   function populateStudentSelect() {
-    if (!studentSelect) return;
     studentSelect.innerHTML = '<option value="">-- Select student --</option>';
     Object.entries(cachedStudents).forEach(([id, s]) => {
       const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
@@ -1889,21 +1718,24 @@
   }
 
   function openPaymentModalFor(id) {
-    if (parentCtx.enabled) return; // parents cannot record payments here
     if (!cachedStudents[id]) return alert('Student not found');
     studentSelect.value = id;
+    // Set default date to today
     const today = new Date().toISOString().split('T')[0];
     document.getElementById('paymentDate').value = today;
     paymentModal.style.display = 'block';
   }
   function closePaymentModalFn() { paymentModal.style.display = 'none'; paymentForm.reset(); }
-  function closeDetailsModalFn() { detailsModal.style.display = 'none'; detailsContent.innerHTML = ''; }
 
-  const LEDGER_ACTION_PASSWORD = 'REHEMam!'; // NOTE: frontend password is not secure; prefer Firebase rules
+  const LEDGER_ACTION_PASSWORD = 'REHEMam!';
+
   function confirmLedgerAction(actionLabel) {
     const input = prompt(`Enter password to ${actionLabel}:`);
     if (input === null) return false;
-    if (input !== LEDGER_ACTION_PASSWORD) { alert('Incorrect password.'); return false; }
+    if (input !== LEDGER_ACTION_PASSWORD) {
+      alert('Incorrect password.');
+      return false;
+    }
     return true;
   }
 
@@ -1926,20 +1758,23 @@
     const amountInput = prompt('Edit amount (TSh)', payment.amount != null ? String(payment.amount) : '');
     if (amountInput === null) return;
     const amount = Number(amountInput);
-    if (!Number.isFinite(amount) || amount < 0) return alert('Enter a valid non-negative amount.');
-
+    if (!Number.isFinite(amount) || amount < 0) {
+      alert('Enter a valid non-negative amount.');
+      return;
+    }
     const methodInput = prompt('Edit method', payment.method || '');
     if (methodInput === null) return;
     const noteInput = prompt('Edit note', payment.note || '');
     if (noteInput === null) return;
-
     const currentStamp = payment.timestamp ? new Date(payment.timestamp) : null;
     const defaultStamp = currentStamp ? currentStamp.toISOString().slice(0, 16).replace('T', ' ') : '';
     const dateInput = prompt('Edit date/time (YYYY-MM-DD or YYYY-MM-DD HH:mm). Leave blank to keep.', defaultStamp);
     if (dateInput === null) return;
-
     const nextTimestamp = parseLedgerTimestampInput(dateInput, payment.timestamp || Date.now());
-    if (nextTimestamp === null) return alert('Invalid date/time format.');
+    if (nextTimestamp === null) {
+      alert('Invalid date/time format.');
+      return;
+    }
 
     try {
       await schoolRef(`financeLedgers/${financeYear}/${studentId}/payments/${paymentId}`).update({
@@ -1970,18 +1805,19 @@
   }
 
   async function promptEditYearFee(studentId) {
+    if (!db) return alert('Database connection not ready.');
     if (!hasFinanceAdminAccess()) return alert('Not authorized to edit fees.');
     const student = cachedStudents[studentId];
     if (!student) return alert('Student not found');
-
     const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim() || (student.admissionNumber || studentId);
     const currentBase = Math.max(0, Number(student.baseFee || 0));
     const input = prompt(`Set base fee for ${fullName} (${financeYear})`, currentBase ? String(currentBase) : '');
     if (input === null) return;
-
     const parsed = Number(input);
-    if (!Number.isFinite(parsed) || parsed < 0) return alert('Enter a valid non-negative amount.');
-
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      alert('Enter a valid non-negative amount.');
+      return;
+    }
     const rounded = Math.round(parsed);
     try {
       await schoolRef(`studentFees/${financeYear}/${studentId}`).update({ feePerYear: rounded });
@@ -1995,40 +1831,74 @@
   }
 
   async function openDetailsModal(id) {
-    const s = cachedStudents[id];
-    if (!s) return alert('Student not found');
-
+    const s = cachedStudents[id]; if (!s) return alert('Student not found');
     let fin = computeStudentFinancials(s);
     if (s.isGraduated) {
-      fin = { feePerYear:0, previousDebt:0, paidAmount:0, balance:0, periodDebtLabel:'-', periodDebtValue:0, credit:0, scheduleItems:[] };
+      fin = {
+        feePerYear: 0,
+        previousDebt: 0,
+        paidAmount: 0,
+        balance: 0,
+        periodDebtLabel: '-',
+        periodDebtValue: 0,
+        credit: 0,
+        scheduleItems: [],
+      };
     }
-
     const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
     const targetYearNum = Number(financeYear);
     const admission = s.admissionNumber || id;
-
-    // carry-forward display: use integrated cache
     let carryForwardPrev = 0;
     if (Number.isFinite(targetYearNum)) {
       const prevYear = targetYearNum - 1;
-      const key = `${targetYearNum}::${admission}`;
-      carryForwardPrev = Math.max(0, Number(sharedCarryCache?.[key]?.carry || 0));
-      if (prevYear < CARRY_FORWARD_START_YEAR) carryForwardPrev = 0;
+      if (prevYear >= CARRY_FORWARD_START_YEAR) {
+        const safeId = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(id)) : String(id).replace(/"/g, '\\"');
+        const rowEl = document.querySelector(`#financeTable tbody tr[data-student-id="${safeId}"]`);
+        const rowCarry = Number(rowEl?.dataset?.carryForward || 0);
+        if (rowCarry > 0) {
+          carryForwardPrev = rowCarry;
+        } else {
+          const key = `${targetYearNum}::${admission}`;
+          const sharedCarry = window.__financeCarryForwardVisual?.[key]?.carry;
+          if (sharedCarry) carryForwardPrev = Number(sharedCarry) || 0;
+        }
+        if (carryForwardPrev <= 0 && typeof window.__finance_getBalanceForYearAdmission === 'function') {
+          try {
+            const bal = await window.__finance_getBalanceForYearAdmission(prevYear, admission);
+            carryForwardPrev = Math.max(0, Number(bal) || 0);
+          } catch (err) {
+            console.warn('Carry-forward (details modal) lookup failed', admission, prevYear, err);
+          }
+        }
+      }
     }
-
+    carryForwardPrev = Math.max(0, Number(carryForwardPrev) || 0);
     const dbCarry = Math.max(0, Number(s.carryAmount || 0));
-    const baseFee = Math.max(0, Number(s.baseFee || 0));
-    const totalDue = baseFee + dbCarry;
-
+    const baseFeeRaw = s.baseFee != null ? Number(s.baseFee) : Number(s.feePerYear || 0) - dbCarry;
+    const baseFee = Math.max(0, Number.isFinite(baseFeeRaw) ? baseFeeRaw : 0);
+    const prevYearLabel = Number.isFinite(targetYearNum) ? targetYearNum - 1 : 'Prev';
+    const effectiveCarry = Math.max(dbCarry, carryForwardPrev);
+    const totalDue = baseFee + effectiveCarry;
     const paidTotal = Math.max(0, Number(fin.paidAmount || 0));
     const balanceDisplay = Math.max(0, totalDue - paidTotal);
-
-    const prevYearLabel = Number.isFinite(targetYearNum) ? targetYearNum - 1 : 'Prev';
+    const debtWithCarry = Math.max(0, Number(fin.periodDebtValue || 0) + carryForwardPrev);
 
     let carryLine = '';
     if (carryForwardPrev > 0 || dbCarry > 0) {
-      carryLine = `<p><strong>Carry Forward (${prevYearLabel}):</strong> ${fmt(carryForwardPrev || dbCarry)}</p>`;
+      const parts = [];
+      if (carryForwardPrev > 0) {
+        parts.push(`${fmt(carryForwardPrev)}${dbCarry > 0 && dbCarry !== carryForwardPrev ? '' : ''}`);
+      }
+      if (dbCarry > 0 && dbCarry !== carryForwardPrev) {
+        parts.push(`Existing carry-in: ${fmt(dbCarry)}`);
+      }
+      const combined = parts.length ? parts.join(' + ') : fmt(effectiveCarry);
+      carryLine = `<p><strong>Carry Forward (${prevYearLabel}):</strong> ${combined}</p>`;
     }
+
+    const carrySummaryNote = (carryForwardPrev > 0 && dbCarry > 0 && dbCarry === carryForwardPrev)
+      ? `<span class="text-xs text-slate-500">(Already captured in ${financeYear} record)</span>`
+      : '';
 
     let html = `
       <p><strong>Name:</strong> ${fullName}</p>
@@ -2036,13 +1906,13 @@
       <p><strong>Class:</strong> ${s.classLevel || ''}</p>
       <p><strong>Fee (base):</strong> ${fmt(baseFee)}</p>
       ${carryLine || ''}
+      ${carrySummaryNote ? `<p class="mt-0">${carrySummaryNote}</p>` : ''}
       <p><strong>Total Due (incl. carry):</strong> ${fmt(totalDue)}</p>
       <p><strong>Payment Plan:</strong> ${s.paymentPlan || ''}</p>
-      <p><strong>Debt till:</strong> ${fin.periodDebtLabel} - <strong>${fmt(fin.periodDebtValue)}</strong></p>
+      <p><strong>Debt till:</strong> ${fin.periodDebtLabel} - <strong>${fmt(debtWithCarry)}</strong></p>
       <p><strong>Paid:</strong> ${fmt(paidTotal)}</p>
       <p><strong>Balance (incl. carry):</strong> ${fmt(balanceDisplay)}</p>
     `;
-
     if (hasFinanceAdminAccess()) {
       html += `
         <div class="mt-3 flex flex-col gap-2">
@@ -2053,69 +1923,64 @@
         </div>
       `;
     }
-
-    html += `<hr class="my-3"/><h4 class="font-semibold">Payments Ledger</h4>`;
-
+    if (!s.hasYearData) {
+      html += `
+        <div class="mt-2 text-xs text-slate-500">No finance data recorded for ${financeYear}. All totals show as 0 until this year's structure or receipts are captured.</div>
+      `;
+    }
+    html += `
+      <hr class="my-3"/>
+      <h4 class="font-semibold">Payments Ledger</h4>
+    `;
     const paymentEntries = Object.entries(s.payments || {}).filter(([, p]) => p);
     if (!paymentEntries.length) {
       html += '<div class="text-sm text-gray-500">No payments recorded yet.</div>';
     } else {
       const escapeAttr = (value) => String(value).replace(/"/g, '&quot;');
       html += `<div class="overflow-auto"><table class="min-w-full text-xs mt-2"><thead><tr class="table-header"><th class="p-1 border">Date</th><th class="p-1 border">Amount</th><th class="p-1 border">Method</th><th class="p-1 border">Note</th><th class="p-1 border">Actions</th></tr></thead><tbody>`;
-      paymentEntries
-        .sort((a, b) => (a[1]?.timestamp || 0) - (b[1]?.timestamp || 0))
-        .forEach(([paymentId, p]) => {
-          const d = new Date(p.timestamp || 0).toLocaleString();
-          const safeId = escapeAttr(paymentId);
-          html += `<tr>
-            <td class="p-1 border">${d}</td>
-            <td class="p-1 border">${fmt(p.amount)}</td>
-            <td class="p-1 border">${p.method || ''}</td>
-            <td class="p-1 border">${p.note || ''}</td>
-            <td class="p-1 border">
-              <div class="flex gap-1">
-                <button class="px-2 py-0.5 text-[11px] bg-amber-500 text-white rounded" data-action="edit-payment" data-payment-id="${safeId}">Edit</button>
-                <button class="px-2 py-0.5 text-[11px] bg-rose-600 text-white rounded" data-action="delete-payment" data-payment-id="${safeId}">Delete</button>
-              </div>
-            </td>
-          </tr>`;
-        });
+      paymentEntries.sort((a, b) => (a[1]?.timestamp || 0) - (b[1]?.timestamp || 0)).forEach(([paymentId, p]) => {
+        const d = new Date(p.timestamp || 0).toLocaleString();
+        const safeId = escapeAttr(paymentId);
+        html += `<tr><td class="p-1 border">${d}</td><td class="p-1 border">${fmt(p.amount)}</td><td class="p-1 border">${p.method || ''}</td><td class="p-1 border">${p.note || ''}</td><td class="p-1 border"><div class="flex gap-1"><button class="px-2 py-0.5 text-[11px] bg-amber-500 text-white rounded" data-action="edit-payment" data-payment-id="${safeId}">Edit</button><button class="px-2 py-0.5 text-[11px] bg-rose-600 text-white rounded" data-action="delete-payment" data-payment-id="${safeId}">Delete</button></div></td></tr>`;
+      });
       html += `</tbody></table></div>`;
     }
-
     detailsContent.innerHTML = html;
-
     if (hasFinanceAdminAccess()) {
       const editBtn = detailsContent.querySelector('[data-action="edit-fee-year"]');
       if (editBtn) editBtn.addEventListener('click', () => promptEditYearFee(id));
     }
-
     detailsContent.querySelectorAll('[data-action="edit-payment"]').forEach((btn) => {
       const paymentId = btn.getAttribute('data-payment-id');
       btn.addEventListener('click', () => handleLedgerEdit(id, paymentId));
     });
-
     detailsContent.querySelectorAll('[data-action="delete-payment"]').forEach((btn) => {
       const paymentId = btn.getAttribute('data-payment-id');
       btn.addEventListener('click', () => handleLedgerDelete(id, paymentId));
     });
-
     detailsModal.style.display = 'block';
   }
+  function closeDetailsModalFn() { detailsModal.style.display = 'none'; detailsContent.innerHTML = ''; }
 
   function resolveRecorderEmail() {
     if (window.currentUserEmail) return window.currentUserEmail;
     try {
-      const stored = sessionStorage.getItem('somapUserEmail') || sessionStorage.getItem('userEmail');
-      if (stored) return stored;
+      if (window.sessionStorage) {
+        const stored = sessionStorage.getItem('somapUserEmail') || sessionStorage.getItem('userEmail');
+        if (stored) return stored;
+      }
+    } catch (_) {}
+    try {
+      if (firebase.auth) {
+        const user = firebase.auth().currentUser;
+        if (user && user.email) return user.email;
+      }
     } catch (_) {}
     return 'unknown';
   }
 
-  paymentForm?.addEventListener('submit', async (e) => {
+  paymentForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (parentCtx.enabled) return alert('Parents cannot record payments here.');
-
     const studentId = studentSelect.value;
     const amount = Number(document.getElementById('paymentAmount').value || 0);
     const paymentDateInput = document.getElementById('paymentDate').value;
@@ -2124,13 +1989,11 @@
     const paidBy = (document.getElementById('paymentPaidBy').value || '').trim();
     const payerContact = (document.getElementById('paymentPayerContact').value || '').trim();
     const note = document.getElementById('paymentNote').value || '';
-
     if (!studentId) return alert('Choose a student');
     if (amount <= 0) return alert('Enter a valid amount');
     if (!paymentDateInput) return alert('Please select payment date');
     if (!paidBy) return alert('Please enter who made the payment');
     if (!payerContact) return alert('Please enter contact of payer');
-
     try {
       const studentRef = schoolRef(`students/${studentId}`);
       const snap = await studentRef.once('value');
@@ -2141,7 +2004,6 @@
       const totalRequired = Number(fin.feePerYear || 0);
       const totalPaidBefore = Number(fin.paidAmount || 0);
       const newBalance = Math.max(0, totalRequired - Math.min(totalRequired, totalPaidBefore + amount));
-
       const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim();
       const recorder = resolveRecorderEmail();
       const paymentTimestamp = new Date(paymentDateInput).getTime() || Date.now();
@@ -2159,8 +2021,8 @@
         paymentMethod: method,
         paymentReferenceCode: reference || 'N/A',
         datePaid: paymentTimestamp,
-        paidBy,
-        payerContact,
+        paidBy: paidBy,
+        payerContact: payerContact,
         recordedBy: recorder,
         status: 'pending',
         academicYear: financeYear,
@@ -2178,165 +2040,198 @@
             timestamp: paymentTimestamp,
             recordedBy: recorder,
             referenceCode: reference || null,
-            paidBy,
-            payerContact,
+            paidBy: paidBy,
+            payerContact: payerContact,
           },
+          breakdown: [
+            { label: 'Academic Year', value: financeYear },
+            { label: 'Plan', value: student.paymentPlan || '--' },
+            { label: 'Fee (Year)', value: `TSh ${fmt(totalRequired)}` },
+            { label: 'Paid Before', value: `TSh ${fmt(totalPaidBefore)}` },
+            { label: 'Balance After Approval', value: `TSh ${fmt(newBalance)}` },
+            { label: 'Paid By', value: paidBy },
+            { label: 'Payer Contact', value: payerContact },
+          ],
         },
       });
 
       alert('Payment sent for admin approval. Student will update once approved.');
       paymentForm.reset();
       closePaymentModalFn();
-      await loadStudents(financeYear);
+      await loadStudents();
     } catch (err) {
       console.error('Error recording payment', err);
       alert('Error recording payment: ' + err.message);
     }
   });
 
-  /* ===== CSV/PDF export (same behavior) ===== */
-  function _gatherDebtNow() {
-    const rows = []; let totalDebt = 0;
-    const filterClass = classFilter?.value || '';
-    Object.entries(cachedStudents).forEach(([id, s]) => {
-      if (filterClass && s.classLevel !== filterClass) return;
-      const fin = computeStudentFinancials(s);
-      if (fin.periodDebtValue > 0) {
-        const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
-        rows.push([s.admissionNumber || '', fullName, s.classLevel || '', s.paymentPlan || '', fin.periodDebtLabel, fin.periodDebtValue]);
-        totalDebt += fin.periodDebtValue;
+  // ===== Parent mode UI lockdown =====
+  function applyParentModeUI(){
+    if (!parentCtx.enabled) return;
+    
+    const fsCard = document.getElementById('financialStatementsCard');
+    if (fsCard) fsCard.style.display = 'none';
+    
+    // Hide filters & bulk exports that could reveal other students
+    ['classFilter','showOnlyDebtors','downloadDebtNowCsv','downloadDebtNowPdf',
+     'downloadBreakdownCsv','downloadBreakdownPdf'].forEach(id=>{
+      const el = document.getElementById(id); 
+      if (el) el.style.display = 'none';
+    });
+    
+    // Hide expenses KPIs (parents don't need to see school expenses)
+    const kpiCards = document.querySelectorAll('.bg-white.p-4.rounded.shadow');
+    if (kpiCards[3]) kpiCards[3].style.display = 'none'; // Total Expenses
+    if (kpiCards[4]) kpiCards[4].style.display = 'none'; // Net Balance
+    
+    // Hide entire expenses section (form, table, reports)
+    const expenseSections = document.querySelectorAll('.bg-white.rounded.shadow.p-4.mt-6');
+    expenseSections.forEach(section => {
+      if (section.querySelector('#expenseForm') || section.querySelector('#expenseTable')) {
+        section.style.display = 'none';
       }
     });
-    return { rows, totalDebt };
+    
+    // Rename finance KPIs to parent-friendly labels
+    const kpiHeaders = document.querySelectorAll('.bg-white.p-4.rounded.shadow h3');
+    if (kpiHeaders[0]) kpiHeaders[0].textContent = 'Your Total Due (Year)';
+    if (kpiHeaders[1]) kpiHeaders[1].textContent = 'Paid (Total)';
+    if (kpiHeaders[2]) kpiHeaders[2].textContent = 'Balance';
+    
+    // Auto-open the lone breakdown row (there is exactly one row in parent mode)
+    setTimeout(() => {
+      const onlyId = Object.keys(cachedStudents||{})[0];
+      if (onlyId) {
+        const br = document.getElementById(`br-${onlyId}`);
+        if (br) {
+          br.classList.remove('hidden');
+          injectIframeIfNeeded(onlyId);
+          // Also rotate the chevron
+          const expandBtn = document.querySelector(`button.expander[data-id="${onlyId}"]`);
+          if (expandBtn) {
+            expandBtn.classList.add('open');
+            const icon = expandBtn.querySelector('i');
+            if (icon) { 
+              icon.classList.remove('fa-chevron-down'); 
+              icon.classList.add('fa-chevron-up'); 
+            }
+          }
+        }
+      }
+    }, 100);
   }
 
-  function downloadCSV_Main() {
-    const rows = [['Admission No', 'Full Name', 'Class', 'Fee (year)', 'Plan', 'Paid', 'Balance (Year)', 'Debt till …', 'Debt Amount']];
-    let totalFee = 0, totalPaid = 0, totalBal = 0, totalDebt = 0;
-    const filterClass = classFilter?.value || '';
-    Object.entries(cachedStudents).forEach(([id, s]) => {
-      if (filterClass && s.classLevel !== filterClass) return;
-      const fin = computeStudentFinancials(s);
-      if (showingDebtorsOnly && (fin.balance <= 0 && fin.periodDebtValue <= 0)) return;
-      const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
-      rows.push([s.admissionNumber || '', fullName, s.classLevel || '', fin.feePerYear, s.paymentPlan || '', fin.paidAmount, fin.balance, fin.periodDebtLabel, fin.periodDebtValue]);
-      totalFee += fin.feePerYear; totalPaid += fin.paidAmount; totalBal += fin.balance; totalDebt += fin.periodDebtValue;
-    });
-    rows.push(['TOTAL', '', '', totalFee, '', totalPaid, totalBal, '', totalDebt]);
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Finance');
-    const filename = parentCtx.enabled
-      ? `finance_${(Object.values(cachedStudents)[0]?.admissionNumber||'student')}_${(parentCtx.year||financeYear)}.xlsx`
-      : `finance_export_${Date.now()}.xlsx`;
-    XLSX.writeFile(wb, filename);
+  // ===== Data loading and UI wiring =====
+  async function loadStudents(year = activeYear) {
+    if (!db) return;
+    const targetYear = String(year || activeYear);
+    activeYear = targetYear;
+    financeYear = targetYear;
+    try { sessionStorage.setItem('somap_selected_year', targetYear); } catch (_) {}
+    updateYearHint();
+    if (yearSelectEl && yearSelectEl.value !== targetYear) {
+      yearSelectEl.value = targetYear;
+    }
+    try {
+      const [
+        baseSnap,
+        anchorEnrollSnap,
+        enrollmentSnap,
+        classFeesSnap,
+        stOverridesSnap,
+        plansSnap,
+        ledgerSnap,
+        carrySnap,
+        studentFeesSnap
+      ] = await Promise.all([
+        schoolRef('students').once('value'),
+        schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
+        schoolRef(`enrollments/${targetYear}`).once('value'),
+        schoolRef(`feesStructure/${targetYear}`).once('value'),
+        schoolRef(`studentOverrides/${targetYear}`).once('value'),
+        schoolRef(`installmentPlans/${targetYear}`).once('value'),
+        schoolRef(`financeLedgers/${targetYear}`).once('value'),
+        schoolRef(`financeCarryForward/${targetYear}`).once('value'),
+        schoolRef(`studentFees/${targetYear}`).once('value'),
+      ]);
+      const baseStudents = baseSnap.val() || {};
+      let ledgerData = ledgerSnap.val() || {};
+      if (!Object.keys(ledgerData || {}).length) {
+        try {
+          const legacyLedgerSnap = await schoolRef('financeLedgers').once('value');
+          ledgerData = legacyLedgerSnap.val() || {};
+        } catch (legacyErr) {
+          console.warn('Legacy financeLedgers read failed', legacyErr?.message || legacyErr);
+        }
+      }
+      let studentFeesData = studentFeesSnap.val() || {};
+      if (!Object.keys(studentFeesData || {}).length) {
+        try {
+          const legacyStudentFeesSnap = await schoolRef(`finance/${targetYear}/studentFees`).once('value');
+          studentFeesData = legacyStudentFeesSnap.val() || {};
+        } catch (studentFeesErr) {
+          console.warn('Student fee override read failed', studentFeesErr?.message || studentFeesErr);
+        }
+      }
+      const approvalsByStudent = await loadApprovedFinanceApprovals(targetYear, true);
+      cachedStudents = buildFinanceStudents(
+        baseStudents,
+        anchorEnrollSnap.val() || {},
+        enrollmentSnap.val() || {},
+        classFeesSnap.val() || {},
+        stOverridesSnap.val() || {},
+        plansSnap.val() || {},
+        ledgerData,
+        carrySnap.val() || {},
+        studentFeesData,
+        approvalsByStudent,
+        targetYear
+      );
+      if (!Object.keys(cachedStudents).length) {
+        cachedStudents = baseStudents;
+      }
+
+      // ===== Parent mode: filter to single learner =====
+      if (parentCtx.enabled) {
+        let targetId = parentCtx.studentId;
+        if (!targetId && parentCtx.adm) {
+          targetId = Object.keys(cachedStudents||{}).find(k =>
+            String(cachedStudents[k]?.admissionNumber||'') === String(parentCtx.adm)
+          );
+        }
+        if (!targetId || !cachedStudents[targetId]) {
+          // Clear table and show a friendly message; do not leak other records
+          const tbodyEl = document.querySelector('#financeTable tbody');
+          if (tbodyEl) tbodyEl.innerHTML =
+            `<tr><td colspan="10" class="p-4 text-center text-sm text-slate-600">
+              No finance record found for this learner.
+            </td></tr>`;
+          // Also lock KPIs to 0
+          ['totalDue','totalCollected','totalOutstanding'].forEach(id=>{
+            const el = document.getElementById(id);
+            if (el){ el.textContent = '0'; el.dataset.amount = '0'; }
+          });
+          // Stop further rendering in parent scope
+          populateStudentSelect();
+          applyParentModeUI();
+          return;
+        }
+        // Reduce dataset to the single learner
+        cachedStudents = { [targetId]: cachedStudents[targetId] };
+      }
+
+      populateStudentSelect();
+      renderTable();
+      if (parentCtx.enabled) {
+        applyParentModeUI();
+      }
+    } catch (err) {
+      console.error('Error loading students:', err);
+      alert('Error loading students: ' + err.message);
+    }
   }
 
-  function downloadPDF_Main() {
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF({ orientation: 'landscape' });
-    const headers = [['Admission No', 'Full Name', 'Class', 'Fee (year)', 'Plan', 'Paid', 'Balance (Year)', 'Debt till …', 'Debt Amount']];
-    const body = [];
-    let totalFee = 0, totalPaid = 0, totalBal = 0, totalDebt = 0;
-    const filterClass = classFilter?.value || '';
-    Object.entries(cachedStudents).forEach(([id, s]) => {
-      if (filterClass && s.classLevel !== filterClass) return;
-      const fin = computeStudentFinancials(s);
-      if (showingDebtorsOnly && (fin.balance <= 0 && fin.periodDebtValue <= 0)) return;
-      const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
-      body.push([s.admissionNumber || '', fullName, s.classLevel || '', fin.feePerYear, s.paymentPlan || '', fin.paidAmount, fin.balance, fin.periodDebtLabel, fin.periodDebtValue]);
-      totalFee += fin.feePerYear; totalPaid += fin.paidAmount; totalBal += fin.balance; totalDebt += fin.periodDebtValue;
-    });
-    body.push(['TOTAL', '', '', totalFee, '', totalPaid, totalBal, '', totalDebt]);
-    doc.setFontSize(14); doc.text('SoMAp Finance Report', 14, 14);
-    doc.autoTable({ head: headers, body, startY: 20, styles: { fontSize: 8 } });
-    const filename = parentCtx.enabled
-      ? `finance_${(Object.values(cachedStudents)[0]?.admissionNumber||'student')}_${(parentCtx.year||financeYear)}.pdf`
-      : `finance_report_${Date.now()}.pdf`;
-    doc.save(filename);
-  }
-
-  function downloadCSV_DebtNow() {
-    const header = ['Admission No', 'Full Name', 'Class', 'Plan', 'Debt till …', 'Debt Amount'];
-    const { rows, totalDebt } = _gatherDebtNow();
-    const data = [header, ...rows, ['TOTAL', '', '', '', '', totalDebt]];
-    const ws = XLSX.utils.aoa_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Debt Now');
-    XLSX.writeFile(wb, `debt_now_${Date.now()}.xlsx`);
-  }
-
-  function downloadPDF_DebtNow() {
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF({ orientation: 'landscape' });
-    const header = [['Admission No', 'Full Name', 'Class', 'Plan', 'Debt till …', 'Debt Amount']];
-    const { rows, totalDebt } = _gatherDebtNow();
-    const body = [...rows, ['TOTAL', '', '', '', '', totalDebt]];
-    doc.setFontSize(14); doc.text('Debt List (Current Period)', 14, 14);
-    doc.autoTable({ head: header, body: body, startY: 20, styles: { fontSize: 8 } });
-    doc.save(`debt_now_${Date.now()}.pdf`);
-  }
-
-  function _gatherBreakdown() {
-    const sheets = [];
-    const filterClass = classFilter?.value || '';
-    Object.entries(cachedStudents).forEach(([id, s]) => {
-      if (filterClass && s.classLevel !== filterClass) return;
-      const fin = computeStudentFinancials(s);
-      const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
-      const rows = [['Period', 'Expected', 'Allocated Paid', 'Remaining', 'Status', 'Window']];
-      let totalExp = 0, totalPaid = 0;
-      fin.scheduleItems.forEach(it => {
-        const need = it.amount, got = it.paidAllocated, rem = Math.max(0, need - got);
-        totalExp += need; totalPaid += got;
-        rows.push([it.label, need, got, rem, it.status, `${new Date(it.fromTS).toLocaleDateString()} – ${new Date(it.toTS).toLocaleDateString()}`]);
-      });
-      const totalRem = Math.max(0, totalExp - totalPaid);
-      rows.push(['TOTAL', totalExp, totalPaid, totalRem, '', '']);
-      sheets.push({ title: `${fullName} (${s.admissionNumber || ''})`, rows });
-    });
-    return sheets;
-  }
-
-  function downloadCSV_Breakdown() {
-    const wb = XLSX.utils.book_new();
-    const sheets = _gatherBreakdown();
-    if (!sheets.length) return alert('No students to export.');
-    sheets.forEach(sh => {
-      const ws = XLSX.utils.aoa_to_sheet(sh.rows);
-      XLSX.utils.book_append_sheet(wb, ws, sh.title.slice(0, 31));
-    });
-    const filename = parentCtx.enabled
-      ? `breakdown_${(Object.values(cachedStudents)[0]?.admissionNumber||'student')}_${(parentCtx.year||financeYear)}.xlsx`
-      : `breakdowns_${Date.now()}.xlsx`;
-    XLSX.writeFile(wb, filename);
-  }
-
-  function downloadPDF_Breakdown() {
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF({ orientation: 'landscape' });
-    const sheets = _gatherBreakdown();
-    if (!sheets.length) return alert('No students to export.');
-    sheets.forEach((sh, idx) => {
-      if (idx > 0) doc.addPage();
-      doc.setFontSize(14);
-      doc.text(`Installment Breakdown — ${sh.title}`, 14, 14);
-      doc.autoTable({
-        head: [['Period', 'Expected', 'Allocated Paid', 'Remaining', 'Status', 'Window']],
-        body: sh.rows.slice(1),
-        startY: 20,
-        styles: { fontSize: 8 }
-      });
-    });
-    const filename = parentCtx.enabled
-      ? `breakdown_${(Object.values(cachedStudents)[0]?.admissionNumber||'student')}_${(parentCtx.year||financeYear)}.pdf`
-      : `breakdowns_${Date.now()}.pdf`;
-    doc.save(filename);
-  }
-
-  /* ===== Expense exports ===== */
-  document.getElementById("downloadExpenseCsv")?.addEventListener("click", () => {
-    if (parentCtx.enabled) return;
+  document.getElementById("downloadExpenseCsv").addEventListener("click", () => {
     const rows = [["Category", "Description", "Amount", "Date"]];
     document.querySelectorAll("#expenseTable tbody tr").forEach(tr => {
       const cells = [...tr.querySelectorAll("td")].map(td => td.innerText);
@@ -2348,8 +2243,7 @@
     XLSX.writeFile(wb, "expenses_report.xlsx");
   });
 
-  document.getElementById("downloadExpensePdf")?.addEventListener("click", () => {
-    if (parentCtx.enabled) return;
+  document.getElementById("downloadExpensePdf").addEventListener("click", () => {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF();
     doc.text("Expense Report", 14, 10);
@@ -2362,55 +2256,279 @@
     doc.save("expenses_report.pdf");
   });
 
-  /* ===== Wire buttons ===== */
-  closePaymentModal?.addEventListener('click', closePaymentModalFn);
-  cancelPayment?.addEventListener('click', closePaymentModalFn);
-  closeDetailsModal?.addEventListener('click', closeDetailsModalFn);
-
-  showOnlyDebtorsBtn?.addEventListener('click', () => {
+  closePaymentModal.addEventListener('click', closePaymentModalFn);
+  cancelPayment.addEventListener('click', closePaymentModalFn);
+  closeDetailsModal.addEventListener('click', closeDetailsModalFn);
+  showOnlyDebtorsBtn.addEventListener('click', () => {
     showingDebtorsOnly = !showingDebtorsOnly;
     showOnlyDebtorsBtn.textContent = showingDebtorsOnly ? 'Showing Debtors' : 'Show Debtors';
     renderTable();
   });
+  downloadCsvBtn.addEventListener('click', downloadCSV_Main);
+  downloadPdfBtn.addEventListener('click', downloadPDF_Main);
+  downloadDebtNowCsvBtn.addEventListener('click', downloadCSV_DebtNow);
+  downloadDebtNowPdfBtn.addEventListener('click', downloadPDF_DebtNow);
+  downloadBreakdownCsvBtn.addEventListener('click', downloadCSV_Breakdown);
+  downloadBreakdownPdfBtn.addEventListener('click', downloadPDF_Breakdown);
+  reloadBtn.addEventListener('click', async () => { await refreshFinanceData(financeYear); });
 
-  downloadCsvBtn?.addEventListener('click', downloadCSV_Main);
-  downloadPdfBtn?.addEventListener('click', downloadPDF_Main);
-  downloadDebtNowCsvBtn?.addEventListener('click', downloadCSV_DebtNow);
-  downloadDebtNowPdfBtn?.addEventListener('click', downloadPDF_DebtNow);
-  downloadBreakdownCsvBtn?.addEventListener('click', downloadCSV_Breakdown);
-  downloadBreakdownPdfBtn?.addEventListener('click', downloadPDF_Breakdown);
-  reloadBtn?.addEventListener('click', async () => { await refreshFinanceData(financeYear); });
-
-  window.addEventListener('click', ev => {
-    if (ev.target === paymentModal) closePaymentModalFn();
-    if (ev.target === detailsModal) closeDetailsModalFn();
-  });
-
-  classFilter?.addEventListener('change', renderTable);
-
-  if (yearContext?.onYearChanged) {
+  if (yearContext) {
     yearContext.onYearChanged((year) => {
       const normalized = String(year);
       if (normalized === financeYear) return;
       financeYear = normalized;
       activeYear = normalized;
       try { sessionStorage.setItem('somap_selected_year', normalized); } catch (_) {}
-      if (yearSelectEl && yearSelectEl.value !== normalized) yearSelectEl.value = normalized;
+      if (yearSelectEl && yearSelectEl.value !== normalized) {
+        yearSelectEl.value = normalized;
+      }
       refreshFinanceData(normalized);
     });
   }
-
-  /* ===== Boot reliably (even if DOMContentLoaded already fired) ===== */
-  function boot() {
+  window.addEventListener('click', ev => {
+    if (ev.target === paymentModal) closePaymentModalFn();
+    if (ev.target === detailsModal) closeDetailsModalFn();
+  });
+  classFilter.addEventListener('change', renderTable);
+  document.addEventListener('DOMContentLoaded', () => {
     updateYearHint();
     refreshFinanceData(activeYear);
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot, { once: true });
-  } else {
-    boot();
+  });
+})();
+</script>
+
+<script>
+/** SoMAp v2.1 — Carry-Forward Debts (2025→)
+ *  Non-invasive decorator for finance.html
+ *  - Adds previous-year (>=2025) unpaid balance to current year's Fee (year)
+ *  - Exposes data-carry-forward for payment.html (iframe) to pick for January
+ */
+(function carryForwardPatch() {
+  const START_YEAR = 2025;
+  const sharedCache = window.__financeCarryForwardVisual || (window.__financeCarryForwardVisual = {});
+  let scheduled = false;
+  let running = false;
+
+  function detectTargetYear() {
+    if (window.currentAcademicYear && Number(window.currentAcademicYear)) return Number(window.currentAcademicYear);
+    if (window.somapYearContext?.getSelectedYear) {
+      const ctxYear = Number(window.somapYearContext.getSelectedYear());
+      if (!Number.isNaN(ctxYear)) return ctxYear;
+    }
+    const sel = document.querySelector('#yearSelect, select[name="year"], [data-somap-year-select]');
+    if (sel) {
+      const v = Number(sel.value || sel.textContent);
+      if (!Number.isNaN(v)) return v;
+    }
+    const maybe = (document.title || '').match(/\b(20\d{2})\b/);
+    if (maybe) return Number(maybe[1]);
+    return new Date().getFullYear();
   }
 
+  async function getPrevYearBalance(adm, prevYear) {
+    if (!adm) return 0;
+    if (typeof window.__finance_getBalanceForYearAdmission === 'function') {
+      return Number(await window.__finance_getBalanceForYearAdmission(prevYear, adm)) || 0;
+    }
+    if (window.firebase?.database) {
+      try {
+        const ref = window.firebase.database().ref(`finance/${prevYear}/students/${adm}`);
+        const snap = await ref.get();
+        if (snap.exists()) {
+          const d = snap.val();
+          if (d.balance !== undefined) return Number(d.balance) || 0;
+          const feeYear = Number(String(d.feeYear || d.fee || 0).replace(/[^\d]/g, '')) || 0;
+          const paid = Number(String(d.paid || 0).replace(/[^\d]/g, '')) || 0;
+          return Math.max(feeYear - paid, 0);
+        }
+      } catch (err) {
+        console.warn('CarryForward fallback fetch failed', adm, prevYear, err);
+      }
+    }
+    return 0;
+  }
+
+  function parseNumberLike(x) {
+    if (typeof x === 'number') return x;
+    return Number(String(x || '0').replace(/[^\d]/g, '')) || 0;
+  }
+
+  function formatTSh(n) {
+    const value = Number(n) || 0;
+    try {
+      return new Intl.NumberFormat('en-KE', {
+        style: 'currency',
+        currency: 'TZS',
+        maximumFractionDigits: 0,
+      }).format(value);
+    } catch (err) {
+      return 'TSh ' + value.toLocaleString('en-US');
+    }
+  }
+
+  function formatNumber(n) {
+    return (Number(n) || 0).toLocaleString('en-US');
+  }
+
+  function adjustKpis(delta) {
+    if (!delta) return;
+    const targets = ['totalDue', 'totalOutstanding'];
+    targets.forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const current = parseNumberLike(el.dataset.amount || el.textContent);
+      const next = current + delta;
+      el.dataset.amount = String(next);
+      el.textContent = formatNumber(next);
+    });
+  }
+
+  function findFinanceTableRows() {
+    const table = document.getElementById('financeTable');
+    if (!table) return [];
+    const rows = Array.from(table.querySelectorAll('tbody tr')).filter(tr => tr.children.length >= 10);
+    return rows.map(tr => {
+      const tds = Array.from(tr.children);
+      const adm = (tds[1]?.innerText || '').trim();
+      const feeYearCell = tds[4] || null;
+      const feeYear = parseNumberLike(tds[4]?.innerText);
+      return { tr, tds, adm, feeYearCell, feeYear };
+    }).filter(entry => entry.adm);
+  }
+
+  async function decorateWithCarryForward() {
+    if (running) {
+      scheduled = true;
+      return;
+    }
+    running = true;
+    const targetYear = detectTargetYear();
+    const prevYear = targetYear - 1;
+    if (!Number.isFinite(prevYear) || prevYear < START_YEAR) {
+      running = false;
+      return;
+    }
+    const rows = findFinanceTableRows();
+    if (!rows.length) {
+      running = false;
+      return;
+    }
+    const uniqueAdms = [...new Set(rows.map(r => r.adm))];
+    const cfMap = new Map();
+    await Promise.all(uniqueAdms.map(async (adm) => {
+      const carry = await getPrevYearBalance(adm, prevYear);
+      cfMap.set(adm, Math.max(0, Number(carry) || 0));
+    }));
+
+    rows.forEach(row => {
+      const carry = cfMap.get(row.adm) || 0;
+      const hasCF = carry > 0;
+      row.tr.dataset.carryForward = hasCF ? String(carry) : '0';
+      row.tr.dataset.carryForwardYear = String(prevYear);
+      const storeKey = `${targetYear}::${row.adm}`;
+      const lookup = typeof window.__finance_lookupStudent === 'function'
+        ? window.__finance_lookupStudent(row.adm)
+        : null;
+      const student = lookup?.student || null;
+
+      let originalDisplayedDue = row.feeYear;
+      let newTotalDue = originalDisplayedDue;
+      let appliedCarry = 0;
+
+      if (student) {
+        const existingCarry = Math.max(0, Number(student.carryAmount || 0));
+        const currentFeePerYear = Math.max(0, Number(student.feePerYear || 0));
+        const inferredBase = Math.max(0, Number(
+          student.baseFee ??
+          (currentFeePerYear > existingCarry ? currentFeePerYear - existingCarry : 0)
+        ));
+
+        student.__carryOverlayAmount = carry;
+        student.__carryOverlayPrevYear = prevYear;
+        student.__carryOverlayYear = targetYear;
+
+        appliedCarry = Math.max(0, carry - existingCarry);
+        if (appliedCarry > 0) {
+          student.baseFee = inferredBase;
+          student.carryAmount = existingCarry + appliedCarry;
+          student.feePerYear = Math.max(0, currentFeePerYear || inferredBase + existingCarry) + appliedCarry;
+          student.__carryOverlayMerged = true;
+        }
+
+        newTotalDue = Math.max(0, Number(student.feePerYear || inferredBase + existingCarry + appliedCarry));
+      } else if (hasCF) {
+        appliedCarry = carry;
+        newTotalDue = row.feeYear + appliedCarry;
+      }
+
+      if (hasCF) {
+        sharedCache[storeKey] = { carry, prevYear, total: newTotalDue };
+        try {
+          sessionStorage.setItem(`somap_cf_${targetYear}_${row.adm}`, String(carry));
+        } catch (_) {}
+      } else {
+        delete sharedCache[storeKey];
+        try {
+          sessionStorage.removeItem(`somap_cf_${targetYear}_${row.adm}`);
+        } catch (_) {}
+      }
+
+      row.tr.dataset.carryForwardTotal = String(newTotalDue);
+
+      const delta = Math.max(0, newTotalDue - originalDisplayedDue);
+      if (delta > 0) {
+        adjustKpis(delta);
+      }
+
+      if (row.feeYearCell) {
+        if (row.feeYearCell.firstChild && row.feeYearCell.firstChild.nodeType === Node.TEXT_NODE) {
+          row.feeYearCell.firstChild.textContent = formatNumber(newTotalDue);
+        } else {
+          row.feeYearCell.textContent = formatNumber(newTotalDue);
+        }
+        row.feeYearCell.querySelectorAll('[data-cf-badge]').forEach(el => el.remove());
+      }
+
+      if (hasCF && row.feeYearCell) {
+        const badge = document.createElement('div');
+        badge.dataset.cfBadge = 'badge';
+        badge.className = 'text-xs mt-1';
+        badge.innerHTML = `<span class="px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">Carry Forward (${prevYear}): ${formatTSh(carry)}</span>`;
+        const totalLine = document.createElement('div');
+        totalLine.dataset.cfBadge = 'total';
+        totalLine.className = 'text-sm font-semibold mt-1';
+        totalLine.textContent = `Total Due (incl. CF): ${formatTSh(newTotalDue)}`;
+        row.feeYearCell.appendChild(badge);
+        row.feeYearCell.appendChild(totalLine);
+      }
+
+      const paidCell = row.tds[6];
+      const balanceCell = row.tds[7];
+      const paidAmount = parseNumberLike(paidCell?.innerText || '0');
+      const newBalance = Math.max(0, newTotalDue - paidAmount);
+      if (balanceCell) {
+        balanceCell.textContent = formatNumber(newBalance);
+      }
+
+      row.feeYear = newTotalDue;
+    });
+    running = false;
+    if (scheduled) {
+      scheduled = false;
+      decorateWithCarryForward();
+    }
+  }
+
+  function queueRun() {
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      setTimeout(decorateWithCarryForward, 0);
+    } else {
+      document.addEventListener('DOMContentLoaded', () => setTimeout(decorateWithCarryForward, 0), { once: true });
+    }
+  }
+
+  document.addEventListener('finance:tableRendered', () => setTimeout(decorateWithCarryForward, 0));
+  queueRun();
 })();
 </script>
 </body>
