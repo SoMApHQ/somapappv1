@@ -1989,38 +1989,94 @@
       // Year-scoped single-student renderer (strict; never switch student)
       function monthName(num){ return MONTH_NAMES[num] || ''; }
       async function loadTransportContextStrict(year, studentId){
-        const db = firebase.database();
+        const requestedId = String(studentId || '').trim();
+        const idsToTry = [requestedId];
+        let resolvedTransportId = requestedId;
+        let resolvedStudentKey = requestedId;
+
         const [assignSnap, enrollSnap, paysSnap, financeSnap, studentSnap] = await Promise.all([
-          scopedOrSocratesLegacy(`years/${year}/transportAssignments/${studentId}`, `transportAssignments/${year}/${studentId}`),
-          scopedOrSocratesLegacy(`years/${year}/transportEnrollments/${studentId}`, `transport_enrollments/${studentId}`).catch(() => ({ val: () => null })),
-          scopedOrSocratesLegacy(`years/${year}/transportLedgers/${studentId}/payments`, `transportLedgers/${year}/${studentId}/payments`).catch(() => ({ val: () => null })),
-          scopedOrSocratesLegacy(`years/${year}/finance/${studentId}/payments`, `finance/${year}/${studentId}/payments`).catch(() => ({ val: () => null })),
-          scopedOrSocratesLegacy(`students/${studentId}`, `students/${studentId}`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${year}/transportAssignments/${requestedId}`, `transportAssignments/${year}/${requestedId}`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${year}/transportEnrollments/${requestedId}`, `transport_enrollments/${requestedId}`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${year}/transportLedgers/${requestedId}/payments`, `transportLedgers/${year}/${requestedId}/payments`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`years/${year}/finance/${requestedId}/payments`, `finance/${year}/${requestedId}/payments`).catch(() => ({ val: () => null })),
+          scopedOrSocratesLegacy(`students/${requestedId}`, `students/${requestedId}`).catch(() => ({ val: () => null })),
         ]);
-        const assign = assignSnap.val() || null;
-        const legacyEnroll = enrollSnap.val() || null;
-        
-        // Get payments from both paths
+
+        let assign = assignSnap.val() || null;
+        let legacyEnroll = enrollSnap.val() || null;
         let payments = normalizePaymentList(paysSnap.val() || {});
-        if (!payments || payments.length === 0) {
-          payments = await readSupplementalPayments(year, studentId);
+        let financeMap = financeSnap.val() || {};
+        let student = studentSnap.val() || null;
+
+        // Resolve student profile by admission number when URL id is transport key (AUTO-...) instead of /students key.
+        if (!student || Object.keys(student || {}).length === 0) {
+          try {
+            const allStudentsSnap = await scopedOrSocratesLegacy('students', 'students');
+            const allStudents = allStudentsSnap.val() || {};
+            const reqNorm = normalizeIdentifier(requestedId);
+            for (const [key, rec] of Object.entries(allStudents)) {
+              if (!rec || typeof rec !== 'object') continue;
+              const candidates = [key, rec.admissionNumber, rec.admissionNo, rec.studentAdm, rec.admission];
+              if (candidates.some(v => normalizeIdentifier(v) === reqNorm)) {
+                student = rec;
+                resolvedStudentKey = key;
+                break;
+              }
+            }
+          } catch (err) {
+            console.warn('Could not resolve student profile for single view:', err);
+          }
         }
-        
+
+        const admissionKey = String(student?.admissionNumber || student?.admissionNo || '').trim();
+        if (admissionKey && !idsToTry.includes(admissionKey)) idsToTry.push(admissionKey);
+        if (resolvedStudentKey && !idsToTry.includes(resolvedStudentKey)) idsToTry.push(resolvedStudentKey);
+
+        // Fill missing transport/finance/payment data by trying both transport key and student profile key.
+        for (const idTry of idsToTry) {
+          if (!assign) {
+            const s = await scopedOrSocratesLegacy(`years/${year}/transportAssignments/${idTry}`, `transportAssignments/${year}/${idTry}`).catch(() => ({ val: () => null }));
+            if (s.val()) {
+              assign = s.val();
+              resolvedTransportId = idTry;
+            }
+          }
+          if (!legacyEnroll) {
+            const s = await scopedOrSocratesLegacy(`years/${year}/transportEnrollments/${idTry}`, `transport_enrollments/${idTry}`).catch(() => ({ val: () => null }));
+            if (s.val()) {
+              legacyEnroll = s.val();
+              resolvedTransportId = idTry;
+            }
+          }
+          if (!payments || payments.length === 0) {
+            const s = await scopedOrSocratesLegacy(`years/${year}/transportLedgers/${idTry}/payments`, `transportLedgers/${year}/${idTry}/payments`).catch(() => ({ val: () => null }));
+            payments = normalizePaymentList(s.val() || {});
+            if ((!payments || payments.length === 0)) {
+              payments = await readSupplementalPayments(year, idTry);
+            }
+            if (payments && payments.length) resolvedTransportId = idTry;
+          }
+          if (!financeMap || Object.keys(financeMap).length === 0) {
+            const s = await scopedOrSocratesLegacy(`years/${year}/finance/${idTry}/payments`, `finance/${year}/${idTry}/payments`).catch(() => ({ val: () => null }));
+            financeMap = s.val() || {};
+          }
+        }
+
         // Normalize payment objects
-        const normalizedPayments = payments.map(x => ({
+        const normalizedPayments = (payments || []).map(x => ({
           month: Number(x.month)||0,
           amount: Number(x.amount)||0,
           status: x.status||'pending'
         }));
-        
-        const finance = Object.values(financeSnap.val()||{});
+
+        const finance = Object.values(financeMap || {});
         const schoolFeePaid = finance.reduce((a,p)=>a+(Number(p.amount)||0),0);
-        const student = studentSnap.val() || {};
-        if (student && student.schoolId) {
-          // School context is managed by SOMAP; do not override here.
+
+        if (!student || Object.keys(student || {}).length === 0) {
+          student = buildFallbackStudent(resolvedTransportId, legacyEnroll || assign || {});
         }
-        state.students[studentId] = student;
-        const existingEnrollment = state.transportEnrollments[studentId] || {};
+
+        const existingEnrollment = state.transportEnrollments[resolvedTransportId] || {};
         // Prefer year assignment; fallback to legacy enrollment for parent view
         let effective = assign;
         if (!effective && legacyEnroll) {
@@ -2036,16 +2092,24 @@
           };
         }
 
-        state.transportEnrollments[studentId] = {
+        state.students[resolvedTransportId] = student;
+        state.transportEnrollments[resolvedTransportId] = {
           ...existingEnrollment,
           ...(effective || assign || legacyEnroll || {}),
         };
-        state.transportPayments[studentId] = normalizedPayments;
+        state.transportPayments[resolvedTransportId] = normalizedPayments;
+
+        // Keep requested id in sync so downstream reads by requested key still work.
+        state.students[requestedId] = state.students[requestedId] || student;
+        state.transportEnrollments[requestedId] = state.transportEnrollments[requestedId] || state.transportEnrollments[resolvedTransportId];
+        state.transportPayments[requestedId] = state.transportPayments[requestedId] || normalizedPayments;
+
         return {
           assign: effective || assign,
           payments: normalizedPayments,
           schoolFeePaid,
           student,
+          resolvedTransportId,
         };
       }
 
@@ -2068,11 +2132,13 @@
       async function renderYearScopedStudentView(studentId){
         state.currentPaymentStudentId = studentId;
         const year = String(state.year);
-        const { assign, payments, schoolFeePaid, student } = await loadTransportContextStrict(year, studentId);
+        const { assign, payments, schoolFeePaid, student, resolvedTransportId } = await loadTransportContextStrict(year, studentId);
+        const effectiveStudentId = resolvedTransportId || studentId;
+        state.currentPaymentStudentId = effectiveStudentId;
         renderIdentityStrict(student);
         // If no year-scoped assignment, attempt to render using legacy enrollment data
         if (!assign || assign.status !== 'Using'){
-          if (!state.transportEnrollments[studentId]) {
+          if (!state.transportEnrollments[effectiveStudentId]) {
             renderNoDataStrict(`No transport assignment for ${year}.`);
             return;
           }
@@ -2169,8 +2235,8 @@
               <td style="font-size: 0.75rem;">${unpaid}</td>
               <td style="color: ${combinedDebt>0?'var(--accent-danger)':'var(--accent-success)'}; font-weight: 700;">${formatCurrency(combinedDebt)}</td>
               <td class="table-actions" style="justify-content: flex-end;">
-                <button class="btn success" onclick="openPaymentModal('${studentId}')">&#128176; Pay</button>
-                <button class="btn secondary" onclick="viewPaymentHistory('${studentId}')">&#128221; History</button>
+                <button class="btn success" onclick="openPaymentModal('${effectiveStudentId}')">&#128176; Pay</button>
+                <button class="btn secondary" onclick="viewPaymentHistory('${effectiveStudentId}')">&#128221; History</button>
               </td>
             </tr>`;
           document.getElementById('emptyState')?.classList.add('hidden');
