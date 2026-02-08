@@ -1468,29 +1468,76 @@
         return id === "socrates-school" || id === "default";
       }
 
-      async function schoolOrLegacyOnce(scopedSubPath, legacyPath) {
-        const scopedRef = schoolRef(scopedSubPath);
-        if (!isLegacyMergeSchool() || !legacyPath) return scopedRef.once("value");
-        try {
-          const scopedSnap = await scopedRef.once("value");
-          const scopedVal = scopedSnap.val();
-          const emptyObj =
-            scopedVal &&
-            typeof scopedVal === "object" &&
-            Object.keys(scopedVal).length === 0;
-          if (!scopedSnap.exists() || emptyObj) {
-            return db.ref(legacyPath).once("value");
-          }
-          return scopedSnap;
-        } catch (_) {
-          return db.ref(legacyPath).once("value");
-        }
+      function normalizeNameForMatch(value) {
+        return String(value || "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
       }
 
-      function pickMatchingRecord(records, preferredStudentId, admissionNorm) {
+      function normalizePhoneForMatch(value) {
+        return String(value || "").replace(/\D/g, "");
+      }
+
+      async function loadTransportMapsForYear(year) {
+        const y = String(year || getActiveYearString());
+        const [enrollScopedSnap, registryScopedSnap, assignmentsScopedSnap] =
+          await Promise.all([
+            schoolRef(`years/${y}/transportEnrollments`)
+              .once("value")
+              .catch(() => ({ val: () => ({}) })),
+            schoolRef(`years/${y}/transportRegistry`)
+              .once("value")
+              .catch(() => ({ val: () => ({}) })),
+            schoolRef(`years/${y}/transportAssignments`)
+              .once("value")
+              .catch(() => ({ val: () => ({}) })),
+          ]);
+
+        let enrollLegacy = {};
+        let registryLegacy = {};
+        let assignmentsLegacy = {};
+        if (isLegacyMergeSchool()) {
+          const [enrollLegacySnap, registryLegacySnap, assignmentsLegacySnap] =
+            await Promise.all([
+              db.ref("transport_enrollments")
+                .once("value")
+                .catch(() => ({ val: () => ({}) })),
+              db.ref(`transportRegistry/${y}`)
+                .once("value")
+                .catch(() => ({ val: () => ({}) })),
+              db.ref(`transportAssignments/${y}`)
+                .once("value")
+                .catch(() => ({ val: () => ({}) })),
+            ]);
+          enrollLegacy = enrollLegacySnap.val() || {};
+          registryLegacy = registryLegacySnap.val() || {};
+          assignmentsLegacy = assignmentsLegacySnap.val() || {};
+        }
+
+        return {
+          enrollments: { ...enrollLegacy, ...(enrollScopedSnap.val() || {}) },
+          registry: { ...registryLegacy, ...(registryScopedSnap.val() || {}) },
+          assignments: {
+            ...assignmentsLegacy,
+            ...(assignmentsScopedSnap.val() || {}),
+          },
+        };
+      }
+
+      function pickMatchingRecord(
+        records,
+        preferredStudentId,
+        admissionNorm,
+        options = {}
+      ) {
         const entries = Object.entries(records || {});
         if (!entries.length) return { key: null, record: null };
         const preferredNorm = normalizeIdentifier(preferredStudentId);
+        const preferredNameNorm = normalizeNameForMatch(options.fullName || "");
+        const preferredPhone = normalizePhoneForMatch(options.parentPhone || "");
+
         for (const [key, record] of entries) {
           if (normalizeIdentifier(key) === preferredNorm) return { key, record };
         }
@@ -1512,6 +1559,35 @@
             return { key, record };
           }
         }
+
+        if (preferredNameNorm || preferredPhone) {
+          for (const [key, record] of entries) {
+            if (!record || typeof record !== "object") continue;
+            const recName = normalizeNameForMatch(
+              record.fullName ||
+                record.studentName ||
+                `${record.firstName || ""} ${record.middleName || ""} ${record.lastName || ""}`
+            );
+            const recPhone = normalizePhoneForMatch(
+              record.parentContact ||
+                record.primaryParentContact ||
+                record.parentPhone ||
+                record.guardianPhone ||
+                ""
+            );
+            const nameMatch = preferredNameNorm && recName === preferredNameNorm;
+            const phoneMatch =
+              preferredPhone &&
+              recPhone &&
+              (recPhone.endsWith(preferredPhone.slice(-7)) ||
+                preferredPhone.endsWith(recPhone.slice(-7)));
+            const allowPhoneOnly = !preferredNameNorm;
+            if (nameMatch || (allowPhoneOnly && phoneMatch)) {
+              return { key, record };
+            }
+          }
+        }
+
         return { key: null, record: null };
       }
 
@@ -1525,28 +1601,36 @@
           studentRecord?.admissionNumber || studentRecord?.pupilId || ""
         );
 
-        const [assignMapSnap, enrollMapSnap, registryMapSnap] = await Promise.all([
-          schoolOrLegacyOnce(
-            `years/${y}/transportAssignments`,
-            `transportAssignments/${y}`
-          ).catch(() => ({ val: () => ({}) })),
-          schoolOrLegacyOnce(
-            `years/${y}/transportEnrollments`,
-            "transport_enrollments"
-          ).catch(() => ({ val: () => ({}) })),
-          schoolOrLegacyOnce(
-            `years/${y}/transportRegistry`,
-            `transportRegistry/${y}`
-          ).catch(() => ({ val: () => ({}) })),
-        ]);
+        const fullName = `${studentRecord?.firstName || ""} ${
+          studentRecord?.middleName || ""
+        } ${studentRecord?.lastName || ""}`.replace(/\s+/g, " ").trim();
+        const parentPhone =
+          studentRecord?.primaryParentContact ||
+          studentRecord?.parentPhone ||
+          studentRecord?.motherPhone ||
+          "";
+        const { assignments, enrollments, registry } =
+          await loadTransportMapsForYear(y);
 
-        const assignments = assignMapSnap.val() || {};
-        const enrollments = enrollMapSnap.val() || {};
-        const registry = registryMapSnap.val() || {};
-
-        const assignMatch = pickMatchingRecord(assignments, studentId, admissionNorm);
-        const enrollMatch = pickMatchingRecord(enrollments, studentId, admissionNorm);
-        const registryMatch = pickMatchingRecord(registry, studentId, admissionNorm);
+        const matchOptions = { fullName, parentPhone };
+        const assignMatch = pickMatchingRecord(
+          assignments,
+          studentId,
+          admissionNorm,
+          matchOptions
+        );
+        const enrollMatch = pickMatchingRecord(
+          enrollments,
+          studentId,
+          admissionNorm,
+          matchOptions
+        );
+        const registryMatch = pickMatchingRecord(
+          registry,
+          studentId,
+          admissionNorm,
+          matchOptions
+        );
 
         const resolvedStudentId =
           assignMatch.key || enrollMatch.key || registryMatch.key || studentId;
