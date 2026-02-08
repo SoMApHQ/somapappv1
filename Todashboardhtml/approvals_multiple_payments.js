@@ -21,7 +21,7 @@
     return;
   }
 
-  const financeHelpers = window.SOMAP_FINANCE || {};
+  const financeHelpers = window.SOMAP_FINANCE_DEDUPE || window.SOMAP_FINANCE || {};
   const normalizePath = (subPath) => String(subPath || '').replace(/^\/+/, '');
   const resolveSchoolId = () => {
     if (window.SOMAP && typeof window.SOMAP.getSchool === 'function') {
@@ -44,7 +44,13 @@
     if (!id) return trimmed;
     return `schools/${id}/${trimmed}`;
   };
-  const legacyRef = (subPath) => db.ref(normalizePath(subPath));
+  const schoolRef = (subPath) => {
+    const trimmed = normalizePath(subPath);
+    if (window.SOMAP && typeof window.SOMAP.P === 'function') {
+      return db.ref(window.SOMAP.P(trimmed));
+    }
+    return db.ref(P(trimmed));
+  };
 
   let currentGroups = [];
 
@@ -76,21 +82,54 @@
       .join('/');
   }
 
+  function isLikelyApprovalRecord(value) {
+    if (!value || typeof value !== 'object') return false;
+    return (
+      value.sourceModule != null ||
+      value.modulePayload != null ||
+      value.amountPaidNow != null ||
+      value.amount != null ||
+      value.studentAdm != null ||
+      value.studentName != null
+    );
+  }
+
   function collectSnapshotEntries(snapshot, source, { basePath = '', year = '', month = '', seen } = {}) {
     const results = [];
     if (!snapshot || typeof snapshot.forEach !== 'function') return results;
     snapshot.forEach((child) => {
       if (!child.key) return;
-      if (seen && seen.has(child.key)) return;
-      const recordPath = joinPath(basePath, child.key);
-      const row = toRowModel(child.val() || {}, source, {
-        id: child.key,
-        path: recordPath,
-        year,
-        month,
+      const childVal = child.val() || {};
+      if (isLikelyApprovalRecord(childVal)) {
+        const dedupeKey = joinPath(basePath, child.key);
+        if (seen && seen.has(dedupeKey)) return;
+        const recordPath = joinPath(basePath, child.key);
+        const row = toRowModel(childVal, source, {
+          id: child.key,
+          path: recordPath,
+          year,
+          month,
+        });
+        results.push(row);
+        if (seen) seen.add(dedupeKey);
+        return;
+      }
+
+      const inferredYear = Number(child.key);
+      if (!Number.isFinite(inferredYear) || inferredYear < 2000) return;
+      Object.entries(childVal || {}).forEach(([approvalId, payload]) => {
+        if (!isLikelyApprovalRecord(payload)) return;
+        const nestedPath = joinPath(basePath, child.key, approvalId);
+        if (seen && seen.has(nestedPath)) return;
+        const row = toRowModel(payload, source, {
+          id: approvalId,
+          path: nestedPath,
+          year: inferredYear,
+          month,
+        });
+        results.push(row);
+        if (seen) seen.add(nestedPath);
       });
-      results.push(row);
-      if (seen) seen.add(child.key);
     });
     return results;
   }
@@ -215,8 +254,8 @@
   async function fetchPending(year) {
     const rows = [];
     const seen = new Set();
-    const scopedBase = P('approvalsPending');
-    const scopedSnap = await db.ref(scopedBase).once('value');
+    const scopedBase = 'approvalsPending';
+    const scopedSnap = await schoolRef(scopedBase).once('value');
     if (scopedSnap.exists()) {
       rows.push(
         ...collectSnapshotEntries(scopedSnap, 'pending', {
@@ -227,18 +266,16 @@
       );
     }
 
-    if (isSocratesSchool()) {
-      const legacyBase = normalizePath('approvalsPending');
-      const legacySnap = await legacyRef('approvalsPending').once('value');
-      if (legacySnap.exists()) {
-        rows.push(
-          ...collectSnapshotEntries(legacySnap, 'pending', {
-            basePath: legacyBase,
-            year,
-            seen,
-          }),
-        );
-      }
+    const byYearBase = joinPath('approvalsPending', String(year));
+    const byYearSnap = await schoolRef(byYearBase).once('value');
+    if (byYearSnap.exists()) {
+      rows.push(
+        ...collectSnapshotEntries(byYearSnap, 'pending', {
+          basePath: byYearBase,
+          year,
+          seen,
+        }),
+      );
     }
 
     return rows;
@@ -247,8 +284,8 @@
   async function fetchHistory(year) {
     const rows = [];
     const seen = new Set();
-    const scopedRoot = P('approvalsHistory');
-    const scopedSnap = await db.ref(scopedRoot).child(String(year)).once('value');
+    const scopedRoot = 'approvalsHistory';
+    const scopedSnap = await schoolRef(joinPath(scopedRoot, String(year))).once('value');
     if (scopedSnap.exists()) {
       scopedSnap.forEach((monthNode) => {
         const monthKey = monthNode.key;
@@ -264,31 +301,13 @@
       });
     }
 
-    if (isSocratesSchool()) {
-      const legacyRoot = normalizePath('approvalsHistory');
-      const legacySnap = await legacyRef('approvalsHistory').child(String(year)).once('value');
-      if (legacySnap.exists()) {
-        legacySnap.forEach((monthNode) => {
-          const monthKey = monthNode.key;
-          const monthBase = joinPath(legacyRoot, year, monthKey);
-          rows.push(
-            ...collectSnapshotEntries(monthNode, 'history', {
-              basePath: monthBase,
-              year,
-              month: monthKey,
-              seen,
-            }),
-          );
-        });
-      }
-    }
-
     return rows;
   }
 
-  function groupByFingerprint(records) {
+  function groupByFingerprint(records, workingYear) {
     const map = new Map();
     records.forEach((rec) => {
+      if (Number(rec.year) !== Number(workingYear)) return;
       if (!rec.fingerprint) return;
       const bucket = map.get(rec.fingerprint) || [];
       bucket.push(rec);
@@ -378,7 +397,7 @@
     const year = getWorkingYear();
     try {
       const [pending, history] = await Promise.all([fetchPending(year), fetchHistory(year)]);
-      const groups = groupByFingerprint([...pending, ...history]);
+      const groups = groupByFingerprint([...pending, ...history], year);
       renderGroups(groups);
       if (showPanel) ui.panel.classList.remove('hidden');
     } catch (err) {
@@ -404,18 +423,17 @@
       : window.confirm(message);
     if (!confirmed) return;
 
-    const updates = {};
-    checked.forEach((cb) => {
-      const path = cb.dataset.path;
-      if (path) updates[path] = null;
-      if (cb.dataset.module === 'finance' && cb.dataset.student && cb.dataset.year && cb.dataset.approval) {
-        const ledgerPath = P(`financeLedgers/${cb.dataset.year}/${cb.dataset.student}/payments/${cb.dataset.approval}`);
-        updates[ledgerPath] = null;
-      }
-    });
-
     try {
-      await db.ref().update(updates);
+      const removals = [];
+      checked.forEach((cb) => {
+        const path = cb.dataset.path;
+        if (path) removals.push(schoolRef(path).remove());
+        if (cb.dataset.module === 'finance' && cb.dataset.student && cb.dataset.year && cb.dataset.approval) {
+          const ledgerPath = `financeLedgers/${cb.dataset.year}/${cb.dataset.student}/payments/${cb.dataset.approval}`;
+          removals.push(schoolRef(ledgerPath).remove());
+        }
+      });
+      await Promise.all(removals);
       await scan(true);
     } catch (err) {
       console.error('[approvals_multiple_payments] delete failed', err);

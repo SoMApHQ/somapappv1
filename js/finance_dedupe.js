@@ -2,6 +2,7 @@
 // Shared helpers to fingerprint payments and avoid double-counting.
 (function (global) {
   const root = (global.SOMAP_FINANCE = global.SOMAP_FINANCE || {});
+  const dedupeRoot = (global.SOMAP_FINANCE_DEDUPE = global.SOMAP_FINANCE_DEDUPE || {});
 
   function normalizeRef(raw) {
     if (!raw) return '';
@@ -9,7 +10,7 @@
     if (['N/A', 'NA', 'NONE', 'NO', '-', 'NIL', '0'].includes(cleaned)) {
       return '';
     }
-    return cleaned.replace(/\s+/g, '');
+    return cleaned.replace(/[.#$\[\]/]/g, '').replace(/\s+/g, '');
   }
 
   function coerceAmount(p) {
@@ -21,6 +22,113 @@
         p?.value ||
         0
     );
+  }
+
+  function normalizeAmount(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '0';
+    return (Math.round(n * 100) / 100).toFixed(2);
+  }
+
+  function resolveYear(record, fallbackYear) {
+    const candidates = [
+      record?.forYear,
+      record?.year,
+      record?.academicYear,
+      record?.financeYear,
+      record?.workingYear,
+      record?.targetYear,
+      typeof fallbackYear === 'object' ? fallbackYear?.year : fallbackYear,
+    ];
+    for (let i = 0; i < candidates.length; i += 1) {
+      const value = candidates[i];
+      const year = Number(value);
+      if (Number.isFinite(year) && year > 0) return String(year);
+    }
+    return String(new Date().getFullYear());
+  }
+
+  function resolveModule(record) {
+    return String(
+      record?.sourceModule ||
+      record?.module ||
+      record?.moduleName ||
+      record?.feeType ||
+      'FINANCE'
+    ).trim().toUpperCase();
+  }
+
+  function resolveStudent(record) {
+    return String(
+      record?.studentAdm ||
+      record?.admissionNo ||
+      record?.admissionNumber ||
+      record?.adm ||
+      record?.studentId ||
+      record?.studentKey ||
+      record?.modulePayload?.studentKey ||
+      ''
+    ).trim().toUpperCase();
+  }
+
+  function resolveDayKey(record) {
+    const raw =
+      record?.paymentDate ||
+      record?.date ||
+      record?.datePaid ||
+      record?.paidOn ||
+      record?.timestamp ||
+      record?.createdAt ||
+      record?.modulePayload?.payment?.timestamp ||
+      '';
+    if (!raw) return '';
+    if (typeof raw === 'string') {
+      const iso = raw.trim().slice(0, 10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+      const parsed = new Date(raw);
+      if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+      return '';
+    }
+    const stamp = Number(raw);
+    if (!Number.isFinite(stamp) || stamp <= 0) return '';
+    const ms = stamp < 1e12 ? stamp * 1000 : stamp;
+    const parsed = new Date(ms);
+    if (Number.isNaN(parsed.getTime())) return '';
+    return parsed.toISOString().slice(0, 10);
+  }
+
+  function resolveReference(record) {
+    const fields = [
+      record?.referenceCode,
+      record?.paymentReferenceCode,
+      record?.transactionCode,
+      record?.bankRef,
+      record?.receiptNo,
+      record?.receipt,
+      record?.mpesaCode,
+      record?.mpesaRef,
+      record?.refCode,
+      record?.paymentRef,
+      record?.reference,
+      record?.ref,
+      record?.modulePayload?.payment?.referenceCode,
+      record?.modulePayload?.payment?.transactionCode,
+      record?.modulePayload?.payment?.bankRef,
+      record?.modulePayload?.payment?.receiptNo,
+      record?.modulePayload?.payment?.receipt,
+      record?.modulePayload?.payment?.mpesaCode,
+      record?.modulePayload?.payment?.mpesaRef,
+      record?.modulePayload?.payment?.reference,
+      record?.modulePayload?.payment?.refCode,
+      record?.modulePayload?.payment?.paymentRef,
+    ];
+    const tokens = [];
+    fields.forEach((value) => {
+      const normalized = normalizeRef(value);
+      if (!normalized) return;
+      if (!tokens.includes(normalized)) tokens.push(normalized);
+    });
+    return tokens.join('~');
   }
 
   function buildIdentity(p, workingYearFallback) {
@@ -204,95 +312,33 @@
   }
 
   root.normalizeRef = normalizeRef;
-  root.buildFinancePaymentFingerprint = function buildFinancePaymentFingerprint(
-    record,
-    fallbackYear
-  ) {
-    if (!record) return '';
-
-    const year =
-      Number(
-        record.forYear ||
-          record.year ||
-          record.academicYear ||
-          fallbackYear ||
-          0
-      ) || 0;
-
-    const amount =
-      Number(record.amount || record.amountClaimed || record.total || 0) || 0;
-
-    const dateRaw = String(
-      record.paymentDate ||
-        record.date ||
-        record.paidOn ||
-        record.timestamp ||
-        record.datePaid ||
-        ''
-    ).slice(0, 10);
-
-    const method = String(
-      record.method || record.paymentMethod || 'UNKNOWN'
-    )
-      .trim()
-      .toUpperCase();
-
-    const ref = normalizeRef(
-      record.referenceCode ||
-        record.paymentReferenceCode ||
-        record.refCode ||
-        record.paymentRef ||
-        record.reference ||
-        record.ref ||
-        ''
+  function buildFinancePaymentFingerprint(record, opts) {
+    if (!record || typeof record !== 'object') return '';
+    const year = resolveYear(record, opts);
+    const moduleName = resolveModule(record);
+    const student = resolveStudent(record) || 'UNKNOWN';
+    const amount = normalizeAmount(
+      record?.amountPaidNow ||
+      record?.amount ||
+      record?.amountClaimed ||
+      record?.paidAmount ||
+      record?.allocation ||
+      record?.value ||
+      record?.modulePayload?.payment?.amount ||
+      0
     );
+    const normalizedReference = resolveReference(record);
+    const dayKey = resolveDayKey(record);
+    const refPart = normalizedReference || `DAY:${dayKey || 'UNKNOWN'}`;
+    return [year, moduleName, student, amount, refPart].join('|');
+  }
 
-    const paidBy = String(
-      record.paidBy || record.payerName || record.recordedBy || ''
-    )
-      .trim()
-      .toUpperCase();
-
-    const payerContact = String(
-      record.payerContact ||
-        record.contactOfPayer ||
-        record.parentContact ||
-        ''
-    ).trim();
-
-    const studentAdm = String(record.studentAdm || record.adm || '').trim();
-    const studentName = String(record.studentName || record.name || '')
-      .trim()
-      .toUpperCase();
-    const classLabel = String(
-      record.classLabel || record.className || record.class || ''
-    )
-      .trim()
-      .toUpperCase();
-
-    const src = String(record.sourceModule || record.module || 'FINANCE')
-      .trim()
-      .toUpperCase();
-
-    const note = String(record.note || record.notes || '').trim();
-
-    return [
-      year,
-      studentAdm,
-      studentName,
-      classLabel,
-      amount,
-      method,
-      ref,
-      dateRaw,
-      paidBy,
-      payerContact,
-      src,
-      note,
-    ].join('|');
-  };
+  dedupeRoot.normalizeRef = normalizeRef;
+  dedupeRoot.buildFinancePaymentFingerprint = buildFinancePaymentFingerprint;
   root.buildIdentity = buildIdentity;
   root.aggregateLedgerSnapshot = aggregateLedgerSnapshot;
   root.dedupePaymentMap = dedupePaymentMap;
   root.isDuplicateInLedger = isDuplicateInLedger;
+  root.normalizeRef = normalizeRef;
+  root.buildFinancePaymentFingerprint = buildFinancePaymentFingerprint;
 })(typeof window !== "undefined" ? window : globalThis);
