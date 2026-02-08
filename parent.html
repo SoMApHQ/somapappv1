@@ -1371,11 +1371,13 @@
           if (currentStudent && currentStudentKey) {
             const currentStudentId = currentStudentKey;
 
-            // Check if current student uses transport
-            const enrollSnap = await schoolRef(
-              `transport_enrollments/${currentStudentId}`
-            ).once("value");
-            const enrollment = enrollSnap.val();
+            const transportCtx = await resolveTransportEnrollmentForStudent(
+              year,
+              currentStudentId,
+              currentStudent
+            );
+            const enrollment = transportCtx?.enrollment;
+            const transportStudentId = transportCtx?.studentId || currentStudentId;
 
             if (enrollment) {
               const fullName = `${currentStudent.firstName || ""} ${
@@ -1404,7 +1406,7 @@
                   <div class="muted text-xs mt-1">Admission: ${adm}</div>
                   <div class="muted text-xs">Route: ${route} • Stop: ${stopDisplay}</div>
                 </div>
-                <button class="btn" data-student-id="${currentStudentId}" data-student-adm="${adm}">
+                <button class="btn" data-student-id="${transportStudentId}" data-student-adm="${adm}">
                   <i class="fas fa-credit-card mr-2"></i>View Payments
                 </button>
               </div>
@@ -1415,7 +1417,7 @@
               const btn = childrenList.querySelector("button[data-student-id]");
               if (btn) {
                 btn.addEventListener("click", () => {
-                  localStorage.setItem("parentFocusStudent", currentStudentId);
+                  localStorage.setItem("parentFocusStudent", transportStudentId);
                   localStorage.setItem("parentFocusAdm", adm);
                   const schoolKey =
                     currentStudent.schoolId ||
@@ -1425,8 +1427,8 @@
                   if (schoolKey)
                     localStorage.setItem("somap_school", schoolKey);
                   const schoolParam = encodeURIComponent(schoolKey);
-                  window.location.href = `transporthtml/transportpayments.html?student=${encodeURIComponent(
-                    currentStudentId
+                  window.location.href = `transporthtml/transportpayments.html?studentKey=${encodeURIComponent(
+                    transportStudentId
                   )}&year=${year}&school=${schoolParam}`;
                 });
               }
@@ -1452,6 +1454,137 @@
       function normalizePhone(p) {
         const s = String(p || "").replace(/[\s\-()]/g, "");
         return s.replace(/(?!^\+)[^\d]/g, "");
+      }
+
+      function normalizeIdentifier(value) {
+        return String(value || "")
+          .trim()
+          .toUpperCase()
+          .replace(/[^A-Z0-9]/g, "");
+      }
+
+      function isLegacyMergeSchool() {
+        const id = String(currentSchool?.id || "").toLowerCase();
+        return id === "socrates-school" || id === "default";
+      }
+
+      async function schoolOrLegacyOnce(scopedSubPath, legacyPath) {
+        const scopedRef = schoolRef(scopedSubPath);
+        if (!isLegacyMergeSchool() || !legacyPath) return scopedRef.once("value");
+        try {
+          const scopedSnap = await scopedRef.once("value");
+          const scopedVal = scopedSnap.val();
+          const emptyObj =
+            scopedVal &&
+            typeof scopedVal === "object" &&
+            Object.keys(scopedVal).length === 0;
+          if (!scopedSnap.exists() || emptyObj) {
+            return db.ref(legacyPath).once("value");
+          }
+          return scopedSnap;
+        } catch (_) {
+          return db.ref(legacyPath).once("value");
+        }
+      }
+
+      function pickMatchingRecord(records, preferredStudentId, admissionNorm) {
+        const entries = Object.entries(records || {});
+        if (!entries.length) return { key: null, record: null };
+        const preferredNorm = normalizeIdentifier(preferredStudentId);
+        for (const [key, record] of entries) {
+          if (normalizeIdentifier(key) === preferredNorm) return { key, record };
+        }
+        if (!admissionNorm) return { key: null, record: null };
+        for (const [key, record] of entries) {
+          if (!record || typeof record !== "object") continue;
+          const candidates = [
+            record.admissionNo,
+            record.admissionNumber,
+            record.studentAdm,
+            record.studentId,
+            record.admission,
+          ];
+          if (
+            candidates.some(
+              (candidate) => normalizeIdentifier(candidate) === admissionNorm
+            )
+          ) {
+            return { key, record };
+          }
+        }
+        return { key: null, record: null };
+      }
+
+      async function resolveTransportEnrollmentForStudent(
+        year,
+        studentId,
+        studentRecord
+      ) {
+        const y = String(year || getActiveYearString());
+        const admissionNorm = normalizeIdentifier(
+          studentRecord?.admissionNumber || studentRecord?.pupilId || ""
+        );
+
+        const [assignMapSnap, enrollMapSnap, registryMapSnap] = await Promise.all([
+          schoolOrLegacyOnce(
+            `years/${y}/transportAssignments`,
+            `transportAssignments/${y}`
+          ).catch(() => ({ val: () => ({}) })),
+          schoolOrLegacyOnce(
+            `years/${y}/transportEnrollments`,
+            "transport_enrollments"
+          ).catch(() => ({ val: () => ({}) })),
+          schoolOrLegacyOnce(
+            `years/${y}/transportRegistry`,
+            `transportRegistry/${y}`
+          ).catch(() => ({ val: () => ({}) })),
+        ]);
+
+        const assignments = assignMapSnap.val() || {};
+        const enrollments = enrollMapSnap.val() || {};
+        const registry = registryMapSnap.val() || {};
+
+        const assignMatch = pickMatchingRecord(assignments, studentId, admissionNorm);
+        const enrollMatch = pickMatchingRecord(enrollments, studentId, admissionNorm);
+        const registryMatch = pickMatchingRecord(registry, studentId, admissionNorm);
+
+        const resolvedStudentId =
+          assignMatch.key || enrollMatch.key || registryMatch.key || studentId;
+        const assign = assignMatch.record || null;
+        const enroll = enrollMatch.record || null;
+        const reg = registryMatch.record || null;
+
+        if (assign && String(assign.status || "").toLowerCase() !== "using") {
+          return { studentId: resolvedStudentId, enrollment: null };
+        }
+
+        const usingByAssignment =
+          assign && String(assign.status || "").toLowerCase() === "using";
+        const usingByRegistry = reg && reg.using === true;
+        const usingByEnrollment = !!enroll;
+
+        if (!usingByAssignment && !usingByRegistry && !usingByEnrollment) {
+          return { studentId: resolvedStudentId, enrollment: null };
+        }
+
+        const merged = {
+          ...(enroll && typeof enroll === "object" ? enroll : {}),
+        };
+        if (usingByRegistry) {
+          merged.amStop = merged.amStop || reg.routeId || "";
+          merged.pmStop = merged.pmStop || reg.stopName || "";
+          merged.monthlyFee = merged.monthlyFee || reg.monthlyFee || 0;
+        }
+        if (usingByAssignment) {
+          merged.startDate = assign.startDate || merged.startDate;
+          merged.baseMonthlyFee = assign.baseMonthlyFee || merged.baseMonthlyFee;
+          merged.amStop =
+            merged.amStop || assign.amStop || assign.morningRouteId || "";
+          merged.pmStop =
+            merged.pmStop || assign.pmStop || assign.eveningRouteId || "";
+          merged.status = "Using";
+        }
+        return { studentId: resolvedStudentId, enrollment: merged };
       }
 
       // State
@@ -2277,21 +2410,12 @@
         if (!quickTransport) return;
         quickTransport.classList.add("hidden");
         try {
-          const primaryKey = sanitizeKey(studentId);
-          let exists = false;
-          if (primaryKey) {
-            const directSnap = await schoolRef(
-              `transport_enrollments/${primaryKey}`
-            ).once("value");
-            exists = directSnap.exists();
-          }
-          if (!exists) {
-            const querySnap = await schoolRef("transport_enrollments")
-              .orderByChild("studentId")
-              .equalTo(studentId)
-              .once("value");
-            exists = querySnap.exists();
-          }
+          const resolved = await resolveTransportEnrollmentForStudent(
+            getActiveYearString(),
+            studentId,
+            currentStudent || {}
+          );
+          const exists = !!resolved?.enrollment;
           if (exists) {
             quickTransport.classList.remove("hidden");
             if (!quickTransport.dataset.bound) {
