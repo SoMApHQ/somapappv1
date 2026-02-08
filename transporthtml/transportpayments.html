@@ -508,6 +508,7 @@
         expenses: {},
         showDebtorsOnly: false,
         currentPaymentStudentId: null,
+        studentKeyAliases: {},
       };
 
       state.year = Number(state.year) || new Date().getFullYear();
@@ -573,6 +574,49 @@
       function normalizePhone(p) {
         const s = String(p || '').replace(/[\s\-()]/g, '');
         return s.replace(/(?!^\+)[^\d]/g, '');
+      }
+
+      function normalizeIdentifier(value) {
+        return String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      }
+
+      function splitName(fullName) {
+        const clean = String(fullName || '').replace(/\s+/g, ' ').trim();
+        if (!clean) return { firstName: '', middleName: '', lastName: '' };
+        const parts = clean.split(' ');
+        if (parts.length === 1) return { firstName: parts[0], middleName: '', lastName: '' };
+        if (parts.length === 2) return { firstName: parts[0], middleName: '', lastName: parts[1] };
+        return {
+          firstName: parts[0],
+          middleName: parts.slice(1, -1).join(' '),
+          lastName: parts[parts.length - 1],
+        };
+      }
+
+      function buildFallbackStudent(studentId, enrollment = {}) {
+        const fullNameRaw = enrollment.studentName || enrollment.fullName || enrollment.name || '';
+        const { firstName, middleName, lastName } = splitName(fullNameRaw || studentId);
+        return {
+          firstName,
+          middleName,
+          lastName,
+          classLevel: enrollment.classLevel || enrollment.className || enrollment.class || '',
+          admissionNumber: enrollment.admissionNumber || enrollment.admissionNo || enrollment.studentAdm || studentId,
+          primaryParentContact: enrollment.primaryParentContact || enrollment.parentContact || enrollment.parentPhone || enrollment.guardianPhone || '',
+          feePerYear: Number(enrollment.feePerYear || enrollment.schoolFeeTotal || 0) || 0,
+          payments: {},
+          timestamp: enrollment.timestamp || enrollment.createdAt || enrollment.dateRegistered || null,
+          createdAt: enrollment.createdAt || enrollment.timestamp || enrollment.dateRegistered || null,
+          __synthetic: true,
+        };
+      }
+
+      function getStudentForTransport(studentId, enrollment = null) {
+        const student = state.students[studentId];
+        if (student) return student;
+        const fallback = buildFallbackStudent(studentId, enrollment || state.transportEnrollments[studentId] || {});
+        state.students[studentId] = fallback;
+        return fallback;
       }
 
       const toast = document.getElementById("toast");
@@ -825,8 +869,7 @@
         // OPTIMIZATION: Pre-filter students before expensive calculations
         const preFiltered = [];
         for (const [studentId, enrollment] of allEntries) {
-          const student = state.students[studentId];
-          if (!student) continue;
+          const student = getStudentForTransport(studentId, enrollment);
 
           // Calculate class for selected year
           const baseClass = student.classLevel || '';
@@ -918,7 +961,7 @@
         filtered.sort((a, b) => b[2].debt - a[2].debt);
 
         paymentsBody.innerHTML = filtered.map(([studentId, enrollment, transportStatus]) => {
-          const student = state.students[studentId];
+          const student = getStudentForTransport(studentId, enrollment);
           const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
           
           // Calculate class for selected year
@@ -996,10 +1039,10 @@
       // Open payment modal (with year-scoped multipliers)
       async function openPaymentModal(studentId) {
         state.currentPaymentStudentId = studentId;
-        const student = state.students[studentId];
         const enrollment = state.transportEnrollments[studentId];
+        const student = getStudentForTransport(studentId, enrollment);
         
-        if (!student || !enrollment) return;
+        if (!enrollment) return;
         
         const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
         const payments = Object.values(state.transportPayments[studentId] || {});
@@ -1133,9 +1176,9 @@
         }
         
         try {
-          const student = state.students[studentId];
           const enrollment = state.transportEnrollments[studentId];
-          if (!student || !enrollment) throw new Error('Student transport enrollment not found.');
+          const student = getStudentForTransport(studentId, enrollment);
+          if (!enrollment) throw new Error('Student transport enrollment not found.');
           const payments = Object.values(state.transportPayments[studentId] || {});
           const multipliers = cachedMultipliers[Number(state.year)] || (await TransportPricing.loadYearMultipliers(Number(state.year)));
           if (!cachedMultipliers[Number(state.year)]) cachedMultipliers[Number(state.year)] = multipliers;
@@ -1268,11 +1311,7 @@
 
       // View payment history - with real-time approval status
       async function viewPaymentHistory(studentId) {
-        const student = state.students[studentId];
-        if (!student) {
-          showToast('Student not found', 'bad');
-          return;
-        }
+        const student = getStudentForTransport(studentId, state.transportEnrollments[studentId]);
         
         // Load transport assignment to get start date
         const year = String(state.year);
@@ -1465,8 +1504,7 @@
         
         // OPTIMIZATION: Process all students in parallel (already using Promise.all, but removed redundant multiplier loading)
         const data = await Promise.all(Object.entries(state.transportEnrollments).map(async ([studentId, enrollment]) => {
-          const student = state.students[studentId];
-          if (!student) return null;
+          const student = getStudentForTransport(studentId, enrollment);
           
           const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
           
@@ -1479,7 +1517,7 @@
           const schoolDebt = Math.max(0, feePerYear - schoolPaid);
           
           return {
-            'Admission No': student.admissionNumber,
+            'Admission No': student.admissionNumber || studentId,
             'Full Name': fullName,
             'Class': student.classLevel,
             'Parent Contact': student.primaryParentContact,
@@ -1498,8 +1536,7 @@
           };
         }));
         
-        // Filter out null entries (students that don't exist)
-        const filteredData = data.filter(d => d !== null);
+        const filteredData = data.filter(Boolean);
         
         const ws = XLSX.utils.json_to_sheet(filteredData);
         const wb = XLSX.utils.book_new();
@@ -1629,6 +1666,8 @@
           // Load students in batches to avoid timeout on slow connections
           const BATCH_SIZE = 50;
           state.students = {};
+          state.studentKeyAliases = {};
+          const unresolvedStudentIds = [];
           for (let i = 0; i < studentIds.length; i += BATCH_SIZE) {
             const batch = studentIds.slice(i, i + BATCH_SIZE);
             const studentPromises = batch.map(id => 
@@ -1636,13 +1675,79 @@
             );
             const students = await Promise.all(studentPromises);
             students.forEach(({ id, data }) => {
-              if (data) state.students[id] = data;
+              if (data) {
+                state.students[id] = data;
+              } else {
+                unresolvedStudentIds.push(id);
+              }
             });
             // Show progress
             if (i % (BATCH_SIZE * 2) === 0) {
               showToast(`Loading students... ${Math.min(i + BATCH_SIZE, studentIds.length)}/${studentIds.length}`, 'ok');
             }
           }
+
+          // Resolve transport IDs that are not direct keys in /students by admission number or equivalent identifiers.
+          if (unresolvedStudentIds.length) {
+            let allStudents = {};
+            try {
+              const allStudentsSnap = await scopedOrSocratesLegacy('students', 'students');
+              allStudents = allStudentsSnap.val() || {};
+            } catch (err) {
+              console.warn('Could not load all students for alias matching:', err);
+            }
+
+            const admissionIndex = new Map();
+            Object.entries(allStudents || {}).forEach(([key, record]) => {
+              if (!record || typeof record !== 'object') return;
+              const candidates = [
+                key,
+                record.admissionNumber,
+                record.admissionNo,
+                record.admission,
+                record.studentAdm,
+                record.studentId,
+              ];
+              candidates.forEach((candidate) => {
+                const normalized = normalizeIdentifier(candidate);
+                if (normalized && !admissionIndex.has(normalized)) {
+                  admissionIndex.set(normalized, { key, record });
+                }
+              });
+            });
+
+            unresolvedStudentIds.forEach((transportStudentId) => {
+              const enrollment = state.transportEnrollments[transportStudentId] || {};
+              const keysToTry = [
+                transportStudentId,
+                enrollment.admissionNumber,
+                enrollment.admissionNo,
+                enrollment.admission,
+                enrollment.studentAdm,
+                enrollment.studentId,
+              ];
+              let match = null;
+              for (const candidate of keysToTry) {
+                const normalized = normalizeIdentifier(candidate);
+                if (!normalized) continue;
+                if (admissionIndex.has(normalized)) {
+                  match = admissionIndex.get(normalized);
+                  break;
+                }
+              }
+              if (match && match.record) {
+                state.students[transportStudentId] = match.record;
+                state.studentKeyAliases[transportStudentId] = match.key;
+              }
+            });
+          }
+
+          // Final fallback: never drop transport pupils due to missing /students profile.
+          studentIds.forEach((id) => {
+            if (!state.students[id]) {
+              state.students[id] = buildFallbackStudent(id, state.transportEnrollments[id] || {});
+            }
+          });
 
           // STEP 3: Load payments ONLY for transport students (year-scoped ledgers primary)
           showToast('Loading payments...', 'ok');
@@ -1673,20 +1778,35 @@
           const paymentsData = {};
           const ledgers = paymentsSnap.val() || {};
           studentIds.forEach(studentId => {
+            const aliasId = state.studentKeyAliases[studentId];
             if (ledgers[studentId] && ledgers[studentId].payments) {
               paymentsData[studentId] = normalizePaymentList(ledgers[studentId].payments);
+              return;
+            }
+            if (aliasId && ledgers[aliasId] && ledgers[aliasId].payments) {
+              paymentsData[studentId] = normalizePaymentList(ledgers[aliasId].payments);
             }
           });
 
           // Optional legacy payments: scoped year path (non-Socrates) or legacy root (Socrates fallback)
           studentIds.forEach(studentId => {
+            const aliasId = state.studentKeyAliases[studentId];
             if (paymentsData[studentId] && paymentsData[studentId].length) return;
             if (scopedPaymentsVal && scopedPaymentsVal[studentId]) {
               paymentsData[studentId] = normalizePaymentList(scopedPaymentsVal[studentId]);
               return;
             }
+            if (aliasId && scopedPaymentsVal && scopedPaymentsVal[aliasId]) {
+              paymentsData[studentId] = normalizePaymentList(scopedPaymentsVal[aliasId]);
+              return;
+            }
             if (legacyPaymentsVal && legacyPaymentsVal[studentId]) {
               const legacyPayments = legacyPaymentsVal[studentId];
+              paymentsData[studentId] = filterLegacyPaymentsByYear(legacyPayments, year);
+              return;
+            }
+            if (aliasId && legacyPaymentsVal && legacyPaymentsVal[aliasId]) {
+              const legacyPayments = legacyPaymentsVal[aliasId];
               paymentsData[studentId] = filterLegacyPaymentsByYear(legacyPayments, year);
             }
           });
