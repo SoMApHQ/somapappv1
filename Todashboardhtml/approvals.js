@@ -147,6 +147,8 @@
     pendingRefreshTimer: null,
     summariesInFlight: null,
     summariesLoadedYear: '',
+    loadInFlight: null,
+    hasFirstLoadCompleted: false,
   };
   function formatCurrency(amount) {
     const numeric = Number(amount) || 0;
@@ -526,18 +528,34 @@
       yearContext.onYearChanged(handleYearChange);
     }
   }
-  function loadAllData() {
-    showLoader(true);
-    Promise.all([
+  async function loadAllData(options = {}) {
+    const foreground = options.foreground !== false;
+    const showForegroundLoader = foreground && !state.hasFirstLoadCompleted;
+    if (state.loadInFlight) return state.loadInFlight;
+    if (showForegroundLoader) showLoader(true);
+    else showLoader(false);
+
+    const withTimeout = (promise, ms, fallbackValue) => Promise.race([
+      promise,
+      new Promise((resolve) => setTimeout(() => resolve(fallbackValue), ms)),
+    ]);
+
+    state.loadInFlight = Promise.all([
       watchPendingApprovals(),
-      loadHistorySnapshot(),
+      withTimeout(loadHistorySnapshot(), 6000, null),
     ]).catch((err) => {
       console.error('Approvals: data load failed', err);
       toast(err?.message || 'Failed to refresh approvals data', 'danger');
-    }).finally(() => showLoader(false));
+    }).finally(() => {
+      state.hasFirstLoadCompleted = true;
+      if (showForegroundLoader) showLoader(false);
+      state.loadInFlight = null;
+    });
+
     loadSummaries().catch((err) => {
       console.warn('Approvals: summary refresh failed', err);
     });
+    return state.loadInFlight;
   }
 
   function watchPendingApprovals() {
