@@ -635,6 +635,7 @@
           fromTS: parseScheduleTS(it.from, false),
           toTS: parseScheduleTS(it.to, true),
           amount: Math.max(0, Math.round(Number(it.amount) || 0)),
+          carryComponent: Math.max(0, Number(it.carryComponent || 0)),
           paidAllocated: 0,
           status: 'Pending'
         }));
@@ -660,9 +661,13 @@
         fromTS: parseScheduleTS(s.from, false),
         toTS: parseScheduleTS(s.to, true),
         amount: Math.max(0, amounts[i] || 0),
+        carryComponent: 0,
         paidAllocated: 0,
         status: 'Pending'
       }));
+      if (carryAmount > 0 && sc.length) {
+        sc[0].carryComponent = Math.max(0, Number(sc[0].carryComponent || 0)) + carryAmount;
+      }
       let lastDueIndex = -1, periodLabel = '-', expectedToDate = 0;
       const now = Date.now();
       sc.forEach((it, idx) => { if (it.toTS < now) { lastDueIndex = idx; expectedToDate += it.amount; } });
@@ -688,8 +693,11 @@
       if (toM === 12) toY = y - 1;
       const fromTS = dateFromYMD(fromY, fromM, fromD, false);
       const toTS = dateFromYMD(toY, toM, toD, true);
-      sc.push({ key: `inst${i + 1}`, label, fromTS, toTS, amount: amounts[i] || 0, paidAllocated:0, status:'Pending' });
+      sc.push({ key: `inst${i + 1}`, label, fromTS, toTS, amount: amounts[i] || 0, carryComponent: 0, paidAllocated:0, status:'Pending' });
     });
+    if (carryAmount > 0 && sc.length) {
+      sc[0].carryComponent = Math.max(0, Number(sc[0].carryComponent || 0)) + carryAmount;
+    }
     let lastDueIndex = -1, periodLabel = '-', expectedToDate = 0;
     const now = Date.now();
     sc.forEach((it, idx) => { if (it.toTS < now) { lastDueIndex = idx; expectedToDate += it.amount; } });
@@ -740,8 +748,21 @@
     const paidAfterPrev = Math.max(0, alloc.totalPaid - (previousDebt - alloc.prevDebtAfter));
     const yearBalance = Math.max(0, feePerYear - paidAfterPrev);
     const carryAmount = Math.max(0, Number(student.carryAmount || 0));
-    const carryOutstanding = Math.max(0, carryAmount - Math.max(0, Number(alloc.totalPaid || 0)));
+    const totalPaid = Math.max(0, Number(alloc.totalPaid || 0));
+    const carryOutstanding = Math.max(0, carryAmount - totalPaid);
     const hasCarryOutstanding = carryOutstanding > 0;
+    const paidAfterCarry = Math.max(0, totalPaid - carryAmount);
+    const nowTs = Date.now();
+    const overdueRowsForBase = (alloc.scheduleItems || [])
+      .filter((it) => Number(it.toTS || 0) > 0 && Number(it.toTS || 0) < nowTs)
+      .sort((a, b) => Number(a.toTS || 0) - Number(b.toTS || 0));
+    const overdueBaseExpected = overdueRowsForBase.reduce((sum, it) => {
+      const totalExpected = Math.max(0, Number(it.amount || 0));
+      const carryPart = Math.max(0, Number(it.carryComponent || 0));
+      const installmentPart = Math.max(0, totalExpected - carryPart);
+      return sum + installmentPart;
+    }, 0);
+    const overdueBaseOutstanding = Math.max(0, overdueBaseExpected - paidAfterCarry);
     const overdueRows = (alloc.scheduleItems || []).filter((it) => {
       const remaining = Math.max(0, Number(it.amount || 0) - Number(it.paidAllocated || 0));
       return Number(it.toTS || 0) > 0 && isPast(Number(it.toTS)) && remaining > 0;
@@ -758,8 +779,8 @@
       ? `${new Date(Number(latestOverdue.fromTS || 0)).toLocaleDateString()} - ${new Date(Number(latestOverdue.toTS || 0)).toLocaleDateString()}`
       : '-';
     const debtForCollection = Math.max(
-      hasCarryOutstanding ? carryOutstanding : 0,
-      isOverdueDebt ? Math.max(0, Number(alloc.debtTillNow || 0)) : 0
+      0,
+      (hasCarryOutstanding ? carryOutstanding : 0) + overdueBaseOutstanding
     );
     return {
       feePerYear,
