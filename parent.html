@@ -1541,6 +1541,11 @@
         for (const [key, record] of entries) {
           if (normalizeIdentifier(key) === preferredNorm) return { key, record };
         }
+        if (admissionNorm) {
+          for (const [key, record] of entries) {
+            if (normalizeIdentifier(key) === admissionNorm) return { key, record };
+          }
+        }
         if (!admissionNorm) return { key: null, record: null };
         for (const [key, record] of entries) {
           if (!record || typeof record !== "object") continue;
@@ -1597,8 +1602,10 @@
         studentRecord
       ) {
         const y = String(year || getActiveYearString());
+        const admissionKey =
+          String(studentRecord?.admissionNumber || studentRecord?.pupilId || "").trim();
         const admissionNorm = normalizeIdentifier(
-          studentRecord?.admissionNumber || studentRecord?.pupilId || ""
+          admissionKey
         );
 
         const fullName = `${studentRecord?.firstName || ""} ${
@@ -1632,11 +1639,57 @@
           matchOptions
         );
 
-        const resolvedStudentId =
+        let resolvedStudentId =
           assignMatch.key || enrollMatch.key || registryMatch.key || studentId;
-        const assign = assignMatch.record || null;
-        const enroll = enrollMatch.record || null;
-        const reg = registryMatch.record || null;
+        let assign = assignMatch.record || null;
+        let enroll = enrollMatch.record || null;
+        let reg = registryMatch.record || null;
+
+        // Hard fallback: direct admission-key reads (AUTO-...) for mixed key systems.
+        if ((!assign || !enroll || !reg) && admissionKey) {
+          const [
+            assignDirectScoped,
+            enrollDirectScoped,
+            regDirectScoped,
+            assignDirectLegacy,
+            enrollDirectLegacy,
+            regDirectLegacy,
+          ] = await Promise.all([
+            schoolRef(`years/${y}/transportAssignments/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            schoolRef(`years/${y}/transportEnrollments/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            schoolRef(`years/${y}/transportRegistry/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            isLegacyMergeSchool()
+              ? db
+                  .ref(`transportAssignments/${y}/${admissionKey}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null }))
+              : Promise.resolve({ val: () => null }),
+            isLegacyMergeSchool()
+              ? db
+                  .ref(`transport_enrollments/${admissionKey}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null }))
+              : Promise.resolve({ val: () => null }),
+            isLegacyMergeSchool()
+              ? db
+                  .ref(`transportRegistry/${y}/${admissionKey}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null }))
+              : Promise.resolve({ val: () => null }),
+          ]);
+          assign = assign || assignDirectScoped.val() || assignDirectLegacy.val() || null;
+          enroll = enroll || enrollDirectScoped.val() || enrollDirectLegacy.val() || null;
+          reg = reg || regDirectScoped.val() || regDirectLegacy.val() || null;
+          if ((assign || enroll || reg) && admissionKey) {
+            resolvedStudentId = admissionKey;
+          }
+        }
 
         if (assign && String(assign.status || "").toLowerCase() !== "using") {
           return { studentId: resolvedStudentId, enrollment: null };
