@@ -1990,126 +1990,182 @@
       function monthName(num){ return MONTH_NAMES[num] || ''; }
       async function loadTransportContextStrict(year, studentId){
         const requestedId = String(studentId || '').trim();
-        const idsToTry = [requestedId];
-        let resolvedTransportId = requestedId;
-        let resolvedStudentKey = requestedId;
+        const reqNorm = normalizeIdentifier(requestedId);
+        const y = String(year);
+        const isLegacyMerge = isSocratesSchool();
 
-        const [assignSnap, enrollSnap, paysSnap, financeSnap, studentSnap] = await Promise.all([
-          scopedOrSocratesLegacy(`years/${year}/transportAssignments/${requestedId}`, `transportAssignments/${year}/${requestedId}`).catch(() => ({ val: () => null })),
-          scopedOrSocratesLegacy(`years/${year}/transportEnrollments/${requestedId}`, `transport_enrollments/${requestedId}`).catch(() => ({ val: () => null })),
-          scopedOrSocratesLegacy(`years/${year}/transportLedgers/${requestedId}/payments`, `transportLedgers/${year}/${requestedId}/payments`).catch(() => ({ val: () => null })),
-          scopedOrSocratesLegacy(`years/${year}/finance/${requestedId}/payments`, `finance/${year}/${requestedId}/payments`).catch(() => ({ val: () => null })),
-          scopedOrSocratesLegacy(`students/${requestedId}`, `students/${requestedId}`).catch(() => ({ val: () => null })),
+        // 1) Build merged transport map exactly like admin view.
+        const [
+          enrollScopedSnap,
+          enrollLegacySnap,
+          registryScopedSnap,
+          registryLegacySnap,
+          assignmentsScopedSnap,
+          assignmentsLegacySnap
+        ] = await Promise.all([
+          schoolRef(`years/${y}/transportEnrollments`).once('value').catch(() => ({ val: () => ({}) })),
+          isLegacyMerge ? db.ref('transport_enrollments').once('value').catch(() => ({ val: () => ({}) })) : Promise.resolve({ val: () => ({}) }),
+          schoolRef(`years/${y}/transportRegistry`).once('value').catch(() => ({ val: () => ({}) })),
+          isLegacyMerge ? db.ref(`transportRegistry/${y}`).once('value').catch(() => ({ val: () => ({}) })) : Promise.resolve({ val: () => ({}) }),
+          schoolRef(`years/${y}/transportAssignments`).once('value').catch(() => ({ val: () => ({}) })),
+          isLegacyMerge ? db.ref(`transportAssignments/${y}`).once('value').catch(() => ({ val: () => ({}) })) : Promise.resolve({ val: () => ({}) }),
         ]);
 
-        let assign = assignSnap.val() || null;
-        let legacyEnroll = enrollSnap.val() || null;
-        let payments = normalizePaymentList(paysSnap.val() || {});
-        let financeMap = financeSnap.val() || {};
-        let student = studentSnap.val() || null;
+        const scopedEnrollments = enrollScopedSnap.val() || {};
+        const legacyEnrollments = enrollLegacySnap.val() || {};
+        const scopedRegistry = registryScopedSnap.val() || {};
+        const legacyRegistry = registryLegacySnap.val() || {};
+        const scopedAssignments = assignmentsScopedSnap.val() || {};
+        const legacyAssignments = assignmentsLegacySnap.val() || {};
 
-        // Resolve student profile by admission number when URL id is transport key (AUTO-...) instead of /students key.
-        if (!student || Object.keys(student || {}).length === 0) {
-          try {
-            const allStudentsSnap = await scopedOrSocratesLegacy('students', 'students');
-            const allStudents = allStudentsSnap.val() || {};
-            const reqNorm = normalizeIdentifier(requestedId);
-            for (const [key, rec] of Object.entries(allStudents)) {
-              if (!rec || typeof rec !== 'object') continue;
-              const candidates = [key, rec.admissionNumber, rec.admissionNo, rec.studentAdm, rec.admission];
-              if (candidates.some(v => normalizeIdentifier(v) === reqNorm)) {
-                student = rec;
-                resolvedStudentKey = key;
-                break;
-              }
+        const enrollments = isLegacyMerge ? { ...legacyEnrollments, ...scopedEnrollments } : scopedEnrollments;
+        const registry = isLegacyMerge ? { ...legacyRegistry, ...scopedRegistry } : scopedRegistry;
+        const assignments = isLegacyMerge ? { ...legacyAssignments, ...scopedAssignments } : scopedAssignments;
+
+        const mergedTransport = {};
+        Object.entries(enrollments).forEach(([id, enrollment]) => {
+          if (enrollment) mergedTransport[id] = enrollment;
+        });
+        Object.entries(registry).forEach(([id, reg]) => {
+          if (!reg || reg.using !== true) return;
+          if (!mergedTransport[id]) {
+            mergedTransport[id] = {
+              amStop: reg.routeId || '',
+              pmStop: reg.stopName || '',
+              monthlyFee: reg.monthlyFee || 0
+            };
+          }
+        });
+        Object.entries(assignments).forEach(([id, assignRecord]) => {
+          if (!assignRecord || assignRecord.status !== 'Using') {
+            if (mergedTransport[id]) delete mergedTransport[id];
+            return;
+          }
+          const existing = mergedTransport[id] || {};
+          mergedTransport[id] = {
+            ...existing,
+            ...assignRecord,
+            amStop: assignRecord.morningRouteId || assignRecord.amStop || existing.amStop || '',
+            pmStop: assignRecord.eveningRouteId || assignRecord.pmStop || existing.pmStop || '',
+            baseMonthlyFee: assignRecord.baseMonthlyFee || existing.baseMonthlyFee,
+            startDate: assignRecord.startDate || existing.startDate,
+          };
+        });
+
+        // 2) Load merged students map (scoped + legacy for Socrates).
+        let allStudents = {};
+        try {
+          const scopedStudentsSnap = await schoolRef('students').once('value');
+          const scopedStudents = scopedStudentsSnap.val() || {};
+          if (isLegacyMerge) {
+            const legacyStudentsSnap = await db.ref('students').once('value');
+            const legacyStudents = legacyStudentsSnap.val() || {};
+            allStudents = { ...legacyStudents, ...scopedStudents };
+          } else {
+            allStudents = scopedStudents;
+          }
+        } catch (err) {
+          console.warn('Could not load students map for single view:', err);
+          allStudents = {};
+        }
+
+        // 3) Resolve student profile + transport key by requested key/admission.
+        let resolvedStudentKey = null;
+        let student = null;
+        for (const [k, rec] of Object.entries(allStudents)) {
+          if (!rec || typeof rec !== 'object') continue;
+          const candidates = [k, rec.admissionNumber, rec.admissionNo, rec.studentAdm, rec.admission];
+          if (candidates.some(v => normalizeIdentifier(v) === reqNorm)) {
+            resolvedStudentKey = k;
+            student = rec;
+            break;
+          }
+        }
+        if (!student && allStudents[requestedId]) {
+          resolvedStudentKey = requestedId;
+          student = allStudents[requestedId];
+        }
+        const admissionKey = String(student?.admissionNumber || student?.admissionNo || requestedId).trim();
+        const admissionNorm = normalizeIdentifier(admissionKey);
+
+        let resolvedTransportId = null;
+        const tryTransportIds = [requestedId, resolvedStudentKey, admissionKey].filter(Boolean);
+        for (const idTry of tryTransportIds) {
+          if (mergedTransport[idTry]) {
+            resolvedTransportId = idTry;
+            break;
+          }
+        }
+        if (!resolvedTransportId) {
+          for (const id of Object.keys(mergedTransport)) {
+            if (normalizeIdentifier(id) === reqNorm || normalizeIdentifier(id) === admissionNorm) {
+              resolvedTransportId = id;
+              break;
             }
-          } catch (err) {
-            console.warn('Could not resolve student profile for single view:', err);
           }
         }
 
-        const admissionKey = String(student?.admissionNumber || student?.admissionNo || '').trim();
-        if (admissionKey && !idsToTry.includes(admissionKey)) idsToTry.push(admissionKey);
-        if (resolvedStudentKey && !idsToTry.includes(resolvedStudentKey)) idsToTry.push(resolvedStudentKey);
+        const enrollment = mergedTransport[resolvedTransportId] || null;
+        const assignment = assignments[resolvedTransportId] || null;
 
-        // Fill missing transport/finance/payment data by trying both transport key and student profile key.
-        for (const idTry of idsToTry) {
-          if (!assign) {
-            const s = await scopedOrSocratesLegacy(`years/${year}/transportAssignments/${idTry}`, `transportAssignments/${year}/${idTry}`).catch(() => ({ val: () => null }));
-            if (s.val()) {
-              assign = s.val();
-              resolvedTransportId = idTry;
-            }
-          }
-          if (!legacyEnroll) {
-            const s = await scopedOrSocratesLegacy(`years/${year}/transportEnrollments/${idTry}`, `transport_enrollments/${idTry}`).catch(() => ({ val: () => null }));
-            if (s.val()) {
-              legacyEnroll = s.val();
-              resolvedTransportId = idTry;
-            }
-          }
-          if (!payments || payments.length === 0) {
-            const s = await scopedOrSocratesLegacy(`years/${year}/transportLedgers/${idTry}/payments`, `transportLedgers/${year}/${idTry}/payments`).catch(() => ({ val: () => null }));
-            payments = normalizePaymentList(s.val() || {});
-            if ((!payments || payments.length === 0)) {
-              payments = await readSupplementalPayments(year, idTry);
-            }
-            if (payments && payments.length) resolvedTransportId = idTry;
-          }
-          if (!financeMap || Object.keys(financeMap).length === 0) {
-            const s = await scopedOrSocratesLegacy(`years/${year}/finance/${idTry}/payments`, `finance/${year}/${idTry}/payments`).catch(() => ({ val: () => null }));
-            financeMap = s.val() || {};
-          }
+        // 4) Payments + finance for resolved ids.
+        const idsForLedger = [resolvedTransportId, admissionKey, resolvedStudentKey, requestedId].filter(Boolean);
+        let payments = [];
+        for (const idTry of idsForLedger) {
+          if (payments.length) break;
+          const paySnap = await scopedOrSocratesLegacy(`years/${y}/transportLedgers/${idTry}/payments`, `transportLedgers/${y}/${idTry}/payments`).catch(() => ({ val: () => null }));
+          payments = normalizePaymentList(paySnap.val() || {});
+          if (!payments.length) payments = await readSupplementalPayments(y, idTry);
         }
-
-        // Normalize payment objects
         const normalizedPayments = (payments || []).map(x => ({
           month: Number(x.month)||0,
           amount: Number(x.amount)||0,
           status: x.status||'pending'
         }));
 
-        const finance = Object.values(financeMap || {});
-        const schoolFeePaid = finance.reduce((a,p)=>a+(Number(p.amount)||0),0);
+        let financeMap = {};
+        for (const idTry of [resolvedStudentKey, admissionKey, requestedId].filter(Boolean)) {
+          if (Object.keys(financeMap).length) break;
+          const finSnap = await scopedOrSocratesLegacy(`years/${y}/finance/${idTry}/payments`, `finance/${y}/${idTry}/payments`).catch(() => ({ val: () => null }));
+          financeMap = finSnap.val() || {};
+        }
+        const schoolFeePaid = Object.values(financeMap || {}).reduce((a,p)=>a+(Number(p?.amount)||0),0);
 
+        const safeTransportId = resolvedTransportId || requestedId;
         if (!student || Object.keys(student || {}).length === 0) {
-          student = buildFallbackStudent(resolvedTransportId, legacyEnroll || assign || {});
+          student = buildFallbackStudent(safeTransportId, enrollment || assignment || {});
         }
 
-        const existingEnrollment = state.transportEnrollments[resolvedTransportId] || {};
-        // Prefer year assignment; fallback to legacy enrollment for parent view
-        let effective = assign;
-        if (!effective && legacyEnroll) {
-          const amStop = legacyEnroll.amStop || legacyEnroll.morningRouteId || legacyEnroll.route || '';
-          const pmStop = legacyEnroll.pmStop || legacyEnroll.eveningRouteId || legacyEnroll.stopName || '';
-          const baseMonthlyFee = Number(legacyEnroll.baseMonthlyFee || 0) || (TransportPricing.priceForStop(amStop) + TransportPricing.priceForStop(pmStop));
-          effective = {
+        let effectiveAssign = assignment;
+        if ((!effectiveAssign || effectiveAssign.status !== 'Using') && enrollment) {
+          const amStop = enrollment.amStop || enrollment.morningRouteId || enrollment.route || '';
+          const pmStop = enrollment.pmStop || enrollment.eveningRouteId || enrollment.stopName || '';
+          const baseMonthlyFee = Number(enrollment.baseMonthlyFee || 0) || (TransportPricing.priceForStop(amStop) + TransportPricing.priceForStop(pmStop));
+          effectiveAssign = {
             status: 'Using',
             amStop,
             pmStop,
             baseMonthlyFee,
-            startDate: legacyEnroll.startDate || legacyEnroll.start_date || legacyEnroll.dateRegistered || null,
+            startDate: enrollment.startDate || enrollment.start_date || enrollment.dateRegistered || null,
           };
         }
 
-        state.students[resolvedTransportId] = student;
-        state.transportEnrollments[resolvedTransportId] = {
-          ...existingEnrollment,
-          ...(effective || assign || legacyEnroll || {}),
-        };
-        state.transportPayments[resolvedTransportId] = normalizedPayments;
+        state.students[safeTransportId] = student;
+        state.transportEnrollments[safeTransportId] = enrollment || effectiveAssign || {};
+        state.transportPayments[safeTransportId] = normalizedPayments;
+        state.studentKeyAliases[safeTransportId] = resolvedStudentKey || admissionKey || safeTransportId;
 
-        // Keep requested id in sync so downstream reads by requested key still work.
+        // Mirror onto requested key too, so downstream consumers don't break.
         state.students[requestedId] = state.students[requestedId] || student;
-        state.transportEnrollments[requestedId] = state.transportEnrollments[requestedId] || state.transportEnrollments[resolvedTransportId];
+        state.transportEnrollments[requestedId] = state.transportEnrollments[requestedId] || state.transportEnrollments[safeTransportId];
         state.transportPayments[requestedId] = state.transportPayments[requestedId] || normalizedPayments;
 
         return {
-          assign: effective || assign,
+          assign: effectiveAssign || (enrollment ? { status: 'Using', ...enrollment } : null),
           payments: normalizedPayments,
           schoolFeePaid,
           student,
-          resolvedTransportId,
+          resolvedTransportId: safeTransportId,
         };
       }
 
