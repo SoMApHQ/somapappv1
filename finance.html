@@ -687,7 +687,55 @@
       return { items: sc, periodLabelNow: periodLabel, expectedToDate };
     }
 
-    // 2) Year plan schedule (from installmentPlans/{y})
+    // 2) Class default edited installments (paymentedits) if present
+    if (student._classInstallments && typeof student._classInstallments === 'object') {
+      const rawRows = Array.isArray(student._classInstallments)
+        ? student._classInstallments
+        : Object.values(student._classInstallments || {});
+      const rows = rawRows.filter((row) => row && row.active !== false);
+      if (rows.length) {
+        const sorted = rows.slice().sort((a, b) => {
+          const aw = a?.window?.from || [];
+          const bw = b?.window?.from || [];
+          const am = Number(aw[0] || 0), bm = Number(bw[0] || 0);
+          const ad = Number(aw[1] || 0), bd = Number(bw[1] || 0);
+          if (am !== bm) return am - bm;
+          return ad - bd;
+        });
+
+        const sc = sorted.map((row, idx) => {
+          const fromPair = Array.isArray(row?.window?.from) ? row.window.from : null;
+          const toPair = Array.isArray(row?.window?.to) ? row.window.to : null;
+          const fallback = getConfig(student).windows?.[idx] || { from: [1, 1], to: [1, 10] };
+          const fromTS = parseScheduleTS(fromPair || fallback.from, false, academicYear);
+          const toTS = parseScheduleTS(toPair || fallback.to, true, academicYear);
+          return {
+            key: row.id || `classinst${idx + 1}`,
+            label: row.label || `Inst ${idx + 1}`,
+            fromTS,
+            toTS,
+            amount: Math.max(0, Math.round(Number(row.amount) || 0)),
+            carryComponent: 0,
+            paidAllocated: 0,
+            status: 'Pending'
+          };
+        });
+
+        const carryAmount = Math.max(0, Number(student.carryAmount || 0));
+        if (carryAmount > 0 && sc.length) {
+          sc[0].amount += carryAmount;
+          sc[0].carryComponent = Math.max(0, Number(sc[0].carryComponent || 0)) + carryAmount;
+        }
+
+        let lastDueIndex = -1, periodLabel = '-', expectedToDate = 0;
+        const now = Date.now();
+        sc.forEach((it, idx) => { if (it.toTS < now) { lastDueIndex = idx; expectedToDate += it.amount; } });
+        if (lastDueIndex >= 0) periodLabel = sc[lastDueIndex].label;
+        return { items: sc, periodLabelNow: periodLabel, expectedToDate };
+      }
+    }
+
+    // 3) Year plan schedule (from installmentPlans/{y})
     if (Array.isArray(student._planSchedule) && student._planSchedule.length) {
       const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
       const carryAmount = Math.max(0, Number(student.carryAmount || 0));
@@ -716,7 +764,7 @@
       return { items: sc, periodLabelNow: periodLabel, expectedToDate };
     }
 
-    // 3) Fallback to existing static configs by class/plan
+    // 4) Fallback to existing static configs by class/plan
     const config = getConfig(student);
     const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
     const carryAmount = Math.max(0, Number(student.carryAmount || 0));
@@ -1190,6 +1238,9 @@ function buildFinanceStudents(
         record._customSchedule = override.customSchedule;
       } else if (resolvedPlan && Array.isArray(resolvedPlan.schedule)) {
         record._planSchedule = resolvedPlan.schedule;
+      }
+      if (classDefaults && classDefaults.installments && typeof classDefaults.installments === 'object') {
+        record._classInstallments = classDefaults.installments;
       }
 
       record.previousDebt = 0;
