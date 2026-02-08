@@ -875,11 +875,6 @@
           const baseClass = student.classLevel || '';
           const shiftedClass = shiftClass(baseClass, yearDelta);
           
-          // Skip if graduated (for future years)
-          if (shiftedClass === 'GRADUATED' && state.year > BASE_YEAR) {
-            continue;
-          }
-
           const matchesClass = !filterClass || shiftedClass === filterClass;
           const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.toLowerCase();
           const matchesSearch = !searchTerm || 
@@ -955,7 +950,10 @@
         }
 
         document.getElementById('emptyState').classList.add('hidden');
-        document.getElementById('paymentSummary').textContent = `${filtered.length} student(s) on transport`;
+        const totalTransport = allEntries.length;
+        document.getElementById('paymentSummary').textContent = filtered.length === totalTransport
+          ? `${filtered.length} student(s) on transport`
+          : `${filtered.length} of ${totalTransport} student(s) on transport`;
 
         // Sort by debt (highest first)
         filtered.sort((a, b) => b[2].debt - a[2].debt);
@@ -1591,67 +1589,79 @@
           showToast('Loading transport data...', 'ok');
           const year = String(state.year);
           
-          // STEP 1: Load transport enrollments FIRST (smaller dataset) - this tells us which students to load
-          const [legacyEnrollSnap, enrollSnap, assignmentsSnap] = await Promise.all([
-            scopedOrSocratesLegacy(`years/${year}/transportEnrollments`, 'transport_enrollments'),
-            scopedOrSocratesLegacy(`years/${year}/transportRegistry`, `transportRegistry/${year}`).catch(() => ({ val: () => null })),
-            scopedOrSocratesLegacy(`years/${year}/transportAssignments`, `transportAssignments/${year}`).catch(() => ({ val: () => null }))
+          // STEP 1: Load and merge transport sources exactly like transport hub
+          const isLegacyMerge = isSocratesSchool();
+          const [
+            enrollScopedSnap,
+            enrollLegacySnap,
+            registryScopedSnap,
+            registryLegacySnap,
+            assignmentsScopedSnap,
+            assignmentsLegacySnap
+          ] = await Promise.all([
+            schoolRef(`years/${year}/transportEnrollments`).once('value'),
+            isLegacyMerge ? db.ref('transport_enrollments').once('value') : Promise.resolve(null),
+            schoolRef(`years/${year}/transportRegistry`).once('value').catch(() => ({ val: () => null })),
+            isLegacyMerge ? db.ref(`transportRegistry/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
+            schoolRef(`years/${year}/transportAssignments`).once('value').catch(() => ({ val: () => null })),
+            isLegacyMerge ? db.ref(`transportAssignments/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
           ]);
 
-          // Build list of student IDs on transport
+          const scopedEnrollments = (enrollScopedSnap && typeof enrollScopedSnap.val === 'function') ? (enrollScopedSnap.val() || {}) : {};
+          const legacyEnrollmentsRaw = (enrollLegacySnap && typeof enrollLegacySnap.val === 'function') ? (enrollLegacySnap.val() || {}) : {};
+          const enrollments = isLegacyMerge ? { ...legacyEnrollmentsRaw, ...scopedEnrollments } : scopedEnrollments;
+
+          const scopedRegistry = (registryScopedSnap && typeof registryScopedSnap.val === 'function') ? (registryScopedSnap.val() || {}) : {};
+          const legacyRegistry = (registryLegacySnap && typeof registryLegacySnap.val === 'function') ? (registryLegacySnap.val() || {}) : {};
+          const registry = isLegacyMerge ? { ...legacyRegistry, ...scopedRegistry } : scopedRegistry;
+
+          const scopedAssignments = (assignmentsScopedSnap && typeof assignmentsScopedSnap.val === 'function') ? (assignmentsScopedSnap.val() || {}) : {};
+          const legacyAssignments = (assignmentsLegacySnap && typeof assignmentsLegacySnap.val === 'function') ? (assignmentsLegacySnap.val() || {}) : {};
+          const assignments = isLegacyMerge ? { ...legacyAssignments, ...scopedAssignments } : scopedAssignments;
+
           state.transportEnrollments = {};
-          const transportStudentIds = new Set();
-          
-          // Process legacy enrollments
-          const legacyEnrollments = legacyEnrollSnap.val() || {};
-          Object.entries(legacyEnrollments).forEach(([studentId, enrollment]) => {
-            if (enrollment) {
-              state.transportEnrollments[studentId] = enrollment;
-              transportStudentIds.add(studentId);
+
+          Object.entries(enrollments).forEach(([studentId, enrollment]) => {
+            if (enrollment) state.transportEnrollments[studentId] = enrollment;
+          });
+
+          Object.entries(registry).forEach(([studentId, reg]) => {
+            if (!reg || reg.using !== true) return;
+            if (!state.transportEnrollments[studentId]) {
+              state.transportEnrollments[studentId] = {
+                amStop: reg.routeId || '',
+                pmStop: reg.stopName || '',
+                monthlyFee: reg.monthlyFee || 0
+              };
             }
           });
-          
-          // Process registry
-          try {
-            const registry = enrollSnap.val() || {};
-            Object.entries(registry).forEach(([studentId, reg]) => {
-              if (reg && reg.using) {
-                transportStudentIds.add(studentId);
-                if (!state.transportEnrollments[studentId]) {
-                  state.transportEnrollments[studentId] = {
-                    amStop: reg.routeId || '',
-                    pmStop: reg.stopName || '',
-                    monthlyFee: reg.monthlyFee || 0
-                  };
-                }
+
+          Object.entries(assignments).forEach(([studentId, assignRecord]) => {
+            if (!assignRecord || assignRecord.status !== 'Using') {
+              if (state.transportEnrollments[studentId]) {
+                delete state.transportEnrollments[studentId];
               }
-            });
-          } catch (err) {
-            console.warn('Could not load transportRegistry:', err);
-          }
-          
-          // Process assignments
-          try {
-            const assignments = assignmentsSnap.val() || {};
-            Object.entries(assignments).forEach(([studentId, assignRecord]) => {
-              if (assignRecord && assignRecord.status === 'Using') {
-                transportStudentIds.add(studentId);
-                const existing = state.transportEnrollments[studentId] || {};
-                state.transportEnrollments[studentId] = {
-                  ...existing,
-                  startDate: assignRecord.startDate || existing.startDate,
-                  baseMonthlyFee: assignRecord.baseMonthlyFee || existing.baseMonthlyFee,
-                  amStop: existing.amStop || assignRecord.amStop || assignRecord.morningRouteId || existing.routeId || '',
-                  pmStop: existing.pmStop || assignRecord.pmStop || assignRecord.eveningRouteId || existing.stopName || '',
-                };
-              }
-            });
-          } catch (err) {
-            console.warn('Could not load transportAssignments:', err);
-          }
+              return;
+            }
+            const existing = state.transportEnrollments[studentId] || {};
+            const amStop = assignRecord.morningRouteId || assignRecord.amStop || existing.amStop || '';
+            const pmStop = assignRecord.eveningRouteId || assignRecord.pmStop || existing.pmStop || '';
+            const route = assignRecord.route || existing.route || amStop || pmStop || '';
+            const period = amStop && pmStop ? 'both' : (amStop ? 'morning' : (pmStop ? 'evening' : ''));
+            state.transportEnrollments[studentId] = {
+              ...existing,
+              ...assignRecord,
+              amStop,
+              pmStop,
+              route,
+              period: assignRecord.period || existing.period || period,
+              baseMonthlyFee: assignRecord.baseMonthlyFee || existing.baseMonthlyFee,
+              startDate: assignRecord.startDate || existing.startDate,
+            };
+          });
 
           // STEP 2: Load ONLY students who are on transport (not all students!)
-          const studentIds = Array.from(transportStudentIds);
+          const studentIds = Object.keys(state.transportEnrollments);
           if (studentIds.length === 0) {
             state.students = {};
             state.transportPayments = {};
