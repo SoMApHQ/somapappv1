@@ -145,6 +145,8 @@
     unsubPending: null,
     historyMonthOptions: [],
     pendingRefreshTimer: null,
+    summariesInFlight: null,
+    summariesLoadedYear: '',
   };
   function formatCurrency(amount) {
     const numeric = Number(amount) || 0;
@@ -529,11 +531,13 @@
     Promise.all([
       watchPendingApprovals(),
       loadHistorySnapshot(),
-      loadSummaries(),
     ]).catch((err) => {
       console.error('Approvals: data load failed', err);
       toast(err?.message || 'Failed to refresh approvals data', 'danger');
     }).finally(() => showLoader(false));
+    loadSummaries().catch((err) => {
+      console.warn('Approvals: summary refresh failed', err);
+    });
   }
 
   function watchPendingApprovals() {
@@ -1523,25 +1527,24 @@
     await firebase.database().ref().update(updates);
   }
   async function loadHistorySnapshot() {
-    let snapshot = await sref('approvalsHistory').once('value');
+    const selectedYear = String(state.selectedYear || getContextYear());
+    let snapshot = await sref(`approvalsHistory/${selectedYear}`).once('value');
     let tree = snapshot.val() || {};
     if (isSocratesSchool()) {
-      const scopedSnap = await scopedRef('approvalsHistory').once('value');
+      const scopedSnap = await scopedRef(`approvalsHistory/${selectedYear}`).once('value');
       const scopedTree = scopedSnap.val() || {};
       tree = { ...scopedTree, ...tree };
     }
     const entries = [];
 
-    Object.entries(tree).forEach(([year, months]) => {
-      Object.entries(months || {}).forEach(([month, records]) => {
-        Object.entries(records || {}).forEach(([key, value]) => {
-          entries.push({
-            approvalId: key,
-            year: Number(year),
-            month,
-            forYear: Number(value?.forYear || value?.academicYear || value?.year || year),
-            ...(value || {}),
-          });
+    Object.entries(tree || {}).forEach(([month, records]) => {
+      Object.entries(records || {}).forEach(([key, value]) => {
+        entries.push({
+          approvalId: key,
+          year: Number(selectedYear),
+          month,
+          forYear: Number(value?.forYear || value?.academicYear || value?.year || selectedYear),
+          ...(value || {}),
         });
       });
     });
@@ -1669,14 +1672,22 @@
   }
 
   async function loadSummaries() {
-    await Promise.all([
+    const selectedYear = String(state.selectedYear || getContextYear());
+    if (state.summariesInFlight && state.summariesLoadedYear === selectedYear) {
+      return state.summariesInFlight;
+    }
+    state.summariesLoadedYear = selectedYear;
+    state.summariesInFlight = Promise.all([
       computeFinanceSummary(),
       computeTransportSummary(),
       computePrefoneSummary(),
       computeGraduationSummary(),
       computeFridaySummary(),
       computeAdmissionSummary(),
-    ]);
+    ]).finally(() => {
+      state.summariesInFlight = null;
+    });
+    await state.summariesInFlight;
   }
 
   async function computeFinanceSummary() {
