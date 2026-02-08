@@ -144,6 +144,7 @@
     },
     unsubPending: null,
     historyMonthOptions: [],
+    pendingRefreshTimer: null,
   };
   function formatCurrency(amount) {
     const numeric = Number(amount) || 0;
@@ -321,6 +322,9 @@
         const dupKey = pendingPath || dup.approvalId;
         if (dupKey) duplicateKeys.add(dupKey);
         if (!pendingPath) return;
+        const alreadyMarked = String(dup.status || '').toUpperCase() === 'DUPLICATE'
+          && String(dup.duplicateOf || '') === String(fp);
+        if (alreadyMarked) return;
         updates[P(`${pendingPath}/status`)] = 'DUPLICATE';
         updates[P(`${pendingPath}/duplicateOf`)] = fp;
         updates[P(`${pendingPath}/duplicateMarkedAt`)] = firebase.database.ServerValue.TIMESTAMP;
@@ -345,6 +349,28 @@
     });
   }
 
+  function rebuildPendingListFromState() {
+    const flattened = flattenPendingTree(state.pending, state.selectedYear);
+    markPendingDuplicates(flattened).then((visibleRows) => {
+      state.pendingList = visibleRows;
+      renderPendingTable();
+      recomputePendingSummaries();
+    }).catch((err) => {
+      if (err) console.warn('Approvals: pending duplicate mark failed', err);
+      state.pendingList = flattened;
+      renderPendingTable();
+      recomputePendingSummaries();
+    });
+  }
+
+  function schedulePendingRebuild() {
+    if (state.pendingRefreshTimer) clearTimeout(state.pendingRefreshTimer);
+    state.pendingRefreshTimer = setTimeout(() => {
+      state.pendingRefreshTimer = null;
+      rebuildPendingListFromState();
+    }, 40);
+  }
+
   function handleYearChange(newYear) {
     const normalized = normalizeYearValue(newYear || state.selectedYear);
     const changed = state.selectedYear !== normalized;
@@ -353,16 +379,7 @@
     if (els.historyMonth) els.historyMonth.value = '';
     buildHistoryMonthOptionsForYear();
     renderHistory();
-    const flattened = flattenPendingTree(state.pending, state.selectedYear);
-    markPendingDuplicates(flattened).then((visibleRows) => {
-      state.pendingList = visibleRows;
-      renderPendingTable();
-      recomputePendingSummaries();
-    }).catch(() => {
-      state.pendingList = flattened;
-      renderPendingTable();
-      recomputePendingSummaries();
-    });
+    schedulePendingRebuild();
     return changed;
   }
 
@@ -538,17 +555,7 @@
       if (isLegacy) legacySnap = snapshot;
       else primarySnap = snapshot;
       state.pending = mergeSnapshots();
-      const flattened = flattenPendingTree(state.pending, state.selectedYear);
-      markPendingDuplicates(flattened).then((visibleRows) => {
-        state.pendingList = visibleRows;
-        renderPendingTable();
-        recomputePendingSummaries();
-      }).catch((err) => {
-        console.warn('Approvals: pending duplicate mark failed', err);
-        state.pendingList = flattened;
-        renderPendingTable();
-        recomputePendingSummaries();
-      });
+      schedulePendingRebuild();
     };
     ref.on('value', (snap) => handler(snap, false));
     if (legacy) legacy.on('value', (snap) => handler(snap, true));
@@ -891,16 +898,6 @@
   async function approveSelectedRecord() {
     const record = state.selectedRecord;
     if (!record) return;
-
-    const duplicateExists = await hasDuplicateInHistory(record);
-    if (duplicateExists) {
-      Swal.fire({
-        icon: 'error',
-        title: 'Duplicate payment',
-        text: 'This payment has already been approved earlier. It cannot be approved twice.',
-      });
-      return;
-    }
 
     Swal.fire({
       icon: 'question',

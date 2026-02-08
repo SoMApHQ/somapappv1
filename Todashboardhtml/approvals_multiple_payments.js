@@ -53,6 +53,7 @@
   };
 
   let currentGroups = [];
+  let scanInFlight = null;
 
   const fmt = new Intl.NumberFormat('en-TZ', {
     style: 'currency',
@@ -392,19 +393,27 @@
   }
 
   async function scan(showPanel) {
+    if (scanInFlight) return scanInFlight;
     ui.summary.textContent = 'Scanning for duplicate payments...';
     if (ui.deleteBtn) ui.deleteBtn.disabled = true;
-    const year = getWorkingYear();
-    try {
-      const [pending, history] = await Promise.all([fetchPending(year), fetchHistory(year)]);
-      const groups = groupByFingerprint([...pending, ...history], year);
-      renderGroups(groups);
-      if (showPanel) ui.panel.classList.remove('hidden');
-    } catch (err) {
-      console.error('[approvals_multiple_payments] scan failed', err);
-      ui.summary.textContent = 'Failed to scan duplicates. Check console.';
-      updateBadge(0);
-    }
+    scanInFlight = (async () => {
+      const year = getWorkingYear();
+      try {
+        const pendingPromise = fetchPending(year);
+        const historyPromise = showPanel ? fetchHistory(year) : Promise.resolve([]);
+        const [pending, history] = await Promise.all([pendingPromise, historyPromise]);
+        const groups = groupByFingerprint([...pending, ...history], year);
+        renderGroups(groups);
+        if (showPanel) ui.panel.classList.remove('hidden');
+      } catch (err) {
+        console.error('[approvals_multiple_payments] scan failed', err);
+        ui.summary.textContent = 'Failed to scan duplicates. Check console.';
+        updateBadge(0);
+      } finally {
+        scanInFlight = null;
+      }
+    })();
+    return scanInFlight;
   }
 
   async function deleteSelected() {
@@ -453,5 +462,7 @@
   }
 
   // Initial badge load (silent)
-  scan(false).catch((err) => console.warn('[approvals_multiple_payments] initial scan failed', err));
+  setTimeout(() => {
+    scan(false).catch((err) => console.warn('[approvals_multiple_payments] initial scan failed', err));
+  }, 120);
 })();
