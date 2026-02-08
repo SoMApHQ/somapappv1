@@ -480,19 +480,59 @@
     if (endOfDay) return new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
     return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
   }
-  function parseScheduleTS(raw, endOfDay = false) {
-    if (!raw) return 0;
+  function parseScheduleTS(raw, endOfDay = false, academicYear = Number(financeYear)) {
+    if (raw == null) return 0;
+
+    const toBoundary = (y, m, d) => endOfDay
+      ? new Date(y, m - 1, d, 23, 59, 59, 999).getTime()
+      : new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      return raw;
+    }
+
+    if (Array.isArray(raw) && raw.length >= 2) {
+      const m = Number(raw[0]);
+      const d = Number(raw[1]);
+      if (Number.isFinite(m) && Number.isFinite(d) && m >= 1 && m <= 12 && d >= 1 && d <= 31 && Number.isFinite(academicYear)) {
+        const y = m === 12 ? academicYear - 1 : academicYear;
+        return toBoundary(y, m, d);
+      }
+      return 0;
+    }
+
     const value = String(raw).trim();
     if (!value) return 0;
+
+    // Explicit Y-M-D / Y/M/D
+    const ymdMatch = value.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+    if (ymdMatch) {
+      const y = Number(ymdMatch[1]);
+      const m = Number(ymdMatch[2]);
+      const d = Number(ymdMatch[3]);
+      if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+        return toBoundary(y, m, d);
+      }
+    }
+
+    // M-D or M-D-Y format; when year missing, bind to academic year
+    const mdyMatch = value.match(/^(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}))?$/);
+    if (mdyMatch) {
+      const m = Number(mdyMatch[1]);
+      const d = Number(mdyMatch[2]);
+      let y = Number(mdyMatch[3]);
+      if (!Number.isFinite(y) && Number.isFinite(academicYear)) {
+        y = (m === 12) ? academicYear - 1 : academicYear;
+      }
+      if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+        return toBoundary(y, m, d);
+      }
+    }
+
     const ts = Date.parse(value);
     if (!Number.isFinite(ts)) return 0;
-    if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(value)) {
-      const d = new Date(ts);
-      return endOfDay
-        ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999).getTime()
-        : new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
-    }
-    return ts;
+    const d = new Date(ts);
+    return toBoundary(d.getFullYear(), d.getMonth() + 1, d.getDate());
   }
   function isPast(ts) { return Date.now() > ts; }
   function apportion(total, weights) {
@@ -624,6 +664,7 @@
       return { items: [], periodLabelNow: '-', expectedToDate: 0 };
     }
     const { y } = todayYMD();
+    const academicYear = Number.isFinite(y) ? y : Number(financeYear);
 
     // 1) Student-level custom schedule wins
     if (Array.isArray(student._customSchedule) && student._customSchedule.length) {
@@ -632,8 +673,8 @@
         .map((it, idx) => ({
           key: `custom${idx+1}`,
           label: String(it.label || 'Item'),
-          fromTS: parseScheduleTS(it.from, false),
-          toTS: parseScheduleTS(it.to, true),
+          fromTS: parseScheduleTS(it.from, false, academicYear),
+          toTS: parseScheduleTS(it.to, true, academicYear),
           amount: Math.max(0, Math.round(Number(it.amount) || 0)),
           carryComponent: Math.max(0, Number(it.carryComponent || 0)),
           paidAllocated: 0,
@@ -658,8 +699,8 @@
       const sc = student._planSchedule.map((s, i) => ({
         key: `inst${i+1}`,
         label: s.label || `Inst ${i+1}`,
-        fromTS: parseScheduleTS(s.from, false),
-        toTS: parseScheduleTS(s.to, true),
+        fromTS: parseScheduleTS(s.from, false, academicYear),
+        toTS: parseScheduleTS(s.to, true, academicYear),
         amount: Math.max(0, amounts[i] || 0),
         carryComponent: 0,
         paidAllocated: 0,
