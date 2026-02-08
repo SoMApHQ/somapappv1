@@ -1052,7 +1052,7 @@
             ...(effectiveFinance?.feeOverride || {}),
           };
 
-          const prepared = {
+          let prepared = {
             ...baseStudent,
             academicYear: targetYearStr,
             classLevel,
@@ -1065,12 +1065,47 @@
             isGraduated: classLevel === 'GRADUATED',
             admissionNumber: enrollment.admissionNumber || enrollment.admissionNo || baseStudent.admissionNumber || studentId,
           };
-
           // Attach custom schedule or plan schedule for builder to use
           if (Array.isArray(effectiveOverride.customSchedule) && effectiveOverride.customSchedule.length) {
             prepared._customSchedule = effectiveOverride.customSchedule;
           } else if (resolvedPlan && Array.isArray(resolvedPlan.schedule)) {
             prepared._planSchedule = resolvedPlan.schedule; // [{label, from, to, weight}]
+          }
+
+          // Keep iframe breakdown in lockstep with finance table logic for class/plan/fee/payments.
+          try {
+            const parentApi = window.parent;
+            if (parentApi && typeof parentApi.__finance_lookupStudent === 'function') {
+              const byId = parentApi.__finance_lookupStudent(studentId);
+              const byAdm = prepared.admissionNumber ? parentApi.__finance_lookupStudent(prepared.admissionNumber) : null;
+              const parentStudent = byId?.student || byAdm?.student || null;
+              if (parentStudent) {
+                const merged = { ...prepared, ...parentStudent };
+                merged.classLevel = parentStudent.classLevel || prepared.classLevel;
+                merged.paymentPlan = parentStudent.paymentPlan || prepared.paymentPlan;
+                merged.baseFee = Math.max(0, Number(parentStudent.baseFee ?? prepared.baseFee) || 0);
+                merged.carryAmount = Math.max(0, Number(parentStudent.carryAmount ?? prepared.carryAmount) || 0);
+                merged.feePerYear = Math.max(0, Number(parentStudent.feePerYear ?? (merged.baseFee + merged.carryAmount)) || 0);
+                merged.payments = (parentStudent.payments && typeof parentStudent.payments === 'object')
+                  ? parentStudent.payments
+                  : prepared.payments;
+                merged.hasYearData = (parentStudent.hasYearData !== undefined)
+                  ? Boolean(parentStudent.hasYearData)
+                  : prepared.hasYearData;
+                merged.isGraduated = (parentStudent.isGraduated !== undefined)
+                  ? Boolean(parentStudent.isGraduated)
+                  : prepared.isGraduated;
+                if (Array.isArray(parentStudent._customSchedule) && parentStudent._customSchedule.length) {
+                  merged._customSchedule = parentStudent._customSchedule;
+                  delete merged._planSchedule;
+                } else if (Array.isArray(parentStudent._planSchedule) && parentStudent._planSchedule.length) {
+                  merged._planSchedule = parentStudent._planSchedule;
+                }
+                prepared = merged;
+              }
+            }
+          } catch (syncErr) {
+            console.warn('parent finance sync failed', syncErr?.message || syncErr);
           }
 
           await render(prepared, classDefaults, effectiveOverride);
