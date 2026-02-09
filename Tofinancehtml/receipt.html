@@ -1169,8 +1169,8 @@
 
     function matchesStudent(approval, studentId, adm){
       if (!approval) return false;
-      if (studentId && approval.studentId && String(approval.studentId) === String(studentId)) return true;
-      if (adm && approval.studentAdm && String(approval.studentAdm).toLowerCase() === String(adm).toLowerCase()) return true;
+      if (studentId && approval.studentId && String(approval.studentId).trim() === String(studentId).trim()) return true;
+      if (adm && approval.studentAdm && String(approval.studentAdm).trim().toLowerCase() === String(adm).trim().toLowerCase()) return true;
       return false;
     }
 
@@ -1214,43 +1214,109 @@
     }
 
     async function fetchLedgerReceiptsForStudent(year, studentId, adm, studentRecord){
-      if (!window.SomapFinance || typeof window.SomapFinance.loadStudentFinance !== 'function') return [];
-      const identifier = studentId || adm;
-      if (!identifier) return [];
-      let finance = null;
-      try{
-        finance = await window.SomapFinance.loadStudentFinance(String(year), identifier);
-      }catch(err){
-        console.warn('Receipt: unable to load finance ledger for receipts', err);
-        return [];
+      const yearStr = String(year || state.year || SOMAP_DEFAULT_YEAR);
+      const admission = String(adm || '').trim();
+      const studentIdFromDirectory = (!studentId && admission)
+        ? resolveStudentId(admission, state.students || {})
+        : null;
+      const identifierCandidates = Array.from(new Set([
+        studentId,
+        studentIdFromDirectory,
+        admission,
+        sanitizeKey(admission),
+        studentRecord?.admissionNumber,
+        studentRecord?.admissionNo,
+        studentRecord?.admNo,
+        studentRecord?.registrationNumber,
+        studentRecord?.autoId,
+      ].filter(Boolean).map(v => String(v).trim()).filter(Boolean)));
+
+      const mapRows = (paymentsMap, finance = null) => {
+        const rows = Object.entries(paymentsMap || {})
+          .map(([rowKey, payment]) => normalizeLedgerReceiptRecord(rowKey, payment, {
+            year: yearStr,
+            studentId: studentId || finance?.studentId || '',
+            studentAdm: admission || finance?.admissionNumber || '',
+            studentName: buildFullName(studentRecord) || finance?.fullName || '',
+            className: studentRecord?.classLevel || finance?.classLevel || '',
+            payerContact: collectPrimaryContact(studentRecord),
+            totalRequired: Number(finance?.due || 0),
+            planLabel: finance?.paymentPlan || '',
+            debtStage: finance?.record?.debtStage || '',
+            dueDate: finance?.record?.nextDueDate || '',
+          }))
+          .filter(Boolean);
+        const sortedAsc = rows.slice().sort((a,b)=>Number(a.paymentDate||0)-Number(b.paymentDate||0));
+        let runningTotal = 0;
+        const due = Number(finance?.due || 0);
+        sortedAsc.forEach(row => {
+          row.totalPaidBefore = runningTotal;
+          runningTotal += Number(row.amountPaidNow || 0);
+          row.totalPaidAfter = runningTotal;
+          row.balanceAfter = Math.max(0, due - runningTotal);
+        });
+        return rows;
+      };
+
+      if (window.SomapFinance && typeof window.SomapFinance.loadStudentFinance === 'function'){
+        for (const identifier of identifierCandidates){
+          try{
+            const finance = await window.SomapFinance.loadStudentFinance(yearStr, identifier);
+            const paymentsMap = finance?.record?.payments || {};
+            const rows = mapRows(paymentsMap, finance);
+            if (rows.length) return rows;
+          }catch(err){
+            console.warn('Receipt: finance helper lookup failed', { identifier, year: yearStr, err });
+          }
+        }
       }
-      const paymentsMap = finance?.record?.payments || {};
-      const rows = Object.entries(paymentsMap || {})
-        .map(([rowKey, payment]) => normalizeLedgerReceiptRecord(rowKey, payment, {
-          year: String(year),
-          studentId: studentId || finance?.studentId || '',
-          studentAdm: adm || finance?.admissionNumber || '',
-          studentName: buildFullName(studentRecord) || finance?.fullName || '',
-          className: studentRecord?.classLevel || finance?.classLevel || '',
-          payerContact: collectPrimaryContact(studentRecord),
-          totalRequired: Number(finance?.due || 0),
-          planLabel: finance?.paymentPlan || '',
-          debtStage: finance?.record?.debtStage || '',
-          dueDate: finance?.record?.nextDueDate || '',
-        }))
-        .filter(Boolean);
 
-      const sortedAsc = rows.slice().sort((a,b)=>Number(a.paymentDate||0)-Number(b.paymentDate||0));
-      let runningTotal = 0;
-      const due = Number(finance?.due || 0);
-      sortedAsc.forEach(row => {
-        row.totalPaidBefore = runningTotal;
-        runningTotal += Number(row.amountPaidNow || 0);
-        row.totalPaidAfter = runningTotal;
-        row.balanceAfter = Math.max(0, due - runningTotal);
-      });
-
-      return rows;
+      // Fallback: read ledger paths directly (same year scope), useful when student/admission mapping is inconsistent.
+      const aggregated = {};
+      const matchesFinanceYear = (payment) => {
+        const directYear = Number(
+          payment?.academicYear ??
+          payment?.financeYear ??
+          payment?.feeYear ??
+          payment?.year ??
+          payment?._year
+        );
+        if (Number.isFinite(directYear)) return String(directYear) === yearStr;
+        const ts = Number(payment?.paymentDate || payment?.timestamp || payment?.datePaid || payment?.createdAt || 0);
+        if (Number.isFinite(ts) && ts > 0){
+          return String(new Date(ts).getFullYear()) === yearStr;
+        }
+        return false;
+      };
+      for (const identifier of identifierCandidates){
+        const rawKey = String(identifier || '').trim();
+        if (!rawKey) continue;
+        const possibleKeys = Array.from(new Set([rawKey, sanitizeKey(rawKey)]));
+        for (const key of possibleKeys){
+          try{
+            const snap = await fetchScoped(`financeLedgers/${yearStr}/${key}`);
+            const raw = snap?.val?.() || null;
+            if (!raw || typeof raw !== 'object') continue;
+            const bucket = raw.payments || raw.entries || raw.records || raw;
+            Object.entries(bucket || {}).forEach(([payKey, payVal]) => {
+              if (!payVal || typeof payVal !== 'object') return;
+              const dedupeKey = `${key}:${payKey}`;
+              aggregated[dedupeKey] = payVal;
+            });
+          }catch(_){}
+          try{
+            const studentSnap = await fetchScoped(`students/${key}/payments`);
+            const studentPayments = studentSnap?.val?.() || {};
+            Object.entries(studentPayments || {}).forEach(([payKey, payVal]) => {
+              if (!payVal || typeof payVal !== 'object') return;
+              if (!matchesFinanceYear(payVal)) return;
+              const dedupeKey = `students:${key}:${payKey}`;
+              aggregated[dedupeKey] = payVal;
+            });
+          }catch(_){}
+        }
+      }
+      return mapRows(aggregated, null);
     }
 
     async function fetchReceiptRecordsForStudent(year, studentId, adm, studentRecord){
