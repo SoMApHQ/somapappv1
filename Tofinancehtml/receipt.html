@@ -1289,15 +1289,25 @@
     async function fetchFinanceLedgerApprovalsForStudent(year, studentId, adm){
       const yearStr = String(year || state.year || SOMAP_DEFAULT_YEAR);
       const admission = String(adm || '').trim();
+      const admissionNeedle = normalizeAdmission(admission);
       const resolvedStudentKeyFromAdmission = resolveStudentKeyFromAdmission(
         admission,
         state.students || {},
         state.enrollAnchor || {},
         state.enrollYear || {}
       );
+      let globalResolvedStudentKey = '';
+      if (!resolvedStudentKeyFromAdmission && admissionNeedle){
+        try{
+          const globalStudentsSnap = await db.ref('students').once('value');
+          const globalStudents = globalStudentsSnap?.val?.() || {};
+          globalResolvedStudentKey = resolveStudentKeyFromAdmission(admission, globalStudents, {}, {});
+        }catch(_){}
+      }
       const identifierCandidates = Array.from(new Set([
         studentId,
         resolvedStudentKeyFromAdmission,
+        globalResolvedStudentKey,
         admission,
         sanitizeKey(admission),
       ].filter(Boolean).map(v => String(v).trim()).filter(Boolean)));
@@ -1349,6 +1359,47 @@
             }catch(_){}
           }
         }
+      }
+      if (!merged.length && admissionNeedle){
+        try{
+          const ledgerYearSnap = await fetchScoped(`financeLedgers/${yearStr}`);
+          const ledgerYearTree = ledgerYearSnap?.val?.() || {};
+          Object.entries(ledgerYearTree || {}).forEach(([nodeKey, nodeValue]) => {
+            if (!nodeValue || typeof nodeValue !== 'object') return;
+            const keyMatches =
+              normalizeAdmission(nodeKey) === admissionNeedle ||
+              String(nodeKey).trim() === String(studentId || '') ||
+              String(nodeKey).trim() === String(resolvedStudentKeyFromAdmission || '') ||
+              String(nodeKey).trim() === String(globalResolvedStudentKey || '');
+            if (!keyMatches) return;
+            const payments = extractLedgerPayments(nodeValue);
+            Object.entries(payments || {}).forEach(([paymentKey, payment]) => {
+              if (!payment || typeof payment !== 'object') return;
+              const normalized = normalizeApprovalRecord(paymentKey, {
+                ...payment,
+                studentId: payment.studentId || payment.studentKey || nodeKey || studentId || resolvedStudentKeyFromAdmission || globalResolvedStudentKey || '',
+                studentAdm: payment.studentAdm || payment.admissionNumber || payment.admissionNo || admission || '',
+                approvedBy: payment.approvedBy || 'Finance Ledger',
+                sourceModule: payment.sourceModule || payment.module || payment.paymentModule || 'finance',
+                paymentReferenceCode: payment.paymentReferenceCode || payment.referenceCode || payment.reference || payment.ref || '',
+                paymentMethod: payment.paymentMethod || payment.method || payment.mode || 'Cash',
+                paymentDate: parseTimestampLike(
+                  payment.paymentDate || payment.timestamp || payment.datePaid || payment.createdAt || payment.updatedAt || 0
+                ),
+                approvedAt: parseTimestampLike(
+                  payment.approvedAt || payment.timestamp || payment.createdAt || payment.updatedAt || payment.paymentDate || 0
+                ),
+                amountPaidNow: parseMoneyValue(
+                  payment.amountPaidNow ?? payment.amount ?? payment.value ?? payment.paid ?? payment.total ?? 0
+                ),
+              }, { year: yearStr });
+              if (!normalized) return;
+              normalized.modulePath = 'finance.html';
+              normalized.fromLedger = true;
+              merged.push(normalized);
+            });
+          });
+        }catch(_){}
       }
       return merged;
     }
