@@ -886,6 +886,28 @@
       return found ? String(found).trim() : '';
     }
 
+    function normalizeAdmission(value){
+      return String(value || '').trim().toLowerCase();
+    }
+
+    function resolveStudentKeyFromAdmission(admission, studentsMap, enrollAnchorMap, enrollYearMap){
+      const needle = normalizeAdmission(admission);
+      if (!needle) return '';
+      const admissionFields = ['admissionNumber','admissionNo','admNo','registrationNumber','autoId','pupilId','studentAdm'];
+      const scan = (mapObj) => {
+        if (!mapObj || typeof mapObj !== 'object') return '';
+        for (const [key, row] of Object.entries(mapObj)){
+          if (!row || typeof row !== 'object') continue;
+          for (const field of admissionFields){
+            const candidate = normalizeAdmission(row[field]);
+            if (candidate && candidate === needle) return String(key);
+          }
+        }
+        return '';
+      };
+      return scan(studentsMap) || scan(enrollYearMap) || scan(enrollAnchorMap) || '';
+    }
+
     function resolvePhotoUrl(student, fallbackUrl){
       if (!student && !fallbackUrl) return '';
       const direct = student?.photoUrl
@@ -1236,11 +1258,18 @@
     async function fetchLedgerReceiptsForStudent(year, studentId, adm, studentRecord){
       const yearStr = String(year || state.year || SOMAP_DEFAULT_YEAR);
       const admission = String(adm || '').trim();
+      const resolvedStudentKeyFromAdmission = resolveStudentKeyFromAdmission(
+        admission,
+        state.students || {},
+        state.enrollAnchor || {},
+        state.enrollYear || {}
+      );
       const studentIdFromDirectory = (!studentId && admission)
         ? resolveStudentId(admission, state.students || {})
         : null;
       const identifierCandidates = Array.from(new Set([
         studentId,
+        resolvedStudentKeyFromAdmission,
         studentIdFromDirectory,
         admission,
         sanitizeKey(admission),
@@ -1374,6 +1403,30 @@
             const paymentMap = entry.payments || entry.entries || entry.records || {};
             injectPaymentMap(paymentMap, `finance:${yearStr}:${classKey}:${admKey}`, true);
           });
+        });
+      }catch(_){}
+      rows = mapRows(aggregated, null);
+      if (rows.length) return rows;
+
+      // Final fallback: scan all financeLedgers/{year} entries and match by internal admission fields.
+      try{
+        const ledgerYearSnap = await fetchScoped(`financeLedgers/${yearStr}`);
+        const ledgerYearTree = ledgerYearSnap?.val?.() || {};
+        const admissionNeedle = normalizeAdmission(admission);
+        Object.entries(ledgerYearTree || {}).forEach(([nodeKey, nodeVal]) => {
+          if (!nodeVal || typeof nodeVal !== 'object') return;
+          const admissionCandidates = [
+            nodeVal.admissionNumber,
+            nodeVal.admissionNo,
+            nodeVal.admNo,
+            nodeVal.registrationNumber,
+            nodeVal.studentAdm,
+          ].map(normalizeAdmission).filter(Boolean);
+          const keyMatchesAdmission = normalizeAdmission(nodeKey) === admissionNeedle;
+          const bodyMatchesAdmission = admissionCandidates.includes(admissionNeedle);
+          if (!keyMatchesAdmission && !bodyMatchesAdmission) return;
+          const paymentMap = nodeVal.payments || nodeVal.entries || nodeVal.records || {};
+          injectPaymentMap(paymentMap, `financeLedgers:${yearStr}:${nodeKey}`, true);
         });
       }catch(_){}
       rows = mapRows(aggregated, null);
