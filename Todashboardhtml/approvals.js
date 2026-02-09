@@ -1044,22 +1044,34 @@
     return financeDedupe.buildFinancePaymentFingerprint(fingerprintRecord, { year: targetYear });
   }
 
+  function toFirebaseKeySegment(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    return raw
+      .replace(/[.#$/\[\]]/g, '_')
+      .replace(/\s+/g, '');
+  }
+
   async function lockFinanceApproval(record, targetYear) {
     const year = normalizeYearValue(targetYear || state.selectedYear || getContextYear());
     const fingerprint = buildFinanceApprovalFingerprint(record, year);
     if (!fingerprint) return { year, fingerprint: '', committed: true, lockValue: null };
     const approvalId = record?.approvalId || '';
-    const lockPath = `financeDedupe/approved/${year}/${fingerprint}`;
+    const fingerprintKey = toFirebaseKeySegment(fingerprint);
+    if (!fingerprintKey) return { year, fingerprint, fingerprintKey: '', committed: true, lockValue: null };
+    const lockPath = `financeDedupe/approved/${year}/${fingerprintKey}`;
     const tx = await schoolRef(lockPath).transaction((current) => (
       current || {
         approvedAt: Date.now(),
         approvalId,
         fingerprint,
+        fingerprintKey,
       }
     ));
     return {
       year,
       fingerprint,
+      fingerprintKey,
       committed: !!tx?.committed,
       lockValue: tx?.snapshot?.val() || null,
     };
@@ -1243,9 +1255,9 @@
       toast('Student approved. Payment saved.', 'success');
       hideDetailModal();
     } catch (err) {
-      if (financeLock?.committed && financeLock?.fingerprint) {
+      if (financeLock?.committed && financeLock?.fingerprintKey) {
         const year = normalizeYearValue(financeLock.year || targetYear || state.selectedYear || getContextYear());
-        const lockPath = `financeDedupe/approved/${year}/${financeLock.fingerprint}`;
+        const lockPath = `financeDedupe/approved/${year}/${financeLock.fingerprintKey}`;
         await schoolRef(lockPath).transaction((current) => {
           if (!current || current.approvalId !== record.approvalId) return current;
           return null;
