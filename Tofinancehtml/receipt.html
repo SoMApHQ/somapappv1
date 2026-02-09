@@ -913,6 +913,29 @@
       return `${initials}${receiptYear}${formatReceiptSequence(seq)}`;
     }
 
+    function normalizeFingerprintToken(value){
+      return String(value == null ? '' : value)
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g,' ');
+    }
+
+    function buildReceiptFingerprint(entry, financeYear){
+      const studentToken = normalizeFingerprintToken(
+        entry?.studentId || entry?.studentAdm || state.studentId || state.queryStudent || ''
+      );
+      const yearToken = normalizeFingerprintToken(
+        entry?.receiptYear || entry?.financeYear || financeYear || state.year || SOMAP_DEFAULT_YEAR
+      );
+      const amountToken = (Number(entry?.amountPaidNow || entry?.amount || 0) || 0).toFixed(2);
+      const timeToken = String(Number(entry?.paymentDate || entry?.approvedAt || 0) || 0);
+      const methodToken = normalizeFingerprintToken(entry?.paymentMethod || entry?.method || '');
+      const refToken = normalizeFingerprintToken(
+        entry?.paymentReferenceCode || entry?.referenceCode || entry?.reference || entry?.note || ''
+      );
+      return `${studentToken}|${yearToken}|${amountToken}|${timeToken}|${methodToken}|${refToken}`;
+    }
+
     function buildReceiptNumberMap(approvals){
       if (!Array.isArray(approvals) || !approvals.length) return {};
       const sorted = approvals.slice().sort((a,b)=>{
@@ -1030,6 +1053,120 @@
       };
     }
 
+    function normalizeLedgerReceiptRecord(rowKey, payment, context = {}){
+      if (!payment) return null;
+      const amountPaidNow = Number(payment.amount ?? payment.value ?? payment.paid ?? payment.total ?? 0);
+      if (!Number.isFinite(amountPaidNow) || amountPaidNow <= 0) return null;
+      const sourceModule = payment.sourceModule || payment.module || payment.paymentModule || 'finance';
+      const approvedAt = Number(
+        payment.timestamp || payment.datePaid || payment.paymentDate || payment.createdAt || payment.updatedAt || Date.now()
+      );
+      const paymentTimestamp = Number(
+        payment.paymentDate || payment.timestamp || payment.datePaid || approvedAt
+      );
+      const referenceCode =
+        payment.paymentReferenceCode ||
+        payment.referenceCode ||
+        payment.reference ||
+        payment.ref ||
+        payment.note ||
+        payment.remarks ||
+        '';
+      const paymentMethod = payment.method || payment.mode || payment.paymentMethod || 'Cash';
+      const rowKeyResolved = moduleToRowKey(sourceModule);
+      const receiptYear = String(context.year || payment.academicYear || payment.financeYear || SOMAP_DEFAULT_YEAR);
+      return {
+        id: '',
+        sourceModule,
+        rowKey: rowKeyResolved,
+        moduleLabel: (PAYMENT_ROWS.find(r=>r.key===rowKeyResolved)?.label) || 'School Fees',
+        modulePath: 'finance.html',
+        amountPaidNow,
+        paymentMethod,
+        paymentReferenceCode: referenceCode,
+        paidBy: payment.paidBy || payment.payer || payment.parentName || context.studentName || 'Parent/Guardian',
+        payerContact: payment.payerContact || payment.contact || context.payerContact || '',
+        approvedAt,
+        approvedBy: payment.approvedBy || 'Finance Ledger',
+        paymentDate: paymentTimestamp,
+        receiptUpdatedAt: Number(payment.updatedAt || approvedAt),
+        totalRequired: Number(context.totalRequired || 0),
+        totalPaidBefore: 0,
+        totalPaidAfter: 0,
+        balanceAfter: 0,
+        planLabel: context.planLabel || '',
+        debtStage: context.debtStage || '',
+        dueDate: context.dueDate || '',
+        studentId: context.studentId || '',
+        studentAdm: context.studentAdm || '',
+        studentName: context.studentName || '',
+        className: context.className || '',
+        motherPhone: context.payerContact || '',
+        amountWords: numberToWordsTZS(amountPaidNow),
+        breakdownMap: {},
+        note: payment.note || payment.remarks || payment.description || '',
+        photoUrl: '',
+        receiptYear,
+        financeYear: receiptYear,
+        fromLedger: true,
+        ledgerRowKey: rowKey || '',
+      };
+    }
+
+    function mergeReceiptRecords(approvals, ledgerRows, financeYear){
+      const merged = [];
+      const byFingerprint = new Map();
+      const addRow = (row) => {
+        if (!row) return;
+        const fingerprint = buildReceiptFingerprint(row, financeYear);
+        const existing = byFingerprint.get(fingerprint);
+        if (!existing){
+          const base = {
+            ...row,
+            receiptYear: String(row.receiptYear || financeYear || state.year || SOMAP_DEFAULT_YEAR),
+            financeYear: String(row.financeYear || row.receiptYear || financeYear || state.year || SOMAP_DEFAULT_YEAR),
+            receiptFingerprint: fingerprint,
+            ledgerDuplicateCount: row.fromLedger ? 1 : 0,
+            possibleDuplicate: false,
+          };
+          if (!base.id) base.id = `RCPT-${fingerprint.slice(0,16).replace(/[^a-z0-9]/gi,'').toUpperCase()}`;
+          byFingerprint.set(fingerprint, base);
+          merged.push(base);
+          return;
+        }
+        if (row.fromLedger){
+          existing.ledgerDuplicateCount = Number(existing.ledgerDuplicateCount || 0) + 1;
+          if (existing.ledgerDuplicateCount > 1){
+            existing.possibleDuplicate = true;
+          }
+        }
+        if (!existing.fromLedger && row.fromLedger){
+          return;
+        }
+        if (existing.fromLedger && !row.fromLedger){
+          const keepMeta = {
+            receiptFingerprint: existing.receiptFingerprint,
+            ledgerDuplicateCount: existing.ledgerDuplicateCount,
+            possibleDuplicate: existing.possibleDuplicate,
+          };
+          Object.assign(existing, row, keepMeta);
+          return;
+        }
+      };
+
+      (approvals || []).forEach(addRow);
+      (ledgerRows || []).forEach(addRow);
+
+      merged.sort((a,b)=>{
+        const aTime = Number(a.approvedAt || a.paymentDate || a.receiptUpdatedAt || 0);
+        const bTime = Number(b.approvedAt || b.paymentDate || b.receiptUpdatedAt || 0);
+        if (aTime === bTime) return String(a.id || '').localeCompare(String(b.id || ''));
+        return bTime - aTime;
+      });
+
+      return merged;
+    }
+
     function matchesStudent(approval, studentId, adm){
       if (!approval) return false;
       if (studentId && approval.studentId && String(approval.studentId) === String(studentId)) return true;
@@ -1074,6 +1211,54 @@
       const approvals = await loadApprovalsForYear(year);
       const filtered = approvals.filter(rec => matchesStudent(rec, studentId, adm));
       return filtered;
+    }
+
+    async function fetchLedgerReceiptsForStudent(year, studentId, adm, studentRecord){
+      if (!window.SomapFinance || typeof window.SomapFinance.loadStudentFinance !== 'function') return [];
+      const identifier = studentId || adm;
+      if (!identifier) return [];
+      let finance = null;
+      try{
+        finance = await window.SomapFinance.loadStudentFinance(String(year), identifier);
+      }catch(err){
+        console.warn('Receipt: unable to load finance ledger for receipts', err);
+        return [];
+      }
+      const paymentsMap = finance?.record?.payments || {};
+      const rows = Object.entries(paymentsMap || {})
+        .map(([rowKey, payment]) => normalizeLedgerReceiptRecord(rowKey, payment, {
+          year: String(year),
+          studentId: studentId || finance?.studentId || '',
+          studentAdm: adm || finance?.admissionNumber || '',
+          studentName: buildFullName(studentRecord) || finance?.fullName || '',
+          className: studentRecord?.classLevel || finance?.classLevel || '',
+          payerContact: collectPrimaryContact(studentRecord),
+          totalRequired: Number(finance?.due || 0),
+          planLabel: finance?.paymentPlan || '',
+          debtStage: finance?.record?.debtStage || '',
+          dueDate: finance?.record?.nextDueDate || '',
+        }))
+        .filter(Boolean);
+
+      const sortedAsc = rows.slice().sort((a,b)=>Number(a.paymentDate||0)-Number(b.paymentDate||0));
+      let runningTotal = 0;
+      const due = Number(finance?.due || 0);
+      sortedAsc.forEach(row => {
+        row.totalPaidBefore = runningTotal;
+        runningTotal += Number(row.amountPaidNow || 0);
+        row.totalPaidAfter = runningTotal;
+        row.balanceAfter = Math.max(0, due - runningTotal);
+      });
+
+      return rows;
+    }
+
+    async function fetchReceiptRecordsForStudent(year, studentId, adm, studentRecord){
+      const [approvals, ledgerRows] = await Promise.all([
+        fetchApprovalsForStudent(year, studentId, adm),
+        fetchLedgerReceiptsForStudent(year, studentId, adm, studentRecord),
+      ]);
+      return mergeReceiptRecords(approvals, ledgerRows, String(year));
     }
 
     function resolveStudentId(query, students){
@@ -1460,16 +1645,18 @@
           state.queryStudent = admission;
         }
 
-        const approvals = (studentId || admission) ? await fetchApprovalsForStudent(state.year, studentId, admission) : [];
+        const receipts = (studentId || admission)
+          ? await fetchReceiptRecordsForStudent(state.year, studentId, admission, state.studentRecord)
+          : [];
         if (token !== renderToken) return;
-        state.approvals = approvals;
+        state.approvals = receipts;
 
         if (normalizedApproval){
-          const exists = approvals.find(a=>a.id === normalizedApproval.id);
+          const exists = receipts.find(a=>a.id === normalizedApproval.id);
           if (!exists) state.approvals.unshift(normalizedApproval);
           state.activeApproval = normalizedApproval;
         } else {
-          state.activeApproval = approvals[0] || null;
+          state.activeApproval = receipts[0] || null;
         }
 
         state.receiptNumbers = buildReceiptNumberMap(state.approvals);
@@ -1544,7 +1731,7 @@
       setField('fieldPayerContact', approval.payerContact || '--');
       setField('fieldAmountFigures', formatCurrency(approval.amountPaidNow));
       setField('fieldAmountWords', approval.amountWords || numberToWordsTZS(approval.amountPaidNow));
-      setField('fieldReference', approval.paymentReferenceCode || '--');
+      setField('fieldReference', `${approval.paymentReferenceCode || '--'}${approval.possibleDuplicate ? ' (Possible duplicate)' : ''}`);
       setField('fieldPaymentDate', formatDateOnly(approval.paymentDate));
       setField('paymentLabel', `${approval.moduleLabel || 'Payment'} -- ${formatCurrency(approval.amountPaidNow)}`);
       setField('paymentPathLabel', `Source: ${approval.modulePath}`);
@@ -1596,8 +1783,8 @@
         if (list) list.innerHTML = '';
         if (empty){
           empty.textContent = state.queryStudent
-            ? `No approved receipts for ${state.queryStudent} in ${state.year}.`
-            : `No approved receipts in ${state.year}.`;
+            ? `No receipts for ${state.queryStudent} in ${state.year}.`
+            : `No receipts in ${state.year}.`;
           empty.classList.remove('hidden');
         }
         return;
@@ -1607,11 +1794,12 @@
       list.innerHTML = state.approvals.map(item => {
         const active = state.activeApproval && item.id === state.activeApproval.id;
         const receiptNo = formatReceiptNumber(item);
+        const duplicateFlag = item.possibleDuplicate ? '<span class="ml-2 rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">Possible duplicate</span>' : '';
         return `
           <div class="list-card ${active ? 'border-sky-400 ring-2 ring-sky-500/40' : ''}" data-id="${item.id}">
             <div class="flex items-center justify-between gap-3">
               <div>
-                <p class="text-sm font-semibold text-white">${item.moduleLabel}</p>
+                <p class="text-sm font-semibold text-white">${item.moduleLabel}${duplicateFlag}</p>
                 <p class="text-xs text-slate-300">${receiptNo} &bull; ${formatDateOnly(item.approvedAt)} &bull; Ref ${item.paymentReferenceCode || '--'}</p>
               </div>
               <div class="text-right">

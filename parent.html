@@ -1756,6 +1756,9 @@
         attendanceChart = null;
       let __allPaymentsSum = 0;
       let latestFinanceSnapshot = null;
+      let latestYearHasFinanceRecord = false;
+      const firstActiveYearCache = new Map();
+      const yearRecordExistenceCache = new Map();
       const parentBooksClassCache = new Map();
       let parentYearDataCache = null;
       let parentYearDataKey = null;
@@ -1834,15 +1837,18 @@
       async function resolveCarryForwardDebt(
         studentKey,
         uptoYearStr,
-        admissionOverride
+        admissionOverride,
+        firstActiveYearOverride = null
       ) {
         const fallback = { amount: 0, sourceYear: null };
         if (!studentKey || !window.SomapFinance) return fallback;
         const financeApi = window.SomapFinance;
         const targetYearNum = Number(uptoYearStr);
+        const firstActiveYearNum = Number(firstActiveYearOverride);
         const earliestYear = Math.max(
           MIN_DATA_YEAR,
-          EARLIEST_CARRY_FORWARD_YEAR
+          EARLIEST_CARRY_FORWARD_YEAR,
+          Number.isFinite(firstActiveYearNum) ? firstActiveYearNum : MIN_DATA_YEAR
         );
         if (!Number.isFinite(targetYearNum) || targetYearNum <= earliestYear)
           return fallback;
@@ -1898,16 +1904,235 @@
         return fallback;
       }
 
+      function asNumberOrNaN(value) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : NaN;
+      }
+
+      function extractStudentStartYear(student) {
+        if (!student || typeof student !== "object") return null;
+        const candidates = [
+          student.academicYear,
+          student.year,
+          student.admissionYear,
+          student.startYear,
+        ]
+          .map(asNumberOrNaN)
+          .filter(Number.isFinite);
+        const createdTs = asNumberOrNaN(student.createdAt || student.joinedAt);
+        if (Number.isFinite(createdTs) && createdTs > 0) {
+          const createdYear = new Date(createdTs).getFullYear();
+          if (Number.isFinite(createdYear)) candidates.push(createdYear);
+        }
+        if (!candidates.length) return null;
+        return Math.min(...candidates);
+      }
+
+      function snapshotHasObjectData(snap) {
+        const raw = snap?.val ? snap.val() : null;
+        if (!raw) return false;
+        if (typeof raw !== "object") return true;
+        return Object.keys(raw).length > 0;
+      }
+
+      function valueHasPositiveAmount(raw) {
+        const amount = Number(
+          raw?.amount ??
+            raw?.balance ??
+            raw?.carry ??
+            raw?.total ??
+            raw?.value ??
+            0
+        );
+        return Number.isFinite(amount) && amount > 0;
+      }
+
+      function objectContainsPositivePayment(raw) {
+        if (!raw || typeof raw !== "object") return false;
+        const stack = [raw];
+        const visited = new Set();
+        while (stack.length) {
+          const current = stack.pop();
+          if (!current || typeof current !== "object") continue;
+          if (visited.has(current)) continue;
+          visited.add(current);
+          const directAmount = Number(
+            current.amount ??
+              current.amt ??
+              current.paid ??
+              current.value ??
+              current.amountPaid ??
+              0
+          );
+          if (Number.isFinite(directAmount) && directAmount > 0) return true;
+          Object.values(current).forEach((child) => {
+            if (child && typeof child === "object") stack.push(child);
+          });
+        }
+        return false;
+      }
+
+      function hasYearTaggedStudentPayment(raw, yearStr) {
+        const target = Number(yearStr);
+        if (!raw || typeof raw !== "object" || !Number.isFinite(target))
+          return false;
+        return Object.values(raw).some((entry) => {
+          if (!entry || typeof entry !== "object") return false;
+          const directYear = Number(
+            entry.academicYear ??
+              entry.financeYear ??
+              entry.feeYear ??
+              entry.year ??
+              entry._year ??
+              entry.academic_session
+          );
+          if (Number.isFinite(directYear)) return directYear === target;
+          return false;
+        });
+      }
+
+      async function studentHasActualYearRecord(studentKey, admission, yearStr) {
+        const cacheKey = `${studentKey || ""}|${admission || ""}|${yearStr}`;
+        if (yearRecordExistenceCache.has(cacheKey)) {
+          return yearRecordExistenceCache.get(cacheKey);
+        }
+        const cleanAdmission = String(admission || "").trim();
+        const admissionKey = sanitizeKey(cleanAdmission);
+        const paths = [
+          `enrollments/${yearStr}/${studentKey}`,
+          `financeLedgers/${yearStr}/${studentKey}`,
+          cleanAdmission ? `financeLedgers/${yearStr}/${cleanAdmission}` : "",
+          admissionKey ? `financeLedgers/${yearStr}/${admissionKey}` : "",
+          `financeCarryForward/${yearStr}/${studentKey}`,
+          cleanAdmission ? `financeCarryForward/${yearStr}/${cleanAdmission}` : "",
+          admissionKey ? `financeCarryForward/${yearStr}/${admissionKey}` : "",
+          `studentFees/${yearStr}/${studentKey}`,
+          cleanAdmission ? `studentFees/${yearStr}/${cleanAdmission}` : "",
+          admissionKey ? `studentFees/${yearStr}/${admissionKey}` : "",
+          `students/${studentKey}/payments`,
+        ].filter(Boolean);
+
+        const snaps = await Promise.all(
+          paths.map((path) =>
+            schoolRef(path)
+              .once("value")
+              .catch(() => null)
+          )
+        );
+        const [
+          enrollmentSnap,
+          ledgerByStudent,
+          ledgerByAdmission,
+          ledgerByAdmissionSanitized,
+          carryByStudent,
+          carryByAdmission,
+          carryByAdmissionSanitized,
+          feeByStudent,
+          feeByAdmission,
+          feeByAdmissionSanitized,
+          studentPaymentsSnap,
+        ] = snaps;
+
+        const hasEnrollment = snapshotHasObjectData(enrollmentSnap);
+        const hasLedgerPayments =
+          objectContainsPositivePayment(ledgerByStudent?.val?.()) ||
+          objectContainsPositivePayment(ledgerByAdmission?.val?.()) ||
+          objectContainsPositivePayment(ledgerByAdmissionSanitized?.val?.());
+        const hasCarry =
+          valueHasPositiveAmount(carryByStudent?.val?.()) ||
+          valueHasPositiveAmount(carryByAdmission?.val?.()) ||
+          valueHasPositiveAmount(carryByAdmissionSanitized?.val?.());
+        const hasStudentFeeConfig =
+          snapshotHasObjectData(feeByStudent) ||
+          snapshotHasObjectData(feeByAdmission) ||
+          snapshotHasObjectData(feeByAdmissionSanitized);
+        const hasTaggedStudentPayment = hasYearTaggedStudentPayment(
+          studentPaymentsSnap?.val?.(),
+          yearStr
+        );
+
+        const exists =
+          hasEnrollment ||
+          hasLedgerPayments ||
+          hasCarry ||
+          hasStudentFeeConfig ||
+          hasTaggedStudentPayment;
+        yearRecordExistenceCache.set(cacheKey, exists);
+        return exists;
+      }
+
+      async function resolveFirstActiveYear(studentKey, admission, student) {
+        const cacheKey = `${studentKey || ""}|${admission || ""}`;
+        if (firstActiveYearCache.has(cacheKey)) {
+          return firstActiveYearCache.get(cacheKey);
+        }
+        const sortedYears = SOMAP_ALLOWED_YEARS.map(Number)
+          .filter(Number.isFinite)
+          .sort((a, b) => a - b);
+        for (const y of sortedYears) {
+          const exists = await studentHasActualYearRecord(
+            studentKey,
+            admission,
+            String(y)
+          );
+          if (exists) {
+            firstActiveYearCache.set(cacheKey, y);
+            return y;
+          }
+        }
+        const hinted = extractStudentStartYear(student);
+        if (Number.isFinite(hinted)) {
+          firstActiveYearCache.set(cacheKey, hinted);
+          return hinted;
+        }
+        const fallback = sortedYears.length ? sortedYears[0] : MIN_DATA_YEAR;
+        firstActiveYearCache.set(cacheKey, fallback);
+        return fallback;
+      }
+
+      function applyNoYearRecordState(yearStr) {
+        latestFinanceSnapshot = null;
+        latestYearHasFinanceRecord = false;
+        statFeeDue.innerHTML = `${fmtTsh(0)}<span style="font-size: 0.65rem; color: var(--muted); display: block; margin-top: 2px;">No record for this year (${safe(
+          yearStr
+        )}).</span>`;
+        statPaid.textContent = fmtTsh(0);
+        statBalance.textContent = fmtTsh(0);
+        statPaymentPlan.textContent = "-";
+        applyFeeBadge(0, 0);
+      }
+
       async function renderFinanceStats() {
         if (!currentStudentKey || !window.SomapFinance) return;
         const yearStr = getActiveYearString();
         const admissionRef =
           currentStudent?.admissionNumber || currentStudent?.pupilId || "";
         try {
+          const [firstActiveYear, hasSelectedYearRecord] = await Promise.all([
+            resolveFirstActiveYear(currentStudentKey, admissionRef, currentStudent),
+            studentHasActualYearRecord(currentStudentKey, admissionRef, yearStr),
+          ]);
+          if (
+            !hasSelectedYearRecord ||
+            Number(yearStr) < Number(firstActiveYear || MIN_DATA_YEAR)
+          ) {
+            applyNoYearRecordState(yearStr);
+            return;
+          }
+          latestYearHasFinanceRecord = true;
           const [fin, carryMeta] = await Promise.all([
             window.SomapFinance.loadStudentFinance(yearStr, currentStudentKey),
-            resolveCarryForwardDebt(currentStudentKey, yearStr, admissionRef),
+            resolveCarryForwardDebt(
+              currentStudentKey,
+              yearStr,
+              admissionRef,
+              firstActiveYear
+            ),
           ]);
+          if (!fin) {
+            applyNoYearRecordState(yearStr);
+            return;
+          }
           latestFinanceSnapshot = fin;
 
           const currentFee = Number(fin.due || fin.record?.feePerYear || 0);
@@ -2436,6 +2661,14 @@
         classLevel,
         year
       ) {
+        if (!latestYearHasFinanceRecord) {
+          paymentsList.innerHTML =
+            '<li class="muted">No record for this year.</li>';
+          __allPaymentsSum = 0;
+          if (statReceiptCount) statReceiptCount.textContent = "0";
+          if (statReceiptMeta) statReceiptMeta.textContent = "No receipts yet";
+          return;
+        }
         paymentsList.innerHTML = `
       <li><div class="skeleton h-4 w-40"></div></li>
       <li><div class="skeleton h-4 w-56"></div></li>
