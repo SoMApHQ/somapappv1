@@ -809,6 +809,26 @@
       return Number(val)||0;
     };
 
+    function parseMoneyValue(val){
+      if (typeof val === 'number') return Number.isFinite(val) ? val : 0;
+      if (typeof val === 'string'){
+        const cleaned = val.replace(/[^0-9.-]/g,'');
+        const n = Number(cleaned);
+        return Number.isFinite(n) ? n : 0;
+      }
+      return Number(val) || 0;
+    }
+
+    function parseTimestampLike(value){
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 0) return numeric;
+      if (typeof value === 'string' && value.trim()){
+        const parsed = Date.parse(value);
+        if (!Number.isNaN(parsed)) return parsed;
+      }
+      return 0;
+    }
+
     function numberToWordsTZS(val){
       const belowTwenty=['Zero','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'];
       const tens=['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
@@ -927,8 +947,8 @@
       const yearToken = normalizeFingerprintToken(
         entry?.receiptYear || entry?.financeYear || financeYear || state.year || SOMAP_DEFAULT_YEAR
       );
-      const amountToken = (Number(entry?.amountPaidNow || entry?.amount || 0) || 0).toFixed(2);
-      const timeToken = String(Number(entry?.paymentDate || entry?.approvedAt || 0) || 0);
+      const amountToken = parseMoneyValue(entry?.amountPaidNow || entry?.amount || 0).toFixed(2);
+      const timeToken = String(parseTimestampLike(entry?.paymentDate || entry?.approvedAt || 0) || 0);
       const methodToken = normalizeFingerprintToken(entry?.paymentMethod || entry?.method || '');
       const refToken = normalizeFingerprintToken(
         entry?.paymentReferenceCode || entry?.referenceCode || entry?.reference || entry?.note || ''
@@ -1055,13 +1075,13 @@
 
     function normalizeLedgerReceiptRecord(rowKey, payment, context = {}){
       if (!payment) return null;
-      const amountPaidNow = Number(payment.amount ?? payment.value ?? payment.paid ?? payment.total ?? 0);
+      const amountPaidNow = parseMoneyValue(payment.amount ?? payment.value ?? payment.paid ?? payment.total ?? 0);
       if (!Number.isFinite(amountPaidNow) || amountPaidNow <= 0) return null;
       const sourceModule = payment.sourceModule || payment.module || payment.paymentModule || 'finance';
-      const approvedAt = Number(
+      const approvedAt = parseTimestampLike(
         payment.timestamp || payment.datePaid || payment.paymentDate || payment.createdAt || payment.updatedAt || Date.now()
       );
-      const paymentTimestamp = Number(
+      const paymentTimestamp = parseTimestampLike(
         payment.paymentDate || payment.timestamp || payment.datePaid || approvedAt
       );
       const referenceCode =
@@ -1273,7 +1293,7 @@
 
       // Fallback: read ledger paths directly (same year scope), useful when student/admission mapping is inconsistent.
       const aggregated = {};
-      const matchesFinanceYear = (payment) => {
+      const matchesFinanceYear = (payment, allowUnknown = false) => {
         const directYear = Number(
           payment?.academicYear ??
           payment?.financeYear ??
@@ -1282,16 +1302,24 @@
           payment?._year
         );
         if (Number.isFinite(directYear)) return String(directYear) === yearStr;
-        const ts = Number(payment?.paymentDate || payment?.timestamp || payment?.datePaid || payment?.createdAt || 0);
+        const ts = parseTimestampLike(
+          payment?.paymentDate ||
+          payment?.timestamp ||
+          payment?.datePaid ||
+          payment?.createdAt ||
+          payment?.date ||
+          payment?.time ||
+          0
+        );
         if (Number.isFinite(ts) && ts > 0){
           return String(new Date(ts).getFullYear()) === yearStr;
         }
-        return false;
+        return Boolean(allowUnknown);
       };
-      const injectPaymentMap = (paymentsObj, prefix) => {
+      const injectPaymentMap = (paymentsObj, prefix, allowUnknownYear = false) => {
         Object.entries(paymentsObj || {}).forEach(([payKey, payVal]) => {
           if (!payVal || typeof payVal !== 'object') return;
-          if (!matchesFinanceYear(payVal)) return;
+          if (!matchesFinanceYear(payVal, allowUnknownYear)) return;
           const dedupeKey = `${prefix}:${payKey}`;
           aggregated[dedupeKey] = payVal;
         });
@@ -1306,11 +1334,7 @@
             const raw = snap?.val?.() || null;
             if (!raw || typeof raw !== 'object') continue;
             const bucket = raw.payments || raw.entries || raw.records || raw;
-            Object.entries(bucket || {}).forEach(([payKey, payVal]) => {
-              if (!payVal || typeof payVal !== 'object') return;
-              const dedupeKey = `${key}:${payKey}`;
-              aggregated[dedupeKey] = payVal;
-            });
+            injectPaymentMap(bucket || {}, `${key}`, true);
           }catch(_){}
           try{
             const studentSnap = await fetchScoped(`students/${key}/payments`);
@@ -1319,7 +1343,7 @@
           }catch(_){}
           try{
             const feePaymentsSnap = await fetchScoped(`fees/${yearStr}/${key}/payments`);
-            injectPaymentMap(feePaymentsSnap?.val?.() || {}, `fees:${yearStr}:${key}`);
+            injectPaymentMap(feePaymentsSnap?.val?.() || {}, `fees:${yearStr}:${key}`, true);
           }catch(_){}
           try{
             const paymentsSnap = await fetchScoped(`payments/${key}`);
@@ -1348,7 +1372,7 @@
             const entry = classNode?.[admKey];
             if (!entry || typeof entry !== 'object') return;
             const paymentMap = entry.payments || entry.entries || entry.records || {};
-            injectPaymentMap(paymentMap, `finance:${yearStr}:${classKey}:${admKey}`);
+            injectPaymentMap(paymentMap, `finance:${yearStr}:${classKey}:${admKey}`, true);
           });
         });
       }catch(_){}
