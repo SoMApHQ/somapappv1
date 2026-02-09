@@ -1288,6 +1288,14 @@
         }
         return false;
       };
+      const injectPaymentMap = (paymentsObj, prefix) => {
+        Object.entries(paymentsObj || {}).forEach(([payKey, payVal]) => {
+          if (!payVal || typeof payVal !== 'object') return;
+          if (!matchesFinanceYear(payVal)) return;
+          const dedupeKey = `${prefix}:${payKey}`;
+          aggregated[dedupeKey] = payVal;
+        });
+      };
       for (const identifier of identifierCandidates){
         const rawKey = String(identifier || '').trim();
         if (!rawKey) continue;
@@ -1307,16 +1315,45 @@
           try{
             const studentSnap = await fetchScoped(`students/${key}/payments`);
             const studentPayments = studentSnap?.val?.() || {};
-            Object.entries(studentPayments || {}).forEach(([payKey, payVal]) => {
-              if (!payVal || typeof payVal !== 'object') return;
-              if (!matchesFinanceYear(payVal)) return;
-              const dedupeKey = `students:${key}:${payKey}`;
-              aggregated[dedupeKey] = payVal;
-            });
+            injectPaymentMap(studentPayments, `students:${key}`);
+          }catch(_){}
+          try{
+            const feePaymentsSnap = await fetchScoped(`fees/${yearStr}/${key}/payments`);
+            injectPaymentMap(feePaymentsSnap?.val?.() || {}, `fees:${yearStr}:${key}`);
+          }catch(_){}
+          try{
+            const paymentsSnap = await fetchScoped(`payments/${key}`);
+            injectPaymentMap(paymentsSnap?.val?.() || {}, `payments:${key}`);
+          }catch(_){}
+          try{
+            const feesPaymentsSnap = await fetchScoped(`feesPayments/${key}`);
+            injectPaymentMap(feesPaymentsSnap?.val?.() || {}, `feesPayments:${key}`);
           }catch(_){}
         }
       }
-      return mapRows(aggregated, null);
+      let rows = mapRows(aggregated, null);
+      if (rows.length) return rows;
+
+      // Last-resort: scan finance/{year} class buckets for this admission if class is unknown.
+      const admissionKeys = Array.from(new Set([
+        admission,
+        sanitizeKey(admission),
+      ].filter(Boolean)));
+      try{
+        const financeYearSnap = await fetchScoped(`finance/${yearStr}`);
+        const financeYearTree = financeYearSnap?.val?.() || {};
+        Object.entries(financeYearTree || {}).forEach(([classKey, classNode]) => {
+          if (!classNode || typeof classNode !== 'object') return;
+          admissionKeys.forEach((admKey) => {
+            const entry = classNode?.[admKey];
+            if (!entry || typeof entry !== 'object') return;
+            const paymentMap = entry.payments || entry.entries || entry.records || {};
+            injectPaymentMap(paymentMap, `finance:${yearStr}:${classKey}:${admKey}`);
+          });
+        });
+      }catch(_){}
+      rows = mapRows(aggregated, null);
+      return rows;
     }
 
     async function fetchReceiptRecordsForStudent(year, studentId, adm, studentRecord){
