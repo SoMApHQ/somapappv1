@@ -837,12 +837,57 @@
     students = studentData;
     const studentIndex = {};
     const classNamesSet = new Set();
+    const shiftedIdSet = new Set();
+    const shiftedByClass = {};
+    const normalizeStudentRef = (value) => String(value || '').trim().toLowerCase();
+    const extractYear = (value) => {
+      const raw = String(value || '').trim();
+      if (!raw) return null;
+      const m = raw.match(/(19|20)\d{2}/);
+      return m ? Number(m[0]) : null;
+    };
+    const selectedYearNum = Number(selYear);
+    getShiftEntries().forEach(entry => {
+      const status = String(entry.status || '').trim().toLowerCase();
+      if (status !== 'shifted') return;
+      const shiftYearVal = extractYear(entry.shiftYear);
+      const dateYearVal = extractYear(entry.dateShifted);
+      if (shiftYearVal !== null) {
+        if (shiftYearVal !== selectedYearNum) return;
+      } else if (dateYearVal !== null && dateYearVal !== selectedYearNum) {
+        return;
+      }
+
+      [
+        entry.key,
+        entry.studentId,
+        entry.id,
+        entry.admissionNo,
+        entry.admissionNumber,
+        entry.admission
+      ].forEach(ref => {
+        const normalized = normalizeStudentRef(ref);
+        if (normalized) shiftedIdSet.add(normalized);
+      });
+
+      const rawClass = String(entry.className || entry.classLevel || entry.class || entry.grade || '').trim();
+      if (rawClass) {
+        const cls = normalizeClassName(rawClass);
+        shiftedByClass[cls] = (shiftedByClass[cls] || 0) + 1;
+        classNamesSet.add(cls);
+      }
+    });
 
     (studentData || []).forEach(s => {
       const className = s.className || s.classLevel || s.class || s.grade || '';
       if (!className) return;
       const gender = normalizeGender(s.gender || s.sex || s.genderType);
       const studentId = s.id || s.studentId || s.studentID || s.admissionNo || s.admissionNumber || s.admission || '';
+      const admissionNo = s.admissionNo || s.admissionNumber || s.admission || '';
+      const isShiftedStudent =
+        shiftedIdSet.has(normalizeStudentRef(studentId)) ||
+        shiftedIdSet.has(normalizeStudentRef(admissionNo));
+      if (isShiftedStudent) return;
       const fullName = [s.firstName, s.middleName, s.lastName]
         .filter(Boolean).join(' ').trim()
         || s.name || s.fullName || studentId || 'Unknown';
@@ -863,17 +908,24 @@
 
     const classNames = Array.from(classNamesSet).sort((a, b) => classOrderKey(a) - classOrderKey(b));
     const perClass = {};
-    classNames.forEach(cls => { perClass[cls] = initialCounts(); });
+    const schoolTotals = initialCounts();
+    classNames.forEach(cls => {
+      perClass[cls] = initialCounts();
+      perClass[cls].shifted = Number(shiftedByClass[normalizeClassName(cls)] || 0);
+      schoolTotals.shifted += perClass[cls].shifted;
+    });
 
     const absenteesByClass = {};
     classNames.forEach(cls => { absenteesByClass[cls] = []; });
 
-    const schoolTotals = initialCounts();
-
     // Registered counts
     Object.entries(studentIndex).forEach(([, info]) => {
       const cls = info.className;
-      if (!perClass[cls]) perClass[cls] = initialCounts();
+      if (!perClass[cls]) {
+        perClass[cls] = initialCounts();
+        perClass[cls].shifted = Number(shiftedByClass[normalizeClassName(cls)] || 0);
+        schoolTotals.shifted += perClass[cls].shifted;
+      }
       perClass[cls].registered.total += 1;
       schoolTotals.registered.total += 1;
       if (info.gender === 'boys') {
@@ -892,6 +944,7 @@
         const snap = await schoolRef(`attendance/${cls}/${monthKeyLocal}/${targetDate}`).get();
         const records = snap.exists() ? snap.val() : {};
         Object.keys(records || {}).forEach(stuId => {
+          if (shiftedIdSet.has(normalizeStudentRef(stuId))) return;
           const record = records[stuId] || {};
           const info = studentIndex[stuId] || { name: stuId, gender: null, className: cls };
           const statusRaw = String(record.status || record.daily || '').toUpperCase();
@@ -924,11 +977,6 @@
               gender: info.gender,
               reason: record.reason || record.comment || record.note || ''
             });
-          }
-
-          if (record.shifted === true || record.dateShifted) {
-            perClass[cls].shifted += 1;
-            schoolTotals.shifted += 1;
           }
           if (record.isNew === true || record.newComer === true) {
             perClass[cls].newcomers += 1;
