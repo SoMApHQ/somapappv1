@@ -299,6 +299,7 @@
             expected,
             allocated: allocate,
             remaining: Math.max(0, expected - allocate),
+            carryComponent: Math.max(0, Number(it.carryComponent || 0)),
             status,
             fromTS: it.fromTS,
             toTS: it.toTS,
@@ -512,14 +513,21 @@
         
         // PRIORITY 2: Check if class-level edited installments exist (from paymentedits.html)
         // These are stored in feesStructure/{year}/{Class}/installments
-        // Only use if student doesn't have a custom schedule or plan override
+        // Use class defaults for the whole school unless the student has an explicit custom schedule override.
         const hasStudentOverride = override && (
           (Array.isArray(override.customSchedule) && override.customSchedule.length > 0) ||
-          override.planId
+          (Array.isArray(override.installments) && override.installments.length > 0)
         );
         
-        if (!hasStudentOverride && classDefaults && classDefaults.installments && typeof classDefaults.installments === 'object') {
-          const installmentsObj = classDefaults.installments;
+        const classInstallmentsSource =
+          (student && student._classInstallments && typeof student._classInstallments === 'object')
+            ? student._classInstallments
+            : (classDefaults && classDefaults.installments && typeof classDefaults.installments === 'object'
+                ? classDefaults.installments
+                : null);
+
+        if (!hasStudentOverride && classInstallmentsSource) {
+          const installmentsObj = classInstallmentsSource;
           const entries = Object.values(installmentsObj).filter(inst => inst && inst.active !== false);
           
           if (entries.length > 0) {
@@ -549,15 +557,20 @@
                 toTS: toAcademicTS(toPair || fallback.to, true),
                 paidAllocated: 0,
                 status: 'Pending',
+                carryComponent: 0,
                 weight: Number(inst?.weight || 0),
                 windowText: inst?.windowText || ''
               };
             });
             
-            // Add carry forward if exists
+            // Add carry forward only when schedule does not already include it
             const carryAmount = Math.max(0, Number(student.carryAmount || 0));
-            if (carryAmount > 0 && items.length) {
+            const plannedTotal = items.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
+            const targetTotal = Math.max(0, Number(student.feePerYear || 0));
+            const shouldApplyCarry = carryAmount > 0 && items.length && plannedTotal + 1 < targetTotal;
+            if (shouldApplyCarry) {
               items[0].amount += carryAmount;
+              items[0].carryComponent = Math.max(0, Number(items[0].carryComponent || 0)) + carryAmount;
             }
             
             const feeBase = Math.max(0, Math.round(Number(classDefaults.feePerYear || student.baseFee || student.feePerYear || 0)));
@@ -566,7 +579,7 @@
               items,
               academicYear: targetYear,
               feeBase,
-              planName: classDefaults.defaultPlan || classDefaults.defaultPlanId || student.paymentPlan || '',
+              planName: student.paymentPlan || classDefaults.defaultPlan || classDefaults.defaultPlanId || '',
               planId: classDefaults.defaultPlanId || ''
             };
           }
@@ -602,15 +615,20 @@
             toTS: resolveWindowTimestamp(row, 'to', toPair, true),
             paidAllocated: 0,
             status: 'Pending',
+            carryComponent: Math.max(0, Number(row.carryComponent || 0)),
             weight: Number(row.weight || 0),
             windowText: row.windowText || '',
           };
         });
 
         const carryAmount = Math.max(0, Number(student.carryAmount || 0));
-        if (carryAmount > 0) {
+        const plannedTotal = items.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
+        const targetTotal = Math.max(0, Number(student.feePerYear || 0));
+        const shouldApplyCarry = carryAmount > 0 && (plannedTotal + 1 < targetTotal);
+        if (shouldApplyCarry) {
           if (items.length) {
             items[0].amount += carryAmount;
+            items[0].carryComponent = Math.max(0, Number(items[0].carryComponent || 0)) + carryAmount;
           } else {
             const fallback = fallbackWindow(config, 0) || { from: [1, 1], to: [1, 10] };
             items.push({
@@ -620,6 +638,7 @@
               toTS: toAcademicTS(fallback.to, true),
               paidAllocated: 0,
               status: 'Pending',
+              carryComponent: carryAmount,
               weight: 0,
               windowText: '',
             });
@@ -715,6 +734,29 @@
         const prevCarry = hasYearData ? await fetchPrevYearCarry(admissionForLookup) : 0;
         const dbCarry = Math.max(0, Number(student.carryAmount || 0));
         const effectiveCarry = Math.max(dbCarry, prevCarry);
+        const carryDelta = Math.max(0, effectiveCarry - dbCarry);
+        const schedulePlannedTotal = schedule.items.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
+        const desiredTotalDue = Math.max(0, Number(student.feePerYear || 0) + carryDelta);
+        if (hasYearData && carryDelta > 0 && schedulePlannedTotal + 1 < desiredTotalDue) {
+          if (schedule.items.length) {
+            schedule.items[0].amount = Math.max(0, Number(schedule.items[0].amount || 0)) + carryDelta;
+            schedule.items[0].carryComponent = Math.max(0, Number(schedule.items[0].carryComponent || 0)) + carryDelta;
+          } else {
+            const fallback = { from: [12, 1], to: [1, 10] };
+            schedule.items.push({
+              label: 'Carry Forward',
+              amount: carryDelta,
+              fromTS: ymdToTS(targetYear, fallback.from[0], fallback.from[1], false),
+              toTS: ymdToTS(targetYear, fallback.to[0], fallback.to[1], true),
+              paidAllocated: 0,
+              status: 'Pending',
+              carryComponent: carryDelta,
+              weight: 0,
+              windowText: '',
+            });
+          }
+          sortScheduleItems(schedule.items);
+        }
         const inferredBaseFee = student.baseFee != null
           ? Math.max(0, Number(student.baseFee) || 0)
           : Math.max(0, Number(student.feePerYear || 0) - dbCarry);
@@ -1017,7 +1059,7 @@
             ...(effectiveFinance?.feeOverride || {}),
           };
 
-          const prepared = {
+          let prepared = {
             ...baseStudent,
             academicYear: targetYearStr,
             classLevel,
@@ -1030,12 +1072,50 @@
             isGraduated: classLevel === 'GRADUATED',
             admissionNumber: enrollment.admissionNumber || enrollment.admissionNo || baseStudent.admissionNumber || studentId,
           };
-
           // Attach custom schedule or plan schedule for builder to use
           if (Array.isArray(effectiveOverride.customSchedule) && effectiveOverride.customSchedule.length) {
             prepared._customSchedule = effectiveOverride.customSchedule;
           } else if (resolvedPlan && Array.isArray(resolvedPlan.schedule)) {
             prepared._planSchedule = resolvedPlan.schedule; // [{label, from, to, weight}]
+          }
+
+          // Keep iframe breakdown in lockstep with finance table logic for class/plan/fee/payments.
+          try {
+            const parentApi = window.parent;
+            if (parentApi && typeof parentApi.__finance_lookupStudent === 'function') {
+              const byId = parentApi.__finance_lookupStudent(studentId);
+              const byAdm = prepared.admissionNumber ? parentApi.__finance_lookupStudent(prepared.admissionNumber) : null;
+              const parentStudent = byId?.student || byAdm?.student || null;
+              if (parentStudent) {
+                const merged = { ...prepared, ...parentStudent };
+                merged.classLevel = parentStudent.classLevel || prepared.classLevel;
+                merged.paymentPlan = parentStudent.paymentPlan || prepared.paymentPlan;
+                merged.baseFee = Math.max(0, Number(parentStudent.baseFee ?? prepared.baseFee) || 0);
+                merged.carryAmount = Math.max(0, Number(parentStudent.carryAmount ?? prepared.carryAmount) || 0);
+                merged.feePerYear = Math.max(0, Number(parentStudent.feePerYear ?? (merged.baseFee + merged.carryAmount)) || 0);
+                merged.payments = (parentStudent.payments && typeof parentStudent.payments === 'object')
+                  ? parentStudent.payments
+                  : prepared.payments;
+                merged.hasYearData = (parentStudent.hasYearData !== undefined)
+                  ? Boolean(parentStudent.hasYearData)
+                  : prepared.hasYearData;
+                merged.isGraduated = (parentStudent.isGraduated !== undefined)
+                  ? Boolean(parentStudent.isGraduated)
+                  : prepared.isGraduated;
+                if (parentStudent._classInstallments && typeof parentStudent._classInstallments === 'object') {
+                  merged._classInstallments = parentStudent._classInstallments;
+                }
+                if (Array.isArray(parentStudent._customSchedule) && parentStudent._customSchedule.length) {
+                  merged._customSchedule = parentStudent._customSchedule;
+                  delete merged._planSchedule;
+                } else if (Array.isArray(parentStudent._planSchedule) && parentStudent._planSchedule.length) {
+                  merged._planSchedule = parentStudent._planSchedule;
+                }
+                prepared = merged;
+              }
+            }
+          } catch (syncErr) {
+            console.warn('parent finance sync failed', syncErr?.message || syncErr);
           }
 
           await render(prepared, classDefaults, effectiveOverride);
@@ -1047,12 +1127,15 @@
         const h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
         try { window.parent.postMessage({ type:'resizeIframe', id: window.__STUDENT_ID__, height: h }, '*'); } catch {}
       });
+      window.__somap_cfHandledInCore = true;
     })();
   </script>
 
   <script>
   /** SoMAp v2.1 — Carry-forward overlay for January installment (prevYear >= 2025) */
   (function carryForwardIntoJanuary() {
+    return; // carry-forward handled in core schedule logic
+    if (window.__somap_cfHandledInCore === true) return;
     const START_YEAR = 2025;
 
     function detectTargetYear() {

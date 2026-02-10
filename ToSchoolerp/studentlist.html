@@ -231,445 +231,682 @@
   <script src="../firebase.js"></script> <!-- Adjusted path to firebase.js in root -->
 
   <!-- Students List Logic -->
-  <script type="module">
-    import { resolveEffectiveFinance, readPlan } from '../js/financeplans.js';
+ <script type="module">
+  import { resolveEffectiveFinance, readPlan } from '../js/financeplans.js';
 
-    document.addEventListener('DOMContentLoaded', () => {
-      const db = window.db || (window.firebase && firebase.database ? firebase.database() : null);
-      if (!db) {
-        console.error('Firebase Realtime Database not available. Ensure ../firebase.js and Firebase SDKs are loaded.');
-        return;
+  document.addEventListener('DOMContentLoaded', () => {
+    const db = window.db || (window.firebase && firebase.database ? firebase.database() : null);
+    if (!db) {
+      console.error('Firebase Realtime Database not available. Ensure ../firebase.js and Firebase SDKs are loaded.');
+      return;
+    }
+
+    const school = window.SOMAP?.getSchool?.();
+    if (!school || !school.id) {
+      window.location.href = '../somapappv1multischool/multischool.html';
+      return;
+    }
+    if (!window.SOMAP?.P) {
+      console.error('Missing SOMAP path helper; redirecting to school selector.');
+      window.location.href = '../somapappv1multischool/multischool.html';
+      return;
+    }
+
+    const currentSchoolId = school.id;
+    const isSocrates = currentSchoolId === 'socrates-school';
+    const schoolRef = (subPath) => db.ref(window.SOMAP.P(subPath));
+
+    // Make sure progression helpers exist even inside module scope
+    const CLASS_ORDER = window.CLASS_ORDER || ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
+    const L = (s) => String(s || '').trim().toLowerCase();
+    const shiftClassSafe = window.shiftClass || function shiftClass(baseClass, deltaYears) {
+      const i = CLASS_ORDER.findIndex(c => L(c) === L(baseClass));
+      if (i < 0) return baseClass || '';
+      const j = i + Number(deltaYears || 0);
+      if (j < 0) return 'PRE-ADMISSION';
+      if (j >= CLASS_ORDER.length) return 'GRADUATED';
+      return CLASS_ORDER[j];
+    };
+
+    const schoolLabel = document.getElementById('currentSchoolLabel');
+    if (schoolLabel) {
+      const schoolName = school.name || school.id;
+      schoolLabel.textContent = `Current school: ${schoolName}`;
+    }
+
+    const elements = {
+      listBody: document.getElementById('studentListBody'),
+      schoolReportBody: document.getElementById('schoolReportBody'),
+      reportFormBody: document.getElementById('reportFormBody'),
+      classFilter: document.getElementById('student-list-class'),
+      downloadCsvBtn: document.getElementById('downloadCsvBtn'),
+      downloadPdfBtn: document.getElementById('downloadPdfBtn'),
+      schoolDownloadCsv: document.getElementById('schoolDownloadCsv'),
+      schoolDownloadPdf: document.getElementById('schoolDownloadPdf'),
+      reportDownloadCsv: document.getElementById('reportDownloadCsv'),
+      reportDownloadPdf: document.getElementById('reportDownloadPdf'),
+    };
+
+    const currencyFormatter = new Intl.NumberFormat('en-US', { minimumFractionDigits: 0 });
+    const fmtCurrency = (value) => `TSh ${currencyFormatter.format(Number(value) || 0)}`;
+    const normalize = (value) => String(value || '').trim().toLowerCase();
+
+    const yearSelect = document.querySelector('[data-somap-year-select]');
+    const yearHint = document.getElementById('somapYearHint');
+
+    const BASE_YEAR = 2025; // your rule: 2025 list is only 2025; 2026 list is 2025+2026, etc.
+
+    const getWorkingYear = () => {
+      const fromCtx = window.somapYearContext?.getSelectedYear?.();
+      const y = Number(fromCtx || new Date().getFullYear());
+      return String(Number.isFinite(y) ? y : BASE_YEAR);
+    };
+
+    if (yearSelect && window.somapYearContext?.attachYearDropdown) {
+      window.somapYearContext.attachYearDropdown(yearSelect);
+    }
+
+    function updateYearUI(year) {
+      const yearStr = String(year || BASE_YEAR);
+      if (yearHint) yearHint.textContent = yearStr;
+      if (yearSelect && yearSelect.value !== yearStr) yearSelect.value = yearStr;
+    }
+
+    const state = {
+      // merged students (scoped overrides legacy by key)
+      students: new Map(),
+      scopedStudents: new Map(),
+      legacyStudents: new Map(),
+
+      // year-specific class overrides (optional)
+      yearEnrollments: {},
+
+      // year-specific ledger
+      ledger: {},
+
+      // caching
+      planCache: new Map(),
+      latestRecords: [],
+      latestYear: getWorkingYear(),
+      renderToken: 0,
+
+      // listeners
+      yearEnrollRef: null,
+      legacyYearEnrollRef: null,
+      ledgerRef: null,
+      legacyLedgerRef: null,
+      studentsRef: null,
+      legacyStudentsRef: null,
+
+      // loading stability (prevents “463 then 501” jumping)
+      loaded: {
+        studentsScoped: !isSocrates,
+        studentsLegacy: !isSocrates,   // for Socrates we wait for both snapshots once
+        ledgerScoped: false,
+        ledgerLegacy: !isSocrates,
+        yearEnrollScoped: false,
+        yearEnrollLegacy: !isSocrates,
+      }
+    };
+
+    const escapeHtml = (text) => {
+      if (text === undefined || text === null) return '';
+      return String(text).replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    };
+
+    function toMs(value) {
+      if (value === null || value === undefined) return null;
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        // assume ms if big
+        if (value > 1e12) return value;
+        if (value > 1e10) return value; // also ms-ish
+        if (value > 1e9) return value * 1000; // seconds -> ms
+        return value; // already ms-like small test data
+      }
+      const s = String(value).trim();
+      if (!s) return null;
+      if (/^\d{10,13}$/.test(s)) {
+        const n = Number(s);
+        if (!Number.isFinite(n)) return null;
+        return (n > 1e12) ? n : n * 1000;
+      }
+      const parsed = Date.parse(s);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function getRegistrationMs(stu) {
+      return (
+        toMs(stu.timestamp) ??
+        toMs(stu.createdAt) ??
+        toMs(stu.registeredAt) ??
+        toMs(stu.regTimestamp) ??
+        toMs(stu.dateRegistered) ??
+        toMs(stu.dateOfRegistration) ??
+        null
+      );
+    }
+
+    function getRegistrationYear(stu) {
+      const ms = getRegistrationMs(stu);
+      if (!ms) return null;
+      const d = new Date(ms);
+      const y = d.getFullYear();
+      return Number.isFinite(y) ? y : null;
+    }
+
+    function formatRegistrationDate(stu) {
+      const ms = getRegistrationMs(stu);
+      if (!ms) return 'N/A';
+      return new Date(ms).toLocaleDateString();
+    }
+
+    function mergeSnapshots(scopedSnap, legacySnap) {
+      if (!isSocrates) return scopedSnap?.val?.() || {};
+      const scopedVal = scopedSnap && scopedSnap.exists() ? (scopedSnap.val() || {}) : {};
+      const legacyVal = legacySnap && legacySnap.exists() ? (legacySnap.val() || {}) : {};
+      // scoped should win for same keys
+      return { ...legacyVal, ...scopedVal };
+    }
+
+    function rebuildMergedStudents() {
+      const merged = mergeSnapshots(state.studentsRef?._lastSnap, state.legacyStudentsRef?._lastSnap);
+      state.students.clear();
+      Object.entries(merged).forEach(([key, value]) => {
+        state.students.set(key, { key, ...(value || {}) });
+      });
+    }
+
+    function sumPayments(ledgerEntry) {
+      if (!ledgerEntry || typeof ledgerEntry !== 'object') return 0;
+      const source = ledgerEntry.payments || ledgerEntry.entries || ledgerEntry.records || ledgerEntry;
+      return Object.values(source || {}).reduce((total, entry) => {
+        const amount = Number(entry?.amount ?? entry?.value ?? entry?.paid ?? entry?.total ?? 0);
+        return Number.isFinite(amount) && amount > 0 ? total + amount : total;
+      }, 0);
+    }
+
+    function looksDeleted(stu) {
+      // support many possible flags
+      const status = String(stu.status || '').trim().toLowerCase();
+      return Boolean(
+        stu.deleted === true ||
+        stu.isDeleted === true ||
+        stu.archived === true ||
+        stu.isArchived === true ||
+        stu.removed === true ||
+        stu.isRemoved === true ||
+        stu.active === false ||
+        status === 'deleted' ||
+        status === 'archived' ||
+        status === 'removed' ||
+        status === 'shifted'
+      );
+    }
+
+    function isCompleteStudent(stu) {
+      if (!stu || typeof stu !== 'object') return false;
+      if (looksDeleted(stu)) return false;
+
+      // If record has a schoolId, enforce it.
+      const sid = String(stu.schoolId || '').trim();
+      if (sid && sid !== currentSchoolId) return false;
+
+      const admission = String(stu.admissionNumber || '').trim();
+      const first = String(stu.firstName || '').trim();
+      const last  = String(stu.lastName || '').trim();
+
+      // kill N/A and half-created records (like AUTO-... with no names)
+      if (!admission || L(admission) === 'n/a' || L(admission) === 'na') return false;
+      if (!first || L(first) === 'n/a' || L(first) === 'na') return false;
+      if (!last  || L(last)  === 'n/a' || L(last)  === 'na') return false;
+
+      // must have a known registration year (so we can place it in 2025 vs 2026)
+      const regYear = getRegistrationYear(stu);
+      if (!regYear) return false;
+
+      return true;
+    }
+
+    function belongsToSelectedYear(stu, selectedYearStr) {
+      const selectedYear = Number(selectedYearStr);
+      const regYear = getRegistrationYear(stu);
+      if (!regYear || !Number.isFinite(selectedYear)) return false;
+      // rule: 2025 view = only 2025, 2026 = 2025+2026, etc.
+      return regYear >= BASE_YEAR && regYear <= selectedYear;
+    }
+
+    function resolveClassForYear(studentId, fallbackClass, yearStr, stuObj) {
+      const year = Number(yearStr);
+
+      // 1) If you have explicit enrollments for that year, trust them
+      const override = state.yearEnrollments?.[studentId] || null;
+      if (override && (override.className || override.classLevel)) {
+        return override.className || override.classLevel;
       }
 
-      const school = window.SOMAP?.getSchool?.();
-      if (!school || !school.id) {
-        window.location.href = '../somapappv1multischool/multischool.html';
-        return;
-      }
-      if (!window.SOMAP?.P) {
-        console.error('Missing SOMAP path helper; redirecting to school selector.');
-        window.location.href = '../somapappv1multischool/multischool.html';
-        return;
-      }
-      window.currentSchoolId = school.id;
-      const schoolRef = (subPath) => db.ref(window.SOMAP.P(subPath));
-      const isSocrates = school.id === 'socrates-school';
-      const schoolLabel = document.getElementById('currentSchoolLabel');
-      if (schoolLabel) {
-        const schoolName = school.name || school.id;
-        schoolLabel.textContent = `Current school: ${schoolName}`;
-      }
+      // 2) Otherwise: promote based on the class the student had at registration year
+      const baseClass = fallbackClass || '';
+      const regYear = getRegistrationYear(stuObj);
+      if (!regYear || !Number.isFinite(year)) return baseClass || 'N/A';
 
-      const pickRefWithLegacy = async (scopedSubPath, legacyPath) => {
-        const scopedRef = schoolRef(scopedSubPath);
-        if (!isSocrates || !legacyPath) return scopedRef;
-        try {
-          const snap = await scopedRef.get();
-          if (snap.exists()) return scopedRef;
-        } catch (err) {
-          console.warn('Scoped read failed; falling back to legacy path.', err);
+      const delta = year - regYear; // IMPORTANT: prevents promoting 2026-registered kids in 2026
+      return shiftClassSafe(baseClass, delta);
+    }
+
+    async function planLabelFor(planId, year) {
+      if (!planId) return '';
+      const key = `${year}::${planId}`;
+      if (state.planCache.has(key)) return state.planCache.get(key);
+      try {
+        const plan = await readPlan(planId, { year });
+        const label = plan?.name || planId;
+        state.planCache.set(key, label);
+        return label;
+      } catch (err) {
+        console.warn('Plan lookup failed', planId, err);
+        return planId;
+      }
+    }
+
+    function isReadyToRender() {
+      // For Socrates, wait for BOTH scoped+legacy students snapshot at least once.
+      const studentsReady = state.loaded.studentsScoped && state.loaded.studentsLegacy;
+      // ledger is allowed to be empty, but wait for snapshot once (prevents 0s flicker)
+      const ledgerReady = state.loaded.ledgerScoped && state.loaded.ledgerLegacy;
+      // enrollments optional; don’t block rendering forever if they don’t exist
+      const enrollReady = state.loaded.yearEnrollScoped && state.loaded.yearEnrollLegacy;
+      return studentsReady && ledgerReady && enrollReady;
+    }
+
+    function showLoadingRow(yearStr) {
+      const listBody = elements.listBody;
+      if (!listBody) return;
+      listBody.innerHTML = `<tr><td colspan="11" class="text-center text-sm text-slate-500 py-4">Loading students for ${escapeHtml(String(yearStr))}...</td></tr>`;
+      const countCard = document.getElementById('studentCountCard');
+      if (countCard) countCard.style.display = 'none';
+    }
+
+    // Year change hook
+    window.somapYearContext?.onYearChanged?.(async (year) => {
+      const yearStr = String(year || BASE_YEAR);
+      updateYearUI(yearStr);
+      state.planCache.clear();
+      await attachYearListeners(yearStr);
+      state.latestYear = yearStr;
+      queueRender();
+    });
+
+    updateYearUI(getWorkingYear());
+
+    // Attach students listeners
+    (function attachStudentsListeners() {
+      try {
+        const scopedRef = schoolRef('students');
+        const legacyRef = isSocrates ? db.ref('students') : null;
+
+        if (state.studentsRef) state.studentsRef.off();
+        if (state.legacyStudentsRef) state.legacyStudentsRef.off();
+
+        state.studentsRef = scopedRef;
+        state.legacyStudentsRef = legacyRef;
+
+        state.studentsRef.on('value', (snapshot) => {
+          state.studentsRef._lastSnap = snapshot;
+          state.scopedStudents.clear();
+          Object.entries(snapshot.val() || {}).forEach(([key, value]) => {
+            state.scopedStudents.set(key, { key, ...(value || {}) });
+          });
+          state.loaded.studentsScoped = true;
+          rebuildMergedStudents();
+          queueRender();
+        });
+
+        if (state.legacyStudentsRef) {
+          state.legacyStudentsRef.on('value', (snapshot) => {
+            state.legacyStudentsRef._lastSnap = snapshot;
+            state.legacyStudents.clear();
+            Object.entries(snapshot.val() || {}).forEach(([key, value]) => {
+              state.legacyStudents.set(key, { key, ...(value || {}), _legacy: true });
+            });
+            state.loaded.studentsLegacy = true;
+            rebuildMergedStudents();
+            queueRender();
+          });
+        } else {
+          state.loaded.studentsLegacy = true;
         }
-        return db.ref(legacyPath);
-      };
-
-      const elements = {
-        listBody: document.getElementById('studentListBody'),
-        schoolReportBody: document.getElementById('schoolReportBody'),
-        reportFormBody: document.getElementById('reportFormBody'),
-        classFilter: document.getElementById('student-list-class'),
-        downloadCsvBtn: document.getElementById('downloadCsvBtn'),
-        downloadPdfBtn: document.getElementById('downloadPdfBtn'),
-        schoolDownloadCsv: document.getElementById('schoolDownloadCsv'),
-        schoolDownloadPdf: document.getElementById('schoolDownloadPdf'),
-        reportDownloadCsv: document.getElementById('reportDownloadCsv'),
-        reportDownloadPdf: document.getElementById('reportDownloadPdf'),
-      };
-
-      const currencyFormatter = new Intl.NumberFormat('en-US', { minimumFractionDigits: 0 });
-      const fmtCurrency = (value) => `TSh ${currencyFormatter.format(Number(value) || 0)}`;
-      const normalize = (value) => String(value || '').trim().toLowerCase();
-      const yearSelect = document.querySelector('[data-somap-year-select]');
-      const yearHint = document.getElementById('somapYearHint');
-      const getWorkingYear = () => {
-        const fromCtx = window.somapYearContext?.getSelectedYear?.();
-        return String(fromCtx || SOMAP_DEFAULT_YEAR);
-      };
-      if (yearSelect && window.somapYearContext?.attachYearDropdown) {
-        window.somapYearContext.attachYearDropdown(yearSelect);
+      } catch (err) {
+        console.error('Failed to attach students listener', err);
       }
+    })();
 
-      const state = {
-        students: new Map(),
-        anchorEnrollments: {},
-        yearEnrollments: {},
-        ledger: {},
-        planCache: new Map(),
-        latestRecords: [],
-        latestYear: getWorkingYear(),
-        renderToken: 0,
-        yearEnrollRef: null,
-        ledgerRef: null,
-        studentsRef: null,
-      };
-      const queueRender = () => {
-        renderAllTables().catch((err) => console.error('Render error', err));
-      };
-      const updateYearUI = (year) => {
-        const yearStr = String(year || SOMAP_DEFAULT_YEAR);
-        if (yearHint) yearHint.textContent = yearStr;
-        if (yearSelect && yearSelect.value !== yearStr) yearSelect.value = yearStr;
-      };
-      window.somapYearContext?.onYearChanged?.(async (year) => {
-        const yearStr = String(year || SOMAP_DEFAULT_YEAR);
-        updateYearUI(yearStr);
-        state.planCache.clear();
-        await attachYearListeners(yearStr);
-        state.latestYear = yearStr;
+    async function attachYearListeners(yearStr) {
+      const year = String(yearStr);
+
+      // Reset “loaded” markers for year-scoped things
+      state.loaded.ledgerScoped = false;
+      state.loaded.ledgerLegacy = !isSocrates;
+      state.loaded.yearEnrollScoped = false;
+      state.loaded.yearEnrollLegacy = !isSocrates;
+
+      // clean old
+      if (state.ledgerRef) state.ledgerRef.off();
+      if (state.legacyLedgerRef) state.legacyLedgerRef.off();
+      if (state.yearEnrollRef) state.yearEnrollRef.off();
+      if (state.legacyYearEnrollRef) state.legacyYearEnrollRef.off();
+
+      // ledger
+      state.ledgerRef = schoolRef(`financeLedgers/${year}`);
+      state.legacyLedgerRef = isSocrates ? db.ref(`financeLedgers/${year}`) : null;
+
+      state.ledgerRef.on('value', (snap) => {
+        state.ledgerRef._lastSnap = snap;
+        state.ledger = mergeSnapshots(snap, state.legacyLedgerRef?._lastSnap);
+        state.loaded.ledgerScoped = true;
         queueRender();
       });
-      updateYearUI(getWorkingYear());
-      if (!state.yearEnrollRef) {
-        attachYearListeners(getWorkingYear()).catch((err) => console.error('Year listener attach failed', err));
-      }
 
-      function resolveClassForYear(studentId, fallbackClass, year) {
-        const override = state.yearEnrollments[studentId] || {};
-        if (override && (override.className || override.classLevel)) {
-          return override.className || override.classLevel;
-        }
-        const anchor = state.anchorEnrollments[studentId] || {};
-        const baseClass = anchor.className || anchor.classLevel || fallbackClass || '';
-        const delta = Number(year) - SOMAP_DEFAULT_YEAR;
-        return shiftClass(baseClass, delta);
-      }
-
-      async function planLabelFor(planId, year) {
-        if (!planId) return '';
-        const key = `${year}::${planId}`;
-        if (state.planCache.has(key)) return state.planCache.get(key);
-        try {
-          const plan = await readPlan(planId, { year });
-          const label = plan?.name || planId;
-          state.planCache.set(key, label);
-          return label;
-        } catch (err) {
-          console.warn('Plan lookup failed', planId, err);
-          return planId;
-        }
-      }
-
-      function sumPayments(ledgerEntry) {
-        if (!ledgerEntry || typeof ledgerEntry !== 'object') return 0;
-        const source = ledgerEntry.payments || ledgerEntry.entries || ledgerEntry.records || ledgerEntry;
-        return Object.values(source || {}).reduce((total, entry) => {
-          const amount = Number(entry?.amount ?? entry?.value ?? entry?.paid ?? entry?.total ?? 0);
-          return Number.isFinite(amount) && amount > 0 ? total + amount : total;
-        }, 0);
-      }
-
-      function escapeHtml(text) {
-        if (text === undefined || text === null) return '';
-        return String(text).replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[m]));
-      }
-
-      async function attachYearListeners(year) {
-        const yearStr = String(year);
-        if (state.yearEnrollRef) state.yearEnrollRef.off();
-        if (state.ledgerRef) state.ledgerRef.off();
-
-        state.yearEnrollRef = await pickRefWithLegacy(`enrollments/${yearStr}`, `enrollments/${yearStr}`);
-        state.yearEnrollRef.on('value', (snap) => {
-          state.yearEnrollments = snap.val() || {};
-          queueRender();
-        });
-
-        state.ledgerRef = await pickRefWithLegacy(`financeLedgers/${yearStr}`, `financeLedgers/${yearStr}`);
-        state.ledgerRef.on('value', (snap) => {
-          state.ledger = snap.val() || {};
+      if (state.legacyLedgerRef) {
+        state.legacyLedgerRef.on('value', (snap) => {
+          state.legacyLedgerRef._lastSnap = snap;
+          state.ledger = mergeSnapshots(state.ledgerRef?._lastSnap, snap);
+          state.loaded.ledgerLegacy = true;
           queueRender();
         });
       }
 
-      (async () => {
-        try {
-          state.studentsRef = await pickRefWithLegacy('students', 'students');
-          state.studentsRef.on('value', (snapshot) => {
-            const raw = snapshot.val() || {};
-            state.students.clear();
-            Object.entries(raw).forEach(([key, value]) => {
-              state.students.set(key, { key, ...(value || {}) });
-            });
-            queueRender();
-          });
-        } catch (err) {
-          console.error('Failed to attach students listener', err);
-        }
-      })();
+      // enrollments (optional class overrides)
+      state.yearEnrollRef = schoolRef(`enrollments/${year}`);
+      state.legacyYearEnrollRef = isSocrates ? db.ref(`enrollments/${year}`) : null;
 
-      (async () => {
-        try {
-          const anchorRef = await pickRefWithLegacy(`enrollments/${SOMAP_DEFAULT_YEAR}`, `enrollments/${SOMAP_DEFAULT_YEAR}`);
-          anchorRef.on('value', (snapshot) => {
-            state.anchorEnrollments = snapshot.val() || {};
-            queueRender();
-          });
-        } catch (err) {
-          console.error('Failed to attach anchor enrollment listener', err);
-        }
-      })();
-
-      if (elements.classFilter) {
-        elements.classFilter.addEventListener('change', queueRender);
-      }
-
-      [
-        [elements.downloadCsvBtn, () => downloadCSV('student-list')],
-        [elements.downloadPdfBtn, () => downloadPDF('student-list')],
-        [elements.schoolDownloadCsv, () => downloadCSV('school-reports')],
-        [elements.schoolDownloadPdf, () => downloadPDF('school-reports')],
-        [elements.reportDownloadCsv, () => downloadCSV('report-forms')],
-        [elements.reportDownloadPdf, () => downloadPDF('report-forms')],
-      ].forEach(([btn, handler]) => {
-        if (btn) btn.addEventListener('click', handler);
+      state.yearEnrollRef.on('value', (snap) => {
+        state.yearEnrollRef._lastSnap = snap;
+        state.yearEnrollments = mergeSnapshots(snap, state.legacyYearEnrollRef?._lastSnap);
+        state.loaded.yearEnrollScoped = true;
+        queueRender();
       });
 
-      queueRender();
-
-      async function renderAllTables() {
-        const listBody = elements.listBody;
-        const schoolReportBody = elements.schoolReportBody;
-        const reportFormBody = elements.reportFormBody;
-        if (!listBody || !schoolReportBody || !reportFormBody) return;
-
-        const year = getWorkingYear();
-        state.latestYear = year;
-        const generation = ++state.renderToken;
-
-        const studentsArray = Array.from(state.students.values());
-        const records = await Promise.all(studentsArray.map(async (stu) => {
-          const fallbackClass = stu.classLevel || stu.className || '';
-          const resolvedClass = resolveClassForYear(stu.key, fallbackClass, year) || fallbackClass || 'N/A';
-          const anchorClass = state.anchorEnrollments[stu.key]?.className || state.anchorEnrollments[stu.key]?.classLevel || fallbackClass;
-          let finance = { fee: 0, planId: null, feeOverride: null };
-          try {
-            finance = await resolveEffectiveFinance(stu.key, resolvedClass, { anchorClass, year });
-          } catch (err) {
-            console.error('resolveEffectiveFinance error', stu.key, err);
-          }
-          const planLabel = await planLabelFor(finance.planId, year);
-          const ledgerEntry = state.ledger?.[stu.key] || {};
-          const paidAmount = sumPayments(ledgerEntry);
-          const feeValue = Number(finance.fee || 0);
-          const debtAmount = Math.max(0, feeValue - paidAmount);
-          const fullName = `${stu.firstName || ''} ${stu.middleName || ''} ${stu.lastName || ''}`.replace(/\s+/g, ' ').trim();
-          const registrationDate = stu.timestamp
-            ? new Date(stu.timestamp).toLocaleDateString()
-            : (stu.createdAt ? new Date(stu.createdAt).toLocaleDateString() : 'N/A');
-          const photoURL = stu.passportPhotoUrl || stu.passportPhotoURL || 'https://via.placeholder.com/50';
-          const isOverrideLocked = finance.feeOverride && (finance.feeOverride.locked !== false);
-          const feeSource = isOverrideLocked ? 'Override' : 'Class default';
-          return {
-            key: stu.key,
-            admissionNo: stu.admissionNumber || 'N/A',
-            fullName: fullName || 'N/A',
-            classLabel: resolvedClass === 'GRADUATED' ? `Graduated (${year})` : resolvedClass,
-            rawClass: resolvedClass,
-            registrationDate,
-            photoURL,
-            contact: stu.primaryParentContact || 'N/A',
-            fee: feeValue,
-            paid: paidAmount,
-            debt: debtAmount,
-            planId: finance.planId || null,
-            planLabel,
-            isGraduated: resolvedClass === 'GRADUATED',
-            feeSource,
-            gender: stu.gender || stu.sex || '',
-          };
-        }));
-
-        if (generation !== state.renderToken) return;
-
-        state.latestRecords = records;
-
-        const filterValue = elements.classFilter ? elements.classFilter.value || '' : '';
-        const filteredRecords = records.filter((rec) => {
-          if (rec.isGraduated) return false;
-          if (!filterValue) return true;
-          return normalize(rec.classLabel) === normalize(filterValue);
+      if (state.legacyYearEnrollRef) {
+        state.legacyYearEnrollRef.on('value', (snap) => {
+          state.legacyYearEnrollRef._lastSnap = snap;
+          state.yearEnrollments = mergeSnapshots(state.yearEnrollRef?._lastSnap, snap);
+          state.loaded.yearEnrollLegacy = true;
+          queueRender();
         });
+      }
+    }
 
-        // Update student count card
-        const activeRecordsForCount = records.filter((rec) => !rec.isGraduated);
-        let boysCount = 0;
-        let girlsCount = 0;
-        
-        // Count boys and girls from filtered records (or all if no filter)
-        const recordsToCount = filterValue ? filteredRecords : activeRecordsForCount;
-        recordsToCount.forEach((rec) => {
-          // Get gender from the record (already included when building records)
-          const gender = String(rec.gender || '').trim().toLowerCase();
-          if (gender.startsWith('m')) boysCount++;
-          else if (gender.startsWith('f')) girlsCount++;
-        });
+    // initial year listeners
+    attachYearListeners(getWorkingYear()).catch((err) => console.error('Year listener attach failed', err));
 
-        // Update count card display
-        const countCard = document.getElementById('studentCountCard');
-        const countTotal = document.getElementById('countTotal');
-        const countBoys = document.getElementById('countBoys');
-        const countGirls = document.getElementById('countGirls');
-        const countClassFilter = document.getElementById('countClassFilter');
-        
-        if (countCard && countTotal && countBoys && countGirls && countClassFilter) {
-          countCard.style.display = 'block';
-          if (filterValue) {
-            // When a class is selected, show count for that class
-            countTotal.textContent = filteredRecords.length;
-            countClassFilter.textContent = filterValue;
-          } else {
-            // When showing all classes, show total count
-            countTotal.textContent = activeRecordsForCount.length;
-            countClassFilter.textContent = 'All Classes';
-          }
-          countBoys.textContent = boysCount;
-          countGirls.textContent = girlsCount;
+    function queueRender() {
+      renderAllTables().catch((err) => console.error('Render error', err));
+    }
+
+    if (elements.classFilter) {
+      elements.classFilter.addEventListener('change', queueRender);
+    }
+
+    [
+      [elements.downloadCsvBtn, () => downloadCSV('student-list')],
+      [elements.downloadPdfBtn, () => downloadPDF('student-list')],
+      [elements.schoolDownloadCsv, () => downloadCSV('school-reports')],
+      [elements.schoolDownloadPdf, () => downloadPDF('school-reports')],
+      [elements.reportDownloadCsv, () => downloadCSV('report-forms')],
+      [elements.reportDownloadPdf, () => downloadPDF('report-forms')],
+    ].forEach(([btn, handler]) => {
+      if (btn) btn.addEventListener('click', handler);
+    });
+
+    queueRender();
+
+    async function renderAllTables() {
+      const listBody = elements.listBody;
+      const schoolReportBody = elements.schoolReportBody;
+      const reportFormBody = elements.reportFormBody;
+      if (!listBody || !schoolReportBody || !reportFormBody) return;
+
+      const year = getWorkingYear();
+      state.latestYear = year;
+
+      // prevent “empty then jump” rendering
+      if (!isReadyToRender()) {
+        showLoadingRow(year);
+        return;
+      }
+
+      const generation = ++state.renderToken;
+
+      // ---- KEY FIX: pick students by registration YEAR, not by yearIndex mixing
+      const allStudents = Array.from(state.students.values());
+      const eligibleStudents = allStudents
+        .filter(isCompleteStudent)
+        .filter((stu) => belongsToSelectedYear(stu, year));
+
+      const records = await Promise.all(eligibleStudents.map(async (stu) => {
+        const fallbackClass = stu.classLevel || stu.className || '';
+        const resolvedClass = resolveClassForYear(stu.key, fallbackClass, year, stu) || fallbackClass || 'N/A';
+
+        // Graduated rule: auto-exclude in UI (e.g., Class 7 in 2025 will be GRADUATED in 2026)
+        const isGraduated = resolvedClass === 'GRADUATED';
+
+        let finance = { fee: 0, planId: null, feeOverride: null };
+        try {
+          finance = await resolveEffectiveFinance(stu.key, resolvedClass, { anchorClass: fallbackClass, year });
+        } catch (err) {
+          console.error('resolveEffectiveFinance error', stu.key, err);
         }
 
-        const buildRow = (rec) => `
-  <td>${escapeHtml(rec.admissionNo)}</td>
-  <td>${escapeHtml(rec.fullName)}</td>
-  <td>${escapeHtml(rec.classLabel)}</td>
-  <td>${escapeHtml(rec.registrationDate)}</td>
-  <td><img src="${escapeHtml(rec.photoURL)}" alt="photo" style="width:50px;height:50px;object-fit:cover;border-radius:4px"/></td>
-  <td>${escapeHtml(rec.contact)}</td>
-  <td>${escapeHtml(fmtCurrency(rec.fee))}</td>
-  <td>${escapeHtml(fmtCurrency(rec.paid))}</td>
-  <td>${escapeHtml(fmtCurrency(rec.debt))}</td>
-  <td>${escapeHtml(rec.planLabel || rec.planId || 'Class default')}</td>
-  <td>
-    <a href="generateid.html?key=${encodeURIComponent(rec.key)}" target="_blank"
-       class="py-1 px-2 border rounded text-indigo-600 inline-block" title="Open details & generate ID">
-      <i class="fas fa-eye"></i>
-    </a>
-  </td>
-`;
+        const planLabel = await planLabelFor(finance.planId, year);
 
-        listBody.innerHTML = '';
-        if (!filteredRecords.length) {
-          listBody.innerHTML = `<tr><td colspan="11" class="text-center text-sm text-slate-500 py-4">No students for ${escapeHtml(String(year))} yet.</td></tr>`;
+        const ledgerEntry = state.ledger?.[stu.key] || {};
+        const paidAmount = sumPayments(ledgerEntry);
+        const feeValue = Number(finance.fee || 0);
+        const debtAmount = Math.max(0, feeValue - paidAmount);
+
+        const fullName = `${stu.firstName || ''} ${stu.middleName || ''} ${stu.lastName || ''}`.replace(/\s+/g, ' ').trim();
+        const registrationDate = formatRegistrationDate(stu);
+        const photoURL = stu.passportPhotoUrl || stu.passportPhotoURL || 'https://via.placeholder.com/50';
+
+        const isOverrideLocked = finance.feeOverride && (finance.feeOverride.locked !== false);
+        const feeSource = isOverrideLocked ? 'Override' : 'Class default';
+
+        return {
+          key: stu.key,
+          admissionNo: stu.admissionNumber || 'N/A',
+          fullName: fullName || 'N/A',
+          classLabel: isGraduated ? `Graduated (${year})` : resolvedClass,
+          rawClass: resolvedClass,
+          registrationDate,
+          photoURL,
+          contact: stu.primaryParentContact || 'N/A',
+          fee: feeValue,
+          paid: paidAmount,
+          debt: debtAmount,
+          planId: finance.planId || null,
+          planLabel,
+          isGraduated,
+          feeSource,
+          gender: stu.gender || stu.sex || '',
+        };
+      }));
+
+      if (generation !== state.renderToken) return;
+
+      // Filter out Graduated + any remaining incomplete rows
+      const cleaned = records.filter(r => {
+        if (r.isGraduated) return false;
+        if (L(r.admissionNo) === 'n/a' || L(r.fullName) === 'n/a') return false;
+        return true;
+      });
+
+      state.latestRecords = cleaned;
+
+      const filterValue = elements.classFilter ? (elements.classFilter.value || '') : '';
+      const filteredRecords = cleaned.filter((rec) => {
+        if (!filterValue) return true;
+        return normalize(rec.classLabel) === normalize(filterValue);
+      });
+
+      // Counts
+      let boysCount = 0;
+      let girlsCount = 0;
+      filteredRecords.forEach((rec) => {
+        const g = String(rec.gender || '').trim().toLowerCase();
+        if (g.startsWith('m')) boysCount++;
+        else if (g.startsWith('f')) girlsCount++;
+      });
+
+      const countCard = document.getElementById('studentCountCard');
+      const countTotal = document.getElementById('countTotal');
+      const countBoys = document.getElementById('countBoys');
+      const countGirls = document.getElementById('countGirls');
+      const countClassFilter = document.getElementById('countClassFilter');
+
+      if (countCard && countTotal && countBoys && countGirls && countClassFilter) {
+        countCard.style.display = 'block';
+        countTotal.textContent = String(filteredRecords.length);
+        countBoys.textContent = String(boysCount);
+        countGirls.textContent = String(girlsCount);
+        countClassFilter.textContent = filterValue ? filterValue : 'All Classes';
+      }
+
+      const buildRow = (rec) => `
+        <td>${escapeHtml(rec.admissionNo)}</td>
+        <td>${escapeHtml(rec.fullName)}</td>
+        <td>${escapeHtml(rec.classLabel)}</td>
+        <td>${escapeHtml(rec.registrationDate)}</td>
+        <td><img src="${escapeHtml(rec.photoURL)}" alt="photo" style="width:50px;height:50px;object-fit:cover;border-radius:4px"/></td>
+        <td>${escapeHtml(rec.contact)}</td>
+        <td>${escapeHtml(fmtCurrency(rec.fee))}</td>
+        <td>${escapeHtml(fmtCurrency(rec.paid))}</td>
+        <td>${escapeHtml(fmtCurrency(rec.debt))}</td>
+        <td>${escapeHtml(rec.planLabel || rec.planId || 'Class default')}</td>
+        <td>
+          <a href="generateid.html?key=${encodeURIComponent(rec.key)}" target="_blank"
+             class="py-1 px-2 border rounded text-indigo-600 inline-block" title="Open details & generate ID">
+            <i class="fas fa-eye"></i>
+          </a>
+        </td>
+      `;
+
+      listBody.innerHTML = '';
+      if (!filteredRecords.length) {
+        listBody.innerHTML = `<tr><td colspan="11" class="text-center text-sm text-slate-500 py-4">No students for ${escapeHtml(String(year))} yet.</td></tr>`;
+      } else {
+        filteredRecords.forEach((rec) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = buildRow(rec);
+          listBody.appendChild(tr);
+        });
+      }
+
+      // Reports tables (use ALL active in selected year, ignoring class filter)
+      const simpleRow = (rec) => `
+        <td>${escapeHtml(rec.admissionNo)}</td>
+        <td>${escapeHtml(rec.fullName)}</td>
+        <td>${escapeHtml(rec.classLabel)}</td>
+        <td>${escapeHtml(rec.contact)}</td>
+        <td>${escapeHtml(fmtCurrency(rec.fee))}</td>
+        <td>${escapeHtml(fmtCurrency(rec.paid))}</td>
+        <td>${escapeHtml(fmtCurrency(rec.debt))}</td>
+      `;
+
+      [schoolReportBody, reportFormBody].forEach((tbody) => {
+        tbody.innerHTML = '';
+        if (!cleaned.length) {
+          tbody.innerHTML = `<tr><td colspan="7" class="text-center text-sm text-slate-500 py-4">No student data for ${escapeHtml(String(year))}.</td></tr>`;
         } else {
-          filteredRecords.forEach((rec) => {
+          cleaned.forEach((rec) => {
             const tr = document.createElement('tr');
-            tr.innerHTML = buildRow(rec);
-            listBody.appendChild(tr);
+            tr.innerHTML = simpleRow(rec);
+            tbody.appendChild(tr);
           });
         }
+      });
+    }
 
-        const simpleRow = (rec) => `
-          <td>${escapeHtml(rec.admissionNo)}</td>
-          <td>${escapeHtml(rec.fullName)}</td>
-          <td>${escapeHtml(rec.classLabel)}</td>
-          <td>${escapeHtml(rec.contact)}</td>
-          <td>${escapeHtml(fmtCurrency(rec.fee))}</td>
-          <td>${escapeHtml(fmtCurrency(rec.paid))}</td>
-          <td>${escapeHtml(fmtCurrency(rec.debt))}</td>
-        `;
-
-        const activeRecords = records.filter((rec) => !rec.isGraduated);
-
-        [schoolReportBody, reportFormBody].forEach((tbody) => {
-          tbody.innerHTML = '';
-          if (!activeRecords.length) {
-            tbody.innerHTML = `<tr><td colspan="7" class="text-center text-sm text-slate-500 py-4">No student data for ${escapeHtml(String(year))}.</td></tr>`;
-          } else {
-            activeRecords.forEach((rec) => {
-              const tr = document.createElement('tr');
-              tr.innerHTML = simpleRow(rec);
-              tbody.appendChild(tr);
-            });
-          }
-        });
+    function getRecordsForExport(kind) {
+      const year = state.latestYear || getWorkingYear();
+      const filterValue = elements.classFilter ? (elements.classFilter.value || '') : '';
+      let records = (state.latestRecords || []).slice();
+      if (!records.length) return { year, records: [] };
+      if (kind === 'student-list' && filterValue) {
+        records = records.filter((rec) => normalize(rec.classLabel) === normalize(filterValue));
       }
+      return { year, records };
+    }
 
-      function getRecordsForExport(kind) {
-        const year = state.latestYear || getWorkingYear();
-        const filterValue = elements.classFilter ? elements.classFilter.value || '' : '';
-        let records = state.latestRecords.filter((rec) => !rec.isGraduated);
-        if (!records.length) return { year, records: [] };
-        if (kind === 'student-list' && filterValue) {
-          records = records.filter((rec) => normalize(rec.classLabel) === normalize(filterValue));
-        }
-        return { year, records };
+    function downloadCSV(kind) {
+      const { year, records } = getRecordsForExport(kind);
+      if (!records.length) {
+        alert('No data to download for the selected year.');
+        return;
       }
+      if (!window.Papa) {
+        alert('CSV library not loaded.');
+        return;
+      }
+      const rows = records.map((rec) => ({
+        'Admission No': rec.admissionNo,
+        'Full Name': rec.fullName,
+        'Class': rec.classLabel,
+        'Date of Registration': rec.registrationDate,
+        'Parent Contact': rec.contact,
+        'Fee Total': rec.fee,
+        'Paid Amount': rec.paid,
+        'Debt': rec.debt,
+        'Payment Plan': rec.planLabel || rec.planId || 'Class default',
+        'Fee Source': rec.feeSource,
+      }));
+      const csv = window.Papa.unparse(rows);
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${kind}_${year}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
 
-      function downloadCSV(kind) {
-        const { year, records } = getRecordsForExport(kind);
-        if (!records.length) {
-          alert('No data to download for the selected year.');
-          return;
-        }
-        if (!window.Papa) {
-          alert('CSV library not loaded.');
-          return;
-        }
-        const rows = records.map((rec) => ({
-          'Admission No': rec.admissionNo,
-          'Full Name': rec.fullName,
-          'Class': rec.classLabel,
-          'Date of Registration': rec.registrationDate,
-          'Parent Contact': rec.contact,
-          'Fee Total': rec.fee,
-          'Paid Amount': rec.paid,
-          'Debt': rec.debt,
-          'Payment Plan': rec.planLabel || rec.planId || 'Class default',
-          'Fee Source': rec.feeSource,
-        }));
-        const csv = window.Papa.unparse(rows);
-        const blob = new Blob([csv], { type: 'text/csv' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${kind}_${year}.csv`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+    function downloadPDF(kind) {
+      const { year, records } = getRecordsForExport(kind);
+      if (!records.length) {
+        alert('No data to download for the selected year.');
+        return;
       }
+      const jsPDFLib = window.jspdf?.jsPDF;
+      if (!jsPDFLib) {
+        alert('jsPDF not loaded');
+        return;
+      }
+      const doc = new jsPDFLib({ orientation: 'landscape' });
+      doc.setFontSize(14);
+      doc.text(`${kind.replace('-', ' ')} Report (${year})`, 14, 10);
 
-      function downloadPDF(kind) {
-        const { year, records } = getRecordsForExport(kind);
-        if (!records.length) {
-          alert('No data to download for the selected year.');
-          return;
-        }
-        const jsPDFLib = window.jspdf?.jsPDF;
-        if (!jsPDFLib) {
-          alert('jsPDF not loaded');
-          return;
-        }
-        const doc = new jsPDFLib({ orientation: 'landscape' });
-        doc.setFontSize(14);
-        doc.text(`${kind.replace('-', ' ')} Report (${year})`, 14, 10);
-        const body = records.map((rec) => [
-          rec.admissionNo,
-          rec.fullName,
-          rec.classLabel,
-          rec.registrationDate,
-          rec.contact,
-          fmtCurrency(rec.fee),
-          fmtCurrency(rec.paid),
-          fmtCurrency(rec.debt),
-          rec.planLabel || rec.planId || 'Class default',
-        ]);
-        doc.autoTable({
-          head: [['Admission No','Full Name','Class','Date of Registration','Parent Contact','Fee Total','Paid Amount','Debt','Payment Plan']],
-          body,
-          startY: 18,
-          styles: { fontSize: 8 },
-        });
-        doc.save(`${kind}_${year}.pdf`);
-      }
-    });
-  </script>
+      const body = records.map((rec) => [
+        rec.admissionNo,
+        rec.fullName,
+        rec.classLabel,
+        rec.registrationDate,
+        rec.contact,
+        fmtCurrency(rec.fee),
+        fmtCurrency(rec.paid),
+        fmtCurrency(rec.debt),
+        rec.planLabel || rec.planId || 'Class default',
+      ]);
+
+      doc.autoTable({
+        head: [['Admission No','Full Name','Class','Date of Registration','Parent Contact','Fee Total','Paid Amount','Debt','Payment Plan']],
+        body,
+        startY: 18,
+        styles: { fontSize: 8 },
+      });
+      doc.save(`${kind}_${year}.pdf`);
+    }
+  });
+</script>
 </body>
 </html>

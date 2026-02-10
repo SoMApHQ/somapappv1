@@ -12,7 +12,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
-  <script src="../firebase/firebase-config.js"></script>
+  <script src="../firebase.js"></script>
   <style>
     :root {
       --bg: #0b1220;
@@ -194,6 +194,18 @@
     const statEarly = document.getElementById('statEarly');
     const statFines = document.getElementById('statFines');
 
+    const DEFAULT_RULES = {
+      requireWifi: true,
+      allowedSsids: [],
+      lateThreshold: 3,
+      earlyThreshold: 3,
+      deductionAmount: 1000,
+      deductionLabel: 'Posho ya Uwajibikaji',
+      requireSchoolInternet: false,
+      rotatingCodeEnabled: false,
+      codeTTLSeconds: 90
+    };
+
     const state = {
       school: null,
       schoolId: '',
@@ -206,21 +218,17 @@
       workerId: '',
       profile: null,
       settings: {},
-      rules: { ...DEFAULT_RULES }
+      rules: { ...DEFAULT_RULES },
+      deviceId: ''
     };
+
+    const DEVICE_ID_KEY = 'somap_workers_device_id';
+    const PUBLIC_IP_ENDPOINT = 'https://api.ipify.org';
 
     const db = firebase.database();
 
     const DAY_START = '07:20';
     const DAY_END = '16:30';
-    const DEFAULT_RULES = {
-      requireWifi: true,
-      allowedSsids: [],
-      lateThreshold: 3,
-      earlyThreshold: 3,
-      deductionAmount: 1000,
-      deductionLabel: 'Posho ya Uwajibikaji'
-    };
 
     ensureAnonymousAuth()
       .then(init)
@@ -251,6 +259,17 @@
       state.monthKey = `${targetYear}${month}`;
     }
 
+    async function ensureSystemYearForCheck() {
+      const systemYear = String(new Date().getFullYear());
+      if (state.year === systemYear) return;
+      state.year = systemYear;
+      if (yearLabel) {
+        yearLabel.textContent = `Mwaka: ${state.year}`;
+      }
+      window.somapYearContext?.setSelectedYear?.(systemYear, { manual: false, forceDispatch: true });
+      await loadSettings();
+    }
+
     function setBranding() {
       if (schoolNameEl) schoolNameEl.textContent = state.schoolName;
       if (window.SomapLogo?.loadSchoolLogo) {
@@ -274,8 +293,8 @@
     function initYearContext() {
       const yearCtx = window.somapYearContext || null;
       const systemYear = String(new Date().getFullYear());
-      const selected = String(yearCtx?.getSelectedYear?.() || systemYear);
-      state.year = selected !== systemYear ? yearCtx.resetToCurrentYear?.() || systemYear : selected;
+      const selected = String(yearCtx?.getSelectedYear?.() ?? systemYear);
+      state.year = selected;
       const month = String(new Date().getMonth() + 1).padStart(2, '0');
       state.monthKey = `${state.year}${month}`;
       yearCtx?.attachYearDropdown?.(yearSelect);
@@ -304,6 +323,7 @@
       initSchoolContext();
       initYearContext();
       normalizeNow();
+      ensureLocalDeviceId();
 
       const workerId = await getLinkedWorkerId();
       if (!workerId) {
@@ -318,7 +338,6 @@
 
       checkInBtn.addEventListener('click', () => handleCheck('in'));
       checkOutBtn.addEventListener('click', () => handleCheck('out'));
-      wifiStatus.textContent = 'Wi-Fi check (beta): tutaunganisha SSID ya shule kuthibitisha uwepo. Kwa sasa, check-in hutumia kifaa hiki tu.';
     }
 
     async function loadProfile() {
@@ -361,22 +380,133 @@
       const rules = state.rules || DEFAULT_RULES;
       if (!rules.requireWifi) return true;
       const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-      if (!connection || connection.type !== 'wifi') {
+      if (!connection || typeof connection.type === 'undefined') {
+        toast('Kivinjari hakiwezi kuthibitisha aina ya Wi-Fi; SSID haiwezi kuthibitishwa kwenye kivinjari. Hakikisha una Wi-Fi ya shule unayojua.', 'warning');
+        return true;
+      }
+      if (connection.type !== 'wifi') {
         toast('Unganisha kwenye Wi-Fi ya shule ili kuhudhuria.', 'warning');
         return false;
       }
       return true;
     }
 
-    async function handleCheck(direction) {
-      const systemYear = String(new Date().getFullYear());
-      if (state.year !== systemYear) {
-        state.year = systemYear;
-        window.somapYearContext?.setSelectedYear?.(systemYear, { manual: false, forceDispatch: true });
+    function ensureLocalDeviceId() {
+      let stored = localStorage.getItem(DEVICE_ID_KEY);
+      if (!stored) {
+        if (crypto?.randomUUID) {
+          stored = crypto.randomUUID();
+        } else {
+          stored = `device-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        }
+        localStorage.setItem(DEVICE_ID_KEY, stored);
       }
+      state.deviceId = stored;
+    }
+
+    async function fetchPublicIP() {
+      const resp = await fetch(PUBLIC_IP_ENDPOINT, { cache: 'no-store' });
+      if (!resp.ok) throw new Error('IP lookup failed');
+      return (await resp.text()).trim();
+    }
+
+    async function ensureSchoolInternetRequirement() {
+      try {
+        const ip = await fetchPublicIP();
+        const snap = await schoolRef(scopedPath(`workers_settings/attendanceRules/schoolPublicIPs/${state.todayKey}`)).once('value');
+        const allowed = snap.val() || {};
+        if (!allowed[ip]) {
+          toast('Connect to School Wi-Fi', 'warning');
+          return { success: false };
+        }
+        return { success: true, publicIP: ip };
+      } catch (err) {
+        console.error('School IP verification failed', err);
+        toast('Haikuweza kuthibitisha Wi-Fi ya shule. Jaribu tena.', 'error');
+        return { success: false };
+      }
+    }
+
+    async function verifyRotatingCodeEntry() {
+      try {
+        const snap = await schoolRef(scopedPath(`workers_settings/dailyCheckin/${state.todayKey}`)).once('value');
+        const entry = snap.val();
+        if (!entry?.code) {
+          toast('Ask Headteacher to set code', 'warning');
+          return { success: false };
+        }
+        const now = localTs();
+        if (!entry.validFrom || !entry.validTo || now < entry.validFrom || now > entry.validTo) {
+          toast('Ask Headteacher to set code', 'warning');
+          return { success: false };
+        }
+        const codePrompt = prompt('Enter today\\'s rotating code:');
+        if (!codePrompt) {
+          toast('Msimbo unahitajika.', 'warning');
+          return { success: false };
+        }
+        if (codePrompt.trim() !== entry.code) {
+          toast('Invalid code', 'warning');
+          return { success: false };
+        }
+        return { success: true, code: entry.code, validFrom: entry.validFrom, validTo: entry.validTo };
+      } catch (err) {
+        console.error('Rotating code check failed', err);
+        toast('Hitilafu kuthibitisha msimbo. Jaribu tena.', 'error');
+        return { success: false };
+      }
+    }
+
+    async function ensureDeviceBinding() {
+      const ref = schoolRef(`workers/${state.workerId}/security/deviceId`);
+      const snap = await ref.once('value');
+      const boundId = snap.exists() ? snap.val() : null;
+      if (boundId && boundId !== state.deviceId) {
+        toast('Device not authorized', 'warning');
+        return { success: false };
+      }
+      return { success: true, ref, boundId };
+    }
+
+    async function preflightChecks() {
+      const binding = await ensureDeviceBinding();
+      if (!binding.success) return null;
+      const methodParts = ['device_binding'];
+      const rules = state.rules || DEFAULT_RULES;
+      let publicIP = null;
+      if (rules.requireSchoolInternet) {
+        const internet = await ensureSchoolInternetRequirement();
+        if (!internet.success) return null;
+        methodParts.push('school_internet');
+        publicIP = internet.publicIP;
+      }
+      let codeEntry = null;
+      if (rules.rotatingCodeEnabled) {
+        const codeResult = await verifyRotatingCodeEntry();
+        if (!codeResult.success) return null;
+        methodParts.push('rotating_code');
+        codeEntry = codeResult;
+      }
+      return {
+        method: methodParts.join('+'),
+        publicIP,
+        codeWindow: codeEntry?.code || null,
+        validTo: codeEntry?.validTo || null,
+        binding
+      };
+    }
+
+    async function handleCheck(direction) {
+      await ensureSystemYearForCheck();
       normalizeNow(false);
+      await loadSettings();
       const onWifi = await enforceWifi();
       if (!onWifi) return;
+      const verification = await preflightChecks();
+      if (!verification) return;
+      if (!verification.binding.boundId && direction === 'in') {
+        await verification.binding.ref.set(state.deviceId);
+      }
       const timestamp = localTs();
       const dayKey = state.todayKey;
 
@@ -403,6 +533,15 @@
             checkOutTs: timestamp,
             earlyMinutes: computeEarlyMinutes(timestamp)
           };
+
+      const verificationFields = {
+        method: verification.method,
+        publicIP: verification.publicIP || null,
+        deviceId: state.deviceId,
+        codeWindow: verification.codeWindow,
+        validTo: verification.validTo
+      };
+      Object.assign(payload, verificationFields);
 
       await dayRef.update(payload);
       await markPresent();
@@ -490,9 +629,13 @@
       const ssids = Array.isArray(rules.allowedSsids) && rules.allowedSsids.length
         ? `SSID: ${rules.allowedSsids.join(', ')}`
         : 'Tumia Wi-Fi ya shule (SSID itawekwa na Mwalimu Mkuu).';
+      const extras = [];
+      if (rules.requireSchoolInternet) extras.push('IP ya umma lazima iwe ya shule.');
+      if (rules.rotatingCodeEnabled) extras.push('Msimbo unaozunguka unahitajika.');
+      const extraText = extras.join(' ');
       wifiStatus.textContent = rules.requireWifi
-        ? `Mahudhurio hupokelewa ukiwa kwenye Wi-Fi ya shule. ${ssids}`
-        : 'Wi-Fi haitakiwi kwa sasa (imetolewa na Mwalimu Mkuu).';
+        ? `Mahudhurio hupokelewa ukiwa kwenye Wi-Fi ya shule. ${ssids} ${extraText}`.trim()
+        : `Wi-Fi haitakiwi kwa sasa (imetolewa na Mwalimu Mkuu). ${extraText}`.trim();
     }
 
     function formatTs(ts) {

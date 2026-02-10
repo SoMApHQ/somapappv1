@@ -215,15 +215,9 @@ function normalizeStudent(id, data = {}) {
 }
 
 function isPresent(rec = {}) {
-  const raw = (rec.status || rec.daily || rec.value || '').toString().toUpperCase();
-  return (
-    rec.present === true ||
-    rec.am === 'P' ||
-    rec.pm === 'P' ||
-    raw === 'P' ||
-    raw === 'PRESENT' ||
-    raw === 'PR'
-  );
+  // Must match attendance.html Daily Register logic exactly
+  const dailyCode = String(rec?.daily || rec?.status || '').toUpperCase();
+  return dailyCode.startsWith('P');
 }
 
 function App() {
@@ -237,13 +231,13 @@ function App() {
     perClass: {},
     totals: { registered: { boys: 0, girls: 0, total: 0 }, present: { boys: 0, girls: 0, total: 0 }, absent: { boys: 0, girls: 0, total: 0 } }
   });
+  const autoPax = Number(registerStats?.totals?.present?.total || 0);
   const [registerLoading, setRegisterLoading] = useState(true);
   const [registerError, setRegisterError] = useState('');
 
   const [inventoryItems, setInventoryItems] = useState([]);
   const [logicRules, setLogicRules] = useState({});
 
-  const [headcount, setHeadcount] = useState({ breakfast: '', lunch: '' });
   const [headcountLocked, setHeadcountLocked] = useState(false);
   const [menuSelections, setMenuSelections] = useState({ breakfast: [], lunch: [] });
   const [menuText, setMenuText] = useState({ breakfast: '', lunch: '' });
@@ -329,42 +323,29 @@ function App() {
   }, [currentYear]);
 
   useEffect(() => {
-    const breakfast = safeNumber(headcount.breakfast);
-    const lunch = safeNumber(headcount.lunch);
-    computeCookProjection({ breakfastPax: breakfast, lunchPax: lunch })
+    computeCookProjection({ breakfastPax: autoPax, lunchPax: autoPax })
       .then(setExpectedPolicy)
       .catch(err => console.error(err));
-  }, [headcount.breakfast, headcount.lunch]);
+  }, [autoPax]);
 
   useEffect(() => {
-    const breakfast = safeNumber(headcount.breakfast);
-    const lunch = safeNumber(headcount.lunch);
     const rules = logicRules || {};
     const breakfastList = computeExpectedList({
-      pax: breakfast,
+      pax: autoPax,
       selections: menuSelections.breakfast,
       rules,
       meal: 'breakfast',
       inventoryItems
     });
     const lunchList = computeExpectedList({
-      pax: lunch,
+      pax: autoPax,
       selections: menuSelections.lunch,
       rules,
       meal: 'lunch',
       inventoryItems
     });
     setExpectedList(aggregateExpected([...breakfastList, ...lunchList]));
-  }, [headcount.breakfast, headcount.lunch, menuSelections, logicRules, inventoryItems]);
-
-  useEffect(() => {
-    if (!existingReport && registerStats.totals.present.total > 0 && !headcountLocked) {
-      setHeadcount({
-        breakfast: registerStats.totals.present.total,
-        lunch: registerStats.totals.present.total
-      });
-    }
-  }, [existingReport, registerStats, headcountLocked]);
+  }, [autoPax, menuSelections, logicRules, inventoryItems]);
 
   async function loadBootstrap() {
     try {
@@ -438,19 +419,37 @@ function App() {
     return {};
   }
 
-  async function loadAttendance(dateKey, schoolId, yearKey) {
-    const scopedPath = `years/${yearKey}/attendance_students/${dateKey}`;
-    const snap = await scopedOrSocratesLegacy(scopedPath, `attendance_students/${dateKey}`).catch(() => null);
-    if (snap && snap.exists()) return snap.val() || {};
-    return {};
-  }
+async function loadAttendance(dateKey) {
+  if (!dateKey) return {};
+  const monthKeyDash = String(dateKey.slice(0, 7)); // "2026-02"
+  const monthKeyCompact = `${dateKey.slice(0, 4)}${dateKey.slice(5, 7)}`; // fallback "202602" (legacy)
+  const byClass = {};
+
+  await Promise.all(
+    CLASS_ORDER.map(async (cls) => {
+      try {
+        let snap = await schoolRef(`attendance/${cls}/${monthKeyDash}/${dateKey}`).get();
+        if (!snap.exists()) {
+          // fallback for any legacy stored monthKey formats
+          snap = await schoolRef(`attendance/${cls}/${monthKeyCompact}/${dateKey}`).get();
+        }
+        byClass[cls] = snap.exists() ? (snap.val() || {}) : {};
+      } catch (err) {
+        console.warn(`Failed to load attendance for ${cls} on ${dateKey}:`, err?.message || err);
+        byClass[cls] = {};
+      }
+    })
+  );
+
+  return byClass;
+}
 
   async function loadRegister(dateKey, studentMap = students) {
     setRegisterLoading(true);
     setRegisterError('');
     try {
-      const attendance = await loadAttendance(dateKey, workerSession.schoolId, currentYear);
-      const stats = buildRegisterStats(studentMap, attendance);
+      const attendanceByClass = await loadAttendance(dateKey);
+      const stats = buildRegisterStats(studentMap, attendanceByClass);
       setRegisterStats(stats);
     } catch (err) {
       console.error(err);
@@ -460,7 +459,7 @@ function App() {
     }
   }
 
-  function buildRegisterStats(studentMap, attendanceMap) {
+function buildRegisterStats(studentMap, attendanceByClass) {
     const perClass = { Unknown: makeBlankCounts() };
     const classNamesSet = new Set(['Unknown']);
     Object.values(studentMap || {}).forEach(student => {
@@ -472,28 +471,30 @@ function App() {
       if (student.gender === 'girls') perClass[cls].registered.girls += 1;
     });
 
-    const presentSet = new Set();
-    Object.entries(attendanceMap || {}).forEach(([id, rec]) => {
-      const student = studentMap[id] || normalizeStudent(id, rec);
-      const cls = student.className || 'Unknown';
+    // Present counts MUST follow attendance.html:
+    // present if String(record.daily||\"\").toUpperCase().startsWith(\"P\")
+    Object.entries(attendanceByClass || {}).forEach(([cls, records]) => {
       if (!perClass[cls]) perClass[cls] = makeBlankCounts();
       classNamesSet.add(cls);
-      if (isPresent(rec)) {
+
+      Object.entries(records || {}).forEach(([key, rec]) => {
+        if (!isPresent(rec)) return;
+
         perClass[cls].present.total += 1;
-        if (student.gender === 'boys') perClass[cls].present.boys += 1;
-        if (student.gender === 'girls') perClass[cls].present.girls += 1;
-        presentSet.add(id);
-      }
+
+        // Gender: prefer roster lookup, fallback to record
+        const rosterStudent = studentMap[key];
+        const gender = rosterStudent?.gender || normalizeStudent(key, rec).gender;
+
+        if (gender === 'boys') perClass[cls].present.boys += 1;
+        if (gender === 'girls') perClass[cls].present.girls += 1;
+      });
     });
 
-    Object.entries(studentMap || {}).forEach(([id, student]) => {
-      const cls = student.className || 'Unknown';
-      if (!perClass[cls]) perClass[cls] = makeBlankCounts();
-      if (!presentSet.has(id)) {
-        perClass[cls].absent.total += 1;
-        if (student.gender === 'boys') perClass[cls].absent.boys += 1;
-        if (student.gender === 'girls') perClass[cls].absent.girls += 1;
-      }
+    Object.keys(perClass).forEach(cls => {
+      perClass[cls].absent.total = Math.max(0, perClass[cls].registered.total - perClass[cls].present.total);
+      perClass[cls].absent.boys = Math.max(0, perClass[cls].registered.boys - perClass[cls].present.boys);
+      perClass[cls].absent.girls = Math.max(0, perClass[cls].registered.girls - perClass[cls].present.girls);
     });
 
     const classNames = Array.from(classNamesSet).sort();
@@ -538,10 +539,6 @@ function App() {
         const data = snap.val();
         setExistingReport(data);
         setReportStatus(data.status || 'ok');
-        setHeadcount({
-          breakfast: data.headcount?.breakfast ?? '',
-          lunch: data.headcount?.lunch ?? ''
-        });
         setHeadcountLocked(true);
         setMenuSelections({
           breakfast: data.menuIds?.breakfast || [],
@@ -563,7 +560,6 @@ function App() {
       } else {
         setExistingReport(null);
         setReportStatus('pending');
-        setHeadcountLocked(false);
         setKitchenDaily(mergeDailyWithItems({}, kitchenItems));
       }
     } catch (err) {
@@ -762,10 +758,11 @@ function App() {
   }
 
   async function handleSave() {
-    const breakfast = safeNumber(headcount.breakfast);
-    const lunch = safeNumber(headcount.lunch);
-    if (!breakfast && !lunch) {
-      toast('Weka idadi ya walioshiriki mlo.', 'warning');
+    const breakfast = autoPax;
+    const lunch = autoPax;
+
+    if (!autoPax || autoPax <= 0) {
+      toast('Hakuna waliopo kwa tarehe hii. Pakia Daily Register kwanza.', 'warning');
       return;
     }
 
@@ -1129,8 +1126,9 @@ function App() {
             h('input', {
               type: 'number',
               min: 0,
-              value: headcount.breakfast,
-              onChange: e => setHeadcount({ ...headcount, breakfast: e.target.value })
+              value: autoPax,
+              readOnly: true,
+              disabled: true
             })
           ]),
           h('label', null, [
@@ -1138,8 +1136,9 @@ function App() {
             h('input', {
               type: 'number',
               min: 0,
-              value: headcount.lunch,
-              onChange: e => setHeadcount({ ...headcount, lunch: e.target.value })
+              value: autoPax,
+              readOnly: true,
+              disabled: true
             })
           ])
         ]),

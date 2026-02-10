@@ -14,19 +14,33 @@
     }
     return String(new Date().getFullYear());
   };
-  const P = (subPath) => {
-    if (window.SOMAP && typeof SOMAP.P === 'function') return SOMAP.P(subPath);
-    const trimmed = String(subPath || '').replace(/^\/+/, '');
-    let schoolId = '';
-    try {
-      schoolId = localStorage.getItem('somap.currentSchoolId') || '';
-    } catch (_) {
-      schoolId = '';
-    }
-    if (!schoolId || schoolId === 'socrates-school') return trimmed;
-    return `schools/${schoolId}/${trimmed}`;
+  const normalizePath = (subPath) => String(subPath || '').replace(/^\/+/, '');
+  const isSocratesSchool = () => {
+    const id = resolveSchoolId();
+    return id === 'socrates-school' || id === 'default';
   };
-  const sref = (subPath) => firebase.database().ref(P(subPath));
+  const P = (subPath) => {
+    const trimmed = normalizePath(subPath);
+    if (window.SOMAP && typeof window.SOMAP.P === 'function') {
+      return window.SOMAP.P(trimmed);
+    }
+    const id = resolveSchoolId();
+    if (!id) return trimmed;
+    if (id === 'socrates-school' || id === 'default') return trimmed;
+    return `schools/${id}/${trimmed}`;
+  };
+  const scopedPath = (subPath) => {
+    const trimmed = normalizePath(subPath);
+    const id = resolveSchoolId();
+    if (!id) return trimmed;
+    return `schools/${id}/${trimmed}`;
+  };
+  const shouldUseScopedShadow = (subPath) => (
+    isSocratesSchool() && scopedPath(subPath) !== P(subPath)
+  );
+  const schoolRef = (subPath) => firebase.database().ref(P(subPath));
+  const sref = (subPath) => schoolRef(subPath);
+  const scopedRef = (subPath) => firebase.database().ref(scopedPath(subPath));
   const MODULE_LABELS = {
     finance: 'School Fees',
     transport: 'Transport',
@@ -36,7 +50,7 @@
     joining: 'Joining Applications',
     admission: 'Admissions (Joining Fee)',
   };
-  const financeDedupe = window.SOMAP_FINANCE || {};
+  const financeDedupe = window.SOMAP_FINANCE_DEDUPE || window.SOMAP_FINANCE || {};
 
   if (!window.firebase || !window.db) {
     console.error('Approvals: Firebase not initialised. Ensure firebase.js is loaded before approvals.js');
@@ -95,11 +109,11 @@
         balance: document.getElementById('friday-balance'),
         pending: document.getElementById('friday-pending-count'),
       },
-      joining: {
+      admission: {
         required: null,
-        approved: document.getElementById('joining-approved'),
-        balance: document.getElementById('joining-balance'),
-        pending: document.getElementById('joining-pending-count'),
+        approved: document.getElementById('admission-approved'),
+        balance: document.getElementById('admission-balance'),
+        pending: document.getElementById('admission-pending-count'),
       },
     },
   };
@@ -126,10 +140,15 @@
       prefonefinance: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       graduation: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       fridaymoney: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
-      joining: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
+      admission: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
     },
     unsubPending: null,
     historyMonthOptions: [],
+    pendingRefreshTimer: null,
+    summariesInFlight: null,
+    summariesLoadedYear: '',
+    loadInFlight: null,
+    hasFirstLoadCompleted: false,
   };
   function formatCurrency(amount) {
     const numeric = Number(amount) || 0;
@@ -217,6 +236,145 @@
     return '';
   }
 
+  function resolvePendingRecordPath(record) {
+    if (!record || typeof record !== 'object') return '';
+    const normalized = normalizePath(record.pendingPath || '');
+    if (normalized) return normalized;
+    if (record.approvalId) return `approvalsPending/${record.approvalId}`;
+    return '';
+  }
+
+  function isPendingRecordLike(value) {
+    if (!value || typeof value !== 'object') return false;
+    return (
+      value.sourceModule != null ||
+      value.modulePayload != null ||
+      value.amountPaidNow != null ||
+      value.amount != null ||
+      value.studentAdm != null ||
+      value.studentName != null
+    );
+  }
+
+  function resolvePendingYear(value, fallbackYear) {
+    const fromRecord = getRecordYearString(value);
+    if (fromRecord) return fromRecord;
+    const normalized = normalizeYearValue(fallbackYear);
+    return normalized || getContextYear();
+  }
+
+  function flattenPendingTree(tree, fallbackYear) {
+    const rows = [];
+    Object.entries(tree || {}).forEach(([key, value]) => {
+      if (!value || typeof value !== 'object') return;
+      if (isPendingRecordLike(value)) {
+        const forYear = resolvePendingYear(value, fallbackYear);
+        rows.push({
+          approvalId: key,
+          pendingPath: `approvalsPending/${key}`,
+          forYear: Number(forYear),
+          academicYear: Number(forYear),
+          ...(value || {}),
+        });
+        return;
+      }
+      const nestedYear = Number(key);
+      if (!Number.isFinite(nestedYear) || nestedYear < SOMAP_DEFAULT_YEAR) return;
+      Object.entries(value || {}).forEach(([approvalId, nestedValue]) => {
+        if (!isPendingRecordLike(nestedValue)) return;
+        rows.push({
+          approvalId,
+          pendingPath: `approvalsPending/${nestedYear}/${approvalId}`,
+          forYear: Number(resolvePendingYear(nestedValue, nestedYear)),
+          academicYear: Number(resolvePendingYear(nestedValue, nestedYear)),
+          ...(nestedValue || {}),
+        });
+      });
+    });
+    rows.sort((a, b) => Number(b.createdAt || b.datePaid || 0) - Number(a.createdAt || a.datePaid || 0));
+    return rows;
+  }
+
+  function buildPendingFingerprint(record, year) {
+    if (!financeDedupe || typeof financeDedupe.buildFinancePaymentFingerprint !== 'function') return '';
+    return financeDedupe.buildFinancePaymentFingerprint(record, { year });
+  }
+
+  async function markPendingDuplicates(records = []) {
+    if (!Array.isArray(records) || !records.length) return [];
+    const selectedYear = Number(state.selectedYear || getContextYear());
+    const sameYear = records.filter((row) => Number(resolvePendingYear(row, selectedYear)) === selectedYear);
+    const groups = new Map();
+    sameYear.forEach((row) => {
+      const isFinanceRow = row.sourceModule === 'finance' || row.source === 'Finance Reclassifier';
+      if (!isFinanceRow) return;
+      const fp = buildPendingFingerprint(row, selectedYear);
+      if (!fp) return;
+      row._fingerprint = fp;
+      const bucket = groups.get(fp) || [];
+      bucket.push(row);
+      groups.set(fp, bucket);
+    });
+
+    const duplicateKeys = new Set();
+    const updates = {};
+    groups.forEach((bucket, fp) => {
+      if (bucket.length < 2) return;
+      bucket.sort((a, b) => Number(a.createdAt || a.datePaid || 0) - Number(b.createdAt || b.datePaid || 0));
+      bucket.slice(1).forEach((dup) => {
+        const pendingPath = resolvePendingRecordPath(dup);
+        const dupKey = pendingPath || dup.approvalId;
+        if (dupKey) duplicateKeys.add(dupKey);
+        if (!pendingPath) return;
+        const alreadyMarked = String(dup.status || '').toUpperCase() === 'DUPLICATE'
+          && String(dup.duplicateOf || '') === String(fp);
+        if (alreadyMarked) return;
+        updates[P(`${pendingPath}/status`)] = 'DUPLICATE';
+        updates[P(`${pendingPath}/duplicateOf`)] = fp;
+        updates[P(`${pendingPath}/duplicateMarkedAt`)] = firebase.database.ServerValue.TIMESTAMP;
+        updates[P(`${pendingPath}/duplicateMarkedBy`)] = actorEmail();
+        if (shouldUseScopedShadow('approvalsPending')) {
+          updates[`${scopedPath(`${pendingPath}/status`)}`] = 'DUPLICATE';
+          updates[`${scopedPath(`${pendingPath}/duplicateOf`)}`] = fp;
+          updates[`${scopedPath(`${pendingPath}/duplicateMarkedAt`)}`] = firebase.database.ServerValue.TIMESTAMP;
+          updates[`${scopedPath(`${pendingPath}/duplicateMarkedBy`)}`] = actorEmail();
+        }
+      });
+    });
+
+    if (Object.keys(updates).length) {
+      db.ref().update(updates).catch((err) => {
+        console.warn('Approvals: failed to mark pending duplicates', err);
+      });
+    }
+    return records.filter((row) => {
+      const rowKey = resolvePendingRecordPath(row) || row.approvalId;
+      return !duplicateKeys.has(rowKey);
+    });
+  }
+
+  function rebuildPendingListFromState() {
+    const flattened = flattenPendingTree(state.pending, state.selectedYear);
+    markPendingDuplicates(flattened).then((visibleRows) => {
+      state.pendingList = visibleRows;
+      renderPendingTable();
+      recomputePendingSummaries();
+    }).catch((err) => {
+      if (err) console.warn('Approvals: pending duplicate mark failed', err);
+      state.pendingList = flattened;
+      renderPendingTable();
+      recomputePendingSummaries();
+    });
+  }
+
+  function schedulePendingRebuild() {
+    if (state.pendingRefreshTimer) clearTimeout(state.pendingRefreshTimer);
+    state.pendingRefreshTimer = setTimeout(() => {
+      state.pendingRefreshTimer = null;
+      rebuildPendingListFromState();
+    }, 40);
+  }
+
   function handleYearChange(newYear) {
     const normalized = normalizeYearValue(newYear || state.selectedYear);
     const changed = state.selectedYear !== normalized;
@@ -225,7 +383,7 @@
     if (els.historyMonth) els.historyMonth.value = '';
     buildHistoryMonthOptionsForYear();
     renderHistory();
-    renderPendingTable();
+    schedulePendingRebuild();
     return changed;
   }
 
@@ -370,16 +528,34 @@
       yearContext.onYearChanged(handleYearChange);
     }
   }
-  function loadAllData() {
-    showLoader(true);
-    Promise.all([
+  async function loadAllData(options = {}) {
+    const foreground = options.foreground !== false;
+    const showForegroundLoader = foreground && !state.hasFirstLoadCompleted;
+    if (state.loadInFlight) return state.loadInFlight;
+    if (showForegroundLoader) showLoader(true);
+    else showLoader(false);
+
+    const withTimeout = (promise, ms, fallbackValue) => Promise.race([
+      promise,
+      new Promise((resolve) => setTimeout(() => resolve(fallbackValue), ms)),
+    ]);
+
+    state.loadInFlight = Promise.all([
       watchPendingApprovals(),
-      loadHistorySnapshot(),
-      loadSummaries(),
+      withTimeout(loadHistorySnapshot(), 6000, null),
     ]).catch((err) => {
       console.error('Approvals: data load failed', err);
       toast(err?.message || 'Failed to refresh approvals data', 'danger');
-    }).finally(() => showLoader(false));
+    }).finally(() => {
+      state.hasFirstLoadCompleted = true;
+      if (showForegroundLoader) showLoader(false);
+      state.loadInFlight = null;
+    });
+
+    loadSummaries().catch((err) => {
+      console.warn('Approvals: summary refresh failed', err);
+    });
+    return state.loadInFlight;
   }
 
   function watchPendingApprovals() {
@@ -388,17 +564,27 @@
       state.unsubPending = null;
     }
     const ref = sref('approvalsPending');
-    const handler = (snapshot) => {
-      state.pending = snapshot.val() || {};
-      state.pendingList = Object.entries(state.pending).map(([key, value]) => ({
-        approvalId: key,
-        ...(value || {}),
-      })).sort((a, b) => Number(b.createdAt || b.datePaid || 0) - Number(a.createdAt || a.datePaid || 0));
-      renderPendingTable();
-      recomputePendingSummaries();
+    const legacy = shouldUseScopedShadow('approvalsPending') ? scopedRef('approvalsPending') : null;
+    let primarySnap = null;
+    let legacySnap = null;
+    const mergeSnapshots = () => {
+      const scopedVal = legacySnap && legacySnap.exists() ? (legacySnap.val() || {}) : {};
+      const primaryVal = primarySnap && primarySnap.exists() ? (primarySnap.val() || {}) : {};
+      if (!legacy) return primaryVal;
+      return { ...scopedVal, ...primaryVal }; // primary (root) wins on collision
     };
-    ref.on('value', handler);
-    state.unsubPending = () => ref.off('value', handler);
+    const handler = (snapshot, isLegacy) => {
+      if (isLegacy) legacySnap = snapshot;
+      else primarySnap = snapshot;
+      state.pending = mergeSnapshots();
+      schedulePendingRebuild();
+    };
+    ref.on('value', (snap) => handler(snap, false));
+    if (legacy) legacy.on('value', (snap) => handler(snap, true));
+    state.unsubPending = () => {
+      ref.off('value');
+      if (legacy) legacy.off('value');
+    };
   }
 
   function renderPendingTable() {
@@ -502,15 +688,19 @@
 
   async function ensureApprovalHasYear(record, targetYear) {
     if (!record || !db) return '';
-    const approvalId = record.approvalId;
-    if (!approvalId) return '';
+    const pendingPath = resolvePendingRecordPath(record);
+    if (!pendingPath) return '';
     const normalized = normalizeYearValue(targetYear || record.forYear || state.selectedYear);
     const numeric = Number(normalized);
     try {
-      await sref(`approvalsPending/${approvalId}`).update({
-        forYear: numeric,
-        academicYear: numeric,
-      });
+      const updates = {};
+      updates[P(`${pendingPath}/forYear`)] = numeric;
+      updates[P(`${pendingPath}/academicYear`)] = numeric;
+      if (shouldUseScopedShadow('approvalsPending')) {
+        updates[`${scopedPath(`${pendingPath}/forYear`)}`] = numeric;
+        updates[`${scopedPath(`${pendingPath}/academicYear`)}`] = numeric;
+      }
+      await db.ref().update(updates);
     } catch (err) {
       console.error('Approvals: failed to stamp year', err);
     }
@@ -731,16 +921,6 @@
     const record = state.selectedRecord;
     if (!record) return;
 
-    const duplicateExists = await hasDuplicateInHistory(record);
-    if (duplicateExists) {
-      Swal.fire({
-        icon: 'error',
-        title: 'Duplicate payment',
-        text: 'This payment has already been approved earlier. It cannot be approved twice.',
-      });
-      return;
-    }
-
     Swal.fire({
       icon: 'question',
       title: 'Approve payment?',
@@ -785,13 +965,19 @@
   }
 
   async function rejectDuplicateApproval(record, reason) {
-    const approvalId = record.approvalId;
-    if (!approvalId) return;
+    const pendingPath = resolvePendingRecordPath(record);
+    if (!pendingPath) return;
     const updates = {};
-    updates[P(`approvalsPending/${approvalId}/status`)] = 'REJECTED_DUPLICATE';
-    updates[P(`approvalsPending/${approvalId}/rejectedReason`)] = reason || 'Duplicate payment detected';
-    updates[P(`approvalsPending/${approvalId}/rejectedAt`)] = firebase.database.ServerValue.TIMESTAMP;
-    updates[P(`approvalsPending/${approvalId}/rejectedBy`)] = actorEmail();
+    updates[P(`${pendingPath}/status`)] = 'REJECTED_DUPLICATE';
+    updates[P(`${pendingPath}/rejectedReason`)] = reason || 'Duplicate payment detected';
+    updates[P(`${pendingPath}/rejectedAt`)] = firebase.database.ServerValue.TIMESTAMP;
+    updates[P(`${pendingPath}/rejectedBy`)] = actorEmail();
+    if (shouldUseScopedShadow('approvalsPending')) {
+      updates[`${scopedPath(`${pendingPath}/status`)}`] = 'REJECTED_DUPLICATE';
+      updates[`${scopedPath(`${pendingPath}/rejectedReason`)}`] = reason || 'Duplicate payment detected';
+      updates[`${scopedPath(`${pendingPath}/rejectedAt`)}`] = firebase.database.ServerValue.TIMESTAMP;
+      updates[`${scopedPath(`${pendingPath}/rejectedBy`)}`] = actorEmail();
+    }
     await firebase.database().ref().update(updates);
     await moveApprovalToHistory(
       { ...record, status: 'REJECTED_DUPLICATE' },
@@ -810,6 +996,104 @@
     const candidate = buildFinanceIdentityCandidate(record, targetYear);
     const ledgerPath = P(`financeLedgers/${targetYear}/${studentKey}/payments`);
     return financeDedupe.isDuplicateInLedger(db, ledgerPath, candidate, targetYear, studentKey);
+  }
+
+  function buildFinanceApprovalFingerprint(record, targetYear) {
+    if (!financeDedupe || typeof financeDedupe.buildFinancePaymentFingerprint !== 'function') return '';
+    const payment = record?.modulePayload?.payment || {};
+    const fingerprintRecord = {
+      ...record,
+      ...payment,
+      sourceModule: record?.sourceModule || 'finance',
+      module: record?.sourceModule || 'finance',
+      studentAdm:
+        record?.studentAdm ||
+        record?.admissionNumber ||
+        record?.modulePayload?.studentKey ||
+        record?.studentId ||
+        record?.modulePayload?.admissionNumber ||
+        '',
+      amount:
+        Number(payment.amount || record?.amountPaidNow || record?.amount || 0),
+      amountPaidNow:
+        Number(payment.amount || record?.amountPaidNow || record?.amount || 0),
+      forYear: Number(targetYear || record?.forYear || state.selectedYear || getContextYear()),
+      paymentDate: payment.timestamp || record?.datePaid || record?.createdAt || Date.now(),
+      referenceCode:
+        record?.paymentReferenceCode ||
+        payment.referenceCode ||
+        payment.reference ||
+        payment.refCode ||
+        payment.transactionCode ||
+        payment.bankRef ||
+        payment.receiptNo ||
+        payment.mpesaCode ||
+        '',
+      paymentReferenceCode:
+        record?.paymentReferenceCode ||
+        payment.referenceCode ||
+        payment.reference ||
+        payment.refCode ||
+        '',
+      transactionCode: payment.transactionCode || '',
+      bankRef: payment.bankRef || '',
+      receiptNo: payment.receiptNo || '',
+      mpesaCode: payment.mpesaCode || '',
+      mpesaRef: payment.mpesaRef || '',
+    };
+    return financeDedupe.buildFinancePaymentFingerprint(fingerprintRecord, { year: targetYear });
+  }
+
+  function toFirebaseKeySegment(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    return raw
+      .replace(/[.#$/\[\]]/g, '_')
+      .replace(/\s+/g, '');
+  }
+
+  async function lockFinanceApproval(record, targetYear) {
+    const year = normalizeYearValue(targetYear || state.selectedYear || getContextYear());
+    const fingerprint = buildFinanceApprovalFingerprint(record, year);
+    if (!fingerprint) return { year, fingerprint: '', committed: true, lockValue: null };
+    const approvalId = record?.approvalId || '';
+    const fingerprintKey = toFirebaseKeySegment(fingerprint);
+    if (!fingerprintKey) return { year, fingerprint, fingerprintKey: '', committed: true, lockValue: null };
+    const lockPath = `financeDedupe/approved/${year}/${fingerprintKey}`;
+    const tx = await schoolRef(lockPath).transaction((current) => (
+      current || {
+        approvedAt: Date.now(),
+        approvalId,
+        fingerprint,
+        fingerprintKey,
+      }
+    ));
+    return {
+      year,
+      fingerprint,
+      fingerprintKey,
+      committed: !!tx?.committed,
+      lockValue: tx?.snapshot?.val() || null,
+    };
+  }
+
+  async function markRecordAsDuplicate(record, duplicateOf, duplicateApprovalId) {
+    const pendingPath = resolvePendingRecordPath(record);
+    if (!pendingPath) return;
+    const updates = {};
+    updates[P(`${pendingPath}/status`)] = 'DUPLICATE';
+    updates[P(`${pendingPath}/duplicateOf`)] = duplicateOf || '';
+    if (duplicateApprovalId) updates[P(`${pendingPath}/duplicateApprovalId`)] = duplicateApprovalId;
+    updates[P(`${pendingPath}/duplicateMarkedAt`)] = firebase.database.ServerValue.TIMESTAMP;
+    updates[P(`${pendingPath}/duplicateMarkedBy`)] = actorEmail();
+    if (shouldUseScopedShadow('approvalsPending')) {
+      updates[`${scopedPath(`${pendingPath}/status`)}`] = 'DUPLICATE';
+      updates[`${scopedPath(`${pendingPath}/duplicateOf`)}`] = duplicateOf || '';
+      if (duplicateApprovalId) updates[`${scopedPath(`${pendingPath}/duplicateApprovalId`)}`] = duplicateApprovalId;
+      updates[`${scopedPath(`${pendingPath}/duplicateMarkedAt`)}`] = firebase.database.ServerValue.TIMESTAMP;
+      updates[`${scopedPath(`${pendingPath}/duplicateMarkedBy`)}`] = actorEmail();
+    }
+    await db.ref().update(updates);
   }
 
   function buildFinanceLedgerPayload(record, targetYear, options = {}) {
@@ -886,8 +1170,14 @@
           const year = String(record.modulePayload?.year || record.forYear || state.selectedYear || getContextYear());
           const draftId = record.modulePayload?.admissionDraftId;
           if (draftId) {
-            await sref(`admissionsPending/${year}/${draftId}/status`).set('rejected');
-            await sref(`admissionsPending/${year}/${draftId}/rejectedAt`).set(firebase.database.ServerValue.TIMESTAMP);
+            const updates = {};
+            updates[P(`admissionsPending/${year}/${draftId}/status`)] = 'rejected';
+            updates[P(`admissionsPending/${year}/${draftId}/rejectedAt`)] = firebase.database.ServerValue.TIMESTAMP;
+            if (shouldUseScopedShadow('admissionsPending')) {
+              updates[`${scopedPath(`admissionsPending/${year}/${draftId}/status`)}`] = 'rejected';
+              updates[`${scopedPath(`admissionsPending/${year}/${draftId}/rejectedAt`)}`] = firebase.database.ServerValue.TIMESTAMP;
+            }
+            await db.ref().update(updates);
           }
         }
         await moveApprovalToHistory(record, 'rejected');
@@ -905,10 +1195,22 @@
     const approvedAt = Date.now();
     record.approvedAt = record.approvedAt || approvedAt;
     record.approvedBy = record.approvedBy || actorEmail();
+    let financeLock = null;
     showLoader(true);
     try {
       const needsFinanceCheck = record.source === 'Finance Reclassifier' || record.sourceModule === 'finance';
       if (needsFinanceCheck) {
+        financeLock = await lockFinanceApproval(record, targetYear);
+        if (!financeLock.committed) {
+          await markRecordAsDuplicate(
+            record,
+            financeLock.fingerprint,
+            financeLock.lockValue?.approvalId || ''
+          );
+          toast('Duplicate payment blocked', 'warning');
+          hideDetailModal();
+          return;
+        }
         const duplicate = await isFinanceDuplicate(record, targetYear);
         if (duplicate) {
           await rejectDuplicateApproval(
@@ -952,6 +1254,18 @@
       await moveApprovalToHistory(record, 'approved');
       toast('Student approved. Payment saved.', 'success');
       hideDetailModal();
+    } catch (err) {
+      if (financeLock?.committed && financeLock?.fingerprintKey) {
+        const year = normalizeYearValue(financeLock.year || targetYear || state.selectedYear || getContextYear());
+        const lockPath = `financeDedupe/approved/${year}/${financeLock.fingerprintKey}`;
+        await schoolRef(lockPath).transaction((current) => {
+          if (!current || current.approvalId !== record.approvalId) return current;
+          return null;
+        }).catch((unlockErr) => {
+          console.warn('Approvals: failed to rollback approval lock', unlockErr);
+        });
+      }
+      throw err;
     } finally {
       showLoader(false);
     }
@@ -977,8 +1291,16 @@
     const year = String(record.modulePayload?.year || record.forYear || targetYear || state.selectedYear || getContextYear());
     const draftId = record.modulePayload?.admissionDraftId;
     if (!draftId) throw new Error('Missing admission draft ID.');
-    const draftSnap = await sref(`admissionsPending/${year}/${draftId}`).once('value');
-    const draft = draftSnap.val();
+    const draftPath = `admissionsPending/${year}/${draftId}`;
+    let draftSnap = await sref(draftPath).once('value');
+    let draft = draftSnap.val();
+    if (!draft && shouldUseScopedShadow('admissionsPending')) {
+      const scopedSnap = await scopedRef(draftPath).once('value');
+      if (scopedSnap.exists()) {
+        draftSnap = scopedSnap;
+        draft = scopedSnap.val();
+      }
+    }
     if (!draft) throw new Error('Admission draft not found.');
 
     const studentKey = draft.reservedStudentKey || record.modulePayload?.reservedStudentKey || sref('students').push().key;
@@ -1036,7 +1358,11 @@
       source: 'direct_admission_approved'
     });
 
-    await sref(`admissionsPending/${year}/${draftId}`).remove();
+    const removals = [sref(draftPath).remove()];
+    if (shouldUseScopedShadow('admissionsPending')) {
+      removals.push(scopedRef(draftPath).remove());
+    }
+    await Promise.all(removals);
   }
 
   async function commitFinancePayment(record, targetYear) {
@@ -1205,13 +1531,14 @@
   async function moveApprovalToHistory(record, finalStatus) {
     const approvalId = record.approvalId;
     if (!approvalId) throw new Error('Missing approvalId');
+    const pendingPath = resolvePendingRecordPath(record);
+    const resolvedForYear = Number(record.forYear || record.academicYear || state.selectedYear || getContextYear());
+    const year = Number.isFinite(resolvedForYear) ? resolvedForYear : Number(state.selectedYear || getContextYear());
     const stamp = Number(record.datePaid || record.createdAt || Date.now());
     const date = new Date(stamp);
-    const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const historyPath = `approvalsHistory/${year}/${month}/${approvalId}`;
 
-    const resolvedForYear = Number(record.forYear || record.academicYear || year);
     const payload = {
       ...record,
       forYear: Number.isFinite(resolvedForYear) ? resolvedForYear : undefined,
@@ -1222,25 +1549,32 @@
     };
 
     const updates = {};
-    updates[P(`approvalsPending/${approvalId}`)] = null;
+    updates[P(pendingPath || `approvalsPending/${approvalId}`)] = null;
     updates[P(historyPath)] = payload;
+    if (shouldUseScopedShadow('approvalsPending')) {
+      updates[`${scopedPath(pendingPath || `approvalsPending/${approvalId}`)}`] = null;
+    }
     await firebase.database().ref().update(updates);
   }
   async function loadHistorySnapshot() {
-    const snapshot = await sref('approvalsHistory').once('value');
-    const tree = snapshot.val() || {};
+    const selectedYear = String(state.selectedYear || getContextYear());
+    let snapshot = await sref(`approvalsHistory/${selectedYear}`).once('value');
+    let tree = snapshot.val() || {};
+    if (isSocratesSchool()) {
+      const scopedSnap = await scopedRef(`approvalsHistory/${selectedYear}`).once('value');
+      const scopedTree = scopedSnap.val() || {};
+      tree = { ...scopedTree, ...tree };
+    }
     const entries = [];
 
-    Object.entries(tree).forEach(([year, months]) => {
-      Object.entries(months || {}).forEach(([month, records]) => {
-        Object.entries(records || {}).forEach(([key, value]) => {
-          entries.push({
-            approvalId: key,
-            year: Number(year),
-            month,
-            forYear: Number(value?.forYear || value?.academicYear || value?.year || year),
-            ...(value || {}),
-          });
+    Object.entries(tree || {}).forEach(([month, records]) => {
+      Object.entries(records || {}).forEach(([key, value]) => {
+        entries.push({
+          approvalId: key,
+          year: Number(selectedYear),
+          month,
+          forYear: Number(value?.forYear || value?.academicYear || value?.year || selectedYear),
+          ...(value || {}),
         });
       });
     });
@@ -1347,7 +1681,7 @@
       prefonefinance: { count: 0, amount: 0 },
       graduation: { count: 0, amount: 0 },
       fridaymoney: { count: 0, amount: 0 },
-      joining: { count: 0, amount: 0 },
+      admission: { count: 0, amount: 0 },
     };
 
     state.pendingList.forEach((row) => {
@@ -1368,14 +1702,22 @@
   }
 
   async function loadSummaries() {
-    await Promise.all([
+    const selectedYear = String(state.selectedYear || getContextYear());
+    if (state.summariesInFlight && state.summariesLoadedYear === selectedYear) {
+      return state.summariesInFlight;
+    }
+    state.summariesLoadedYear = selectedYear;
+    state.summariesInFlight = Promise.all([
       computeFinanceSummary(),
       computeTransportSummary(),
       computePrefoneSummary(),
       computeGraduationSummary(),
       computeFridaySummary(),
-      computeJoiningSummary(),
-    ]);
+      computeAdmissionSummary(),
+    ]).finally(() => {
+      state.summariesInFlight = null;
+    });
+    await state.summariesInFlight;
   }
 
   async function computeFinanceSummary() {
@@ -1518,20 +1860,32 @@
     updateSummaryCard('fridaymoney', { required: collected, approved, balance: pendingTotal });
   }
 
-  async function computeJoiningSummary() {
-    const schoolId = resolveSchoolId();
+  async function computeAdmissionSummary() {
     const year = state.selectedYear || getContextYear();
-    const snap = await db.ref(`schools/${schoolId}/joiningApplications/${year}`).once('value');
-    const data = snap.val() || {};
-    let approved = 0;
-    Object.values(data).forEach((app) => {
-      if (!app) return;
-      if (app.paymentVerificationStatus === 'verified') {
-        approved += Number(app.joiningFeeAmount || 0);
+    let tree = {};
+    try {
+      const snap = await sref(`approvalsHistory/${year}`).once('value');
+      tree = snap.val() || {};
+      if (isSocratesSchool()) {
+        const hasEntries = tree && Object.keys(tree).length > 0;
+        if (!hasEntries) {
+          const scopedSnap = await scopedRef(`approvalsHistory/${year}`).once('value');
+          tree = scopedSnap.val() || {};
+        }
       }
+    } catch (err) {
+      console.warn('Approvals: admission summary load failed', err);
+      tree = {};
+    }
+    let approved = 0;
+    Object.values(tree || {}).forEach((records) => {
+      Object.values(records || {}).forEach((entry) => {
+        if (!entry || entry.sourceModule !== 'admission') return;
+        approved += Number(entry.amountPaidNow || 0);
+      });
     });
-    const balance = Math.max(0, state.summary.joining.pendingAmount);
-    updateSummaryCard('joining', { required: 0, approved, balance });
+    const balance = Math.max(0, state.summary.admission.pendingAmount);
+    updateSummaryCard('admission', { required: 0, approved, balance });
   }
 
   function updateSummaryCard(module, { required, approved, balance }) {

@@ -1371,11 +1371,13 @@
           if (currentStudent && currentStudentKey) {
             const currentStudentId = currentStudentKey;
 
-            // Check if current student uses transport
-            const enrollSnap = await schoolRef(
-              `transport_enrollments/${currentStudentId}`
-            ).once("value");
-            const enrollment = enrollSnap.val();
+            const transportCtx = await resolveTransportEnrollmentForStudent(
+              year,
+              currentStudentId,
+              currentStudent
+            );
+            const enrollment = transportCtx?.enrollment;
+            const transportStudentId = transportCtx?.studentId || currentStudentId;
 
             if (enrollment) {
               const fullName = `${currentStudent.firstName || ""} ${
@@ -1404,7 +1406,7 @@
                   <div class="muted text-xs mt-1">Admission: ${adm}</div>
                   <div class="muted text-xs">Route: ${route} • Stop: ${stopDisplay}</div>
                 </div>
-                <button class="btn" data-student-id="${currentStudentId}" data-student-adm="${adm}">
+                <button class="btn" data-student-id="${transportStudentId}" data-student-adm="${adm}">
                   <i class="fas fa-credit-card mr-2"></i>View Payments
                 </button>
               </div>
@@ -1415,18 +1417,18 @@
               const btn = childrenList.querySelector("button[data-student-id]");
               if (btn) {
                 btn.addEventListener("click", () => {
-                  localStorage.setItem("parentFocusStudent", currentStudentId);
+                  localStorage.setItem("parentFocusStudent", transportStudentId);
                   localStorage.setItem("parentFocusAdm", adm);
                   const schoolKey =
                     currentStudent.schoolId ||
                     currentStudent.school ||
                     localStorage.getItem("somap_school") ||
-                    "socrates";
+                    "socrates-school";
                   if (schoolKey)
                     localStorage.setItem("somap_school", schoolKey);
                   const schoolParam = encodeURIComponent(schoolKey);
-                  window.location.href = `transporthtml/transportpayments.html?student=${encodeURIComponent(
-                    currentStudentId
+                  window.location.href = `transporthtml/transportpayments.html?studentKey=${encodeURIComponent(
+                    transportStudentId
                   )}&year=${year}&school=${schoolParam}`;
                 });
               }
@@ -1454,6 +1456,297 @@
         return s.replace(/(?!^\+)[^\d]/g, "");
       }
 
+      function normalizeIdentifier(value) {
+        return String(value || "")
+          .trim()
+          .toUpperCase()
+          .replace(/[^A-Z0-9]/g, "");
+      }
+
+      function isLegacyMergeSchool() {
+        const id = String(currentSchool?.id || "").toLowerCase();
+        return id === "socrates-school" || id === "default";
+      }
+
+      function normalizeNameForMatch(value) {
+        return String(value || "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+      }
+
+      function normalizePhoneForMatch(value) {
+        return String(value || "").replace(/\D/g, "");
+      }
+
+      async function loadTransportMapsForYear(year) {
+        const y = String(year || getActiveYearString());
+        const [enrollScopedSnap, registryScopedSnap, assignmentsScopedSnap] =
+          await Promise.all([
+            schoolRef(`years/${y}/transportEnrollments`)
+              .once("value")
+              .catch(() => ({ val: () => ({}) })),
+            schoolRef(`years/${y}/transportRegistry`)
+              .once("value")
+              .catch(() => ({ val: () => ({}) })),
+            schoolRef(`years/${y}/transportAssignments`)
+              .once("value")
+              .catch(() => ({ val: () => ({}) })),
+          ]);
+
+        let enrollLegacy = {};
+        let registryLegacy = {};
+        let assignmentsLegacy = {};
+        if (isLegacyMergeSchool()) {
+          const [enrollLegacySnap, registryLegacySnap, assignmentsLegacySnap] =
+            await Promise.all([
+              db.ref("transport_enrollments")
+                .once("value")
+                .catch(() => ({ val: () => ({}) })),
+              db.ref(`transportRegistry/${y}`)
+                .once("value")
+                .catch(() => ({ val: () => ({}) })),
+              db.ref(`transportAssignments/${y}`)
+                .once("value")
+                .catch(() => ({ val: () => ({}) })),
+            ]);
+          enrollLegacy = enrollLegacySnap.val() || {};
+          registryLegacy = registryLegacySnap.val() || {};
+          assignmentsLegacy = assignmentsLegacySnap.val() || {};
+        }
+
+        return {
+          enrollments: { ...enrollLegacy, ...(enrollScopedSnap.val() || {}) },
+          registry: { ...registryLegacy, ...(registryScopedSnap.val() || {}) },
+          assignments: {
+            ...assignmentsLegacy,
+            ...(assignmentsScopedSnap.val() || {}),
+          },
+        };
+      }
+
+      function pickMatchingRecord(
+        records,
+        preferredStudentId,
+        admissionNorm,
+        options = {}
+      ) {
+        const entries = Object.entries(records || {});
+        if (!entries.length) return { key: null, record: null };
+        const preferredNorm = normalizeIdentifier(preferredStudentId);
+        const preferredNameNorm = normalizeNameForMatch(options.fullName || "");
+        const preferredPhone = normalizePhoneForMatch(options.parentPhone || "");
+
+        for (const [key, record] of entries) {
+          if (normalizeIdentifier(key) === preferredNorm) return { key, record };
+        }
+        if (admissionNorm) {
+          for (const [key, record] of entries) {
+            if (normalizeIdentifier(key) === admissionNorm) return { key, record };
+          }
+        }
+        if (!admissionNorm) return { key: null, record: null };
+        for (const [key, record] of entries) {
+          if (!record || typeof record !== "object") continue;
+          const candidates = [
+            record.admissionNo,
+            record.admissionNumber,
+            record.studentAdm,
+            record.studentId,
+            record.admission,
+          ];
+          if (
+            candidates.some(
+              (candidate) => normalizeIdentifier(candidate) === admissionNorm
+            )
+          ) {
+            return { key, record };
+          }
+        }
+
+        if (preferredNameNorm || preferredPhone) {
+          for (const [key, record] of entries) {
+            if (!record || typeof record !== "object") continue;
+            const recName = normalizeNameForMatch(
+              record.fullName ||
+                record.studentName ||
+                `${record.firstName || ""} ${record.middleName || ""} ${record.lastName || ""}`
+            );
+            const recPhone = normalizePhoneForMatch(
+              record.parentContact ||
+                record.primaryParentContact ||
+                record.parentPhone ||
+                record.guardianPhone ||
+                ""
+            );
+            const nameMatch = preferredNameNorm && recName === preferredNameNorm;
+            const phoneMatch =
+              preferredPhone &&
+              recPhone &&
+              (recPhone.endsWith(preferredPhone.slice(-7)) ||
+                preferredPhone.endsWith(recPhone.slice(-7)));
+            if (nameMatch && phoneMatch) {
+              return { key, record };
+            }
+          }
+        }
+
+        return { key: null, record: null };
+      }
+
+      async function resolveTransportEnrollmentForStudent(
+        year,
+        studentId,
+        studentRecord
+      ) {
+        const y = String(year || getActiveYearString());
+        const admissionKey =
+          String(studentRecord?.admissionNumber || studentRecord?.pupilId || "").trim();
+        const admissionNorm = normalizeIdentifier(
+          admissionKey
+        );
+
+        const fullName = `${studentRecord?.firstName || ""} ${
+          studentRecord?.middleName || ""
+        } ${studentRecord?.lastName || ""}`.replace(/\s+/g, " ").trim();
+        const parentPhone =
+          studentRecord?.primaryParentContact ||
+          studentRecord?.parentPhone ||
+          studentRecord?.motherPhone ||
+          "";
+        const { assignments, enrollments, registry } =
+          await loadTransportMapsForYear(y);
+
+        const matchOptions = { fullName, parentPhone };
+        const assignMatch = pickMatchingRecord(
+          assignments,
+          studentId,
+          admissionNorm,
+          matchOptions
+        );
+        const enrollMatch = pickMatchingRecord(
+          enrollments,
+          studentId,
+          admissionNorm,
+          matchOptions
+        );
+        const registryMatch = pickMatchingRecord(
+          registry,
+          studentId,
+          admissionNorm,
+          matchOptions
+        );
+
+        let resolvedStudentId =
+          assignMatch.key || enrollMatch.key || registryMatch.key || studentId;
+        let assign = assignMatch.record || null;
+        let enroll = enrollMatch.record || null;
+        let reg = registryMatch.record || null;
+
+        // Hard fallback: direct admission-key reads (AUTO-...) for mixed key systems.
+        if ((!assign || !enroll || !reg) && admissionKey) {
+          const [
+            assignDirectScoped,
+            enrollDirectScoped,
+            regDirectScoped,
+            assignDirectLegacy,
+            enrollDirectLegacy,
+            regDirectLegacy,
+          ] = await Promise.all([
+            schoolRef(`years/${y}/transportAssignments/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            schoolRef(`years/${y}/transportEnrollments/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            schoolRef(`years/${y}/transportRegistry/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            isLegacyMergeSchool()
+              ? db
+                  .ref(`transportAssignments/${y}/${admissionKey}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null }))
+              : Promise.resolve({ val: () => null }),
+            isLegacyMergeSchool()
+              ? db
+                  .ref(`transport_enrollments/${admissionKey}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null }))
+              : Promise.resolve({ val: () => null }),
+            isLegacyMergeSchool()
+              ? db
+                  .ref(`transportRegistry/${y}/${admissionKey}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null }))
+              : Promise.resolve({ val: () => null }),
+          ]);
+          assign = assign || assignDirectScoped.val() || assignDirectLegacy.val() || null;
+          enroll = enroll || enrollDirectScoped.val() || enrollDirectLegacy.val() || null;
+          reg = reg || regDirectScoped.val() || regDirectLegacy.val() || null;
+          if ((assign || enroll || reg) && admissionKey) {
+            resolvedStudentId = admissionKey;
+          }
+        }
+
+        if (assign && String(assign.status || "").toLowerCase() !== "using" && admissionKey) {
+          try {
+            const admissionAssignSnap = await schoolRef(`years/${y}/transportAssignments/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null }));
+            const admissionAssignScoped = admissionAssignSnap.val();
+            let admissionAssignLegacy = null;
+            if (!admissionAssignScoped && isLegacyMergeSchool()) {
+              const s = await db
+                .ref(`transportAssignments/${y}/${admissionKey}`)
+                .once("value")
+                .catch(() => ({ val: () => null }));
+              admissionAssignLegacy = s.val();
+            }
+            const admissionAssign = admissionAssignScoped || admissionAssignLegacy || null;
+            if (admissionAssign && String(admissionAssign.status || "").toLowerCase() === "using") {
+              assign = admissionAssign;
+              resolvedStudentId = admissionKey;
+            } else {
+              return { studentId: resolvedStudentId, enrollment: null };
+            }
+          } catch (_) {
+            return { studentId: resolvedStudentId, enrollment: null };
+          }
+        } else if (assign && String(assign.status || "").toLowerCase() !== "using") {
+          return { studentId: resolvedStudentId, enrollment: null };
+        }
+
+        const usingByAssignment =
+          assign && String(assign.status || "").toLowerCase() === "using";
+        const usingByRegistry = reg && reg.using === true;
+        const usingByEnrollment = !!enroll;
+
+        if (!usingByAssignment && !usingByRegistry && !usingByEnrollment) {
+          return { studentId: resolvedStudentId, enrollment: null };
+        }
+
+        const merged = {
+          ...(enroll && typeof enroll === "object" ? enroll : {}),
+        };
+        if (usingByRegistry) {
+          merged.amStop = merged.amStop || reg.routeId || "";
+          merged.pmStop = merged.pmStop || reg.stopName || "";
+          merged.monthlyFee = merged.monthlyFee || reg.monthlyFee || 0;
+        }
+        if (usingByAssignment) {
+          merged.startDate = assign.startDate || merged.startDate;
+          merged.baseMonthlyFee = assign.baseMonthlyFee || merged.baseMonthlyFee;
+          merged.amStop =
+            merged.amStop || assign.amStop || assign.morningRouteId || "";
+          merged.pmStop =
+            merged.pmStop || assign.pmStop || assign.eveningRouteId || "";
+          merged.status = "Using";
+        }
+        return { studentId: resolvedStudentId, enrollment: merged };
+      }
+
       // State
       let currentStudentKey = null,
         currentStudent = null;
@@ -1463,6 +1756,9 @@
         attendanceChart = null;
       let __allPaymentsSum = 0;
       let latestFinanceSnapshot = null;
+      let latestYearHasFinanceRecord = false;
+      const firstActiveYearCache = new Map();
+      const yearRecordExistenceCache = new Map();
       const parentBooksClassCache = new Map();
       let parentYearDataCache = null;
       let parentYearDataKey = null;
@@ -1541,15 +1837,18 @@
       async function resolveCarryForwardDebt(
         studentKey,
         uptoYearStr,
-        admissionOverride
+        admissionOverride,
+        firstActiveYearOverride = null
       ) {
         const fallback = { amount: 0, sourceYear: null };
         if (!studentKey || !window.SomapFinance) return fallback;
         const financeApi = window.SomapFinance;
         const targetYearNum = Number(uptoYearStr);
+        const firstActiveYearNum = Number(firstActiveYearOverride);
         const earliestYear = Math.max(
           MIN_DATA_YEAR,
-          EARLIEST_CARRY_FORWARD_YEAR
+          EARLIEST_CARRY_FORWARD_YEAR,
+          Number.isFinite(firstActiveYearNum) ? firstActiveYearNum : MIN_DATA_YEAR
         );
         if (!Number.isFinite(targetYearNum) || targetYearNum <= earliestYear)
           return fallback;
@@ -1605,16 +1904,235 @@
         return fallback;
       }
 
+      function asNumberOrNaN(value) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : NaN;
+      }
+
+      function extractStudentStartYear(student) {
+        if (!student || typeof student !== "object") return null;
+        const candidates = [
+          student.academicYear,
+          student.year,
+          student.admissionYear,
+          student.startYear,
+        ]
+          .map(asNumberOrNaN)
+          .filter(Number.isFinite);
+        const createdTs = asNumberOrNaN(student.createdAt || student.joinedAt);
+        if (Number.isFinite(createdTs) && createdTs > 0) {
+          const createdYear = new Date(createdTs).getFullYear();
+          if (Number.isFinite(createdYear)) candidates.push(createdYear);
+        }
+        if (!candidates.length) return null;
+        return Math.min(...candidates);
+      }
+
+      function snapshotHasObjectData(snap) {
+        const raw = snap?.val ? snap.val() : null;
+        if (!raw) return false;
+        if (typeof raw !== "object") return true;
+        return Object.keys(raw).length > 0;
+      }
+
+      function valueHasPositiveAmount(raw) {
+        const amount = Number(
+          raw?.amount ??
+            raw?.balance ??
+            raw?.carry ??
+            raw?.total ??
+            raw?.value ??
+            0
+        );
+        return Number.isFinite(amount) && amount > 0;
+      }
+
+      function objectContainsPositivePayment(raw) {
+        if (!raw || typeof raw !== "object") return false;
+        const stack = [raw];
+        const visited = new Set();
+        while (stack.length) {
+          const current = stack.pop();
+          if (!current || typeof current !== "object") continue;
+          if (visited.has(current)) continue;
+          visited.add(current);
+          const directAmount = Number(
+            current.amount ??
+              current.amt ??
+              current.paid ??
+              current.value ??
+              current.amountPaid ??
+              0
+          );
+          if (Number.isFinite(directAmount) && directAmount > 0) return true;
+          Object.values(current).forEach((child) => {
+            if (child && typeof child === "object") stack.push(child);
+          });
+        }
+        return false;
+      }
+
+      function hasYearTaggedStudentPayment(raw, yearStr) {
+        const target = Number(yearStr);
+        if (!raw || typeof raw !== "object" || !Number.isFinite(target))
+          return false;
+        return Object.values(raw).some((entry) => {
+          if (!entry || typeof entry !== "object") return false;
+          const directYear = Number(
+            entry.academicYear ??
+              entry.financeYear ??
+              entry.feeYear ??
+              entry.year ??
+              entry._year ??
+              entry.academic_session
+          );
+          if (Number.isFinite(directYear)) return directYear === target;
+          return false;
+        });
+      }
+
+      async function studentHasActualYearRecord(studentKey, admission, yearStr) {
+        const cacheKey = `${studentKey || ""}|${admission || ""}|${yearStr}`;
+        if (yearRecordExistenceCache.has(cacheKey)) {
+          return yearRecordExistenceCache.get(cacheKey);
+        }
+        const cleanAdmission = String(admission || "").trim();
+        const admissionKey = sanitizeKey(cleanAdmission);
+        const paths = [
+          `enrollments/${yearStr}/${studentKey}`,
+          `financeLedgers/${yearStr}/${studentKey}`,
+          cleanAdmission ? `financeLedgers/${yearStr}/${cleanAdmission}` : "",
+          admissionKey ? `financeLedgers/${yearStr}/${admissionKey}` : "",
+          `financeCarryForward/${yearStr}/${studentKey}`,
+          cleanAdmission ? `financeCarryForward/${yearStr}/${cleanAdmission}` : "",
+          admissionKey ? `financeCarryForward/${yearStr}/${admissionKey}` : "",
+          `studentFees/${yearStr}/${studentKey}`,
+          cleanAdmission ? `studentFees/${yearStr}/${cleanAdmission}` : "",
+          admissionKey ? `studentFees/${yearStr}/${admissionKey}` : "",
+          `students/${studentKey}/payments`,
+        ].filter(Boolean);
+
+        const snaps = await Promise.all(
+          paths.map((path) =>
+            schoolRef(path)
+              .once("value")
+              .catch(() => null)
+          )
+        );
+        const [
+          enrollmentSnap,
+          ledgerByStudent,
+          ledgerByAdmission,
+          ledgerByAdmissionSanitized,
+          carryByStudent,
+          carryByAdmission,
+          carryByAdmissionSanitized,
+          feeByStudent,
+          feeByAdmission,
+          feeByAdmissionSanitized,
+          studentPaymentsSnap,
+        ] = snaps;
+
+        const hasEnrollment = snapshotHasObjectData(enrollmentSnap);
+        const hasLedgerPayments =
+          objectContainsPositivePayment(ledgerByStudent?.val?.()) ||
+          objectContainsPositivePayment(ledgerByAdmission?.val?.()) ||
+          objectContainsPositivePayment(ledgerByAdmissionSanitized?.val?.());
+        const hasCarry =
+          valueHasPositiveAmount(carryByStudent?.val?.()) ||
+          valueHasPositiveAmount(carryByAdmission?.val?.()) ||
+          valueHasPositiveAmount(carryByAdmissionSanitized?.val?.());
+        const hasStudentFeeConfig =
+          snapshotHasObjectData(feeByStudent) ||
+          snapshotHasObjectData(feeByAdmission) ||
+          snapshotHasObjectData(feeByAdmissionSanitized);
+        const hasTaggedStudentPayment = hasYearTaggedStudentPayment(
+          studentPaymentsSnap?.val?.(),
+          yearStr
+        );
+
+        const exists =
+          hasEnrollment ||
+          hasLedgerPayments ||
+          hasCarry ||
+          hasStudentFeeConfig ||
+          hasTaggedStudentPayment;
+        yearRecordExistenceCache.set(cacheKey, exists);
+        return exists;
+      }
+
+      async function resolveFirstActiveYear(studentKey, admission, student) {
+        const cacheKey = `${studentKey || ""}|${admission || ""}`;
+        if (firstActiveYearCache.has(cacheKey)) {
+          return firstActiveYearCache.get(cacheKey);
+        }
+        const sortedYears = SOMAP_ALLOWED_YEARS.map(Number)
+          .filter(Number.isFinite)
+          .sort((a, b) => a - b);
+        for (const y of sortedYears) {
+          const exists = await studentHasActualYearRecord(
+            studentKey,
+            admission,
+            String(y)
+          );
+          if (exists) {
+            firstActiveYearCache.set(cacheKey, y);
+            return y;
+          }
+        }
+        const hinted = extractStudentStartYear(student);
+        if (Number.isFinite(hinted)) {
+          firstActiveYearCache.set(cacheKey, hinted);
+          return hinted;
+        }
+        const fallback = sortedYears.length ? sortedYears[0] : MIN_DATA_YEAR;
+        firstActiveYearCache.set(cacheKey, fallback);
+        return fallback;
+      }
+
+      function applyNoYearRecordState(yearStr) {
+        latestFinanceSnapshot = null;
+        latestYearHasFinanceRecord = false;
+        statFeeDue.innerHTML = `${fmtTsh(0)}<span style="font-size: 0.65rem; color: var(--muted); display: block; margin-top: 2px;">No record for this year (${safe(
+          yearStr
+        )}).</span>`;
+        statPaid.textContent = fmtTsh(0);
+        statBalance.textContent = fmtTsh(0);
+        statPaymentPlan.textContent = "-";
+        applyFeeBadge(0, 0);
+      }
+
       async function renderFinanceStats() {
         if (!currentStudentKey || !window.SomapFinance) return;
         const yearStr = getActiveYearString();
         const admissionRef =
           currentStudent?.admissionNumber || currentStudent?.pupilId || "";
         try {
+          const [firstActiveYear, hasSelectedYearRecord] = await Promise.all([
+            resolveFirstActiveYear(currentStudentKey, admissionRef, currentStudent),
+            studentHasActualYearRecord(currentStudentKey, admissionRef, yearStr),
+          ]);
+          if (
+            !hasSelectedYearRecord ||
+            Number(yearStr) < Number(firstActiveYear || MIN_DATA_YEAR)
+          ) {
+            applyNoYearRecordState(yearStr);
+            return;
+          }
+          latestYearHasFinanceRecord = true;
           const [fin, carryMeta] = await Promise.all([
             window.SomapFinance.loadStudentFinance(yearStr, currentStudentKey),
-            resolveCarryForwardDebt(currentStudentKey, yearStr, admissionRef),
+            resolveCarryForwardDebt(
+              currentStudentKey,
+              yearStr,
+              admissionRef,
+              firstActiveYear
+            ),
           ]);
+          if (!fin) {
+            applyNoYearRecordState(yearStr);
+            return;
+          }
           latestFinanceSnapshot = fin;
 
           const currentFee = Number(fin.due || fin.record?.feePerYear || 0);
@@ -2143,6 +2661,14 @@
         classLevel,
         year
       ) {
+        if (!latestYearHasFinanceRecord) {
+          paymentsList.innerHTML =
+            '<li class="muted">No record for this year.</li>';
+          __allPaymentsSum = 0;
+          if (statReceiptCount) statReceiptCount.textContent = "0";
+          if (statReceiptMeta) statReceiptMeta.textContent = "No receipts yet";
+          return;
+        }
         paymentsList.innerHTML = `
       <li><div class="skeleton h-4 w-40"></div></li>
       <li><div class="skeleton h-4 w-56"></div></li>
@@ -2277,21 +2803,12 @@
         if (!quickTransport) return;
         quickTransport.classList.add("hidden");
         try {
-          const primaryKey = sanitizeKey(studentId);
-          let exists = false;
-          if (primaryKey) {
-            const directSnap = await schoolRef(
-              `transport_enrollments/${primaryKey}`
-            ).once("value");
-            exists = directSnap.exists();
-          }
-          if (!exists) {
-            const querySnap = await schoolRef("transport_enrollments")
-              .orderByChild("studentId")
-              .equalTo(studentId)
-              .once("value");
-            exists = querySnap.exists();
-          }
+          const resolved = await resolveTransportEnrollmentForStudent(
+            getActiveYearString(),
+            studentId,
+            currentStudent || {}
+          );
+          const exists = !!resolved?.enrollment;
           if (exists) {
             quickTransport.classList.remove("hidden");
             if (!quickTransport.dataset.bound) {

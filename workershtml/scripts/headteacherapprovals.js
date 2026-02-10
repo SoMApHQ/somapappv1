@@ -45,16 +45,97 @@
     #${containerId} input[type="text"], #${containerId} input[type="number"] { padding:8px 10px; border:1px solid rgba(255,255,255,0.18); border-radius:10px; background:rgba(255,255,255,0.08); color:#e2e8f0; }
     #${containerId} .save-btn { margin-top:10px; background:linear-gradient(135deg,#22d3ee,#6366f1); color:#0b1220; }
     #${containerId} .empty { color:#94a3b8; font-size:0.95rem; padding:12px; }
+    #${containerId} .lock-section { margin-top:18px; }
+    #${containerId} .lock-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
+    #${containerId} .lock-cell { background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:12px; min-height:180px; }
+    #${containerId} .lock-cell .muted { color:#94a3b8; margin-bottom:6px; font-size:0.9rem; }
+    #${containerId} .ip-list { min-height:56px; display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+    #${containerId} .ip-badge { padding:6px 10px; border-radius:10px; background:rgba(15,118,110,0.15); border:1px solid rgba(15,118,110,0.35); color:#e0f2fe; font-size:0.85rem; }
+    #${containerId} .code-box { font-size:1.6rem; letter-spacing:0.28rem; text-align:center; padding:12px; border-radius:12px; border:1px dashed rgba(255,255,255,0.2); background:rgba(255,255,255,0.02); }
+    #${containerId} .code-meta { margin:6px 0; color:#94a3b8; font-size:0.85rem; }
+    #${containerId} .lock-actions { display:flex; justify-content:flex-end; }
     @media (max-width: 640px) {
       #${containerId} { padding:14px; }
       #${containerId} .worker-actions { justify-content:flex-start; }
     }
   `;
 
-  const showToast = window.toast ? window.toast : (msg, type = 'info') => console.log(`[${type}] ${msg}`);
+  const fallbackToast = (msg, type = 'info') => {
+    const colors = {
+      success: 'rgba(16, 185, 129, 0.95)',
+      error: 'rgba(239, 68, 68, 0.95)',
+      warning: 'rgba(245, 158, 11, 0.95)',
+      info: 'rgba(37, 99, 235, 0.95)'
+    };
+    let container = document.getElementById('toastContainer');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'toastContainer';
+      container.className = 'toast-container';
+      container.style.position = 'fixed';
+      container.style.top = '20px';
+      container.style.right = '20px';
+      container.style.zIndex = '9999';
+      container.style.display = 'flex';
+      container.style.flexDirection = 'column';
+      container.style.gap = '8px';
+      container.style.alignItems = 'flex-end';
+      document.body.appendChild(container);
+    }
+    const toastEl = document.createElement('div');
+    toastEl.textContent = msg;
+    toastEl.style.padding = '12px 16px';
+    toastEl.style.borderRadius = '10px';
+    toastEl.style.background = colors[type] || colors.info;
+    toastEl.style.color = '#fff';
+    toastEl.style.fontWeight = '600';
+    toastEl.style.boxShadow = '0 6px 18px rgba(0,0,0,0.2)';
+    toastEl.style.transform = 'translateX(20px)';
+    toastEl.style.opacity = '0';
+    toastEl.style.transition = 'transform 0.25s ease, opacity 0.25s ease';
+    container.appendChild(toastEl);
+    requestAnimationFrame(() => {
+      toastEl.style.transform = 'translateX(0)';
+      toastEl.style.opacity = '1';
+    });
+    setTimeout(() => {
+      toastEl.style.opacity = '0';
+      toastEl.style.transform = 'translateX(20px)';
+      setTimeout(() => toastEl.remove(), 250);
+    }, 3200);
+  };
+  const showToast = (msg, type = 'info') => {
+    const toastImpl = window.toast || fallbackToast;
+    try {
+      toastImpl(msg, type);
+    } catch (err) {
+      console.warn('Toast handler failed', err);
+      if (toastImpl !== fallbackToast) {
+        fallbackToast(msg, type);
+      }
+    }
+  };
   const todayYMD = (date = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(date);
   const localTs = () => new Date(new Date().toLocaleString('en-US', { timeZone: TZ })).getTime();
   const formatTime = (ts) => ts ? new Date(ts).toLocaleTimeString('sw-TZ', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }) : '-';
+
+  const PUBLIC_IP_ENDPOINT = 'https://api.ipify.org';
+
+  async function fetchPublicIP() {
+    const resp = await fetch(PUBLIC_IP_ENDPOINT, { cache: 'no-store' });
+    if (!resp.ok) {
+      throw new Error('Failed to resolve IP');
+    }
+    return (await resp.text()).trim();
+  }
+
+  function randomNumericCode(length = 6) {
+    let code = '';
+    for (let i = 0; i < length; i += 1) {
+      code += Math.floor(Math.random() * 10);
+    }
+    return code;
+  }
 
   function injectStyles() {
     if (document.getElementById(`${containerId}-styles`)) return;
@@ -118,8 +199,35 @@
             <label>Kichwa cha malipo kinachokatwa
               <input type="text" id="rules-deductionLabel" placeholder="Posho ya Uwajibikaji">
             </label>
+            <label>Lazimisha Wi-Fi ya shule (IP ya umma)
+              <input type="checkbox" id="rules-requireSchoolInternet">
+            </label>
+            <label>Tumika msimbo unaozunguka
+              <input type="checkbox" id="rules-rotatingCodeEnabled">
+            </label>
+            <label>Muda wa msimbo (sekunde)
+              <input type="number" min="15" id="rules-codeTTLSeconds" value="90">
+            </label>
           </div>
           <button class="btn save-btn" id="rules-save">Hifadhi Kanuni</button>
+        </div>
+        <div class="rules lock-section" id="${containerId}-lock">
+          <h3>School Internet Lock</h3>
+          <div class="lock-grid">
+            <div class="lock-cell">
+              <p class="muted">IP za umma zilizohifadhiwa leo</p>
+              <div id="${containerId}-ipList" class="ip-list">Hakuna IP leo.</div>
+              <button class="btn" id="${containerId}-set-school-ip">Set Today's School Internet</button>
+            </div>
+            <div class="lock-cell">
+              <p class="muted">Rotating Check-In Code</p>
+              <div class="code-box" id="${containerId}-code-display">----</div>
+              <p class="code-meta" id="${containerId}-code-meta">No code generated yet.</p>
+              <div class="lock-actions">
+                <button class="btn" id="${containerId}-generate-code">Generate Code Now</button>
+              </div>
+            </div>
+          </div>
         </div>
       `;
     }
@@ -139,7 +247,17 @@
         earlyThreshold: document.getElementById('rules-earlyThreshold'),
         deductionAmount: document.getElementById('rules-deductionAmount'),
         deductionLabel: document.getElementById('rules-deductionLabel'),
+        requireSchoolInternet: document.getElementById('rules-requireSchoolInternet'),
+        rotatingCodeEnabled: document.getElementById('rules-rotatingCodeEnabled'),
+        codeTTLSeconds: document.getElementById('rules-codeTTLSeconds'),
         save: document.getElementById('rules-save')
+      },
+      lock: {
+        ipList: document.getElementById(`${containerId}-ipList`),
+        setIp: document.getElementById(`${containerId}-set-school-ip`),
+        codeDisplay: document.getElementById(`${containerId}-code-display`),
+        codeMeta: document.getElementById(`${containerId}-code-meta`),
+        generateCode: document.getElementById(`${containerId}-generate-code`)
       }
     };
 
@@ -157,7 +275,7 @@
     });
   }
 
-  async function setupRules(els, rulesRef) {
+  async function setupRules(els, rulesRef, onSaved) {
     if (!els || !rulesRef || !els.save) return;
     if (!els.save.hasAttribute('data-listening')) {
       els.save.setAttribute('data-listening', 'true');
@@ -170,10 +288,19 @@
           earlyThreshold: Math.max(1, Number(els.earlyThreshold.value) || 3),
           deductionAmount: Math.max(0, Number(els.deductionAmount.value) || 0),
           deductionLabel: els.deductionLabel.value.trim() || 'Posho ya Uwajibikaji',
+          requireSchoolInternet: !!els.requireSchoolInternet.checked,
+          rotatingCodeEnabled: !!els.rotatingCodeEnabled.checked,
+          codeTTLSeconds: Math.max(15, Number(els.codeTTLSeconds.value) || 90),
           updatedTs: localTs()
         };
-        await rulesRef.set(payload);
-        showToast('Kanuni za mahudhurio zimehifadhiwa', 'success');
+        try {
+          await rulesRef.set(payload);
+          showToast('Imehifadhiwa ✅', 'success');
+          if (onSaved) await onSaved(payload);
+        } catch (err) {
+          console.error('Failed to save attendance rules', err);
+          showToast('Hifadhi haikuweza kukamilika. Jaribu tena.', 'error');
+        }
       });
     }
     const snap = await rulesRef.get();
@@ -184,6 +311,171 @@
     els.earlyThreshold.value = rules.earlyThreshold || 3;
     els.deductionAmount.value = rules.deductionAmount || 1000;
     els.deductionLabel.value = rules.deductionLabel || 'Posho ya Uwajibikaji';
+    els.requireSchoolInternet.checked = rules.requireSchoolInternet === true;
+    els.rotatingCodeEnabled.checked = rules.rotatingCodeEnabled === true;
+    els.codeTTLSeconds.value = Number(rules.codeTTLSeconds) || 90;
+    return rules;
+  }
+
+  function createLockManager({ db, els, showToast, getCurrentYear }) {
+    let timerId = null;
+    let activeRules = {
+      rotatingCodeEnabled: false,
+      codeTTLSeconds: 90
+    };
+    const ipListEl = els?.ipList;
+    const setIpBtn = els?.setIp;
+    const codeDisplayEl = els?.codeDisplay;
+    const codeMetaEl = els?.codeMeta;
+    const generateCodeBtn = els?.generateCode;
+    const getYear = () => String(getCurrentYear());
+    const getTodayKey = () => todayYMD(new Date()).replace(/-/g, '');
+
+    if (setIpBtn) {
+      setIpBtn.addEventListener('click', async () => {
+        setIpBtn.disabled = true;
+        try {
+          const ip = await fetchPublicIP();
+          await db.ref(SOMAP.P(`years/${getYear()}/workers_settings/attendanceRules/schoolPublicIPs/${getTodayKey()}/${ip}`)).set(true);
+          showToast('Saved school internet ✅', 'success');
+          await refreshIpList();
+        } catch (err) {
+          console.error('Failed to save school IP', err);
+          showToast('Imeshindwa kuhifadhi Wi-Fi ya shule. Jaribu tena.', 'error');
+        } finally {
+          setIpBtn.disabled = false;
+        }
+      });
+    }
+
+    if (generateCodeBtn) {
+      generateCodeBtn.addEventListener('click', async () => {
+        await generateAndDisplay(false);
+      });
+    }
+
+    function renderIpList(map) {
+      if (!ipListEl) return;
+      ipListEl.innerHTML = '';
+      const ips = Object.keys(map || {}).sort();
+      if (!ips.length) {
+        ipListEl.textContent = 'Hakuna IP leo.';
+        return;
+      }
+      ips.forEach(ip => {
+        const badge = document.createElement('span');
+        badge.className = 'ip-badge';
+        badge.textContent = ip;
+        ipListEl.appendChild(badge);
+      });
+    }
+
+    async function refreshIpList() {
+      if (!ipListEl) return;
+      try {
+        const snap = await db.ref(SOMAP.P(`years/${getYear()}/workers_settings/attendanceRules/schoolPublicIPs/${getTodayKey()}`)).once('value');
+        renderIpList(snap.val() || {});
+      } catch (err) {
+        console.error('Failed to load school IP list', err);
+      }
+    }
+
+    async function fetchDailyCode() {
+      const snap = await db.ref(SOMAP.P(`years/${getYear()}/workers_settings/dailyCheckin/${getTodayKey()}`)).once('value');
+      return snap.val();
+    }
+
+    function displayCode(entry) {
+      if (codeDisplayEl) {
+        codeDisplayEl.textContent = entry?.code || '----';
+      }
+      if (codeMetaEl) {
+        if (entry?.validTo) {
+          codeMetaEl.textContent = `Valid until ${formatTime(entry.validTo)}`;
+        } else if (!activeRules.rotatingCodeEnabled) {
+          codeMetaEl.textContent = 'Rotating code disabled';
+        } else {
+          codeMetaEl.textContent = 'No code generated yet.';
+        }
+      }
+    }
+
+    function clearTimer() {
+      if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+    }
+
+    function scheduleRefresh(entry) {
+      clearTimer();
+      if (!activeRules.rotatingCodeEnabled || !entry?.validTo) return;
+      const delay = Math.max(1000, entry.validTo - localTs());
+      timerId = setTimeout(() => generateAndDisplay(true), delay);
+    }
+
+    async function generateAndDisplay(auto = false) {
+      const ttl = Math.max(15, Number(activeRules.codeTTLSeconds) || 90);
+      const now = localTs();
+      const entry = {
+        code: randomNumericCode(6),
+        validFrom: now,
+        validTo: now + ttl * 1000
+      };
+      try {
+        await db.ref(SOMAP.P(`years/${getYear()}/workers_settings/dailyCheckin/${getTodayKey()}`)).set(entry);
+        displayCode(entry);
+        showToast(`Rotating code ${auto ? 'refreshed' : 'generated'}`, 'success');
+        scheduleRefresh(entry);
+      } catch (err) {
+        console.error('Failed to save rotating code', err);
+        showToast('Imeshindwa kuweka msimbo. Jaribu tena.', 'error');
+      }
+    }
+
+    async function refreshCodeDisplay() {
+      try {
+        const entry = await fetchDailyCode();
+        if (entry?.code) {
+          displayCode(entry);
+          if (activeRules.rotatingCodeEnabled) {
+            scheduleRefresh(entry);
+          }
+          return;
+        }
+        displayCode(null);
+        if (activeRules.rotatingCodeEnabled) {
+          await generateAndDisplay(false);
+        }
+      } catch (err) {
+        console.error('Failed to load rotating code', err);
+      }
+    }
+
+    return {
+      async applyRules(rules) {
+        activeRules = {
+          requireSchoolInternet: !!rules?.requireSchoolInternet,
+          rotatingCodeEnabled: !!rules?.rotatingCodeEnabled,
+          codeTTLSeconds: Number(rules?.codeTTLSeconds) || 90
+        };
+        if (!activeRules.rotatingCodeEnabled) {
+          clearTimer();
+        }
+        await refreshIpList();
+        await refreshCodeDisplay();
+      },
+      async refreshForYear() {
+        await refreshIpList();
+        await refreshCodeDisplay();
+      },
+      async manualGenerate() {
+        await generateAndDisplay(false);
+      },
+      destroy() {
+        clearTimer();
+      }
+    };
   }
 
   function statusBadge(status) {
@@ -238,8 +530,18 @@
       document.body.classList.add('headteacher-approvals-page');
       const { container, els } = ensureContainer();
 
-      const rulesRef = db.ref(SOMAP.P(`years/${currentYear}/workers_settings/attendanceRules`));
-      await setupRules(els.rules, rulesRef);
+      const lockManager = createLockManager({
+        db,
+        els: els.lock,
+        showToast,
+        getCurrentYear: () => currentYear
+      });
+
+      let rulesRef = db.ref(SOMAP.P(`years/${currentYear}/workers_settings/attendanceRules`));
+      const initialRules = await setupRules(els.rules, rulesRef, async (payload) => {
+        await lockManager.applyRules(payload);
+      });
+      await lockManager.applyRules(initialRules);
 
       const render = async () => {
         const now = new Date();
@@ -361,31 +663,45 @@
 
       if (els.list && !els.list.hasAttribute('data-listening')) {
         els.list.setAttribute('data-listening', 'true');
-        els.list.addEventListener('click', async (event) => {
-          const btn = event.target.closest('button[data-action]');
-          if (!btn) return;
-          const targetWorker = btn.dataset.worker;
-          const approveValue = btn.dataset.action === 'approve';
-          const { monthKey, todayKey } = latestKeys;
-          if (!monthKey || !todayKey) return;
-          const refPath = lastAttendanceSource === 'legacy'
-            ? `attendance/${targetWorker}/${monthKey}/${todayKey}`
-            : SOMAP.P(`years/${currentYear}/workerAttendance/${targetWorker}/${monthKey}/${todayKey}`);
+      els.list.addEventListener('click', async (event) => {
+        const btn = event.target.closest('button[data-action]');
+        if (!btn) return;
+        const targetWorker = btn.dataset.worker;
+        const approveValue = btn.dataset.action === 'approve';
+        const { monthKey, todayKey } = latestKeys;
+        if (!monthKey || !todayKey) return;
+        const refPath = lastAttendanceSource === 'legacy'
+          ? `attendance/${targetWorker}/${monthKey}/${todayKey}`
+          : SOMAP.P(`years/${currentYear}/workerAttendance/${targetWorker}/${monthKey}/${todayKey}`);
+        try {
           const ref = db.ref(refPath);
           await ref.update({ approved: approveValue, approvedTs: localTs() });
           showToast(`Entry ${approveValue ? 'approved' : 'rejected'}`, approveValue ? 'success' : 'warning');
           render();
-        });
+        } catch (err) {
+          console.error('Failed to update approval', err);
+          showToast('Imeshindwa kuhifadhi maamuzi. Jaribu tena.', 'error');
+        }
+      });
       }
 
       await render();
       attachRealtime();
 
       if (yearCtx && yearCtx.onYearChanged) {
-        yearCtx.onYearChanged((yr) => {
-          currentYear = String(yr);
-          render();
-          attachRealtime();
+        yearCtx.onYearChanged(async (yr) => {
+          try {
+            currentYear = String(yr);
+            rulesRef = db.ref(SOMAP.P(`years/${currentYear}/workers_settings/attendanceRules`));
+            const newRules = await setupRules(els.rules, rulesRef, async (payload) => {
+              await lockManager.applyRules(payload);
+            });
+            await lockManager.applyRules(newRules);
+            await render();
+            attachRealtime();
+          } catch (err) {
+            console.error('Failed to refresh rules for new year', err);
+          }
         });
       }
     } catch (err) {

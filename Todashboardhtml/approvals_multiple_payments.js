@@ -21,10 +21,39 @@
     return;
   }
 
-  const financeHelpers = window.SOMAP_FINANCE || {};
-  const P = (subPath) => (window.SOMAP && typeof window.SOMAP.P === 'function' ? window.SOMAP.P(subPath) : subPath);
+  const financeHelpers = window.SOMAP_FINANCE_DEDUPE || window.SOMAP_FINANCE || {};
+  const normalizePath = (subPath) => String(subPath || '').replace(/^\/+/, '');
+  const resolveSchoolId = () => {
+    if (window.SOMAP && typeof window.SOMAP.getSchool === 'function') {
+      const school = window.SOMAP.getSchool();
+      if (school && school.id) return school.id;
+    }
+    try {
+      return localStorage.getItem('somap.currentSchoolId') || '';
+    } catch (_) {
+      return '';
+    }
+  };
+  const isSocratesSchool = () => {
+    const id = resolveSchoolId();
+    return id === 'socrates-school' || id === 'default';
+  };
+  const P = (subPath) => {
+    const trimmed = normalizePath(subPath);
+    const id = resolveSchoolId();
+    if (!id) return trimmed;
+    return `schools/${id}/${trimmed}`;
+  };
+  const schoolRef = (subPath) => {
+    const trimmed = normalizePath(subPath);
+    if (window.SOMAP && typeof window.SOMAP.P === 'function') {
+      return db.ref(window.SOMAP.P(trimmed));
+    }
+    return db.ref(P(trimmed));
+  };
 
   let currentGroups = [];
+  let scanInFlight = null;
 
   const fmt = new Intl.NumberFormat('en-TZ', {
     style: 'currency',
@@ -45,6 +74,65 @@
     const d = new Date(stamp);
     if (Number.isNaN(d.getTime())) return '--';
     return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+
+  function joinPath(...segments) {
+    return segments
+      .map((segment) => String(segment || '').replace(/^\/+|\/+$/g, ''))
+      .filter(Boolean)
+      .join('/');
+  }
+
+  function isLikelyApprovalRecord(value) {
+    if (!value || typeof value !== 'object') return false;
+    return (
+      value.sourceModule != null ||
+      value.modulePayload != null ||
+      value.amountPaidNow != null ||
+      value.amount != null ||
+      value.studentAdm != null ||
+      value.studentName != null
+    );
+  }
+
+  function collectSnapshotEntries(snapshot, source, { basePath = '', year = '', month = '', seen } = {}) {
+    const results = [];
+    if (!snapshot || typeof snapshot.forEach !== 'function') return results;
+    snapshot.forEach((child) => {
+      if (!child.key) return;
+      const childVal = child.val() || {};
+      if (isLikelyApprovalRecord(childVal)) {
+        const dedupeKey = joinPath(basePath, child.key);
+        if (seen && seen.has(dedupeKey)) return;
+        const recordPath = joinPath(basePath, child.key);
+        const row = toRowModel(childVal, source, {
+          id: child.key,
+          path: recordPath,
+          year,
+          month,
+        });
+        results.push(row);
+        if (seen) seen.add(dedupeKey);
+        return;
+      }
+
+      const inferredYear = Number(child.key);
+      if (!Number.isFinite(inferredYear) || inferredYear < 2000) return;
+      Object.entries(childVal || {}).forEach(([approvalId, payload]) => {
+        if (!isLikelyApprovalRecord(payload)) return;
+        const nestedPath = joinPath(basePath, child.key, approvalId);
+        if (seen && seen.has(nestedPath)) return;
+        const row = toRowModel(payload, source, {
+          id: approvalId,
+          path: nestedPath,
+          year: inferredYear,
+          month,
+        });
+        results.push(row);
+        if (seen) seen.add(nestedPath);
+      });
+    });
+    return results;
   }
 
   function getWorkingYear() {
@@ -165,44 +253,62 @@
   }
 
   async function fetchPending(year) {
-    const snap = await db.ref(P('approvalsPending')).once('value');
-    if (!snap.exists()) return [];
-    const list = [];
-    snap.forEach((child) => {
-      list.push(
-        toRowModel(child.val() || {}, 'pending', {
-          id: child.key,
-          path: P(`approvalsPending/${child.key}`),
+    const rows = [];
+    const seen = new Set();
+    const scopedBase = 'approvalsPending';
+    const scopedSnap = await schoolRef(scopedBase).once('value');
+    if (scopedSnap.exists()) {
+      rows.push(
+        ...collectSnapshotEntries(scopedSnap, 'pending', {
+          basePath: scopedBase,
           year,
-        })
+          seen,
+        }),
       );
-    });
-    return list;
+    }
+
+    const byYearBase = joinPath('approvalsPending', String(year));
+    const byYearSnap = await schoolRef(byYearBase).once('value');
+    if (byYearSnap.exists()) {
+      rows.push(
+        ...collectSnapshotEntries(byYearSnap, 'pending', {
+          basePath: byYearBase,
+          year,
+          seen,
+        }),
+      );
+    }
+
+    return rows;
   }
 
   async function fetchHistory(year) {
-    const yearSnap = await db.ref(P('approvalsHistory')).child(String(year)).once('value');
-    if (!yearSnap.exists()) return [];
-    const list = [];
-    yearSnap.forEach((monthNode) => {
-      const monthKey = monthNode.key;
-      monthNode.forEach((entry) => {
-        list.push(
-          toRowModel(entry.val() || {}, 'history', {
-            id: entry.key,
-            path: P(`approvalsHistory/${year}/${monthKey}/${entry.key}`),
+    const rows = [];
+    const seen = new Set();
+    const scopedRoot = 'approvalsHistory';
+    const scopedSnap = await schoolRef(joinPath(scopedRoot, String(year))).once('value');
+    if (scopedSnap.exists()) {
+      scopedSnap.forEach((monthNode) => {
+        const monthKey = monthNode.key;
+        const monthBase = joinPath(scopedRoot, year, monthKey);
+        rows.push(
+          ...collectSnapshotEntries(monthNode, 'history', {
+            basePath: monthBase,
             year,
             month: monthKey,
-          })
+            seen,
+          }),
         );
       });
-    });
-    return list;
+    }
+
+    return rows;
   }
 
-  function groupByFingerprint(records) {
+  function groupByFingerprint(records, workingYear) {
     const map = new Map();
     records.forEach((rec) => {
+      if (Number(rec.year) !== Number(workingYear)) return;
       if (!rec.fingerprint) return;
       const bucket = map.get(rec.fingerprint) || [];
       bucket.push(rec);
@@ -287,19 +393,27 @@
   }
 
   async function scan(showPanel) {
+    if (scanInFlight) return scanInFlight;
     ui.summary.textContent = 'Scanning for duplicate payments...';
     if (ui.deleteBtn) ui.deleteBtn.disabled = true;
-    const year = getWorkingYear();
-    try {
-      const [pending, history] = await Promise.all([fetchPending(year), fetchHistory(year)]);
-      const groups = groupByFingerprint([...pending, ...history]);
-      renderGroups(groups);
-      if (showPanel) ui.panel.classList.remove('hidden');
-    } catch (err) {
-      console.error('[approvals_multiple_payments] scan failed', err);
-      ui.summary.textContent = 'Failed to scan duplicates. Check console.';
-      updateBadge(0);
-    }
+    scanInFlight = (async () => {
+      const year = getWorkingYear();
+      try {
+        const pendingPromise = fetchPending(year);
+        const historyPromise = showPanel ? fetchHistory(year) : Promise.resolve([]);
+        const [pending, history] = await Promise.all([pendingPromise, historyPromise]);
+        const groups = groupByFingerprint([...pending, ...history], year);
+        renderGroups(groups);
+        if (showPanel) ui.panel.classList.remove('hidden');
+      } catch (err) {
+        console.error('[approvals_multiple_payments] scan failed', err);
+        ui.summary.textContent = 'Failed to scan duplicates. Check console.';
+        updateBadge(0);
+      } finally {
+        scanInFlight = null;
+      }
+    })();
+    return scanInFlight;
   }
 
   async function deleteSelected() {
@@ -318,18 +432,17 @@
       : window.confirm(message);
     if (!confirmed) return;
 
-    const updates = {};
-    checked.forEach((cb) => {
-      const path = cb.dataset.path;
-      if (path) updates[path] = null;
-      if (cb.dataset.module === 'finance' && cb.dataset.student && cb.dataset.year && cb.dataset.approval) {
-        const ledgerPath = P(`financeLedgers/${cb.dataset.year}/${cb.dataset.student}/payments/${cb.dataset.approval}`);
-        updates[ledgerPath] = null;
-      }
-    });
-
     try {
-      await db.ref().update(updates);
+      const removals = [];
+      checked.forEach((cb) => {
+        const path = cb.dataset.path;
+        if (path) removals.push(schoolRef(path).remove());
+        if (cb.dataset.module === 'finance' && cb.dataset.student && cb.dataset.year && cb.dataset.approval) {
+          const ledgerPath = `financeLedgers/${cb.dataset.year}/${cb.dataset.student}/payments/${cb.dataset.approval}`;
+          removals.push(schoolRef(ledgerPath).remove());
+        }
+      });
+      await Promise.all(removals);
       await scan(true);
     } catch (err) {
       console.error('[approvals_multiple_payments] delete failed', err);
@@ -349,5 +462,7 @@
   }
 
   // Initial badge load (silent)
-  scan(false).catch((err) => console.warn('[approvals_multiple_payments] initial scan failed', err));
+  setTimeout(() => {
+    scan(false).catch((err) => console.warn('[approvals_multiple_payments] initial scan failed', err));
+  }, 120);
 })();

@@ -9,6 +9,7 @@
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
+    <script src="../somapappv1multischool/js/context.js"></script>
     <script src="../Todashboardhtml/yearContext.js"></script>
     <script>
       const firebaseConfig = {
@@ -30,7 +31,7 @@
     <div id="contextBar" class="bar">
       <div>
         <h1>🚌 SoMAp Transport Hub</h1>
-        <small>Advanced Transport Management System</small>
+        <small>Advanced Transport Management System Â· <span id="schoolNameDisplay">â€”</span></small>
       </div>
       <div class="context-selectors">
         <div class="date-time-display">
@@ -296,6 +297,117 @@
     <script src="./modules/transport_helpers.js"></script>
     <script src="./modules/transport_pricing.js"></script>
     <script>
+      const db = firebase.database();
+      const currentSchool = window.SOMAP?.getSchool?.();
+      if (!currentSchool || !currentSchool.id) {
+        window.location.href = '../somapappv1multischool/multischool.html';
+      }
+      const schoolId = currentSchool?.id || '';
+      const schoolName = currentSchool?.name || schoolId;
+      const isSocratesSchool = (id) => id === 'socrates-school' || id === 'default';
+
+      function schoolSubPath(subPath) {
+        const clean = String(subPath || '').replace(/^\/+/, '');
+        return isSocratesSchool(schoolId) ? `schools/${schoolId}/${clean}` : clean;
+      }
+
+      function schoolRef(subPath) {
+        return db.ref(window.SOMAP.P(schoolSubPath(subPath)));
+      }
+
+      async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
+        const scopedRef = schoolRef(scopedSubPath);
+        if (!isSocratesSchool(schoolId) || !legacyPath) return scopedRef.once('value');
+        const scopedSnap = await scopedRef.once('value');
+        if (scopedSnap.exists()) return scopedSnap;
+        return db.ref(legacyPath).once('value');
+      }
+
+      function schoolPath(subPath) {
+        return window.SOMAP.P(schoolSubPath(subPath));
+      }
+
+      function maybeAutoAdvanceYear() {
+        const ctx = window.somapYearContext;
+        if (!ctx || typeof ctx.getSelectedYear !== 'function') return;
+        const current = String(new Date().getFullYear());
+        const selected = String(ctx.getSelectedYear());
+        if (Number(current) > Number(selected)) {
+          if (typeof ctx.resetToCurrentYear === 'function') {
+            ctx.resetToCurrentYear();
+          } else if (typeof ctx.setSelectedYear === 'function') {
+            ctx.setSelectedYear(current, { manual: false, forceDispatch: true });
+          }
+        }
+      }
+
+      const CLASS_ORDER = ['Baby Class', 'Middle Class', 'Pre Unit Class', 'Class 1', 'Class 2', 'Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7'];
+      function shiftClass(baseClass, deltaYears) {
+        const normalized = String(baseClass || '').trim();
+        const idx = CLASS_ORDER.findIndex(c => c.toLowerCase() === normalized.toLowerCase());
+        if (idx < 0) return baseClass || '';
+        const newIdx = idx + Number(deltaYears || 0);
+        if (newIdx < 0) return 'PRE-ADMISSION';
+        if (newIdx >= CLASS_ORDER.length) return 'GRADUATED';
+        return CLASS_ORDER[newIdx];
+      }
+
+      async function maybeRunRollover() {
+        const systemYear = String(new Date().getFullYear());
+        const flagRef = schoolRef(`meta/rolloverDone/${systemYear}`);
+        try {
+          const flagSnap = await flagRef.get();
+          if (flagSnap.exists()) return;
+          const previousYear = String(Number(systemYear) - 1);
+          const prevEnrollSnap = await scopedOrSocratesLegacy(`years/${previousYear}/enrollments`, `enrollments/${previousYear}`);
+          const prevEnrollments = prevEnrollSnap.val() || {};
+          const nowIso = new Date().toISOString();
+          const updates = {};
+
+          Object.entries(prevEnrollments).forEach(([studentKey, record]) => {
+            const baseClass = (record && (record.className || record.classLevel)) || '';
+            const nextClass = shiftClass(baseClass, 1);
+            if (nextClass === 'GRADUATED') {
+              updates[schoolPath(`years/${systemYear}/graduated/${studentKey}`)] = {
+                className: baseClass || 'Class 7',
+                promotedAt: nowIso,
+                fromYear: Number(previousYear)
+              };
+              updates[schoolPath(`years/${systemYear}/enrollments/${studentKey}`)] = {
+                className: 'GRADUATED',
+                promotedFrom: baseClass || 'Class 7',
+                fromYear: Number(previousYear),
+                at: firebase.database.ServerValue.TIMESTAMP
+              };
+            } else {
+              updates[schoolPath(`years/${systemYear}/enrollments/${studentKey}`)] = {
+                className: nextClass,
+                promotedFrom: baseClass,
+                fromYear: Number(previousYear),
+                at: firebase.database.ServerValue.TIMESTAMP
+              };
+            }
+          });
+
+          updates[schoolPath(`meta/rolloverDone/${systemYear}`)] = true;
+          await db.ref().update(updates);
+        } catch (err) {
+          console.warn('Year rollover skipped/failed:', err);
+        }
+      }
+
+      const schoolNameDisplay = document.getElementById('schoolNameDisplay');
+      if (schoolNameDisplay) schoolNameDisplay.textContent = schoolName || '—';
+
+      // Allow deep links to set the active year via the shared helper
+      (function syncYearFromUrl() {
+        const params = new URLSearchParams(window.location.search);
+        const y = parseInt(params.get('year'), 10);
+        if (Number.isFinite(y) && window.somapYearContext?.setSelectedYear) {
+          window.somapYearContext.setSelectedYear(String(y), { manual: false, forceDispatch: true });
+        }
+      })();
+
       // Global State
       const state = {
         user: null,
@@ -306,10 +418,12 @@
             return Number.isFinite(parsed) ? parsed : new Date().getFullYear();
           })(),
         month: new Date().getMonth() + 1,
-        school: TransportContext.getContext().school || "socrates",
+        schoolId,
+        schoolName,
         students: {},
         vehicles: {},
         transportEnrollments: {},
+        transportAssignments: {},
         transportPayments: {},
         financeData: {},
         currentAssignStudentId: null,
@@ -367,15 +481,6 @@
       // Initialize date display and update every second
       updateDateDisplay();
       setInterval(updateDateDisplay, 1000);
-
-      // Apply URL params for school/year if present (keeps pages in sync)
-      (function applyUrlParams(){
-        const params = new URLSearchParams(window.location.search);
-        const y = parseInt(params.get('year'), 10);
-        const sch = params.get('school');
-        if (Number.isFinite(y)) state.year = y;
-        if (sch) state.school = sch;
-      })();
 
       // Year selection handler
       if (yearSelect && window.somapYearContext) {
@@ -583,7 +688,7 @@
               <div style="font-size: 2rem; margin-bottom: 0.5rem;">${card.icon}</div>
               <h2>${card.title}</h2>
               <p class="muted">${card.description}</p>
-              <a class="btn mt-2" href="${card.href}?school=${state.school}&year=${state.year}" style="display: block;">
+              <a class="btn mt-2" href="${card.href}?school=${state.schoolId}&year=${state.year}" style="display: block;">
                 Open →
               </a>
             </article>
@@ -633,7 +738,11 @@
           .map(([id, student]) => {
             const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
             const enrollment = state.transportEnrollments[id];
-            const isUsingTransport = !!enrollment;
+            const assignments = state.transportAssignments || {};
+            const assignment = assignments[id];
+            const isUsingTransport = assignment
+              ? assignment.status === 'Using'
+              : !!enrollment;
 
             // Get finance data
             const financeData = state.financeData[id] || {};
@@ -1046,7 +1155,7 @@
 
           const enrollment = {
             studentId,
-            school: state.school,
+            school: state.schoolId,
             year: state.year,
             period,
             amStop: morningRoute || '',
@@ -1059,9 +1168,7 @@
             updatedBy: state.user.uid,
           };
 
-          await firebase.database()
-            .ref(`transport_enrollments/${studentId}`)
-            .set(enrollment);
+          await schoolRef(`years/${state.year}/transportEnrollments/${studentId}`).set(enrollment);
 
           // Also write year-scoped assignment with base fees + start date (canonical path)
           const baseMorningFee = TransportPricing.priceForStop(morningRoute || '');
@@ -1081,13 +1188,14 @@
             admissionNo: state.students[studentId]?.admissionNumber || '',
             fullName: `${state.students[studentId]?.firstName||''} ${state.students[studentId]?.middleName||''} ${state.students[studentId]?.lastName||''}`.replace(/\s+/g,' ').trim()
           };
-          await firebase.database().ref(`transportAssignments/${state.year}/${studentId}`).set(assignPayload);
+          await schoolRef(`years/${state.year}/transportAssignments/${studentId}`).set(assignPayload);
 
           showToast('Transport assignment saved successfully!');
           transportAssignModal.classList.add('hidden');
           
           // Update local state immediately
           state.transportEnrollments[studentId] = enrollment;
+          state.transportAssignments[studentId] = assignPayload;
           
           // Refresh data in background
           loadCriticalData().then(() => {
@@ -1123,13 +1231,86 @@
           // Show loading state
           kpiRowEl.innerHTML = '<article class="card stat-card"><div class="stat-label">Loading...</div><div class="stat-value">⏳</div></article>';
           
-          // Load critical data in parallel
-          const [enrollSnap, vehiclesSnap] = await Promise.all([
-            firebase.database().ref('transport_enrollments').once('value'),
-            firebase.database().ref(`transport/${state.school}/${state.year}/buses`).once('value')
+          // IMPORTANT:
+          // For Socrates/legacy schools we must MERGE legacy + year-scoped data.
+          // If the year-scoped path exists, the old helper would stop falling back,
+          // which makes previously-assigned students "disappear" in the UI.
+          const yearKey = String(state.year);
+          const isLegacyMerge = isSocratesSchool(schoolId);
+
+          const [
+            enrollScopedSnap,
+            enrollLegacySnap,
+            registryScopedSnap,
+            registryLegacySnap,
+            assignmentsScopedSnap,
+            assignmentsLegacySnap,
+            vehiclesSnap
+          ] = await Promise.all([
+            schoolRef(`years/${yearKey}/transportEnrollments`).once('value'),
+            isLegacyMerge ? db.ref('transport_enrollments').once('value') : Promise.resolve(null),
+            schoolRef(`years/${yearKey}/transportRegistry`).once('value').catch(() => ({ val: () => null })),
+            isLegacyMerge ? db.ref(`transportRegistry/${yearKey}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
+            schoolRef(`years/${yearKey}/transportAssignments`).once('value').catch(() => ({ val: () => null })),
+            isLegacyMerge ? db.ref(`transportAssignments/${yearKey}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
+            schoolRef(`years/${yearKey}/transport/buses`).once('value')
           ]);
 
-          state.transportEnrollments = enrollSnap.val() || {};
+          const scopedEnrollments = (enrollScopedSnap && typeof enrollScopedSnap.val === 'function') ? (enrollScopedSnap.val() || {}) : {};
+          const legacyEnrollmentsRaw = (enrollLegacySnap && typeof enrollLegacySnap.val === 'function') ? (enrollLegacySnap.val() || {}) : {};
+          const legacyEnrollments = isLegacyMerge ? { ...legacyEnrollmentsRaw, ...scopedEnrollments } : scopedEnrollments;
+
+          const scopedRegistry = (registryScopedSnap && typeof registryScopedSnap.val === 'function') ? (registryScopedSnap.val() || {}) : {};
+          const legacyRegistry = (registryLegacySnap && typeof registryLegacySnap.val === 'function') ? (registryLegacySnap.val() || {}) : {};
+          const registry = isLegacyMerge ? { ...legacyRegistry, ...scopedRegistry } : scopedRegistry;
+
+          const scopedAssignments = (assignmentsScopedSnap && typeof assignmentsScopedSnap.val === 'function') ? (assignmentsScopedSnap.val() || {}) : {};
+          const legacyAssignments = (assignmentsLegacySnap && typeof assignmentsLegacySnap.val === 'function') ? (assignmentsLegacySnap.val() || {}) : {};
+          const assignments = isLegacyMerge ? { ...legacyAssignments, ...scopedAssignments } : scopedAssignments;
+          state.transportAssignments = assignments || {};
+          state.transportEnrollments = {};
+
+          // Always load legacy enrollments, then let year-scoped assignments override them.
+          Object.entries(legacyEnrollments).forEach(([studentId, enrollment]) => {
+            if (enrollment) state.transportEnrollments[studentId] = enrollment;
+          });
+
+          // Merge registry-based enrollments (if used in this school/year).
+          Object.entries(registry).forEach(([studentId, reg]) => {
+            if (!reg || reg.using !== true) return;
+            if (!state.transportEnrollments[studentId]) {
+              state.transportEnrollments[studentId] = {
+                amStop: reg.routeId || '',
+                pmStop: reg.stopName || '',
+                monthlyFee: reg.monthlyFee || 0
+              };
+            }
+          });
+
+          Object.entries(assignments).forEach(([studentId, assignRecord]) => {
+            if (!assignRecord || assignRecord.status !== 'Using') {
+              // If a student exists in legacy but is marked not using in assignments, remove.
+              if (state.transportEnrollments[studentId]) {
+                delete state.transportEnrollments[studentId];
+              }
+              return;
+            }
+            const existing = state.transportEnrollments[studentId] || {};
+            const amStop = assignRecord.morningRouteId || assignRecord.amStop || existing.amStop || '';
+            const pmStop = assignRecord.eveningRouteId || assignRecord.pmStop || existing.pmStop || '';
+            const route = assignRecord.route || existing.route || amStop || pmStop || '';
+            const period = amStop && pmStop ? 'both' : (amStop ? 'morning' : (pmStop ? 'evening' : ''));
+            state.transportEnrollments[studentId] = {
+              ...existing,
+              ...assignRecord,
+              amStop,
+              pmStop,
+              route,
+              period: assignRecord.period || existing.period || period,
+              baseMonthlyFee: assignRecord.baseMonthlyFee || existing.baseMonthlyFee,
+              startDate: assignRecord.startDate || existing.startDate,
+            };
+          });
           
           // Process vehicles
           state.vehicles = {};
@@ -1144,12 +1325,11 @@
 
           // Load payments in background (needed for KPI calculations)
           // Use same data source as transportpayments.html (transportLedgers)
-          const prefix = window.currentSchoolId ? `schools/${window.currentSchoolId}/` : '';
           const year = String(state.year);
           
           Promise.all([
-            firebase.database().ref(`${prefix}transportLedgers/${year}`).once('value').catch(() => ({ val: () => null })),
-            firebase.database().ref(`${prefix}transport_payments`).once('value').catch(() => ({ val: () => null }))
+            scopedOrSocratesLegacy(`years/${year}/transportLedgers`, `transportLedgers/${year}`).catch(() => ({ val: () => null })),
+            scopedOrSocratesLegacy(`years/${year}/transport_payments`, 'transport_payments').catch(() => ({ val: () => null }))
           ]).then(([ledgersSnap, legacySnap]) => {
             // New format: transportLedgers/{year}/{studentId}/payments
             const paymentsData = {};
@@ -1194,7 +1374,7 @@
         }
 
         try {
-          const workersSnap = await firebase.database().ref('workers').once('value');
+          const workersSnap = await scopedOrSocratesLegacy('workers', 'workers');
           state.drivers = [];
           if (workersSnap.exists()) {
             workersSnap.forEach(workerSnap => {
@@ -1227,8 +1407,19 @@
         }
 
         try {
-          const studentsSnap = await firebase.database().ref('students').once('value');
-          state.students = studentsSnap.val() || {};
+          const scopedSnap = await schoolRef('students').once('value');
+          let merged = scopedSnap.val() || {};
+          if (isSocratesSchool(schoolId)) {
+            const legacySnap = await db.ref('students').once('value');
+            const legacyVal = legacySnap.val() || {};
+            merged = { ...legacyVal, ...merged };
+          }
+          state.students = Object.fromEntries(
+            Object.entries(merged || {}).filter(([, student]) => {
+              const status = String(student?.status || '').trim().toLowerCase();
+              return status !== 'shifted';
+            })
+          );
           
           // Process finance data
           state.financeData = {};
@@ -1311,6 +1502,8 @@
 
       // Initialize
       ensureAuth(() => {
+        maybeAutoAdvanceYear();
+        maybeRunRollover();
         // Render start cards immediately (no data needed)
         renderStartCards();
         // Load critical data (this will render KPIs when ready)

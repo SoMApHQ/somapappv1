@@ -754,6 +754,43 @@ function buildFinanceStudents(
     };
   }
 
+  async function loadStudentFinanceAtCutoff(year, studentId, cutoffDateISO){
+    const base = await loadStudentFinance(year, studentId);
+    const cutoffTs = Date.parse(String(cutoffDateISO || '').trim());
+    if (!Number.isFinite(cutoffTs)) {
+      return {
+        ...base,
+        expectedDueAtCutoff: Number(base.due || 0),
+        paidAtCutoff: Number(base.paid || 0),
+        outstandingAtCutoff: Number(base.outstanding || 0),
+        creditAtCutoff: Math.max(0, Number(base.paid || 0) - Number(base.due || 0)),
+        cutoffDateISO: ''
+      };
+    }
+
+    const schedule = Array.isArray(base.scheduleItems) ? base.scheduleItems : [];
+    const expectedDueAtCutoff = schedule
+      .filter((item) => Number(item?.fromTS || 0) > 0 && Number(item.fromTS) <= cutoffTs)
+      .reduce((sum, item) => sum + (Number(item?.amount || 0)), 0);
+
+    const paidFromAlloc = schedule.reduce((sum, item) => {
+      if (Number(item?.fromTS || 0) > cutoffTs) return sum;
+      return sum + (Number(item?.paidAllocated || 0));
+    }, 0);
+    const paidAtCutoff = Math.max(0, Math.min(Number(base.paid || 0), paidFromAlloc > 0 ? paidFromAlloc : Number(base.paid || 0)));
+    const outstandingAtCutoff = Math.max(0, expectedDueAtCutoff - paidAtCutoff);
+    const creditAtCutoff = Math.max(0, paidAtCutoff - expectedDueAtCutoff);
+
+    return {
+      ...base,
+      expectedDueAtCutoff: Number(expectedDueAtCutoff.toFixed(2)),
+      paidAtCutoff: Number(paidAtCutoff.toFixed(2)),
+      outstandingAtCutoff: Number(outstandingAtCutoff.toFixed(2)),
+      creditAtCutoff: Number(creditAtCutoff.toFixed(2)),
+      cutoffDateISO: String(cutoffDateISO || '').trim()
+    };
+  }
+
   async function loadSchoolTotals(year){
     const summary = await ensureYearSummary(year);
     const due = Number(summary.totalDue || 0);
@@ -871,6 +908,7 @@ function buildFinanceStudents(
 
   const api = {
     loadStudentFinance,
+    loadStudentFinanceAtCutoff,
     loadSchoolTotals,
     loadExpensesTotal,
     listRecentPayments,

@@ -604,6 +604,10 @@
       { key:'other', label:'Other (Clothing / Remedials)', modules:['other','others','clothing','remedials','uniform','misc'], path:'upcoming' }
     ];
     const MODULE_LOOKUP = PAYMENT_ROWS.reduce((acc,row)=>{ row.modules.forEach(m=> acc[m.toLowerCase()] = row.key); return acc; },{});
+    const MODULE_LOOKUP_CANON = Object.keys(MODULE_LOOKUP).reduce((acc,key)=>{
+      acc[key.replace(/[^a-z0-9]/g,'')] = MODULE_LOOKUP[key];
+      return acc;
+    }, {});
     const CLOUDINARY_FALLBACK = 'dg7vnrkgd';
 
     const state = {
@@ -809,6 +813,26 @@
       return Number(val)||0;
     };
 
+    function parseMoneyValue(val){
+      if (typeof val === 'number') return Number.isFinite(val) ? val : 0;
+      if (typeof val === 'string'){
+        const cleaned = val.replace(/[^0-9.-]/g,'');
+        const n = Number(cleaned);
+        return Number.isFinite(n) ? n : 0;
+      }
+      return Number(val) || 0;
+    }
+
+    function parseTimestampLike(value){
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric > 0) return numeric;
+      if (typeof value === 'string' && value.trim()){
+        const parsed = Date.parse(value);
+        if (!Number.isNaN(parsed)) return parsed;
+      }
+      return 0;
+    }
+
     function numberToWordsTZS(val){
       const belowTwenty=['Zero','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'];
       const tens=['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
@@ -866,6 +890,28 @@
       return found ? String(found).trim() : '';
     }
 
+    function normalizeAdmission(value){
+      return String(value || '').trim().toLowerCase();
+    }
+
+    function resolveStudentKeyFromAdmission(admission, studentsMap, enrollAnchorMap, enrollYearMap){
+      const needle = normalizeAdmission(admission);
+      if (!needle) return '';
+      const admissionFields = ['admissionNumber','admissionNo','admNo','registrationNumber','autoId','pupilId','studentAdm'];
+      const scan = (mapObj) => {
+        if (!mapObj || typeof mapObj !== 'object') return '';
+        for (const [key, row] of Object.entries(mapObj)){
+          if (!row || typeof row !== 'object') continue;
+          for (const field of admissionFields){
+            const candidate = normalizeAdmission(row[field]);
+            if (candidate && candidate === needle) return String(key);
+          }
+        }
+        return '';
+      };
+      return scan(studentsMap) || scan(enrollYearMap) || scan(enrollAnchorMap) || '';
+    }
+
     function resolvePhotoUrl(student, fallbackUrl){
       if (!student && !fallbackUrl) return '';
       const direct = student?.photoUrl
@@ -913,6 +959,29 @@
       return `${initials}${receiptYear}${formatReceiptSequence(seq)}`;
     }
 
+    function normalizeFingerprintToken(value){
+      return String(value == null ? '' : value)
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g,' ');
+    }
+
+    function buildReceiptFingerprint(entry, financeYear){
+      const studentToken = normalizeFingerprintToken(
+        entry?.studentId || entry?.studentAdm || state.studentId || state.queryStudent || ''
+      );
+      const yearToken = normalizeFingerprintToken(
+        entry?.receiptYear || entry?.financeYear || financeYear || state.year || SOMAP_DEFAULT_YEAR
+      );
+      const amountToken = parseMoneyValue(entry?.amountPaidNow || entry?.amount || 0).toFixed(2);
+      const timeToken = String(parseTimestampLike(entry?.paymentDate || entry?.approvedAt || 0) || 0);
+      const methodToken = normalizeFingerprintToken(entry?.paymentMethod || entry?.method || '');
+      const refToken = normalizeFingerprintToken(
+        entry?.paymentReferenceCode || entry?.referenceCode || entry?.reference || entry?.note || ''
+      );
+      return `${studentToken}|${yearToken}|${amountToken}|${timeToken}|${methodToken}|${refToken}`;
+    }
+
     function buildReceiptNumberMap(approvals){
       if (!Array.isArray(approvals) || !approvals.length) return {};
       const sorted = approvals.slice().sort((a,b)=>{
@@ -933,8 +1002,15 @@
 
     function moduleToRowKey(module){
       if (!module) return 'other';
-      const key = module.toString().toLowerCase();
-      return MODULE_LOOKUP[key] || 'other';
+      const key = module.toString().toLowerCase().trim();
+      const canonical = key.replace(/[^a-z0-9]/g,'');
+      if (MODULE_LOOKUP[key]) return MODULE_LOOKUP[key];
+      if (MODULE_LOOKUP_CANON[canonical]) return MODULE_LOOKUP_CANON[canonical];
+      if (key.includes('school') && key.includes('fee')) return 'schoolFees';
+      if (key.includes('transport') || key.includes('bus')) return 'transport';
+      if (key.includes('graduation') || key.includes('grad')) return 'graduation';
+      if (key.includes('friday') || key.includes('pocket')) return 'friday';
+      return 'other';
     }
 
     function parseBreakdown(entries){
@@ -1030,10 +1106,124 @@
       };
     }
 
+    function normalizeLedgerReceiptRecord(rowKey, payment, context = {}){
+      if (!payment) return null;
+      const amountPaidNow = parseMoneyValue(payment.amount ?? payment.value ?? payment.paid ?? payment.total ?? 0);
+      if (!Number.isFinite(amountPaidNow) || amountPaidNow <= 0) return null;
+      const sourceModule = payment.sourceModule || payment.module || payment.paymentModule || 'finance';
+      const approvedAt = parseTimestampLike(
+        payment.timestamp || payment.datePaid || payment.paymentDate || payment.createdAt || payment.updatedAt || Date.now()
+      );
+      const paymentTimestamp = parseTimestampLike(
+        payment.paymentDate || payment.timestamp || payment.datePaid || approvedAt
+      );
+      const referenceCode =
+        payment.paymentReferenceCode ||
+        payment.referenceCode ||
+        payment.reference ||
+        payment.ref ||
+        payment.note ||
+        payment.remarks ||
+        '';
+      const paymentMethod = payment.method || payment.mode || payment.paymentMethod || 'Cash';
+      const rowKeyResolved = moduleToRowKey(sourceModule);
+      const receiptYear = String(context.year || payment.academicYear || payment.financeYear || SOMAP_DEFAULT_YEAR);
+      return {
+        id: '',
+        sourceModule,
+        rowKey: rowKeyResolved,
+        moduleLabel: (PAYMENT_ROWS.find(r=>r.key===rowKeyResolved)?.label) || 'School Fees',
+        modulePath: 'finance.html',
+        amountPaidNow,
+        paymentMethod,
+        paymentReferenceCode: referenceCode,
+        paidBy: payment.paidBy || payment.payer || payment.parentName || context.studentName || 'Parent/Guardian',
+        payerContact: payment.payerContact || payment.contact || context.payerContact || '',
+        approvedAt,
+        approvedBy: payment.approvedBy || 'Finance Ledger',
+        paymentDate: paymentTimestamp,
+        receiptUpdatedAt: Number(payment.updatedAt || approvedAt),
+        totalRequired: Number(context.totalRequired || 0),
+        totalPaidBefore: 0,
+        totalPaidAfter: 0,
+        balanceAfter: 0,
+        planLabel: context.planLabel || '',
+        debtStage: context.debtStage || '',
+        dueDate: context.dueDate || '',
+        studentId: context.studentId || '',
+        studentAdm: context.studentAdm || '',
+        studentName: context.studentName || '',
+        className: context.className || '',
+        motherPhone: context.payerContact || '',
+        amountWords: numberToWordsTZS(amountPaidNow),
+        breakdownMap: {},
+        note: payment.note || payment.remarks || payment.description || '',
+        photoUrl: '',
+        receiptYear,
+        financeYear: receiptYear,
+        fromLedger: true,
+        ledgerRowKey: rowKey || '',
+      };
+    }
+
+    function mergeReceiptRecords(approvals, ledgerRows, financeYear){
+      const merged = [];
+      const byFingerprint = new Map();
+      const addRow = (row) => {
+        if (!row) return;
+        const fingerprint = buildReceiptFingerprint(row, financeYear);
+        const existing = byFingerprint.get(fingerprint);
+        if (!existing){
+          const base = {
+            ...row,
+            receiptYear: String(row.receiptYear || financeYear || state.year || SOMAP_DEFAULT_YEAR),
+            financeYear: String(row.financeYear || row.receiptYear || financeYear || state.year || SOMAP_DEFAULT_YEAR),
+            receiptFingerprint: fingerprint,
+            ledgerDuplicateCount: row.fromLedger ? 1 : 0,
+            possibleDuplicate: false,
+          };
+          if (!base.id) base.id = `RCPT-${fingerprint.slice(0,16).replace(/[^a-z0-9]/gi,'').toUpperCase()}`;
+          byFingerprint.set(fingerprint, base);
+          merged.push(base);
+          return;
+        }
+        if (row.fromLedger){
+          existing.ledgerDuplicateCount = Number(existing.ledgerDuplicateCount || 0) + 1;
+          if (existing.ledgerDuplicateCount > 1){
+            existing.possibleDuplicate = true;
+          }
+        }
+        if (!existing.fromLedger && row.fromLedger){
+          return;
+        }
+        if (existing.fromLedger && !row.fromLedger){
+          const keepMeta = {
+            receiptFingerprint: existing.receiptFingerprint,
+            ledgerDuplicateCount: existing.ledgerDuplicateCount,
+            possibleDuplicate: existing.possibleDuplicate,
+          };
+          Object.assign(existing, row, keepMeta);
+          return;
+        }
+      };
+
+      (approvals || []).forEach(addRow);
+      (ledgerRows || []).forEach(addRow);
+
+      merged.sort((a,b)=>{
+        const aTime = Number(a.approvedAt || a.paymentDate || a.receiptUpdatedAt || 0);
+        const bTime = Number(b.approvedAt || b.paymentDate || b.receiptUpdatedAt || 0);
+        if (aTime === bTime) return String(a.id || '').localeCompare(String(b.id || ''));
+        return bTime - aTime;
+      });
+
+      return merged;
+    }
+
     function matchesStudent(approval, studentId, adm){
       if (!approval) return false;
-      if (studentId && approval.studentId && String(approval.studentId) === String(studentId)) return true;
-      if (adm && approval.studentAdm && String(approval.studentAdm).toLowerCase() === String(adm).toLowerCase()) return true;
+      if (studentId && approval.studentId && String(approval.studentId).trim() === String(studentId).trim()) return true;
+      if (adm && approval.studentAdm && String(approval.studentAdm).trim().toLowerCase() === String(adm).trim().toLowerCase()) return true;
       return false;
     }
 
@@ -1070,10 +1260,204 @@
       return found ? { ...found } : null;
     }
 
+    function resolveDuplicateStudentToken(entry){
+      const explicitAdmission = entry?.studentAdm || entry?.admissionNumber || entry?.admissionNo;
+      if (explicitAdmission) return normalizeFingerprintToken(explicitAdmission);
+      const explicitStudentId = String(entry?.studentId || '').trim();
+      if (explicitStudentId && state.students && state.students[explicitStudentId]){
+        const resolvedAdmission = resolveAdmissionNumber(state.students[explicitStudentId], explicitStudentId);
+        if (resolvedAdmission) return normalizeFingerprintToken(resolvedAdmission);
+      }
+      return normalizeFingerprintToken(explicitStudentId || state.studentId || state.queryStudent || '');
+    }
+
+    function buildReceiptDuplicateKey(entry){
+      const studentToken = resolveDuplicateStudentToken(entry);
+      const moduleToken = normalizeFingerprintToken(entry?.rowKey || entry?.sourceModule || entry?.moduleLabel || '');
+      const amountToken = parseMoneyValue(entry?.amountPaidNow || entry?.amount || 0).toFixed(2);
+      const refToken = normalizeFingerprintToken(
+        entry?.paymentReferenceCode || entry?.referenceCode || entry?.reference || entry?.ref || entry?.note || ''
+      );
+      const timeToken = String(parseTimestampLike(entry?.paymentDate || entry?.approvedAt || entry?.timestamp || 0) || 0);
+      const methodToken = normalizeFingerprintToken(entry?.paymentMethod || entry?.method || '');
+      return `${studentToken}|${moduleToken}|${amountToken}|${refToken}|${timeToken}|${methodToken}`;
+    }
+
+    function extractLedgerPayments(node){
+      if (!node || typeof node !== 'object') return {};
+      if (node.payments && typeof node.payments === 'object') return node.payments;
+      if (node.entries && typeof node.entries === 'object') return node.entries;
+      if (node.records && typeof node.records === 'object') return node.records;
+      const filtered = {};
+      Object.entries(node).forEach(([key, value]) => {
+        if (!value || typeof value !== 'object') return;
+        const looksLikePayment = (
+          value.amount != null ||
+          value.value != null ||
+          value.paid != null ||
+          value.total != null ||
+          value.paymentDate != null ||
+          value.timestamp != null ||
+          value.referenceCode != null ||
+          value.reference != null
+        );
+        if (looksLikePayment) filtered[key] = value;
+      });
+      return filtered;
+    }
+
+    async function fetchFinanceLedgerApprovalsForStudent(year, studentId, adm){
+      const yearStr = String(year || state.year || SOMAP_DEFAULT_YEAR);
+      const admission = String(adm || '').trim();
+      const admissionNeedle = normalizeAdmission(admission);
+      const resolvedStudentKeyFromAdmission = resolveStudentKeyFromAdmission(
+        admission,
+        state.students || {},
+        state.enrollAnchor || {},
+        state.enrollYear || {}
+      );
+      let globalResolvedStudentKey = '';
+      if (!resolvedStudentKeyFromAdmission && admissionNeedle){
+        try{
+          const globalStudentsSnap = await db.ref('students').once('value');
+          const globalStudents = globalStudentsSnap?.val?.() || {};
+          globalResolvedStudentKey = resolveStudentKeyFromAdmission(admission, globalStudents, {}, {});
+        }catch(_){}
+      }
+      const identifierCandidates = Array.from(new Set([
+        studentId,
+        resolvedStudentKeyFromAdmission,
+        globalResolvedStudentKey,
+        admission,
+        sanitizeKey(admission),
+      ].filter(Boolean).map(v => String(v).trim()).filter(Boolean)));
+
+      const merged = [];
+      const seenPayments = new Set();
+      for (const identifier of identifierCandidates){
+        const keyCandidates = Array.from(new Set([identifier, sanitizeKey(identifier)]));
+        for (const key of keyCandidates){
+          const readPaths = [
+            `financeLedgers/${yearStr}/${key}/payments`,
+            `financeLedgers/${yearStr}/${key}`,
+            `financeLedgers/${key}/${yearStr}/payments`,
+            `finance/${yearStr}/financeLedgers/${key}/payments`,
+          ];
+          for (const path of readPaths){
+            try{
+              const snap = await fetchScoped(path);
+              const rawNode = snap?.val?.() || null;
+              const payments = extractLedgerPayments(rawNode);
+              Object.entries(payments || {}).forEach(([paymentKey, payment]) => {
+                if (!payment || typeof payment !== 'object') return;
+                const originKey = `${path}:${paymentKey}`;
+                if (seenPayments.has(originKey)) return;
+                seenPayments.add(originKey);
+                const normalized = normalizeApprovalRecord(paymentKey, {
+                  ...payment,
+                  studentId: payment.studentId || payment.studentKey || studentId || resolvedStudentKeyFromAdmission || '',
+                  studentAdm: payment.studentAdm || payment.admissionNumber || payment.admissionNo || admission || '',
+                  approvedBy: payment.approvedBy || 'Finance Ledger',
+                  sourceModule: payment.sourceModule || payment.module || payment.paymentModule || 'finance',
+                  paymentReferenceCode: payment.paymentReferenceCode || payment.referenceCode || payment.reference || payment.ref || '',
+                  paymentMethod: payment.paymentMethod || payment.method || payment.mode || 'Cash',
+                  paymentDate: parseTimestampLike(
+                    payment.paymentDate || payment.timestamp || payment.datePaid || payment.createdAt || payment.updatedAt || 0
+                  ),
+                  approvedAt: parseTimestampLike(
+                    payment.approvedAt || payment.timestamp || payment.createdAt || payment.updatedAt || payment.paymentDate || 0
+                  ),
+                  amountPaidNow: parseMoneyValue(
+                    payment.amountPaidNow ?? payment.amount ?? payment.value ?? payment.paid ?? payment.total ?? 0
+                  ),
+                }, { year: yearStr });
+                if (!normalized) return;
+                normalized.modulePath = 'finance.html';
+                normalized.fromLedger = true;
+                merged.push(normalized);
+              });
+            }catch(_){}
+          }
+        }
+      }
+      if (!merged.length && admissionNeedle){
+        try{
+          const ledgerYearSnap = await fetchScoped(`financeLedgers/${yearStr}`);
+          const ledgerYearTree = ledgerYearSnap?.val?.() || {};
+          Object.entries(ledgerYearTree || {}).forEach(([nodeKey, nodeValue]) => {
+            if (!nodeValue || typeof nodeValue !== 'object') return;
+            const keyMatches =
+              normalizeAdmission(nodeKey) === admissionNeedle ||
+              String(nodeKey).trim() === String(studentId || '') ||
+              String(nodeKey).trim() === String(resolvedStudentKeyFromAdmission || '') ||
+              String(nodeKey).trim() === String(globalResolvedStudentKey || '');
+            if (!keyMatches) return;
+            const payments = extractLedgerPayments(nodeValue);
+            Object.entries(payments || {}).forEach(([paymentKey, payment]) => {
+              if (!payment || typeof payment !== 'object') return;
+              const normalized = normalizeApprovalRecord(paymentKey, {
+                ...payment,
+                studentId: payment.studentId || payment.studentKey || nodeKey || studentId || resolvedStudentKeyFromAdmission || globalResolvedStudentKey || '',
+                studentAdm: payment.studentAdm || payment.admissionNumber || payment.admissionNo || admission || '',
+                approvedBy: payment.approvedBy || 'Finance Ledger',
+                sourceModule: payment.sourceModule || payment.module || payment.paymentModule || 'finance',
+                paymentReferenceCode: payment.paymentReferenceCode || payment.referenceCode || payment.reference || payment.ref || '',
+                paymentMethod: payment.paymentMethod || payment.method || payment.mode || 'Cash',
+                paymentDate: parseTimestampLike(
+                  payment.paymentDate || payment.timestamp || payment.datePaid || payment.createdAt || payment.updatedAt || 0
+                ),
+                approvedAt: parseTimestampLike(
+                  payment.approvedAt || payment.timestamp || payment.createdAt || payment.updatedAt || payment.paymentDate || 0
+                ),
+                amountPaidNow: parseMoneyValue(
+                  payment.amountPaidNow ?? payment.amount ?? payment.value ?? payment.paid ?? payment.total ?? 0
+                ),
+              }, { year: yearStr });
+              if (!normalized) return;
+              normalized.modulePath = 'finance.html';
+              normalized.fromLedger = true;
+              merged.push(normalized);
+            });
+          });
+        }catch(_){}
+      }
+      return merged;
+    }
+
     async function fetchApprovalsForStudent(year, studentId, adm){
       const approvals = await loadApprovalsForYear(year);
-      const filtered = approvals.filter(rec => matchesStudent(rec, studentId, adm));
-      return filtered;
+      const approvalsHistoryRows = approvals.filter(rec => matchesStudent(rec, studentId, adm));
+      const financeLedgerRows = await fetchFinanceLedgerApprovalsForStudent(year, studentId, adm);
+      const deduped = [];
+      const byDuplicateKey = new Map();
+      const addRow = (row) => {
+        if (!row) return;
+        const duplicateKey = buildReceiptDuplicateKey(row);
+        const existing = byDuplicateKey.get(duplicateKey);
+        if (!existing){
+          byDuplicateKey.set(duplicateKey, row);
+          deduped.push(row);
+          return;
+        }
+        if (existing.fromLedger && !row.fromLedger){
+          byDuplicateKey.set(duplicateKey, row);
+          const index = deduped.indexOf(existing);
+          if (index >= 0) deduped[index] = row;
+        }
+      };
+      approvalsHistoryRows.forEach(addRow);
+      financeLedgerRows.forEach(addRow);
+      deduped.sort((a,b)=>{
+        const aTime = Number(a.approvedAt || a.paymentDate || a.receiptUpdatedAt || 0);
+        const bTime = Number(b.approvedAt || b.paymentDate || b.receiptUpdatedAt || 0);
+        if (aTime === bTime) return String(a.id || '').localeCompare(String(b.id || ''));
+        return bTime - aTime;
+      });
+      return deduped;
+    }
+
+    async function fetchReceiptRecordsForStudent(year, studentId, adm){
+      return fetchApprovalsForStudent(year, studentId, adm);
     }
 
     function resolveStudentId(query, students){
@@ -1082,10 +1466,35 @@
       if (students[query]) return query;
       const match = Object.keys(students).find(key => {
         const s = students[key];
-        const admissions = [s.admissionNumber, s.admissionNo, s.admNo, s.registrationNumber, s.autoId];
+        const admissions = [s.admissionNumber, s.admissionNo, s.admNo, s.registrationNumber, s.autoId, s.studentAdm, s.pupilId];
         return admissions.some(adm => adm && String(adm).trim().toLowerCase() === normalized);
       });
       return match || null;
+    }
+
+    async function resolveStudentRecordByAdmission(admission, studentsMap){
+      const needle = normalizeAdmission(admission);
+      if (!needle) return null;
+      const findInMap = (mapObj) => {
+        if (!mapObj || typeof mapObj !== 'object') return null;
+        const foundId = Object.keys(mapObj).find(key => {
+          const s = mapObj[key];
+          if (!s) return false;
+          const admissions = [s.admissionNumber, s.admissionNo, s.admNo, s.registrationNumber, s.autoId, s.studentAdm, s.pupilId];
+          return admissions.some(val => normalizeAdmission(val) === needle);
+        });
+        if (!foundId) return null;
+        return { id: foundId, record: mapObj[foundId] };
+      };
+      const local = findInMap(studentsMap || {});
+      if (local) return local;
+      try{
+        const globalStudentsSnap = await db.ref('students').once('value');
+        const globalStudents = globalStudentsSnap?.val?.() || {};
+        return findInMap(globalStudents);
+      }catch(_){
+        return null;
+      }
     }
 
     function findStudentByName(name, students){
@@ -1452,7 +1861,18 @@
           urlParams.set('school', window.currentSchoolId);
           syncUrlParams();
         }
-        const admission = state.studentRecord?.admissionNumber || normalizedApproval?.studentAdm || state.queryStudent || '';
+        let admission = state.studentRecord?.admissionNumber || normalizedApproval?.studentAdm || state.queryStudent || '';
+        const currentStudentName = buildFullName(state.studentRecord || {});
+        const needsStudentEnrichment = !state.studentRecord || !currentStudentName || /^student$/i.test(currentStudentName);
+        if (needsStudentEnrichment && admission){
+          const fallbackStudent = await resolveStudentRecordByAdmission(admission, state.students || {});
+          if (token !== renderToken) return;
+          if (fallbackStudent?.record){
+            state.studentId = fallbackStudent.id || state.studentId;
+            state.studentRecord = fallbackStudent.record;
+            admission = state.studentRecord?.admissionNumber || admission;
+          }
+        }
 
         if (!state.queryStudent && admission){
           urlParams.set('student', admission);
@@ -1460,16 +1880,18 @@
           state.queryStudent = admission;
         }
 
-        const approvals = (studentId || admission) ? await fetchApprovalsForStudent(state.year, studentId, admission) : [];
+        const receipts = (state.studentId || admission)
+          ? await fetchReceiptRecordsForStudent(state.year, state.studentId, admission)
+          : [];
         if (token !== renderToken) return;
-        state.approvals = approvals;
+        state.approvals = receipts;
 
         if (normalizedApproval){
-          const exists = approvals.find(a=>a.id === normalizedApproval.id);
+          const exists = receipts.find(a=>a.id === normalizedApproval.id);
           if (!exists) state.approvals.unshift(normalizedApproval);
           state.activeApproval = normalizedApproval;
         } else {
-          state.activeApproval = approvals[0] || null;
+          state.activeApproval = receipts[0] || null;
         }
 
         state.receiptNumbers = buildReceiptNumberMap(state.approvals);
@@ -1544,7 +1966,7 @@
       setField('fieldPayerContact', approval.payerContact || '--');
       setField('fieldAmountFigures', formatCurrency(approval.amountPaidNow));
       setField('fieldAmountWords', approval.amountWords || numberToWordsTZS(approval.amountPaidNow));
-      setField('fieldReference', approval.paymentReferenceCode || '--');
+      setField('fieldReference', `${approval.paymentReferenceCode || '--'}${approval.possibleDuplicate ? ' (Possible duplicate)' : ''}`);
       setField('fieldPaymentDate', formatDateOnly(approval.paymentDate));
       setField('paymentLabel', `${approval.moduleLabel || 'Payment'} -- ${formatCurrency(approval.amountPaidNow)}`);
       setField('paymentPathLabel', `Source: ${approval.modulePath}`);
@@ -1596,8 +2018,8 @@
         if (list) list.innerHTML = '';
         if (empty){
           empty.textContent = state.queryStudent
-            ? `No approved receipts for ${state.queryStudent} in ${state.year}.`
-            : `No approved receipts in ${state.year}.`;
+            ? `No receipts for ${state.queryStudent} in ${state.year}.`
+            : `No receipts in ${state.year}.`;
           empty.classList.remove('hidden');
         }
         return;
@@ -1607,11 +2029,12 @@
       list.innerHTML = state.approvals.map(item => {
         const active = state.activeApproval && item.id === state.activeApproval.id;
         const receiptNo = formatReceiptNumber(item);
+        const duplicateFlag = item.possibleDuplicate ? '<span class="ml-2 rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">Possible duplicate</span>' : '';
         return `
           <div class="list-card ${active ? 'border-sky-400 ring-2 ring-sky-500/40' : ''}" data-id="${item.id}">
             <div class="flex items-center justify-between gap-3">
               <div>
-                <p class="text-sm font-semibold text-white">${item.moduleLabel}</p>
+                <p class="text-sm font-semibold text-white">${item.moduleLabel}${duplicateFlag}</p>
                 <p class="text-xs text-slate-300">${receiptNo} &bull; ${formatDateOnly(item.approvedAt)} &bull; Ref ${item.paymentReferenceCode || '--'}</p>
               </div>
               <div class="text-right">
