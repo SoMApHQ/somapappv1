@@ -166,11 +166,12 @@
             <th>Date Shifted</th>
             <th>Probable School</th>
             <th>Status</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody id="shiftListBody">
           <tr>
-            <td colspan="8" class="text-center text-slate-500 py-4">No shift alerts yet. Teachers will flag students here.</td>
+            <td colspan="9" class="text-center text-slate-500 py-4">No shift alerts yet. Teachers will flag students here.</td>
           </tr>
         </tbody>
       </table>
@@ -192,6 +193,8 @@
 <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
 
 <script src="firebase.js"></script>
+<script src="shared/finance_math.js"></script>
+<script src="shared/shift_engine.js"></script>
 
 <script>
 (async function(){
@@ -212,7 +215,9 @@
   let monthAttendance = {};
   let db = null;
   let shiftReports = {};
+  let shiftReportsLegacy = {};
   let shiftRef = null;
+  let shiftRefLegacy = null;
   let currentSchool = null;
   let isSocrates = false;
 
@@ -521,19 +526,32 @@
   }
 
   // ---------- Shift reports ----------
-  function subscribeShiftReports() {
+  function getShiftReportPath(yearArg) {
+    return `years/${String(yearArg || getSelectedYear())}/shiftReports`;
+  }
+
+  function subscribeShiftReports(yearArg) {
     if (!db) return;
     if (shiftRef) shiftRef.off();
-    shiftRef = schoolRef('shiftReports');
+    if (shiftRefLegacy) shiftRefLegacy.off();
+    const selectedYear = String(yearArg || getSelectedYear());
+    shiftRef = schoolRef(getShiftReportPath(selectedYear));
     shiftRef.on('value', snap => {
       shiftReports = snap.exists() ? snap.val() : {};
+      renderShiftList();
+    });
+    shiftRefLegacy = schoolRef('shiftReports');
+    shiftRefLegacy.on('value', snap => {
+      shiftReportsLegacy = snap.exists() ? snap.val() : {};
       renderShiftList();
     });
   }
 
   function getShiftEntries() {
-    const data = shiftReports || {};
-    return Object.keys(data).map(key => ({ key, ...(data[key] || {}) }));
+    const scoped = shiftReports || {};
+    const legacy = shiftReportsLegacy || {};
+    const merged = { ...legacy, ...scoped };
+    return Object.keys(merged).map(key => ({ key, ...(merged[key] || {}) }));
   }
 
   function updateShiftAlertsBadge(pendingCount, totalCount) {
@@ -549,11 +567,11 @@
   function renderShiftList() {
     if (!shiftListBody) return;
     const entries = getShiftEntries();
-    const pendingCount = entries.filter(e => (e.status || 'pending') !== 'shifted').length;
+    const pendingCount = entries.filter(e => String(e.status || 'pending').toLowerCase() !== 'shifted').length;
     if (!entries.length) {
       shiftListBody.innerHTML = `
         <tr>
-          <td colspan="8" class="text-center text-slate-500 py-4">
+          <td colspan="9" class="text-center text-slate-500 py-4">
             No shift alerts yet. Teachers will flag students here.
           </td>
         </tr>`;
@@ -561,8 +579,8 @@
       return;
     }
     entries.sort((a, b) => {
-      const statusA = (a.status || 'pending') === 'shifted' ? 1 : 0;
-      const statusB = (b.status || 'pending') === 'shifted' ? 1 : 0;
+      const statusA = String(a.status || 'pending').toLowerCase() === 'shifted' ? 1 : 0;
+      const statusB = String(b.status || 'pending').toLowerCase() === 'shifted' ? 1 : 0;
       if (statusA !== statusB) return statusA - statusB;
       const dateA = a.flaggedDate || a.teacherReportedAt || '';
       const dateB = b.flaggedDate || b.teacherReportedAt || '';
@@ -579,6 +597,9 @@
           }`;
       const parentParts = [entry.parentName, entry.parentContact].filter(Boolean);
       const parentCell = parentParts.length ? parentParts.join(' | ') : '-';
+      const actionsCell = status === 'shifted'
+        ? `<a class="text-blue-600 hover:underline" href="Toattendancehtml/shiftedkids.html">Open in Shifted Hub</a>`
+        : `<button type="button" data-approve="${escapeHtml(entry.key)}" class="px-2 py-1 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60">Approve Shift</button>`;
       return `
         <tr>
           <td>${escapeHtml(entry.studentName || '')}</td>
@@ -589,10 +610,58 @@
           <td>${escapeHtml(entry.dateShifted || '-')}</td>
           <td>${escapeHtml(entry.probableSchool || '-')}</td>
           <td><span class="badge-status ${statusClass}">${escapeHtml(statusText)}</span></td>
+          <td>${actionsCell}</td>
         </tr>
       `;
     }).join('');
+    shiftListBody.querySelectorAll('[data-approve]').forEach((btn) => {
+      btn.addEventListener('click', () => approveShift(btn.dataset.approve, btn));
+    });
     updateShiftAlertsBadge(pendingCount, entries.length);
+  }
+
+  function showShiftNotice(message, tone = 'success') {
+    const id = 'shiftNoticeToast';
+    let toast = document.getElementById(id);
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = id;
+      toast.style.position = 'fixed';
+      toast.style.right = '16px';
+      toast.style.bottom = '16px';
+      toast.style.zIndex = '9999';
+      toast.style.padding = '10px 14px';
+      toast.style.borderRadius = '10px';
+      toast.style.color = '#fff';
+      toast.style.fontWeight = '600';
+      toast.style.boxShadow = '0 8px 24px rgba(0,0,0,.2)';
+      document.body.appendChild(toast);
+    }
+    toast.style.background = tone === 'error' ? '#b91c1c' : '#166534';
+    toast.textContent = message;
+    clearTimeout(showShiftNotice._timer);
+    showShiftNotice._timer = setTimeout(() => {
+      if (toast && toast.parentNode) toast.parentNode.removeChild(toast);
+    }, 2800);
+  }
+
+  async function approveShift(studentId, buttonEl) {
+    const sid = String(studentId || '').trim();
+    if (!sid) return;
+    if (!window.SomapShift?.approveShiftFromReport) {
+      alert('Shift engine is not loaded. Please refresh the page.');
+      return;
+    }
+    const selectedYear = String(getSelectedYear());
+    try {
+      if (buttonEl) buttonEl.disabled = true;
+      const result = await window.SomapShift.approveShiftFromReport(selectedYear, sid, { approvedBy: 'admin' });
+      showShiftNotice(result?.alreadyShifted ? 'Student already shifted.' : 'Shift approved successfully.', 'success');
+    } catch (err) {
+      console.error('Approve shift failed', err);
+      showShiftNotice(err?.message || 'Failed to approve shift.', 'error');
+      if (buttonEl) buttonEl.disabled = false;
+    }
   }
 
   // ---------- Daily register + analytics ----------
@@ -1175,7 +1244,7 @@
 
     wireUI();
     await setupDailyRegisterControls();
-    subscribeShiftReports();
+    subscribeShiftReports(getSelectedYear());
     renderShiftList();
     await computeAnalytics(currentDateStr);
 
@@ -1192,6 +1261,7 @@
         // Reload roster + analytics + daily register for the new year
         students = await loadStudentsFromDb(year);
         filtered = students.slice();
+        subscribeShiftReports(year);
         await computeAnalytics(currentDateStr);
         await computeDailyRegisterStats(el('registerDate')?.value || currentDateStr);
       });
