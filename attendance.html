@@ -838,8 +838,14 @@
     const studentIndex = {};
     const classNamesSet = new Set();
     const shiftedIdSet = new Set();
+    const shiftedNameSet = new Set();
     const shiftedByClass = {};
+    const matchedShiftedByClass = {};
     const normalizeStudentRef = (value) => String(value || '').trim().toLowerCase();
+    const normalizeStudentName = (value) => String(value || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
     const extractYear = (value) => {
       const raw = String(value || '').trim();
       if (!raw) return null;
@@ -869,6 +875,14 @@
         const normalized = normalizeStudentRef(ref);
         if (normalized) shiftedIdSet.add(normalized);
       });
+      [
+        entry.studentName,
+        entry.name,
+        entry.fullName
+      ].forEach(nameRef => {
+        const normalizedName = normalizeStudentName(nameRef);
+        if (normalizedName) shiftedNameSet.add(normalizedName);
+      });
 
       const rawClass = String(entry.className || entry.classLevel || entry.class || entry.grade || '').trim();
       if (rawClass) {
@@ -884,13 +898,18 @@
       const gender = normalizeGender(s.gender || s.sex || s.genderType);
       const studentId = s.id || s.studentId || s.studentID || s.admissionNo || s.admissionNumber || s.admission || '';
       const admissionNo = s.admissionNo || s.admissionNumber || s.admission || '';
-      const isShiftedStudent =
-        shiftedIdSet.has(normalizeStudentRef(studentId)) ||
-        shiftedIdSet.has(normalizeStudentRef(admissionNo));
-      if (isShiftedStudent) return;
       const fullName = [s.firstName, s.middleName, s.lastName]
         .filter(Boolean).join(' ').trim()
         || s.name || s.fullName || studentId || 'Unknown';
+      const isShiftedStudent =
+        shiftedIdSet.has(normalizeStudentRef(studentId)) ||
+        shiftedIdSet.has(normalizeStudentRef(admissionNo)) ||
+        shiftedNameSet.has(normalizeStudentName(fullName));
+      if (isShiftedStudent) {
+        const clsNorm = normalizeClassName(className);
+        matchedShiftedByClass[clsNorm] = (matchedShiftedByClass[clsNorm] || 0) + 1;
+        return;
+      }
       const key = studentId || fullName;
       studentIndex[key] = { name: fullName, gender, className };
       classNamesSet.add(className);
@@ -935,6 +954,24 @@
       if (info.gender === 'girls') {
         perClass[cls].registered.girls += 1;
         schoolTotals.registered.girls += 1;
+      }
+    });
+    classNames.forEach(cls => {
+      const clsNorm = normalizeClassName(cls);
+      const shiftedTarget = Number(shiftedByClass[clsNorm] || 0);
+      const shiftedMatched = Number(matchedShiftedByClass[clsNorm] || 0);
+      let deficit = Math.max(0, shiftedTarget - shiftedMatched);
+      while (deficit > 0 && perClass[cls].registered.total > 0) {
+        if (perClass[cls].registered.boys >= perClass[cls].registered.girls && perClass[cls].registered.boys > 0) {
+          perClass[cls].registered.boys -= 1;
+          schoolTotals.registered.boys = Math.max(0, schoolTotals.registered.boys - 1);
+        } else if (perClass[cls].registered.girls > 0) {
+          perClass[cls].registered.girls -= 1;
+          schoolTotals.registered.girls = Math.max(0, schoolTotals.registered.girls - 1);
+        }
+        perClass[cls].registered.total -= 1;
+        schoolTotals.registered.total = Math.max(0, schoolTotals.registered.total - 1);
+        deficit -= 1;
       }
     });
 
