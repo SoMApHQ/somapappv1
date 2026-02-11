@@ -1468,6 +1468,11 @@
         const name = String(
           currentSchool?.name || currentSchool?.code || ""
         ).toLowerCase().trim();
+        const storedSchool = String(
+          localStorage.getItem("somap_school") ||
+            sessionStorage.getItem("somap_school") ||
+            ""
+        ).toLowerCase().trim();
         const hint = String(
           extraHints?.schoolName || extraHints?.schoolId || ""
         ).toLowerCase().trim();
@@ -1477,6 +1482,7 @@
           id === "default" ||
           id.includes("socrates") ||
           name.includes("socrates") ||
+          storedSchool.includes("socrates") ||
           hint.includes("socrates");
 
         return looksLikeSocrates;
@@ -1496,7 +1502,14 @@
 
       async function loadTransportMapsForYear(year, legacyAllowed = isLegacyMergeSchool()) {
         const y = String(year || getActiveYearString());
-        const [enrollScopedSnap, registryScopedSnap, assignmentsScopedSnap] =
+        const [
+          enrollScopedSnap,
+          registryScopedSnap,
+          assignmentsScopedSnap,
+          enrollRootYearSnap,
+          registryRootYearSnap,
+          assignmentsRootYearSnap,
+        ] =
           await Promise.all([
             schoolRef(`years/${y}/transportEnrollments`)
               .once("value")
@@ -1507,6 +1520,24 @@
             schoolRef(`years/${y}/transportAssignments`)
               .once("value")
               .catch(() => ({ val: () => ({}) })),
+            legacyAllowed
+              ? db
+                  .ref(`years/${y}/transportEnrollments`)
+                  .once("value")
+                  .catch(() => ({ val: () => ({}) }))
+              : Promise.resolve({ val: () => ({}) }),
+            legacyAllowed
+              ? db
+                  .ref(`years/${y}/transportRegistry`)
+                  .once("value")
+                  .catch(() => ({ val: () => ({}) }))
+              : Promise.resolve({ val: () => ({}) }),
+            legacyAllowed
+              ? db
+                  .ref(`years/${y}/transportAssignments`)
+                  .once("value")
+                  .catch(() => ({ val: () => ({}) }))
+              : Promise.resolve({ val: () => ({}) }),
           ]);
 
         let enrollLegacy = {};
@@ -1531,9 +1562,18 @@
         }
 
         return {
-          enrollments: { ...enrollLegacy, ...(enrollScopedSnap.val() || {}) },
-          registry: { ...registryLegacy, ...(registryScopedSnap.val() || {}) },
+          enrollments: {
+            ...(enrollRootYearSnap.val() || {}),
+            ...enrollLegacy,
+            ...(enrollScopedSnap.val() || {}),
+          },
+          registry: {
+            ...(registryRootYearSnap.val() || {}),
+            ...registryLegacy,
+            ...(registryScopedSnap.val() || {}),
+          },
           assignments: {
+            ...(assignmentsRootYearSnap.val() || {}),
             ...assignmentsLegacy,
             ...(assignmentsScopedSnap.val() || {}),
           },
@@ -1580,6 +1620,8 @@
         }
 
         if (preferredNameNorm || preferredPhone) {
+          let bestName = null;
+          let bestPhone = null;
           for (const [key, record] of entries) {
             if (!record || typeof record !== "object") continue;
             const recName = normalizeNameForMatch(
@@ -1633,7 +1675,11 @@
             if (nameMatch && phoneMatch) {
               return { key, record };
             }
+            if (!bestName && nameMatch) bestName = { key, record };
+            if (!bestPhone && phoneMatch) bestPhone = { key, record };
           }
+          if (bestName) return bestName;
+          if (bestPhone) return bestPhone;
         }
 
         return { key: null, record: null };
@@ -1667,24 +1713,47 @@
           await loadTransportMapsForYear(y, legacyOk);
 
         const matchOptions = { fullName, parentPhone };
-        const assignMatch = pickMatchingRecord(
+        let assignMatch = pickMatchingRecord(
           assignments,
           studentId,
           admissionNorm,
           matchOptions
         );
-        const enrollMatch = pickMatchingRecord(
+        let enrollMatch = pickMatchingRecord(
           enrollments,
           studentId,
           admissionNorm,
           matchOptions
         );
-        const registryMatch = pickMatchingRecord(
+        let registryMatch = pickMatchingRecord(
           registry,
           studentId,
           admissionNorm,
           matchOptions
         );
+
+        // If initial school-context detection missed legacy mode, force one retry against legacy+scoped merged maps.
+        if (!legacyOk && !assignMatch.record && !enrollMatch.record && !registryMatch.record) {
+          const retryMaps = await loadTransportMapsForYear(y, true);
+          assignMatch = pickMatchingRecord(
+            retryMaps.assignments,
+            studentId,
+            admissionNorm,
+            matchOptions
+          );
+          enrollMatch = pickMatchingRecord(
+            retryMaps.enrollments,
+            studentId,
+            admissionNorm,
+            matchOptions
+          );
+          registryMatch = pickMatchingRecord(
+            retryMaps.registry,
+            studentId,
+            admissionNorm,
+            matchOptions
+          );
+        }
 
         let resolvedStudentId =
           assignMatch.key || enrollMatch.key || registryMatch.key || studentId;
@@ -1698,6 +1767,9 @@
             assignDirectScoped,
             enrollDirectScoped,
             regDirectScoped,
+            assignDirectRootYear,
+            enrollDirectRootYear,
+            regDirectRootYear,
             assignDirectLegacy,
             enrollDirectLegacy,
             regDirectLegacy,
@@ -1711,28 +1783,49 @@
             schoolRef(`years/${y}/transportRegistry/${admissionKey}`)
               .once("value")
               .catch(() => ({ val: () => null })),
-            legacyOk
-              ? db
-                  .ref(`transportAssignments/${y}/${admissionKey}`)
-                  .once("value")
-                  .catch(() => ({ val: () => null }))
-              : Promise.resolve({ val: () => null }),
-            legacyOk
-              ? db
-                  .ref(`transport_enrollments/${admissionKey}`)
-                  .once("value")
-                  .catch(() => ({ val: () => null }))
-              : Promise.resolve({ val: () => null }),
-            legacyOk
-              ? db
-                  .ref(`transportRegistry/${y}/${admissionKey}`)
-                  .once("value")
-                  .catch(() => ({ val: () => null }))
-              : Promise.resolve({ val: () => null }),
+            db
+              .ref(`years/${y}/transportAssignments/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            db
+              .ref(`years/${y}/transportEnrollments/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            db
+              .ref(`years/${y}/transportRegistry/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            db
+              .ref(`transportAssignments/${y}/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            db
+              .ref(`transport_enrollments/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
+            db
+              .ref(`transportRegistry/${y}/${admissionKey}`)
+              .once("value")
+              .catch(() => ({ val: () => null })),
           ]);
-          assign = assign || assignDirectScoped.val() || assignDirectLegacy.val() || null;
-          enroll = enroll || enrollDirectScoped.val() || enrollDirectLegacy.val() || null;
-          reg = reg || regDirectScoped.val() || regDirectLegacy.val() || null;
+          assign =
+            assign ||
+            assignDirectScoped.val() ||
+            assignDirectRootYear.val() ||
+            assignDirectLegacy.val() ||
+            null;
+          enroll =
+            enroll ||
+            enrollDirectScoped.val() ||
+            enrollDirectRootYear.val() ||
+            enrollDirectLegacy.val() ||
+            null;
+          reg =
+            reg ||
+            regDirectScoped.val() ||
+            regDirectRootYear.val() ||
+            regDirectLegacy.val() ||
+            null;
           if ((assign || enroll || reg) && admissionKey) {
             resolvedStudentId = admissionKey;
           }
@@ -1758,10 +1851,17 @@
           admissionKey
         ) {
           try {
-            const admissionAssignSnap = await schoolRef(`years/${y}/transportAssignments/${admissionKey}`)
-              .once("value")
-              .catch(() => ({ val: () => null }));
+            const [admissionAssignSnap, admissionAssignRootSnap] = await Promise.all([
+              schoolRef(`years/${y}/transportAssignments/${admissionKey}`)
+                .once("value")
+                .catch(() => ({ val: () => null })),
+              db
+                .ref(`years/${y}/transportAssignments/${admissionKey}`)
+                .once("value")
+                .catch(() => ({ val: () => null })),
+            ]);
             const admissionAssignScoped = admissionAssignSnap.val();
+            const admissionAssignRoot = admissionAssignRootSnap.val();
             let admissionAssignLegacy = null;
             if (!admissionAssignScoped && legacyOk) {
               const s = await db
@@ -1770,7 +1870,8 @@
                 .catch(() => ({ val: () => null }));
               admissionAssignLegacy = s.val();
             }
-            const admissionAssign = admissionAssignScoped || admissionAssignLegacy || null;
+            const admissionAssign =
+              admissionAssignScoped || admissionAssignRoot || admissionAssignLegacy || null;
             if (admissionAssign && String(admissionAssign.status || "").toLowerCase() === "using") {
               assign = admissionAssign;
               resolvedStudentId = admissionKey;
@@ -1809,6 +1910,80 @@
             !enrollmentSignalsUsing
           ) {
             return { studentId: resolvedStudentId, enrollment: null };
+          }
+        }
+
+        // Last-resort key probe: check common key variants across scoped/root/legacy nodes.
+        // This covers cases where enrollment exists but lives under a different student key shape.
+        if (!assign && !enroll && !reg) {
+          const probeIds = Array.from(
+            new Set(
+              [studentId, resolvedStudentId, admissionKey]
+                .map((v) => String(v || "").trim())
+                .filter(Boolean)
+            )
+          );
+          if (probeIds.length) {
+            const probes = [];
+            for (const id of probeIds) {
+              probes.push(
+                schoolRef(`years/${y}/transportAssignments/${id}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null })),
+                schoolRef(`years/${y}/transportEnrollments/${id}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null })),
+                schoolRef(`years/${y}/transportRegistry/${id}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null })),
+                db.ref(`years/${y}/transportAssignments/${id}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null })),
+                db.ref(`years/${y}/transportEnrollments/${id}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null })),
+                db.ref(`years/${y}/transportRegistry/${id}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null })),
+                db.ref(`transportAssignments/${y}/${id}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null })),
+                db.ref(`transportRegistry/${y}/${id}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null })),
+                db.ref(`transport_enrollments/${id}`)
+                  .once("value")
+                  .catch(() => ({ val: () => null }))
+              );
+            }
+            const probeSnaps = await Promise.all(probes);
+            for (const snap of probeSnaps) {
+              const value = snap?.val ? snap.val() : null;
+              if (!value || typeof value !== "object") continue;
+              const hasAssignSignals = !!(
+                value.amStop ||
+                value.pmStop ||
+                value.morningRouteId ||
+                value.eveningRouteId ||
+                value.baseMonthlyFee ||
+                String(value.status || "").toLowerCase().trim() === "using"
+              );
+              const hasRegSignals = !!(
+                value.routeId ||
+                value.stopName ||
+                value.monthlyFee ||
+                value.amStop ||
+                value.pmStop ||
+                value.using === true ||
+                String(value.status || "").toLowerCase().trim() === "using"
+              );
+              if (!assign && hasAssignSignals) assign = value;
+              if (!reg && hasRegSignals) reg = value;
+              if (!enroll) enroll = value;
+            }
+            if ((assign || enroll || reg) && admissionKey) {
+              resolvedStudentId = admissionKey;
+            }
           }
         }
 
