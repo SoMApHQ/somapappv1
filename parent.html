@@ -1433,8 +1433,44 @@
                 });
               }
             } else {
-              childrenList.innerHTML =
-                '<div class="muted text-sm">Your child is not currently using transport.</div>';
+              const adm = currentStudent.admissionNumber || currentStudentId;
+              const schoolKey =
+                currentStudent.schoolId ||
+                currentStudent.school ||
+                localStorage.getItem("somap_school") ||
+                "socrates-school";
+              const schoolParam = encodeURIComponent(schoolKey);
+              childrenList.innerHTML = `
+            <div class="glass bg-white/5 border border-white/10 rounded-xl p-4">
+              <div class="flex items-center justify-between">
+                <div>
+                  <div class="title font-bold">${
+                    `${currentStudent.firstName || ""} ${currentStudent.middleName || ""} ${currentStudent.lastName || ""}`
+                      .replace(/\s+/g, " ")
+                      .trim() || "—"
+                  }</div>
+                  <div class="muted text-xs mt-1">Admission: ${adm}</div>
+                  <div class="muted text-xs">Transport enrollment could not be auto-confirmed from this dashboard. Open transport payments to view the current record.</div>
+                </div>
+                <button class="btn" data-open-transport-fallback="1" data-student-id="${currentStudentId}" data-student-adm="${adm}">
+                  <i class="fas fa-credit-card mr-2"></i>Open Transport Payments
+                </button>
+              </div>
+            </div>
+          `;
+              const fallbackBtn = childrenList.querySelector(
+                "button[data-open-transport-fallback='1']"
+              );
+              if (fallbackBtn) {
+                fallbackBtn.addEventListener("click", () => {
+                  localStorage.setItem("parentFocusStudent", currentStudentId);
+                  localStorage.setItem("parentFocusAdm", adm);
+                  if (schoolKey) localStorage.setItem("somap_school", schoolKey);
+                  window.location.href = `transporthtml/transportpayments.html?studentKey=${encodeURIComponent(
+                    currentStudentId
+                  )}&student=${encodeURIComponent(adm)}&year=${year}&school=${schoolParam}`;
+                });
+              }
             }
             return;
           }
@@ -1685,6 +1721,32 @@
         return { key: null, record: null };
       }
 
+      function pickRecordByCandidateNorms(records, candidateNorms) {
+        const norms = new Set(
+          (candidateNorms || []).map((v) => normalizeIdentifier(v)).filter(Boolean)
+        );
+        if (!norms.size) return { key: null, record: null };
+        const entries = Object.entries(records || {});
+        for (const [key, record] of entries) {
+          if (norms.has(normalizeIdentifier(key))) return { key, record };
+        }
+        for (const [key, record] of entries) {
+          if (!record || typeof record !== "object") continue;
+          const candidates = [
+            record.admissionNo,
+            record.admissionNumber,
+            record.studentAdm,
+            record.studentId,
+            record.admission,
+            record.id,
+          ];
+          if (candidates.some((c) => norms.has(normalizeIdentifier(c)))) {
+            return { key, record };
+          }
+        }
+        return { key: null, record: null };
+      }
+
       async function resolveTransportEnrollmentForStudent(
         year,
         studentId,
@@ -1753,6 +1815,78 @@
             admissionNorm,
             matchOptions
           );
+        }
+
+        // Align with transportpayments alias resolution:
+        // resolve student key via students map, then rematch transport maps using key aliases.
+        if (!assignMatch.record && !enrollMatch.record && !registryMatch.record) {
+          let allStudents = {};
+          try {
+            const [scopedStudentsSnap, rootStudentsSnap] = await Promise.all([
+              schoolRef("students").once("value").catch(() => ({ val: () => ({}) })),
+              db.ref("students").once("value").catch(() => ({ val: () => ({}) })),
+            ]);
+            const scopedStudents = scopedStudentsSnap.val() || {};
+            const rootStudents = rootStudentsSnap.val() || {};
+            allStudents = { ...rootStudents, ...scopedStudents };
+          } catch (_) {
+            allStudents = {};
+          }
+
+          let resolvedStudentKey = null;
+          if (admissionNorm || studentId) {
+            const idNorm = normalizeIdentifier(studentId);
+            for (const [k, rec] of Object.entries(allStudents || {})) {
+              if (!rec || typeof rec !== "object") continue;
+              const candidates = [
+                k,
+                rec.admissionNumber,
+                rec.admissionNo,
+                rec.studentAdm,
+                rec.admission,
+                rec.studentId,
+              ];
+              if (
+                candidates.some((v) => {
+                  const n = normalizeIdentifier(v);
+                  return (admissionNorm && n === admissionNorm) || (idNorm && n === idNorm);
+                })
+              ) {
+                resolvedStudentKey = k;
+                break;
+              }
+            }
+          }
+
+          const candidateNorms = [
+            studentId,
+            admissionKey,
+            resolvedStudentKey,
+            studentRecord?.studentId,
+            studentRecord?.id,
+            studentRecord?.admissionNo,
+            studentRecord?.admission,
+          ];
+
+          if (resolvedStudentKey && allStudents[resolvedStudentKey]) {
+            const resolvedRec = allStudents[resolvedStudentKey];
+            candidateNorms.push(
+              resolvedRec.admissionNumber,
+              resolvedRec.admissionNo,
+              resolvedRec.studentAdm,
+              resolvedRec.admission,
+              resolvedRec.studentId
+            );
+          }
+
+          const aliasAssign = pickRecordByCandidateNorms(assignments, candidateNorms);
+          const aliasEnroll = pickRecordByCandidateNorms(enrollments, candidateNorms);
+          const aliasRegistry = pickRecordByCandidateNorms(registry, candidateNorms);
+          if (aliasAssign.record || aliasEnroll.record || aliasRegistry.record) {
+            assignMatch = aliasAssign.record ? aliasAssign : assignMatch;
+            enrollMatch = aliasEnroll.record ? aliasEnroll : enrollMatch;
+            registryMatch = aliasRegistry.record ? aliasRegistry : registryMatch;
+          }
         }
 
         let resolvedStudentId =
