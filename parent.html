@@ -1463,9 +1463,23 @@
           .replace(/[^A-Z0-9]/g, "");
       }
 
-      function isLegacyMergeSchool() {
-        const id = String(currentSchool?.id || "").toLowerCase();
-        return id === "socrates-school" || id === "default";
+      function isLegacyMergeSchool(extraHints = {}) {
+        const id = String(currentSchool?.id || "").toLowerCase().trim();
+        const name = String(
+          currentSchool?.name || currentSchool?.code || ""
+        ).toLowerCase().trim();
+        const hint = String(
+          extraHints?.schoolName || extraHints?.schoolId || ""
+        ).toLowerCase().trim();
+
+        const looksLikeSocrates =
+          id === "socrates-school" ||
+          id === "default" ||
+          id.includes("socrates") ||
+          name.includes("socrates") ||
+          hint.includes("socrates");
+
+        return looksLikeSocrates;
       }
 
       function normalizeNameForMatch(value) {
@@ -1480,7 +1494,7 @@
         return String(value || "").replace(/\D/g, "");
       }
 
-      async function loadTransportMapsForYear(year) {
+      async function loadTransportMapsForYear(year, legacyAllowed = isLegacyMergeSchool()) {
         const y = String(year || getActiveYearString());
         const [enrollScopedSnap, registryScopedSnap, assignmentsScopedSnap] =
           await Promise.all([
@@ -1498,7 +1512,7 @@
         let enrollLegacy = {};
         let registryLegacy = {};
         let assignmentsLegacy = {};
-        if (isLegacyMergeSchool()) {
+        if (legacyAllowed) {
           const [enrollLegacySnap, registryLegacySnap, assignmentsLegacySnap] =
             await Promise.all([
               db.ref("transport_enrollments")
@@ -1580,7 +1594,37 @@
                 record.guardianPhone ||
                 ""
             );
-            const nameMatch = preferredNameNorm && recName === preferredNameNorm;
+            const simpleTokens = (s) =>
+              String(s || "")
+                .toLowerCase()
+                .replace(/[^a-z0-9]/g, " ")
+                .split(/\s+/)
+                .filter(Boolean);
+            const preferTokens = simpleTokens(options.fullName || "");
+            const recTokens = simpleTokens(
+              record.fullName ||
+                record.studentName ||
+                `${record.firstName || ""} ${record.middleName || ""} ${record.lastName || ""}`
+            );
+
+            const firstLastMatch = (() => {
+              if (preferTokens.length < 2 || recTokens.length < 2) return false;
+              const pFirst = preferTokens[0];
+              const pLast = preferTokens[preferTokens.length - 1];
+              const rFirst = recTokens[0];
+              const rLast = recTokens[recTokens.length - 1];
+              return pFirst === rFirst && pLast === rLast;
+            })();
+
+            const containsMatch = (() => {
+              const p = preferTokens.join(" ");
+              const r = recTokens.join(" ");
+              return p && r && (r.includes(p) || p.includes(r));
+            })();
+
+            const nameMatch =
+              preferredNameNorm &&
+              (recName === preferredNameNorm || firstLastMatch || containsMatch);
             const phoneMatch =
               preferredPhone &&
               recPhone &&
@@ -1601,6 +1645,10 @@
         studentRecord
       ) {
         const y = String(year || getActiveYearString());
+        const legacyOk = isLegacyMergeSchool({
+          schoolName: studentRecord?.schoolName,
+          schoolId: studentRecord?.schoolId || studentRecord?.school,
+        });
         const admissionKey =
           String(studentRecord?.admissionNumber || studentRecord?.pupilId || "").trim();
         const admissionNorm = normalizeIdentifier(
@@ -1616,7 +1664,7 @@
           studentRecord?.motherPhone ||
           "";
         const { assignments, enrollments, registry } =
-          await loadTransportMapsForYear(y);
+          await loadTransportMapsForYear(y, legacyOk);
 
         const matchOptions = { fullName, parentPhone };
         const assignMatch = pickMatchingRecord(
@@ -1663,19 +1711,19 @@
             schoolRef(`years/${y}/transportRegistry/${admissionKey}`)
               .once("value")
               .catch(() => ({ val: () => null })),
-            isLegacyMergeSchool()
+            legacyOk
               ? db
                   .ref(`transportAssignments/${y}/${admissionKey}`)
                   .once("value")
                   .catch(() => ({ val: () => null }))
               : Promise.resolve({ val: () => null }),
-            isLegacyMergeSchool()
+            legacyOk
               ? db
                   .ref(`transport_enrollments/${admissionKey}`)
                   .once("value")
                   .catch(() => ({ val: () => null }))
               : Promise.resolve({ val: () => null }),
-            isLegacyMergeSchool()
+            legacyOk
               ? db
                   .ref(`transportRegistry/${y}/${admissionKey}`)
                   .once("value")
@@ -1697,7 +1745,7 @@
               .catch(() => ({ val: () => null }));
             const admissionAssignScoped = admissionAssignSnap.val();
             let admissionAssignLegacy = null;
-            if (!admissionAssignScoped && isLegacyMergeSchool()) {
+            if (!admissionAssignScoped && legacyOk) {
               const s = await db
                 .ref(`transportAssignments/${y}/${admissionKey}`)
                 .once("value")
