@@ -1738,7 +1738,25 @@
           }
         }
 
-        if (assign && String(assign.status || "").toLowerCase() !== "using" && admissionKey) {
+        const assignmentStatus = String(assign?.status || "").toLowerCase().trim();
+        const assignmentHasExplicitStatus = Boolean(assignmentStatus);
+        const assignmentExplicitlyInactive = [
+          "not_using",
+          "not using",
+          "inactive",
+          "stopped",
+          "disabled",
+          "cancelled",
+          "canceled",
+          "off",
+        ].includes(assignmentStatus);
+
+        if (
+          assign &&
+          assignmentHasExplicitStatus &&
+          assignmentStatus !== "using" &&
+          admissionKey
+        ) {
           try {
             const admissionAssignSnap = await schoolRef(`years/${y}/transportAssignments/${admissionKey}`)
               .once("value")
@@ -1757,18 +1775,71 @@
               assign = admissionAssign;
               resolvedStudentId = admissionKey;
             } else {
-              return { studentId: resolvedStudentId, enrollment: null };
+              const registrySignalsUsing = reg && reg.using === true;
+              const enrollmentSignalsUsing = !!enroll;
+              if (
+                assignmentExplicitlyInactive &&
+                !registrySignalsUsing &&
+                !enrollmentSignalsUsing
+              ) {
+                return { studentId: resolvedStudentId, enrollment: null };
+              }
             }
           } catch (_) {
+            const registrySignalsUsing = reg && reg.using === true;
+            const enrollmentSignalsUsing = !!enroll;
+            if (
+              assignmentExplicitlyInactive &&
+              !registrySignalsUsing &&
+              !enrollmentSignalsUsing
+            ) {
+              return { studentId: resolvedStudentId, enrollment: null };
+            }
+          }
+        } else if (
+          assign &&
+          assignmentHasExplicitStatus &&
+          assignmentStatus !== "using"
+        ) {
+          const registrySignalsUsing = reg && reg.using === true;
+          const enrollmentSignalsUsing = !!enroll;
+          if (
+            assignmentExplicitlyInactive &&
+            !registrySignalsUsing &&
+            !enrollmentSignalsUsing
+          ) {
             return { studentId: resolvedStudentId, enrollment: null };
           }
-        } else if (assign && String(assign.status || "").toLowerCase() !== "using") {
-          return { studentId: resolvedStudentId, enrollment: null };
         }
 
         const usingByAssignment =
-          assign && String(assign.status || "").toLowerCase() === "using";
-        const usingByRegistry = reg && reg.using === true;
+          !!assign &&
+          (
+            assignmentStatus === "using" ||
+            (!assignmentHasExplicitStatus &&
+              !!(
+                assign.amStop ||
+                assign.pmStop ||
+                assign.morningRouteId ||
+                assign.eveningRouteId ||
+                assign.baseMonthlyFee
+              ))
+          );
+        const usingByRegistry =
+          !!reg &&
+          (
+            reg.using === true ||
+            reg.isUsing === true ||
+            reg.active === true ||
+            String(reg.status || "").toLowerCase().trim() === "using" ||
+            !!(
+              reg.routeId ||
+              reg.stopName ||
+              reg.monthlyFee ||
+              reg.amStop ||
+              reg.pmStop
+            )
+          );
         const usingByEnrollment = !!enroll;
 
         if (!usingByAssignment && !usingByRegistry && !usingByEnrollment) {
