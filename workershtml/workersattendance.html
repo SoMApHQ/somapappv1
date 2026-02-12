@@ -181,8 +181,6 @@
   <script type="module">
     import {
       ensureAnonymousAuth,
-      linkDeviceToWorker,
-      getLinkedWorkerId,
       todayYMD,
       yyyymm,
       localTs,
@@ -236,17 +234,10 @@
     const DEVICE_ID_KEY = 'somap_workers_device_id';
     const PUBLIC_IP_ENDPOINT = 'https://api.ipify.org';
 
-    const db = firebase.database();
+    let db = null;
 
     const DAY_START = '07:30';
     const DAY_END = '16:00';
-
-    ensureAnonymousAuth()
-      .then(init)
-      .catch(err => {
-        console.error(err);
-        toast(err.message || 'Initialization error', 'error');
-      });
 
     let actionsBound = false;
     function bindActionsOnce() {
@@ -272,7 +263,10 @@
 
     function schoolRef(subPath) {
       const somap = getSomap();
-      if (!somap?.P) throw new Error('School context is not ready');
+      // Safe fallback: if SOMAP or P helper is missing, use raw path.
+      if (!somap || typeof somap.P !== 'function') {
+        return db.ref(subPath);
+      }
       return db.ref(somap.P(subPath));
     }
 
@@ -346,34 +340,59 @@
       return { snap: scopedSnap || legacySnap, source: 'scoped' };
     }
 
-    function resolveWorkerIdFallback() {
-      const fromQuery = new URLSearchParams(window.location.search).get('workerId');
-      const fromStorage = localStorage.getItem('workerId')
-        || sessionStorage.getItem('workerId')
-        || sessionStorage.getItem('teacherWorkerId');
-      return (fromQuery || fromStorage || '').trim();
+    function resolveWorkerIdFromStorage() {
+      // 1) Direct workerId in storage
+      const direct =
+        localStorage.getItem('workerId') ||
+        sessionStorage.getItem('workerId');
+      if (direct && direct.trim()) return direct.trim();
+
+      // 2) Optional workerProfile JSON in session storage
+      const profileRaw = sessionStorage.getItem('workerProfile');
+      if (profileRaw) {
+        try {
+          const parsed = JSON.parse(profileRaw);
+          const id = parsed.id || parsed.workerId;
+          if (id) return String(id).trim();
+        } catch (e) {
+          console.warn('Failed to parse workerProfile from sessionStorage', e);
+        }
+      }
+
+      return '';
     }
 
     async function init() {
       bindActionsOnce();
-      setInterval(updateWorkerMetaLine, 1000);
       try {
         initSchoolContext();
         initYearContext();
         normalizeNow();
         ensureLocalDeviceId();
-
-        const workerId = await getLinkedWorkerId() || resolveWorkerIdFallback();
+        // Resolve workerId ONLY from allowed storage locations.
+        const workerId = resolveWorkerIdFromStorage();
         if (!workerId) {
           toast('Session ya worker haijakamilika. Ingia tena.', 'error');
+          setTimeout(() => {
+            window.location.href = '../index.html';
+          }, 1800);
           return;
         }
         state.workerId = workerId;
-        try {
-          await linkDeviceToWorker(workerId);
-        } catch (linkErr) {
-          console.warn('Device link warning', linkErr);
+
+        // Seed profile from sessionStorage.workerProfile if present for faster name display.
+        const profileRaw = sessionStorage.getItem('workerProfile');
+        if (profileRaw) {
+          try {
+            const parsed = JSON.parse(profileRaw);
+            if (parsed && typeof parsed === 'object') {
+              state.profile = parsed;
+            }
+          } catch (e) {
+            console.warn('Failed to parse workerProfile for initial display', e);
+          }
         }
+        updateWorkerMetaLine();
 
         await loadSettings();
         await loadProfile().catch((err) => {
@@ -387,16 +406,66 @@
     }
 
     async function loadProfile() {
-      const { snap } = await scopedOrSocratesLegacy(
-        scopedPath(`workers/${state.workerId}`),
-        `workers/${state.workerId}`
-      );
-      if (!snap.exists()) throw new Error('Worker profile missing');
+      if (!state.workerId) return;
+
+      const systemYear = String(new Date().getFullYear());
+      let snap = null;
+
+      // 1) Primary: years/{systemYear}/workers/{workerId} (school-scoped via SOMAP.P)
+      try {
+        snap = await schoolRef(`years/${systemYear}/workers/${state.workerId}`).once('value');
+      } catch (err) {
+        if (!isPermissionDenied(err)) {
+          throw err;
+        }
+        console.warn('Permission denied on primary worker profile path', err);
+      }
+
+      // 2) Fallback: years/{selectedYear}/workers/{workerId}
+      if (!snap || !snap.exists()) {
+        const selectedYear = state.year || systemYear;
+        if (selectedYear !== systemYear || !snap) {
+          try {
+            const altSnap = await schoolRef(`years/${selectedYear}/workers/${state.workerId}`).once('value');
+            if (altSnap.exists()) {
+              snap = altSnap;
+            }
+          } catch (err) {
+            if (!isPermissionDenied(err)) {
+              throw err;
+            }
+            console.warn('Permission denied on selected-year worker profile path', err);
+          }
+        }
+      }
+
+      // 3) Last fallback: legacy workers/{workerId}
+      if (!snap || !snap.exists()) {
+        try {
+          const legacySnap = await db.ref(`workers/${state.workerId}`).once('value');
+          if (legacySnap.exists()) {
+            snap = legacySnap;
+          }
+        } catch (err) {
+          if (!isPermissionDenied(err)) {
+            throw err;
+          }
+          console.warn('Permission denied on legacy worker profile path', err);
+        }
+      }
+
+      if (!snap || !snap.exists()) {
+        console.warn('Worker profile missing from all known paths');
+        return;
+      }
+
       const raw = snap.val() || {};
       const nested = raw.profile || {};
       state.profile = Object.keys(nested).length ? nested : raw;
+
       if (schoolNameEl && state.schoolName) {
-        schoolNameEl.textContent = `${state.schoolName} • ${state.profile.role || ''}`.trim();
+        const roleLabel = state.profile.role || localStorage.getItem('role') || '';
+        schoolNameEl.textContent = `${state.schoolName} • ${roleLabel}`.trim();
       }
       updateWorkerMetaLine();
     }
@@ -433,16 +502,37 @@
     }
 
     function getWorkerName() {
+      // 1) Immediate from localStorage/sessionStorage if available
+      const storedName =
+        localStorage.getItem('fullNameUpper') ||
+        sessionStorage.getItem('fullNameUpper') ||
+        localStorage.getItem('somap_workerName') ||
+        sessionStorage.getItem('somap_workerName');
+      const storedRole =
+        localStorage.getItem('role') ||
+        sessionStorage.getItem('role') ||
+        (state.profile && state.profile.role) ||
+        '';
+      if (storedName) {
+        return storedRole ? `${storedName} • ${storedRole}` : storedName;
+      }
+
+      // 2) From loaded profile
       const p = state.profile || {};
-      return p.fullNameUpper
-        || [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' ')
-        || localStorage.getItem('somap_workerName')
-        || sessionStorage.getItem('fullNameUpper')
-        || state.workerId
-        || localStorage.getItem('fullNameUpper')
-        || sessionStorage.getItem('workerId')
-        || localStorage.getItem('workerId')
-        || 'Worker';
+      const profileName =
+        p.fullNameUpper ||
+        [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' ');
+      if (profileName) {
+        return p.role ? `${profileName} • ${p.role}` : profileName;
+      }
+
+      // 3) Fallbacks tied to workerId
+      return (
+        state.workerId ||
+        sessionStorage.getItem('workerId') ||
+        localStorage.getItem('workerId') ||
+        'Worker'
+      );
     }
 
     function updateWorkerMetaLine() {
@@ -462,6 +552,11 @@
         second: '2-digit'
       });
       workerMetaLine.textContent = `${getWorkerName()} • ${datePart} • ${timePart}`;
+    }
+
+    function startClock() {
+      updateWorkerMetaLine();
+      setInterval(updateWorkerMetaLine, 1000);
     }
 
     function openReasonModal({ title, message, placeholder }) {
@@ -671,7 +766,10 @@
               message: 'Umechelewa. Tafadhali andika sababu kabla ya kuhifadhi.',
               placeholder: 'Kwa nini umechelewa leo?'
             });
-            if (input === null) return;
+            if (input === null) {
+              toast('Check-in imeghairiwa; hakuna kilichohifadhiwa.', 'info');
+              return;
+            }
             reason = input;
           }
           payload.checkInTs = timestamp;
@@ -692,7 +790,10 @@
                 : 'Umetoka kuchelewa. Tafadhali andika ulikuwa unafanya nini hadi kuchelewa.',
               placeholder: 'Andika sababu hapa...'
             });
-            if (input === null) return;
+            if (input === null) {
+              toast('Check-out imeghairiwa; hakuna kilichohifadhiwa.', 'info');
+              return;
+            }
             reason = input;
           }
           payload.checkOutTs = timestamp;
@@ -832,15 +933,15 @@
     }
 
     function statusFromLegacy(record, kind) {
-      const field = kind === 'in' ? 'checkInStatus' : 'checkOutStatus';
-      if (record && record[field]) return record[field];
+      const approved = record?.approved;
+      if (approved === true) return 'approved';
+      if (approved === false && record?.approvedTs) return 'rejected';
+
       if (kind === 'in') {
-        if (record?.approved === true) return 'approved';
-        if (record?.approved === false && record?.approvedTs) return 'rejected';
         return record?.checkInTs ? 'pending' : '--';
       }
-      if (!record?.checkOutTs) return '--';
-      return 'pending';
+
+      return record?.checkOutTs ? 'pending' : '--';
     }
 
     async function renderTable() {
@@ -978,6 +1079,53 @@
         await refreshAll();
       };
     }
+
+    async function boot() {
+      // Always start the clock/date at the top, even if Firebase fails.
+      startClock();
+
+      if (!window.firebase || typeof firebase.database !== 'function') {
+        console.error('Firebase not loaded on workers attendance page.');
+        if (wifiStatus) {
+          wifiStatus.textContent = 'Hatuwezi kuunganisha Firebase kwa sasa. Hakikisha uko mtandaoni kisha jaribu tena kufungua ukurasa.';
+        }
+        toast('Firebase haijapakia. Hakikisha mtandao uko sawa kisha jaribu tena.', 'error');
+        return;
+      }
+
+      try {
+        db = firebase.database();
+      } catch (err) {
+        console.error('Failed to initialize Firebase database', err);
+        if (wifiStatus) {
+          wifiStatus.textContent = 'Hitilafu kuanzisha hifadhidata ya Firebase. Jaribu ku-refresh au kumjulisha msimamizi.';
+        }
+        toast('Hitilafu kuanzisha hifadhidata ya Firebase.', 'error');
+        return;
+      }
+
+      try {
+        await ensureAnonymousAuth();
+      } catch (authErr) {
+        console.error('Anonymous auth initialization failed', authErr);
+        if (wifiStatus) {
+          wifiStatus.textContent = 'Hatuwezi kukamilisha uthibitisho wa Firebase (auth). Baadhi ya kazi zinaweza kuwa read-only.';
+        }
+        toast('Auth ya Firebase haijakamilika kikamilifu. Baadhi ya kazi zinaweza kukosa kuokoa.', 'warning');
+      }
+
+      try {
+        await init();
+      } catch (err) {
+        console.error('init() failed', err);
+        if (wifiStatus) {
+          wifiStatus.textContent = `Attendance haijapakika kikamilifu. ${err?.message || ''}`.trim();
+        }
+        toast('Attendance haijapakika kikamilifu. Jaribu ku-refresh.', 'error');
+      }
+    }
+
+    boot();
   </script>
 </body>
 </html>
