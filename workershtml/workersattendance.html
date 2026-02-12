@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mahudhurio ya Kazi | SoMAp</title>
-  <link rel="stylesheet" href="./css/workers.css">
+  <link rel="stylesheet" href="../css/workers.css">
   <script src="../somapappv1multischool/js/context.js"></script>
   <script src="../Todashboardhtml/yearContext.js"></script>
   <script src="../js/school-logo.js"></script>
@@ -181,6 +181,7 @@
   <script type="module">
     import {
       ensureAnonymousAuth,
+      linkDeviceToWorker,
       getLinkedWorkerId,
       todayYMD,
       yyyymm,
@@ -358,6 +359,11 @@
           return;
         }
         state.workerId = workerId;
+        try {
+          await linkDeviceToWorker(workerId);
+        } catch (linkErr) {
+          console.warn('Device link warning', linkErr);
+        }
 
         await Promise.all([loadProfile(), loadSettings()]);
         await refreshAll();
@@ -373,7 +379,9 @@
         `workers/${state.workerId}`
       );
       if (!snap.exists()) throw new Error('Worker profile missing');
-      state.profile = snap.val().profile || {};
+      const raw = snap.val() || {};
+      const nested = raw.profile || {};
+      state.profile = Object.keys(nested).length ? nested : raw;
       if (schoolNameEl && state.schoolName) {
         schoolNameEl.textContent = `${state.schoolName} • ${state.profile.role || ''}`.trim();
       }
@@ -415,8 +423,11 @@
       const p = state.profile || {};
       return p.fullNameUpper
         || [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' ')
+        || localStorage.getItem('somap_workerName')
+        || sessionStorage.getItem('fullNameUpper')
         || state.workerId
         || localStorage.getItem('fullNameUpper')
+        || sessionStorage.getItem('workerId')
         || localStorage.getItem('workerId')
         || 'Worker';
     }
@@ -614,10 +625,14 @@
         normalizeNow();
         await loadSettings();
         const timestamp = localTs();
-        const systemYear = String(state.year || new Date().getFullYear());
-        const ymd = todayYMD();
+        const ymd = todayYMD(new Date(timestamp));
+        const systemYear = ymd.slice(0, 4);
         const dayKey = ymd.replace(/-/g, '');
         const monthKey = `${systemYear}${ymd.slice(5, 7)}`;
+        state.year = systemYear;
+        state.monthKey = monthKey;
+        if (yearSelect && yearSelect.value !== systemYear) yearSelect.value = systemYear;
+        if (yearLabel) yearLabel.textContent = `Mwaka: ${state.year}`;
 
         const scopedDayPath = scopedPathForYear(systemYear, `workerAttendance/${state.workerId}/${monthKey}/${dayKey}`);
         const legacyDayPath = `attendance/${state.workerId}/${monthKey}/${dayKey}`;
@@ -787,6 +802,22 @@
       });
     }
 
+    function formatDayKey(dayKey) {
+      const text = String(dayKey || '');
+      if (!/^\d{8}$/.test(text)) return text || '--';
+      const y = Number(text.slice(0, 4));
+      const m = Number(text.slice(4, 6));
+      const d = Number(text.slice(6, 8));
+      const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+      return dt.toLocaleDateString('sw-TZ', {
+        timeZone: 'Africa/Nairobi',
+        weekday: 'short',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric'
+      });
+    }
+
     function statusFromLegacy(record, kind) {
       const field = kind === 'in' ? 'checkInStatus' : 'checkOutStatus';
       if (record && record[field]) return record[field];
@@ -800,11 +831,20 @@
     }
 
     async function renderTable() {
-      monthLabel.textContent = new Date().toLocaleString('sw-TZ', {
+      const now = new Date();
+      const monthText = now.toLocaleString('sw-TZ', {
         timeZone: 'Africa/Nairobi',
         month: 'long',
         year: 'numeric'
       });
+      const todayText = now.toLocaleDateString('sw-TZ', {
+        timeZone: 'Africa/Nairobi',
+        weekday: 'long',
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric'
+      });
+      monthLabel.textContent = `${monthText} • Leo: ${todayText}`;
       attendanceTable.innerHTML = '';
       const { snap, source } = await scopedOrSocratesLegacy(
         scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}`),
@@ -818,7 +858,7 @@
         const inStatus = statusFromLegacy(record, 'in');
         const outStatus = statusFromLegacy(record, 'out');
         row.innerHTML = `
-          <td>${dayKey}${source === 'legacy' ? ' *' : ''}</td>
+          <td>${formatDayKey(dayKey)}${source === 'legacy' ? ' *' : ''}</td>
           <td>${formatTs(record.checkInTs)}</td>
           <td>${formatTs(record.checkOutTs)}</td>
           <td>${record.lateMinutes || 0}</td>
