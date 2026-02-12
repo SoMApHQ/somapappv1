@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mahudhurio ya Kazi | SoMAp</title>
-  <link rel="stylesheet" href="../css/workers.css">
+  <link rel="stylesheet" href="./css/workers.css">
   <script src="../somapappv1multischool/js/context.js"></script>
   <script src="../Todashboardhtml/yearContext.js"></script>
   <script src="../js/school-logo.js"></script>
@@ -255,8 +255,24 @@
       checkOutBtn?.addEventListener('click', () => handleCheck('out'));
     }
 
+    function getSomap() {
+      return window.SOMAP || null;
+    }
+
+    function isSocratesLegacySchool() {
+      return ['socrates-school', 'default', 'socrates'].includes(state.schoolId);
+    }
+
+    function isPermissionDenied(err) {
+      const code = String(err?.code || '').toLowerCase();
+      const msg = String(err?.message || '').toLowerCase();
+      return code.includes('permission') || msg.includes('permission');
+    }
+
     function schoolRef(subPath) {
-      return db.ref(SOMAP.P(subPath));
+      const somap = getSomap();
+      if (!somap?.P) throw new Error('School context is not ready');
+      return db.ref(somap.P(subPath));
     }
 
     function scopedPathForYear(year, subPath) {
@@ -285,7 +301,8 @@
     }
 
     function initSchoolContext() {
-      const school = (window.SOMAP && SOMAP.getSchool && SOMAP.getSchool()) || null;
+      const somap = getSomap();
+      const school = (somap && somap.getSchool && somap.getSchool()) || null;
       if (!school || !school.id) {
         window.location.href = '../somapappv1multischool/multischool.html';
         throw new Error('No school selected for multi-school context');
@@ -597,13 +614,14 @@
         normalizeNow();
         await loadSettings();
         const timestamp = localTs();
-        const systemYear = String(new Date().getFullYear());
+        const systemYear = String(state.year || new Date().getFullYear());
         const ymd = todayYMD();
         const dayKey = ymd.replace(/-/g, '');
         const monthKey = `${systemYear}${ymd.slice(5, 7)}`;
 
-        const dayRef = schoolRef(scopedPathForYear(systemYear, `workerAttendance/${state.workerId}/${monthKey}/${dayKey}`));
-        const daySnap = await dayRef.once('value');
+        const scopedDayPath = scopedPathForYear(systemYear, `workerAttendance/${state.workerId}/${monthKey}/${dayKey}`);
+        const legacyDayPath = `attendance/${state.workerId}/${monthKey}/${dayKey}`;
+        const { snap: daySnap, source } = await scopedOrSocratesLegacy(scopedDayPath, legacyDayPath);
         const existing = daySnap.val() || {};
 
         if (direction === 'in' && existing.checkInTs) {
@@ -657,8 +675,24 @@
           payload.checkOutReasonTs = Date.now();
         }
 
-        await dayRef.update(payload);
-        await updateSummaries(existing, payload, direction, dayKey);
+        let writeSource = source;
+        try {
+          if (source === 'legacy') {
+            await db.ref(legacyDayPath).update(payload);
+          } else {
+            await schoolRef(scopedDayPath).update(payload);
+          }
+        } catch (writeErr) {
+          if (isSocratesLegacySchool() && source !== 'legacy' && isPermissionDenied(writeErr)) {
+            await db.ref(legacyDayPath).update(payload);
+            writeSource = 'legacy';
+          } else {
+            throw writeErr;
+          }
+        }
+        await updateSummaries(existing, payload, direction, dayKey).catch((summaryErr) => {
+          console.warn('Summary update skipped', summaryErr);
+        });
 
         if (direction === 'in') {
           toast(
@@ -669,6 +703,9 @@
           );
         } else {
           toast('Check-out successful. Waiting for headteacher approval.', 'success');
+        }
+        if (writeSource === 'legacy') {
+          toast('Attendance saved to legacy RTDB path for compatibility.', 'info', 2500);
         }
         await refreshAll();
       } catch (error) {
@@ -793,10 +830,19 @@
     }
 
     async function renderStats() {
-      const [attendanceSnap, penaltiesSnap, summarySnap] = await Promise.all([
-        schoolRef(scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}`)).once('value'),
-        schoolRef(scopedPath(`workers_penalties_ledger/${state.workerId}/${state.monthKey}`)).once('value'),
-        (await getSummaryRef()).once('value')
+      const summaryPromise = getSummaryRef()
+        .then((ref) => ref.once('value'))
+        .catch(() => ({ val: () => ({}) }));
+      const [{ snap: attendanceSnap }, { snap: penaltiesSnap }, summarySnap] = await Promise.all([
+        scopedOrSocratesLegacy(
+          scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}`),
+          `attendance/${state.workerId}/${state.monthKey}`
+        ),
+        scopedOrSocratesLegacy(
+          scopedPath(`workers_penalties_ledger/${state.workerId}/${state.monthKey}`),
+          `penalties_ledger/${state.workerId}/${state.monthKey}`
+        ),
+        summaryPromise
       ]);
       const attendance = attendanceSnap.val() || {};
       const summary = summarySnap.val() || {};
@@ -864,8 +910,17 @@
         if (!btn) return;
         const wId = btn.dataset.worker;
         const approveValue = btn.dataset.approve === 'true';
-        const dayRef = schoolRef(scopedPathForYear(adminYear, `workerAttendance/${wId}/${adminMonthKey}/${todayKey}`));
-        await dayRef.update({ approved: approveValue });
+        const scopedDayPath = scopedPathForYear(adminYear, `workerAttendance/${wId}/${adminMonthKey}/${todayKey}`);
+        const legacyDayPath = `attendance/${wId}/${adminMonthKey}/${todayKey}`;
+        try {
+          await schoolRef(scopedDayPath).update({ approved: approveValue });
+        } catch (approveErr) {
+          if (isSocratesLegacySchool() && isPermissionDenied(approveErr)) {
+            await db.ref(legacyDayPath).update({ approved: approveValue });
+          } else {
+            throw approveErr;
+          }
+        }
         toast(`Entry ${approveValue ? 'approved' : 'rejected'}`, approveValue ? 'success' : 'warning');
         await refreshAll();
       };
