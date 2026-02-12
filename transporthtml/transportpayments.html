@@ -1687,21 +1687,28 @@
         y += lines2.length * lineH + 8;
 
         const colHeaders = ['Admission No', 'Full Name', 'Class', 'Date Reg.', 'Parent Contact', 'Transport Start', 'Route (AM)', 'Route (PM)', 'Driver', 'Curr. Month Fee', 'Transport Paid', 'Transport Debt', 'Unpaid Months', 'Total Debt'];
+        doc.addPage('a4', 'l');
+        const tablePageW = 297 - 28;
+        const colW = [16, 30, 14, 14, 20, 16, 20, 20, 32, 14, 14, 14, 24, 14];
+        const colStyles = {};
+        colW.forEach((w, i) => { colStyles[i] = { cellWidth: w, overflow: 'linebreak', minCellHeight: 6 }; });
         doc.autoTable({
-          startY: y,
+          startY: 14,
           head: [colHeaders],
           body: rows,
           theme: 'grid',
           margin: { left: 14 },
-          styles: { fontSize: 7 },
-          columnStyles: { 9: { cellWidth: 18 }, 10: { cellWidth: 18 }, 11: { cellWidth: 18 }, 12: { cellWidth: 22 }, 13: { cellWidth: 18 } },
+          styles: { fontSize: 8, cellPadding: 2 },
+          columnStyles: colStyles,
+          headStyles: { fontSize: 8, cellPadding: 2 },
+          tableWidth: tablePageW,
+          showHead: 'everyPage',
         });
-        y = doc.lastAutoTable.finalY + 14;
-        if (y > 270) { doc.addPage(); y = 20; }
+        doc.addPage('a4', 'p');
         doc.setFontSize(10);
-        doc.text('_________________________', 14, y);
-        doc.text('Headteacher signature', 14, y + 6);
-        doc.text('Date: _________________________', 14, y + 12);
+        doc.text('_________________________', 14, 36);
+        doc.text('Headteacher signature', 14, 42);
+        doc.text('Date: _________________________', 14, 48);
 
         doc.save(`transport_payments_${state.year}.pdf`);
         showToast('PDF downloaded!');
@@ -1765,7 +1772,9 @@
             registryScopedSnap,
             registryLegacySnap,
             assignmentsScopedSnap,
-            assignmentsLegacySnap
+            assignmentsLegacySnap,
+            vehiclesSnap,
+            workersSnap
           ] = await Promise.all([
             schoolRef(`years/${year}/transportEnrollments`).once('value'),
             isLegacyMerge ? db.ref('transport_enrollments').once('value') : Promise.resolve(null),
@@ -1773,6 +1782,8 @@
             isLegacyMerge ? db.ref(`transportRegistry/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
             schoolRef(`years/${year}/transportAssignments`).once('value').catch(() => ({ val: () => null })),
             isLegacyMerge ? db.ref(`transportAssignments/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
+            schoolRef(`years/${year}/transport/buses`).once('value').catch(() => ({ val: () => null, exists: () => false })),
+            schoolRef('workers').once('value').catch(() => ({ val: () => null, exists: () => false })),
           ]);
 
           const scopedEnrollments = (enrollScopedSnap && typeof enrollScopedSnap.val === 'function') ? (enrollScopedSnap.val() || {}) : {};
@@ -1786,6 +1797,43 @@
           const scopedAssignments = (assignmentsScopedSnap && typeof assignmentsScopedSnap.val === 'function') ? (assignmentsScopedSnap.val() || {}) : {};
           const legacyAssignments = (assignmentsLegacySnap && typeof assignmentsLegacySnap.val === 'function') ? (assignmentsLegacySnap.val() || {}) : {};
           const assignments = isLegacyMerge ? { ...legacyAssignments, ...scopedAssignments } : scopedAssignments;
+
+          const drivers = [];
+          if (workersSnap && workersSnap.exists && workersSnap.exists()) {
+            const workersVal = workersSnap.val() || {};
+            Object.entries(workersVal).forEach(([uid, worker]) => {
+              const profile = worker && worker.profile;
+              if (!profile || profile.role !== 'driver' || profile.active === false) return;
+              const fullName = profile.fullNameUpper || [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ') || uid;
+              drivers.push({ id: uid, fullName });
+            });
+          }
+          const vehicles = {};
+          if (vehiclesSnap && vehiclesSnap.exists && vehiclesSnap.exists()) {
+            vehiclesSnap.forEach(child => {
+              const v = child.val();
+              if (v) vehicles[child.key] = { id: child.key, ...v };
+            });
+          }
+          const routeVehicleMap = {};
+          Object.entries(vehicles).forEach(([vehicleId, v]) => {
+            const raw = v.assignedRoutes;
+            const list = !raw ? [] : Array.isArray(raw) ? raw : (typeof raw === 'object' ? Object.values(raw) : []);
+            const driver = drivers.find(d => d.id === (v.assignedDriverUid || v.driverId));
+            const driverName = driver ? driver.fullName : 'Not assigned';
+            const entry = { vehicleId, driverName };
+            list.forEach(r => {
+              const routeName = (typeof r === 'string' ? r : (r && (r.route || r.name || r.id))) || '';
+              const key = String(routeName).toLowerCase().trim();
+              if (key && !routeVehicleMap[key]) routeVehicleMap[key] = entry;
+            });
+            if (list.length === 0 && (v.amStop || v.pmStop)) {
+              const k1 = String(v.amStop || '').toLowerCase().trim();
+              const k2 = String(v.pmStop || '').toLowerCase().trim();
+              if (k1) routeVehicleMap[k1] = entry;
+              if (k2) routeVehicleMap[k2] = entry;
+            }
+          });
 
           state.transportEnrollments = {};
 
@@ -1804,6 +1852,15 @@
             }
           });
 
+          function driverForRoute(routeName) {
+            if (!routeName) return null;
+            const key = String(routeName).toLowerCase().trim();
+            const entry = routeVehicleMap[key];
+            if (entry) return { driverName: entry.driverName };
+            const partial = Object.keys(routeVehicleMap).find(k => key.includes(k) || k.includes(key));
+            return partial ? { driverName: routeVehicleMap[partial].driverName } : null;
+          }
+
           Object.entries(assignments).forEach(([studentId, assignRecord]) => {
             if (!assignRecord || assignRecord.status !== 'Using') {
               if (state.transportEnrollments[studentId]) {
@@ -1816,6 +1873,12 @@
             const pmStop = assignRecord.eveningRouteId || assignRecord.pmStop || existing.pmStop || '';
             const route = assignRecord.route || existing.route || amStop || pmStop || '';
             const period = amStop && pmStop ? 'both' : (amStop ? 'morning' : (pmStop ? 'evening' : ''));
+            const morningVehicle = existing.morningVehicle && (existing.morningVehicle.driverName || existing.morningVehicle.driver)
+              ? existing.morningVehicle
+              : (driverForRoute(amStop) || existing.morningVehicle);
+            const eveningVehicle = existing.eveningVehicle && (existing.eveningVehicle.driverName || existing.eveningVehicle.driver)
+              ? existing.eveningVehicle
+              : (driverForRoute(pmStop) || existing.eveningVehicle);
             state.transportEnrollments[studentId] = {
               ...existing,
               ...assignRecord,
@@ -1825,6 +1888,8 @@
               period: assignRecord.period || existing.period || period,
               baseMonthlyFee: assignRecord.baseMonthlyFee || existing.baseMonthlyFee,
               startDate: assignRecord.startDate || existing.startDate,
+              morningVehicle: morningVehicle || existing.morningVehicle,
+              eveningVehicle: eveningVehicle || existing.eveningVehicle,
             };
           });
 
