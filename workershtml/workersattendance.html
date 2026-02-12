@@ -89,6 +89,7 @@
           <p class="brand__eyebrow">SoMAp Workers</p>
           <h1>Mahudhurio | Attendance</h1>
           <p class="brand__school" id="schoolNameDisplay"></p>
+          <p class="hint" id="workerMetaLine"></p>
         </div>
       </div>
       <div class="context">
@@ -128,18 +129,18 @@
         </header>
         <div class="workers-card__content">
           <button id="checkInBtn" class="workers-btn">Check-In Sasa</button>
-          <p class="hint">Lazima kabla ya 07:20 (Africa/Nairobi). Baada ya tukio la 3+ la kuchelewa, kiasi kitaondolewa kwenye posho ya uwajibikaji.</p>
+          <p class="hint">Lazima kabla ya 07:30 (Africa/Nairobi). Baada ya hapo sababu ya kuchelewa inahitajika na entry husubiri idhini ya headteacher.</p>
         </div>
       </div>
 
       <div class="workers-card">
         <header class="workers-card__header">
           <h2>Check-Out</h2>
-          <p class="workers-card__subtitle">Ondoka kwa nidhamu (baada ya 16:30)</p>
+          <p class="workers-card__subtitle">Ondoka kwa nidhamu (muda rasmi 16:00)</p>
         </header>
         <div class="workers-card__content">
           <button id="checkOutBtn" class="workers-btn secondary">Check-Out Sasa</button>
-          <p class="hint">Ukitoka kabla ya 16:30, kuondoka mapema hujilimbikiza na baada ya tukio la 3+, kiasi kitaondolewa kwenye posho ya uwajibikaji.</p>
+          <p class="hint">Ukiondoka kabla au baada ya 16:00, sababu inahitajika na check-out husubiri idhini ya headteacher.</p>
         </div>
       </div>
     </section>
@@ -169,7 +170,7 @@
     <section class="workers-card" id="adminPanel" style="display:none; margin-top:18px;">
       <header class="workers-card__header">
         <h2>Headteacher - Leo</h2>
-        <p class="workers-card__subtitle">Waangalie walioingia baada ya 07:20 au hawajaingia; thibitisha au katae</p>
+        <p class="workers-card__subtitle">Waangalie walioingia baada ya 07:30 au hawajaingia; thibitisha au katae</p>
       </header>
       <div class="workers-card__content">
         <ul id="lateList" style="list-style:none; padding-left:0; display:grid; gap:8px;"></ul>
@@ -194,6 +195,7 @@
     const adminPanel = document.getElementById('adminPanel');
     const monthLabel = document.getElementById('monthLabel');
     const schoolNameEl = document.getElementById('schoolNameDisplay');
+    const workerMetaLine = document.getElementById('workerMetaLine');
     const yearSelect = document.getElementById('yearSelect');
     const yearLabel = document.getElementById('currentYearLabel');
     const wifiStatus = document.getElementById('wifiStatus');
@@ -269,6 +271,7 @@
 
     function setBranding() {
       if (schoolNameEl) schoolNameEl.textContent = state.schoolName;
+      updateWorkerMetaLine();
       if (window.SomapLogo?.loadSchoolLogo) {
         SomapLogo.loadSchoolLogo(db);
       }
@@ -332,6 +335,7 @@
 
       await Promise.all([loadProfile(), loadSettings()]);
       await refreshAll();
+      setInterval(updateWorkerMetaLine, 1000);
 
       checkInBtn.addEventListener('click', () => handleCheck('in'));
       checkOutBtn.addEventListener('click', () => handleCheck('out'));
@@ -347,6 +351,7 @@
       if (schoolNameEl && state.schoolName) {
         schoolNameEl.textContent = `${state.schoolName} • ${state.profile.role || ''}`.trim();
       }
+      updateWorkerMetaLine();
     }
 
     async function loadSettings() {
@@ -378,6 +383,33 @@
       const endLocal = new Date(end.toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
       const diff = checkOutTs - endLocal.getTime();
       return diff > 0 ? Math.round(diff / 60000) : 0;
+    }
+
+    function getWorkerName() {
+      const p = state.profile || {};
+      return p.fullNameUpper
+        || [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' ')
+        || state.workerId
+        || 'Worker';
+    }
+
+    function updateWorkerMetaLine() {
+      if (!workerMetaLine) return;
+      const now = new Date();
+      const datePart = now.toLocaleDateString('sw-TZ', {
+        timeZone: 'Africa/Nairobi',
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+      const timePart = now.toLocaleTimeString('sw-TZ', {
+        timeZone: 'Africa/Nairobi',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+      workerMetaLine.textContent = `${getWorkerName()} • ${datePart} • ${timePart}`;
     }
 
     function openReasonModal({ title, message, placeholder }) {
@@ -540,83 +572,99 @@
     }
 
     async function handleCheck(direction) {
-      normalizeNow();
-      await loadSettings();
-      const timestamp = localTs();
-      const systemYear = String(new Date().getFullYear());
-      const ymd = todayYMD();
-      const dayKey = ymd.replace(/-/g, '');
-      const monthKey = `${systemYear}${ymd.slice(5, 7)}`;
-
-      const dayRef = schoolRef(scopedPathForYear(systemYear, `workerAttendance/${state.workerId}/${monthKey}/${dayKey}`));
-      const daySnap = await dayRef.once('value');
-      const existing = daySnap.val() || {};
-
-      if (direction === 'in' && existing.checkInTs) {
-        toast('Ulishafanya check-in leo.', 'warning');
-        return;
-      }
-      if (direction === 'out' && !existing.checkInTs) {
-        toast('Hujafanya check-in bado.', 'warning');
-        return;
-      }
-
-      const payload = {};
-      if (direction === 'in') {
-        const lateMinutes = computeLateMinutes(timestamp);
-        let reason = '';
-        if (lateMinutes > 0) {
-          const input = await openReasonModal({
-            title: 'Sababu ya kuchelewa check-in',
-            message: 'Umechelewa. Tafadhali andika sababu kabla ya kuhifadhi.',
-            placeholder: 'Kwa nini umechelewa leo?'
-          });
-          if (input === null) return;
-          reason = input;
+      const btn = direction === 'in' ? checkInBtn : checkOutBtn;
+      const initialText = btn?.textContent || '';
+      try {
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = 'Inahifadhi...';
         }
-        payload.checkInTs = timestamp;
-        payload.lateMinutes = lateMinutes;
-        payload.checkInStatus = 'pending';
-        payload.checkInReason = reason;
-        payload.checkInReasonTs = Date.now();
-      } else {
-        const earlyMinutes = computeEarlyMinutes(timestamp);
-        const overtimeMinutes = computeOvertimeMinutes(timestamp);
-        const needsReason = earlyMinutes > 0 || overtimeMinutes > 0;
-        let reason = '';
-        if (needsReason) {
-          const input = await openReasonModal({
-            title: 'Sababu ya check-out nje ya muda',
-            message: earlyMinutes > 0
-              ? 'Umetoka mapema. Tafadhali andika sababu.'
-              : 'Umetoka kuchelewa. Tafadhali andika ulikuwa unafanya nini hadi kuchelewa.',
-            placeholder: 'Andika sababu hapa...'
-          });
-          if (input === null) return;
-          reason = input;
+        normalizeNow();
+        await loadSettings();
+        const timestamp = localTs();
+        const systemYear = String(new Date().getFullYear());
+        const ymd = todayYMD();
+        const dayKey = ymd.replace(/-/g, '');
+        const monthKey = `${systemYear}${ymd.slice(5, 7)}`;
+
+        const dayRef = schoolRef(scopedPathForYear(systemYear, `workerAttendance/${state.workerId}/${monthKey}/${dayKey}`));
+        const daySnap = await dayRef.once('value');
+        const existing = daySnap.val() || {};
+
+        if (direction === 'in' && existing.checkInTs) {
+          toast('Ulishafanya check-in leo.', 'warning');
+          return;
         }
-        payload.checkOutTs = timestamp;
-        payload.earlyMinutes = earlyMinutes;
-        payload.overtimeMinutes = overtimeMinutes;
-        payload.checkOutStatus = 'pending';
-        payload.checkOutReason = reason;
-        payload.checkOutReasonTs = Date.now();
-      }
+        if (direction === 'out' && !existing.checkInTs) {
+          toast('Hujafanya check-in bado.', 'warning');
+          return;
+        }
 
-      await dayRef.update(payload);
-      await updateSummaries(existing, payload, direction, dayKey);
+        const payload = {};
+        if (direction === 'in') {
+          const lateMinutes = computeLateMinutes(timestamp);
+          let reason = '';
+          if (lateMinutes > 0) {
+            const input = await openReasonModal({
+              title: 'Sababu ya kuchelewa check-in',
+              message: 'Umechelewa. Tafadhali andika sababu kabla ya kuhifadhi.',
+              placeholder: 'Kwa nini umechelewa leo?'
+            });
+            if (input === null) return;
+            reason = input;
+          }
+          payload.checkInTs = timestamp;
+          payload.lateMinutes = lateMinutes;
+          payload.checkInStatus = 'pending';
+          payload.checkInReason = reason;
+          payload.checkInReasonTs = Date.now();
+        } else {
+          const earlyMinutes = computeEarlyMinutes(timestamp);
+          const overtimeMinutes = computeOvertimeMinutes(timestamp);
+          const needsReason = earlyMinutes > 0 || overtimeMinutes > 0;
+          let reason = '';
+          if (needsReason) {
+            const input = await openReasonModal({
+              title: 'Sababu ya check-out nje ya muda',
+              message: earlyMinutes > 0
+                ? 'Umetoka mapema. Tafadhali andika sababu.'
+                : 'Umetoka kuchelewa. Tafadhali andika ulikuwa unafanya nini hadi kuchelewa.',
+              placeholder: 'Andika sababu hapa...'
+            });
+            if (input === null) return;
+            reason = input;
+          }
+          payload.checkOutTs = timestamp;
+          payload.earlyMinutes = earlyMinutes;
+          payload.overtimeMinutes = overtimeMinutes;
+          payload.checkOutStatus = 'pending';
+          payload.checkOutReason = reason;
+          payload.checkOutReasonTs = Date.now();
+        }
 
-      if (direction === 'in') {
-        toast(
-          (payload.lateMinutes || 0) > 0
-            ? 'Check-in successful BUT YOU ARE LATE. Reason saved. Waiting for headteacher approval.'
-            : 'Check-in successful. Waiting for headteacher approval.',
-          'success'
-        );
-      } else {
-        toast('Check-out successful. Waiting for headteacher approval.', 'success');
+        await dayRef.update(payload);
+        await updateSummaries(existing, payload, direction, dayKey);
+
+        if (direction === 'in') {
+          toast(
+            (payload.lateMinutes || 0) > 0
+              ? 'Check-in successful BUT YOU ARE LATE. Reason saved. Waiting for headteacher approval.'
+              : 'Check-in successful. Waiting for headteacher approval.',
+            'success'
+          );
+        } else {
+          toast('Check-out successful. Waiting for headteacher approval.', 'success');
+        }
+        await refreshAll();
+      } catch (error) {
+        console.error('Check action failed', error);
+        toast(`Imeshindikana kuhifadhi ${direction === 'in' ? 'check-in' : 'check-out'}. Jaribu tena.`, 'error');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = initialText || (direction === 'in' ? 'Check-In Sasa' : 'Check-Out Sasa');
+        }
       }
-      await refreshAll();
     }
 
     async function getSummaryRef() {
@@ -659,6 +707,7 @@
     }
 
     async function refreshAll() {
+      updateWorkerMetaLine();
       await Promise.all([renderTable(), renderStats(), maybeShowAdminPanel()]);
     }
 
@@ -809,3 +858,6 @@
   </script>
 </body>
 </html>
+
+
+
