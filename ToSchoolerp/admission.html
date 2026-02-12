@@ -333,8 +333,21 @@
 
       <!-- Quick search (live) -->
       <div class="mt-8">
-        <h3 class="font-semibold">Search Students</h3>
-        <input type="text" id="search-box" placeholder="Search by name or ID" class="border p-2 rounded w-64 mt-2"/>
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h3 class="font-semibold">Search Students</h3>
+            <p class="hint">Type to filter students for the current working year. The PDF report will respect this filter.</p>
+          </div>
+          <button
+            type="button"
+            id="downloadAdmissionsPdf"
+            class="btn bg-emerald-600 hover:bg-emerald-700 text-white text-sm"
+          >
+            <i class="fas fa-file-pdf"></i>
+            Download PDF Report
+          </button>
+        </div>
+        <input type="text" id="search-box" placeholder="Search by name or ID" class="border p-2 rounded w-64 mt-4"/>
         <div id="student-list" class="mt-4"></div>
       </div>
     </div>
@@ -1082,6 +1095,370 @@
 
   queueRender();
 
+  function parseDateFromStudent(student) {
+    if (!student) return null;
+    const joining = student.joiningFormPayment || {};
+    const candidates = [
+      student.createdAt,
+      student.updatedAt,
+      joining.paidAt,
+      joining.approvedAt
+    ].filter(Boolean);
+    for (const value of candidates) {
+      if (!value) continue;
+      if (typeof value === 'number') {
+        const d = new Date(value);
+        if (!Number.isNaN(d.getTime())) return d;
+      } else if (typeof value === 'string') {
+        const d = new Date(value);
+        if (!Number.isNaN(d.getTime())) return d;
+      } else if (typeof value === 'object' && value !== null) {
+        if (typeof value.seconds === 'number') {
+          const d = new Date(value.seconds * 1000);
+          if (!Number.isNaN(d.getTime())) return d;
+        }
+      }
+    }
+    return null;
+  }
+
+  function formatDateForReport(date) {
+    if (!date) return '';
+    try {
+      return date.toISOString().slice(0, 10);
+    } catch {
+      return '';
+    }
+  }
+
+  async function loadLogoDataUrl() {
+    try {
+      const imgEl = document.getElementById('school-logo-display');
+      if (!imgEl || !imgEl.src) return null;
+      return await new Promise((resolve) => {
+        const img = new Image();
+        img.crossOrigin = 'Anonymous';
+        img.onload = () => {
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            resolve(canvas.toDataURL('image/png'));
+          } catch (err) {
+            console.warn('Logo canvas conversion failed', err);
+            resolve(null);
+          }
+        };
+        img.onerror = () => resolve(null);
+        img.src = imgEl.src;
+      });
+    } catch (err) {
+      console.warn('Logo load failed', err);
+      return null;
+    }
+  }
+
+  async function downloadAdmissionsPdfReport() {
+    const workingYear = String(getWorkingYear());
+    const { jsPDF } = window.jspdf || {};
+    if (!jsPDF) {
+      alert('PDF library not available. Please try again later.');
+      return;
+    }
+    if (!cachedStudents || !Array.isArray(cachedStudents)) {
+      alert('No students available for this year.');
+      return;
+    }
+
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const marginX = 14;
+    let cursorY = 16;
+
+    let profileLine = '';
+    try {
+      const profileSnap = await schoolRef('profile').get();
+      const profile = profileSnap.exists() ? profileSnap.val() || {} : {};
+      const parts = [];
+      if (profile.poBox || profile.po_box || profile.POBox) {
+        const po =
+          profile.poBox ||
+          profile.po_box ||
+          profile.POBox;
+        parts.push(`P.O. Box ${po}`);
+      }
+      if (profile.tel || profile.phone || profile.telephone) {
+        const tel =
+          profile.tel ||
+          profile.phone ||
+          profile.telephone;
+        parts.push(`Tel ${tel}`);
+      }
+      if (profile.location || profile.address || profile.city) {
+        const loc =
+          profile.location ||
+          profile.address ||
+          profile.city;
+        parts.push(String(loc));
+      }
+      profileLine = parts.join(' | ');
+    } catch (err) {
+      console.warn('Failed to load school profile for PDF', err);
+    }
+
+    try {
+      const logoDataUrl = await loadLogoDataUrl();
+      if (logoDataUrl) {
+        const logoWidth = 18;
+        const logoHeight = 18;
+        doc.addImage(logoDataUrl, 'PNG', marginX, cursorY - 8, logoWidth, logoHeight);
+      }
+    } catch (err) {
+      console.warn('Header logo rendering failed', err);
+    }
+
+    const schoolName = currentSchool.name || schoolId || 'School';
+    doc.setFontSize(14);
+    doc.setFont(undefined, 'bold');
+    doc.text(schoolName, marginX, cursorY);
+    cursorY += 6;
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'normal');
+    doc.text(`Registered Pupils Report — Academic Year ${workingYear}`, marginX, cursorY);
+    cursorY += 6;
+
+    const generatedAt = new Date();
+    doc.setFontSize(10);
+    doc.text(`Generated on: ${generatedAt.toLocaleString()}`, marginX, cursorY);
+    cursorY += 5;
+
+    if (profileLine) {
+      const split = doc.splitTextToSize(profileLine, pageWidth - marginX * 2);
+      doc.text(split, marginX, cursorY);
+      cursorY += split.length * 5;
+    }
+
+    cursorY += 4;
+
+    const searchBoxEl = document.getElementById('search-box');
+    const term = (searchBoxEl ? searchBoxEl.value || '' : '').toLowerCase().trim();
+    const students = !term
+      ? cachedStudents.slice()
+      : cachedStudents.filter((s) => {
+          const full = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.toLowerCase();
+          return (
+            full.includes(term) ||
+            String(s.pupilId || '').toLowerCase().includes(term) ||
+            String(s.admissionNumber || '').toLowerCase().includes(term)
+          );
+        });
+
+    if (!students.length) {
+      alert('No students match the current filter for this working year.');
+      return;
+    }
+
+    const currentYear = workingYear;
+    const enriched = await Promise.all(
+      students.map(async (stu) => {
+        const fallbackClass = stu.classLevel || stu.className || '';
+        const displayClass = resolveClassForStudentYear(stu.key, fallbackClass, currentYear) || fallbackClass || 'N/A';
+        const anchorClass =
+          anchorEnrollments[stu.key]?.className ||
+          anchorEnrollments[stu.key]?.classLevel ||
+          fallbackClass;
+
+        let finance = { fee: 0, planId: null, feeOverride: null };
+        try {
+          finance = await resolveEffectiveFinance(stu.key, displayClass, { anchorClass, year: currentYear });
+        } catch (err) {
+          console.error('resolveEffectiveFinance error (PDF)', stu.key, err);
+        }
+
+        let planLabel = '';
+        try {
+          planLabel = await planLabelFor(finance.planId, currentYear);
+        } catch (err) {
+          console.warn('Plan label fetch failed (PDF)', finance.planId, err);
+        }
+
+        return { stu, displayClass, finance, planLabel };
+      })
+    );
+
+    const rows = [];
+    let totalPupils = 0;
+    let boysCount = 0;
+    let girlsCount = 0;
+    let totalJoiningFees = 0;
+    const classCounts = new Map();
+    const receiverStats = new Map();
+
+    enriched.forEach(({ stu, displayClass, finance, planLabel }, index) => {
+      totalPupils += 1;
+      const genderVal = String(stu.gender || '').toLowerCase();
+      if (genderVal.startsWith('m') || genderVal === 'boy' || genderVal === 'male') boysCount += 1;
+      if (genderVal.startsWith('f') || genderVal === 'girl' || genderVal === 'female') girlsCount += 1;
+
+      const joining = stu.joiningFormPayment || {};
+      const joinAmount = Number(joining.amount || 0);
+      if (Number.isFinite(joinAmount)) totalJoiningFees += joinAmount;
+      const receiverName = (joining.receivedBy || 'Unknown').trim() || 'Unknown';
+      if (!receiverStats.has(receiverName)) {
+        receiverStats.set(receiverName, { count: 0, amount: 0 });
+      }
+      const stat = receiverStats.get(receiverName);
+      stat.count += 1;
+      stat.amount += joinAmount;
+
+      const classLabel = displayClass === 'GRADUATED' ? `Graduated (${currentYear})` : displayClass;
+      const classKey = classLabel || 'N/A';
+      classCounts.set(classKey, (classCounts.get(classKey) || 0) + 1);
+
+      const fullName = `${stu.firstName || ''} ${stu.middleName || ''} ${stu.lastName || ''}`
+        .replace(/\s+/g, ' ')
+        .trim() || 'Unnamed Student';
+      const admission = stu.admissionNumber || stu.pupilId || '';
+      const parentContact = stu.primaryParentContact || '';
+      const dateObj = parseDateFromStudent(stu);
+      const dateRegistered = formatDateForReport(dateObj);
+      const feeLabel = `TSh ${currencyFormatter.format(Number(finance.fee || 0))}`;
+      const planDisplay = planLabel || (finance.planId ? finance.planId : 'Class default');
+      const joiningFeeLabel = joinAmount ? `TSh ${currencyFormatter.format(joinAmount)}` : '';
+
+      rows.push([
+        index + 1,
+        fullName,
+        admission,
+        stu.gender || '',
+        classLabel || '',
+        parentContact,
+        dateRegistered,
+        feeLabel,
+        planDisplay,
+        joiningFeeLabel,
+        joining.reference || '',
+        joining.method || '',
+        joining.receivedBy || ''
+      ]);
+    });
+
+    const head = [
+      [
+        '#',
+        'Student Name',
+        'Admission',
+        'Gender',
+        `Class (${currentYear})`,
+        'Parent Contact',
+        'Date Registered',
+        'Fee/Year',
+        'Payment Plan',
+        'Joining Fee',
+        'Ref',
+        'Method',
+        'Received By'
+      ]
+    ];
+
+    doc.autoTable({
+      head,
+      body: rows,
+      startY: cursorY,
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [238, 242, 255], textColor: [11, 105, 255] }
+    });
+
+    let finalY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 6 : cursorY + 10;
+
+    let highestClass = 'N/A';
+    let lowestClass = 'N/A';
+    if (classCounts.size > 0) {
+      const entries = Array.from(classCounts.entries());
+      entries.sort((a, b) => b[1] - a[1]);
+      highestClass = `${entries[0][0]} (${entries[0][1]})`;
+      const nonZeroSorted = entries
+        .filter(([, count]) => count > 0)
+        .sort((a, b) => a[1] - b[1]);
+      if (nonZeroSorted.length) {
+        lowestClass = `${nonZeroSorted[0][0]} (${nonZeroSorted[0][1]})`;
+      }
+    }
+
+    let topReceiverText = 'N/A';
+    if (receiverStats.size > 0) {
+      const receiverEntries = Array.from(receiverStats.entries());
+      receiverEntries.sort((a, b) => b[1].amount - a[1].amount || b[1].count - a[1].count);
+      const [name, info] = receiverEntries[0];
+      topReceiverText = `${name} — ${info.count} pupils, TSh ${currencyFormatter.format(info.amount)}`;
+    }
+
+    const summaryBody = [
+      ['Total pupils registered', String(totalPupils)],
+      ['Boys', String(boysCount)],
+      ['Girls', String(girlsCount)],
+      ['Total joining fees collected (TZS)', `TSh ${currencyFormatter.format(totalJoiningFees)}`],
+      ['Highest registration class', highestClass],
+      ['Lowest registration class', lowestClass],
+      ['Top receiver', topReceiverText]
+    ];
+
+    doc.autoTable({
+      head: [['Summary', 'Value']],
+      body: summaryBody,
+      startY: finalY,
+      styles: { fontSize: 9 },
+      headStyles: { fillColor: [15, 23, 42], textColor: [255, 255, 255] },
+      columnStyles: {
+        0: { cellWidth: 70 }
+      }
+    });
+
+    finalY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 6 : finalY + 10;
+
+    if (receiverStats.size > 0) {
+      const receiverEntries = Array.from(receiverStats.entries());
+      receiverEntries.sort((a, b) => b[1].amount - a[1].amount);
+      const receiverBody = receiverEntries.map(([name, info]) => [
+        name,
+        String(info.count),
+        `TSh ${currencyFormatter.format(info.amount)}`
+      ]);
+
+      doc.autoTable({
+        head: [['Received By', 'Pupils', 'Amount (TZS)']],
+        body: receiverBody,
+        startY: finalY,
+        styles: { fontSize: 9 },
+        headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255] }
+      });
+
+      finalY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 10 : finalY + 10;
+    }
+
+    const pageHeight = doc.internal.pageSize.getHeight();
+    if (finalY + 20 > pageHeight) {
+      doc.addPage();
+      finalY = 20;
+    }
+    doc.setFontSize(10);
+    doc.text('Head Teacher: ________________________', marginX, finalY);
+    doc.text('Signature: ________________________', marginX, finalY + 6);
+    doc.text('Date: ________________________', marginX, finalY + 12);
+
+    const yyyy = generatedAt.getFullYear();
+    const mm = String(generatedAt.getMonth() + 1).padStart(2, '0');
+    const dd = String(generatedAt.getDate()).padStart(2, '0');
+    const datePart = `${yyyy}${mm}${dd}`;
+    const safeSchoolName = String(schoolName).replace(/[^A-Za-z0-9]+/g, '_');
+    const filename = `Admissions_${safeSchoolName}_${workingYear}_${datePart}.pdf`;
+
+    doc.save(filename);
+  }
+
   async function renderSearchList(students) {
     const searchList = document.getElementById('student-list');
     const searchBox = document.getElementById('search-box');
@@ -1211,6 +1588,15 @@
   // Search input
   const searchBox = document.getElementById('search-box');
   if (searchBox) searchBox.addEventListener('input', queueRender);
+  const downloadPdfBtn = document.getElementById('downloadAdmissionsPdf');
+  if (downloadPdfBtn) {
+    downloadPdfBtn.addEventListener('click', () => {
+      downloadAdmissionsPdfReport().catch((err) => {
+        console.error('PDF generation failed', err);
+        alert('Failed to generate PDF report. Please try again.');
+      });
+    });
+  }
 
   // ---- Edit flow ----
   function startEditForKey(key) {
