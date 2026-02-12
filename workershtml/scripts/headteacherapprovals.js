@@ -38,6 +38,14 @@
     #${containerId} .status-rejected { background:#fee2e2; color:#991b1b; border-color:#fecaca; }
     #${containerId} .status-pending { background:#fef9c3; color:#854d0e; border-color:#fcd34d; }
     #${containerId} .status-missing { background:#e0f2fe; color:#075985; border-color:#bae6fd; }
+    #${containerId} .decision-note { color:#cbd5e1; font-size:0.9rem; }
+    #${containerId} .reason { color:#94a3b8; font-size:0.88rem; margin-top:2px; }
+    .ht-modal-overlay { position:fixed; inset:0; background:rgba(2,6,23,0.72); display:flex; align-items:center; justify-content:center; padding:16px; z-index:10000; }
+    .ht-modal-card { width:min(440px,100%); background:#0f172a; border:1px solid rgba(255,255,255,0.2); border-radius:14px; padding:14px; display:grid; gap:10px; }
+    .ht-modal-card h4 { margin:0; color:#fff; }
+    .ht-modal-card p { margin:0; color:#94a3b8; font-size:0.9rem; }
+    .ht-modal-card textarea, .ht-modal-card input { width:100%; padding:8px 10px; border-radius:10px; border:1px solid rgba(255,255,255,0.18); background:rgba(255,255,255,0.06); color:#e2e8f0; }
+    .ht-modal-actions { display:flex; justify-content:flex-end; gap:8px; }
     #${containerId} .rules { margin-top:14px; padding:12px; border:1px dashed rgba(255,255,255,0.15); border-radius:12px; background:rgba(255,255,255,0.04); }
     #${containerId} .rules h3 { margin:0 0 6px; font-size:1rem; color:#fff; }
     #${containerId} .rules .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; }
@@ -478,6 +486,19 @@
     };
   }
 
+  function statusFromLegacy(record, kind) {
+    if (!record) return 'missing';
+    const direct = kind === 'in' ? record.checkInStatus : record.checkOutStatus;
+    if (direct) return direct;
+    if (kind === 'in') {
+      if (record.approved === true) return 'approved';
+      if (record.approved === false && record.approvedTs) return 'rejected';
+      return record.checkInTs ? 'pending' : 'missing';
+    }
+    if (!record.checkOutTs) return 'missing';
+    return 'pending';
+  }
+
   function statusBadge(status) {
     const label = status === 'approved'
       ? 'Approved'
@@ -487,6 +508,53 @@
           ? 'No check-in'
           : 'Pending';
     return `<span class="status-badge status-${status}">${label}</span>`;
+  }
+
+  function openRejectModal(kindLabel) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'ht-modal-overlay';
+      overlay.innerHTML = `
+        <div class="ht-modal-card" role="dialog" aria-modal="true">
+          <h4>Reject ${kindLabel}</h4>
+          <p>Andika sababu ya kukataa na kiasi cha makato (TZS).</p>
+          <label>Rejection reason (required)<textarea id="ht-reason" rows="4" placeholder="Reason..."></textarea></label>
+          <label>Deduction amount TZS (required)<input id="ht-amount" type="number" min="0" step="1" value="0"></label>
+          <div class="ht-modal-actions">
+            <button class="btn" data-act="cancel">Cancel</button>
+            <button class="btn reject" data-act="save">Save</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      const reasonInput = overlay.querySelector('#ht-reason');
+      const amountInput = overlay.querySelector('#ht-amount');
+      reasonInput?.focus();
+      overlay.addEventListener('click', (event) => {
+        const btn = event.target.closest('button[data-act]');
+        if (!btn) return;
+        if (btn.dataset.act === 'cancel') {
+          overlay.remove();
+          resolve(null);
+          return;
+        }
+        const reason = (reasonInput?.value || '').trim();
+        const amountRaw = amountInput?.value ?? '';
+        const amount = Number(amountRaw);
+        if (!reason) {
+          showToast('Rejection reason is required.', 'warning');
+          reasonInput?.focus();
+          return;
+        }
+        if (amountRaw === '' || Number.isNaN(amount) || amount < 0) {
+          showToast('Deduction amount is required (0 or more).', 'warning');
+          amountInput?.focus();
+          return;
+        }
+        overlay.remove();
+        resolve({ reason, amount });
+      });
+    });
   }
 
   async function loadAndRender(isEvent = false) {
@@ -573,27 +641,27 @@
           seen.add(id);
           totalWorkers += 1;
           const record = attendanceData[id]?.[monthKey]?.[todayKey] || null;
-          let status = 'pending';
-          if (!record) status = 'missing';
-          else if (record.approved === true) status = 'approved';
-          else if (record.approved === false) status = 'rejected';
-
-          if (status === 'approved') approvedCount += 1;
-          else if (status === 'rejected') rejectedCount += 1;
-          else if (status === 'missing') missingCount += 1;
+          const inStatus = statusFromLegacy(record, 'in');
+          const outStatus = statusFromLegacy(record, 'out');
+          if (inStatus === 'approved') approvedCount += 1;
+          else if (inStatus === 'rejected') rejectedCount += 1;
+          else if (inStatus === 'missing') missingCount += 1;
           else pendingCount += 1;
 
-          rows.push({ id, profile: data?.profile || {}, record, status });
+          rows.push({ id, profile: data?.profile || {}, record, inStatus, outStatus });
         });
 
         Object.entries(attendanceData || {}).forEach(([id, months]) => {
           if (seen.has(id)) return;
           const record = months?.[monthKey]?.[todayKey] || null;
           if (!record) return;
-          rows.push({ id, profile: {}, record, status: record.approved === true ? 'approved' : record.approved === false ? 'rejected' : 'pending' });
+          const inStatus = statusFromLegacy(record, 'in');
+          const outStatus = statusFromLegacy(record, 'out');
+          rows.push({ id, profile: {}, record, inStatus, outStatus });
           totalWorkers += 1;
-          if (record.approved === true) approvedCount += 1;
-          else if (record.approved === false) rejectedCount += 1;
+          if (inStatus === 'approved') approvedCount += 1;
+          else if (inStatus === 'rejected') rejectedCount += 1;
+          else if (inStatus === 'missing') missingCount += 1;
           else pendingCount += 1;
         });
 
@@ -607,7 +675,7 @@
 
         rows.sort((a, b) => {
           const order = { pending: 0, missing: 1, rejected: 2, approved: 3 };
-          return order[a.status] - order[b.status];
+          return order[a.inStatus] - order[b.inStatus];
         });
 
         if (!rows.length) {
@@ -627,17 +695,22 @@
                 <h4>${row.profile.fullNameUpper || row.id}</h4>
                 <div class="muted">${row.profile.role || ''}</div>
               </div>
-              ${statusBadge(row.status)}
+              <div class="decision-note">IN ${statusBadge(row.inStatus)} • OUT ${statusBadge(row.outStatus)}</div>
             </div>
             <div class="worker-times">
               <div class="time-pill">Check-In: ${hasRecord ? formatTime(row.record.checkInTs) : '-'}</div>
+              <div class="reason">${row.record?.checkInReason || ''}</div>
+              <div class="time-pill">IN Late: ${hasRecord ? (row.record.lateMinutes || 0) : 0}m</div>
               <div class="time-pill">Check-Out: ${hasRecord ? formatTime(row.record.checkOutTs) : '-'}</div>
-              <div class="time-pill">Late: ${hasRecord ? (row.record.lateMinutes || 0) : 0}m</div>
-              <div class="time-pill">Early: ${hasRecord ? (row.record.earlyMinutes || 0) : 0}m</div>
+              <div class="reason">${row.record?.checkOutReason || ''}</div>
+              <div class="time-pill">OUT Early: ${hasRecord ? (row.record.earlyMinutes || 0) : 0}m</div>
+              <div class="time-pill">OUT Overtime: ${hasRecord ? (row.record.overtimeMinutes || 0) : 0}m</div>
             </div>
             <div class="worker-actions">
-              <button class="btn approve" data-action="approve" data-worker="${row.id}" ${!hasRecord ? 'disabled' : ''}>Approve</button>
-              <button class="btn reject" data-action="reject" data-worker="${row.id}" ${!hasRecord ? 'disabled' : ''}>Reject</button>
+              <button class="btn approve" data-action="approve_in" data-worker="${row.id}" ${!row.record?.checkInTs ? 'disabled' : ''}>Approve IN</button>
+              <button class="btn reject" data-action="reject_in" data-worker="${row.id}" ${!row.record?.checkInTs ? 'disabled' : ''}>Reject IN</button>
+              <button class="btn approve" data-action="approve_out" data-worker="${row.id}" ${!row.record?.checkOutTs ? 'disabled' : ''}>Approve OUT</button>
+              <button class="btn reject" data-action="reject_out" data-worker="${row.id}" ${!row.record?.checkOutTs ? 'disabled' : ''}>Reject OUT</button>
             </div>
           `;
           els.list.appendChild(div);
@@ -661,28 +734,107 @@
         });
       };
 
-      if (els.list && !els.list.hasAttribute('data-listening')) {
-        els.list.setAttribute('data-listening', 'true');
-      els.list.addEventListener('click', async (event) => {
-        const btn = event.target.closest('button[data-action]');
-        if (!btn) return;
-        const targetWorker = btn.dataset.worker;
-        const approveValue = btn.dataset.action === 'approve';
+      const createPenaltyOnce = async ({ targetWorker, monthKey, dayKey, kind, note, amount, createdBy }) => {
+        const ledgerKey = `${dayKey}_${kind}`;
+        const ref = db.ref(SOMAP.P(`years/${currentYear}/workers_penalties_ledger/${targetWorker}/${monthKey}/${ledgerKey}`));
+        const snap = await ref.once('value');
+        if (snap.exists()) return false;
+        await ref.set({
+          amountTZS: Number(amount || 0),
+          note: note || '',
+          kind,
+          createdTs: Date.now(),
+          createdBy
+        });
+        return true;
+      };
+
+      const applyDecision = async ({ targetWorker, action }) => {
         const { monthKey, todayKey } = latestKeys;
         if (!monthKey || !todayKey) return;
-        const refPath = lastAttendanceSource === 'legacy'
-          ? `attendance/${targetWorker}/${monthKey}/${todayKey}`
-          : SOMAP.P(`years/${currentYear}/workerAttendance/${targetWorker}/${monthKey}/${todayKey}`);
+        const dayRef = db.ref(SOMAP.P(`years/${currentYear}/workerAttendance/${targetWorker}/${monthKey}/${todayKey}`));
+        const snap = await dayRef.once('value');
+        const existing = snap.val() || {};
+        const decisionBy = String(workerId || '');
+        const decisionTs = Date.now();
+        const isIn = action.endsWith('_in');
+        const isApprove = action.startsWith('approve_');
+        const kindLabel = isIn ? 'Check-In' : 'Check-Out';
+        const updatePayload = {};
+
+        if (isApprove) {
+          if (isIn) {
+            updatePayload.checkInStatus = 'approved';
+            updatePayload.checkInDecisionBy = decisionBy;
+            updatePayload.checkInDecisionTs = decisionTs;
+            updatePayload.approved = true;
+          } else {
+            updatePayload.checkOutStatus = 'approved';
+            updatePayload.checkOutDecisionBy = decisionBy;
+            updatePayload.checkOutDecisionTs = decisionTs;
+          }
+        } else {
+          const decision = await openRejectModal(kindLabel);
+          if (!decision) return;
+          if (isIn) {
+            updatePayload.checkInStatus = 'rejected';
+            updatePayload.checkInDecisionBy = decisionBy;
+            updatePayload.checkInDecisionTs = decisionTs;
+            updatePayload.checkInDecisionNote = decision.reason;
+            updatePayload.checkInDeductionTZS = Number(decision.amount);
+            updatePayload.approved = false;
+            updatePayload.approvedTs = decisionTs;
+          } else {
+            updatePayload.checkOutStatus = 'rejected';
+            updatePayload.checkOutDecisionBy = decisionBy;
+            updatePayload.checkOutDecisionTs = decisionTs;
+            updatePayload.checkOutDecisionNote = decision.reason;
+            updatePayload.checkOutDeductionTZS = Number(decision.amount);
+          }
+        }
+
+        await dayRef.update(updatePayload);
+
+        if (isIn) {
+          const presentRef = db.ref(SOMAP.P(`years/${currentYear}/dashboard/presentWorkers/${todayKey}/${targetWorker}`));
+          if (isApprove) await presentRef.set(true);
+          else await presentRef.remove();
+        }
+
+        if (!isApprove) {
+          const decisionNote = isIn ? updatePayload.checkInDecisionNote : updatePayload.checkOutDecisionNote;
+          const deduction = isIn ? updatePayload.checkInDeductionTZS : updatePayload.checkOutDeductionTZS;
+          await createPenaltyOnce({
+            targetWorker,
+            monthKey,
+            dayKey: todayKey,
+            kind: isIn ? 'reject_checkin' : 'reject_checkout',
+            note: decisionNote,
+            amount: deduction,
+            createdBy: decisionBy
+          });
+        }
+
+        const verb = isApprove ? 'approved' : 'rejected';
+        showToast(`${kindLabel} ${verb}`, isApprove ? 'success' : 'warning');
+      };
+
+      if (els.list && !els.list.hasAttribute('data-listening')) {
+        els.list.setAttribute('data-listening', 'true');
+        els.list.addEventListener('click', async (event) => {
+          const btn = event.target.closest('button[data-action]');
+          if (!btn) return;
+          const targetWorker = btn.dataset.worker;
+          const action = btn.dataset.action;
+          if (!targetWorker || !action) return;
         try {
-          const ref = db.ref(refPath);
-          await ref.update({ approved: approveValue, approvedTs: localTs() });
-          showToast(`Entry ${approveValue ? 'approved' : 'rejected'}`, approveValue ? 'success' : 'warning');
-          render();
+          await applyDecision({ targetWorker, action });
+          await render();
         } catch (err) {
           console.error('Failed to update approval', err);
           showToast('Imeshindwa kuhifadhi maamuzi. Jaribu tena.', 'error');
         }
-      });
+        });
       }
 
       await render();

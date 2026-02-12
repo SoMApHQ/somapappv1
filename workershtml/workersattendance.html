@@ -66,6 +66,14 @@
     .pill.info { background:rgba(99,102,241,0.18); border-color:rgba(99,102,241,0.45); color:#c7d2fe; }
     .admin-actions { display:flex; gap:6px; flex-wrap:wrap; }
     .hint { font-size:0.9rem; color:var(--muted); }
+    .mini-modal-overlay { position:fixed; inset:0; background:rgba(2,6,23,0.7); display:flex; align-items:center; justify-content:center; padding:16px; z-index:9999; }
+    .mini-modal-card { width:min(520px,100%); background:rgba(15,23,42,0.95); border:1px solid var(--border); border-radius:14px; box-shadow:var(--card-shadow); padding:14px; display:grid; gap:10px; }
+    .mini-modal-card h3 { margin:0; color:#fff; font-size:1.05rem; }
+    .mini-modal-card p { margin:0; color:var(--muted); font-size:0.92rem; }
+    .mini-modal-card textarea { min-height:100px; resize:vertical; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--ink); padding:10px; font:inherit; }
+    .mini-modal-actions { display:flex; justify-content:flex-end; gap:8px; }
+    .mini-modal-btn { border:1px solid var(--border); border-radius:10px; padding:8px 12px; font-weight:700; cursor:pointer; background:rgba(255,255,255,0.08); color:var(--ink); }
+    .mini-modal-btn.primary { background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#0b1220; border-color:rgba(255,255,255,0.2); }
     @media (max-width: 640px) {
       .brand h1 { font-size:1.3rem; }
       .context__chip { width:100%; }
@@ -227,8 +235,8 @@
 
     const db = firebase.database();
 
-    const DAY_START = '07:20';
-    const DAY_END = '16:30';
+    const DAY_START = '07:30';
+    const DAY_END = '16:00';
 
     ensureAnonymousAuth()
       .then(init)
@@ -257,17 +265,6 @@
       const month = String(now.getMonth() + 1).padStart(2, '0');
       const targetYear = useSelectedYear && state.year ? state.year : String(now.getFullYear());
       state.monthKey = `${targetYear}${month}`;
-    }
-
-    async function ensureSystemYearForCheck() {
-      const systemYear = String(new Date().getFullYear());
-      if (state.year === systemYear) return;
-      state.year = systemYear;
-      if (yearLabel) {
-        yearLabel.textContent = `Mwaka: ${state.year}`;
-      }
-      window.somapYearContext?.setSelectedYear?.(systemYear, { manual: false, forceDispatch: true });
-      await loadSettings();
     }
 
     function setBranding() {
@@ -374,6 +371,52 @@
       const endLocal = new Date(end.toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
       const diff = endLocal.getTime() - checkOutTs;
       return diff > 0 ? Math.round(diff / 60000) : 0;
+    }
+
+    function computeOvertimeMinutes(checkOutTs) {
+      const end = new Date(`${state.today}T${DAY_END}:00`);
+      const endLocal = new Date(end.toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
+      const diff = checkOutTs - endLocal.getTime();
+      return diff > 0 ? Math.round(diff / 60000) : 0;
+    }
+
+    function openReasonModal({ title, message, placeholder }) {
+      return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'mini-modal-overlay';
+        overlay.innerHTML = `
+          <div class="mini-modal-card" role="dialog" aria-modal="true">
+            <h3>${title}</h3>
+            <p>${message}</p>
+            <textarea id="reasonInput" placeholder="${placeholder || 'Andika sababu hapa...'}"></textarea>
+            <div class="mini-modal-actions">
+              <button type="button" class="mini-modal-btn" data-act="cancel">Cancel</button>
+              <button type="button" class="mini-modal-btn primary" data-act="save">Save</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(overlay);
+        const input = overlay.querySelector('#reasonInput');
+        input?.focus();
+        overlay.addEventListener('click', (event) => {
+          const btn = event.target.closest('button[data-act]');
+          if (!btn) return;
+          const action = btn.getAttribute('data-act');
+          if (action === 'cancel') {
+            overlay.remove();
+            resolve(null);
+            return;
+          }
+          const reason = (input?.value || '').trim();
+          if (!reason) {
+            toast('Sababu inahitajika.', 'warning');
+            input?.focus();
+            return;
+          }
+          overlay.remove();
+          resolve(reason);
+        });
+      });
     }
 
     async function enforceWifi() {
@@ -497,20 +540,15 @@
     }
 
     async function handleCheck(direction) {
-      await ensureSystemYearForCheck();
-      normalizeNow(false);
+      normalizeNow();
       await loadSettings();
-      const onWifi = await enforceWifi();
-      if (!onWifi) return;
-      const verification = await preflightChecks();
-      if (!verification) return;
-      if (!verification.binding.boundId && direction === 'in') {
-        await verification.binding.ref.set(state.deviceId);
-      }
       const timestamp = localTs();
-      const dayKey = state.todayKey;
+      const systemYear = String(new Date().getFullYear());
+      const ymd = todayYMD();
+      const dayKey = ymd.replace(/-/g, '');
+      const monthKey = `${systemYear}${ymd.slice(5, 7)}`;
 
-      const dayRef = schoolRef(scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}/${dayKey}`));
+      const dayRef = schoolRef(scopedPathForYear(systemYear, `workerAttendance/${state.workerId}/${monthKey}/${dayKey}`));
       const daySnap = await dayRef.once('value');
       const existing = daySnap.val() || {};
 
@@ -523,37 +561,62 @@
         return;
       }
 
-      const payload = direction === 'in'
-        ? {
-            checkInTs: timestamp,
-            lateMinutes: computeLateMinutes(timestamp),
-            approved: existing.approved ?? false
-          }
-        : {
-            checkOutTs: timestamp,
-            earlyMinutes: computeEarlyMinutes(timestamp)
-          };
-
-      const verificationFields = {
-        method: verification.method,
-        publicIP: verification.publicIP || null,
-        deviceId: state.deviceId,
-        codeWindow: verification.codeWindow,
-        validTo: verification.validTo
-      };
-      Object.assign(payload, verificationFields);
+      const payload = {};
+      if (direction === 'in') {
+        const lateMinutes = computeLateMinutes(timestamp);
+        let reason = '';
+        if (lateMinutes > 0) {
+          const input = await openReasonModal({
+            title: 'Sababu ya kuchelewa check-in',
+            message: 'Umechelewa. Tafadhali andika sababu kabla ya kuhifadhi.',
+            placeholder: 'Kwa nini umechelewa leo?'
+          });
+          if (input === null) return;
+          reason = input;
+        }
+        payload.checkInTs = timestamp;
+        payload.lateMinutes = lateMinutes;
+        payload.checkInStatus = 'pending';
+        payload.checkInReason = reason;
+        payload.checkInReasonTs = Date.now();
+      } else {
+        const earlyMinutes = computeEarlyMinutes(timestamp);
+        const overtimeMinutes = computeOvertimeMinutes(timestamp);
+        const needsReason = earlyMinutes > 0 || overtimeMinutes > 0;
+        let reason = '';
+        if (needsReason) {
+          const input = await openReasonModal({
+            title: 'Sababu ya check-out nje ya muda',
+            message: earlyMinutes > 0
+              ? 'Umetoka mapema. Tafadhali andika sababu.'
+              : 'Umetoka kuchelewa. Tafadhali andika ulikuwa unafanya nini hadi kuchelewa.',
+            placeholder: 'Andika sababu hapa...'
+          });
+          if (input === null) return;
+          reason = input;
+        }
+        payload.checkOutTs = timestamp;
+        payload.earlyMinutes = earlyMinutes;
+        payload.overtimeMinutes = overtimeMinutes;
+        payload.checkOutStatus = 'pending';
+        payload.checkOutReason = reason;
+        payload.checkOutReasonTs = Date.now();
+      }
 
       await dayRef.update(payload);
-      await markPresent();
       await updateSummaries(existing, payload, direction, dayKey);
 
-      toast(direction === 'in' ? 'Karibu kazini!' : 'Asante kwa kazi!', 'success');
+      if (direction === 'in') {
+        toast(
+          (payload.lateMinutes || 0) > 0
+            ? 'Check-in successful BUT YOU ARE LATE. Reason saved. Waiting for headteacher approval.'
+            : 'Check-in successful. Waiting for headteacher approval.',
+          'success'
+        );
+      } else {
+        toast('Check-out successful. Waiting for headteacher approval.', 'success');
+      }
       await refreshAll();
-    }
-
-    async function markPresent() {
-      const presentRef = schoolRef(scopedPath(`dashboard/presentWorkers/${state.todayKey}/${state.workerId}`));
-      await presentRef.set(true);
     }
 
     async function getSummaryRef() {
@@ -577,8 +640,6 @@
         newCountLate += 1;
         summary.countLate = newCountLate;
         changed = true;
-        const addFine = await maybeAddPenalty('late', newCountLate, dayKey);
-        newFines += addFine;
       }
       if (direction === 'out') {
         const early = payload.earlyMinutes || 0;
@@ -586,8 +647,6 @@
           newCountEarly += 1;
           summary.countEarly = newCountEarly;
           changed = true;
-          const addFine = await maybeAddPenalty('early', newCountEarly, dayKey);
-          newFines += addFine;
         }
       }
       if (newFines !== summary.finesTZS) {
@@ -597,26 +656,6 @@
       if (changed) {
         await summaryRef.update(summary);
       }
-    }
-
-    async function maybeAddPenalty(kind, count, dayKey) {
-      const rules = state.rules || DEFAULT_RULES;
-      const threshold = kind === 'late' ? (rules.lateThreshold || 3) : (rules.earlyThreshold || 3);
-      if (count < threshold) return 0;
-      const penaltyRef = schoolRef(scopedPath(`workers_penalties_ledger/${state.workerId}/${state.monthKey}/${dayKey}-${kind}`));
-      const existing = await penaltyRef.once('value');
-      if (existing.exists()) return 0;
-      const amount = Number(rules.deductionAmount || 0);
-      const payload = {
-        kind,
-        count,
-        amountTZS: amount,
-        label: rules.deductionLabel || 'Posho ya Uwajibikaji',
-        refPath: SOMAP.P(scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}/${dayKey}`)),
-        createdTs: localTs()
-      };
-      await penaltyRef.set(payload);
-      return amount;
     }
 
     async function refreshAll() {
@@ -639,12 +678,24 @@
     }
 
     function formatTs(ts) {
-      if (!ts) return '—';
+      if (!ts) return '--';
       return new Date(ts).toLocaleTimeString('sw-TZ', {
         timeZone: 'Africa/Nairobi',
         hour: '2-digit',
         minute: '2-digit'
       });
+    }
+
+    function statusFromLegacy(record, kind) {
+      const field = kind === 'in' ? 'checkInStatus' : 'checkOutStatus';
+      if (record && record[field]) return record[field];
+      if (kind === 'in') {
+        if (record?.approved === true) return 'approved';
+        if (record?.approved === false && record?.approvedTs) return 'rejected';
+        return record?.checkInTs ? 'pending' : '--';
+      }
+      if (!record?.checkOutTs) return '--';
+      return 'pending';
     }
 
     async function renderTable() {
@@ -663,18 +714,15 @@
       dayKeys.forEach(dayKey => {
         const record = data[dayKey] || {};
         const row = document.createElement('tr');
-        const approval = record.approved === true
-          ? '<span class="pill success">Approved</span>'
-          : record.approved === false
-            ? '<span class="pill warning">Pending/Not approved</span>'
-            : '<span class="pill info">Awaiting review</span>';
+        const inStatus = statusFromLegacy(record, 'in');
+        const outStatus = statusFromLegacy(record, 'out');
         row.innerHTML = `
           <td>${dayKey}${source === 'legacy' ? ' *' : ''}</td>
           <td>${formatTs(record.checkInTs)}</td>
           <td>${formatTs(record.checkOutTs)}</td>
           <td>${record.lateMinutes || 0}</td>
           <td>${record.earlyMinutes || 0}</td>
-          <td>${approval}</td>
+          <td>IN: <span class="pill ${inStatus === 'approved' ? 'success' : inStatus === 'rejected' ? 'danger' : inStatus === 'pending' ? 'warning' : 'info'}">${inStatus}</span> • OUT: <span class="pill ${outStatus === 'approved' ? 'success' : outStatus === 'rejected' ? 'danger' : outStatus === 'pending' ? 'warning' : 'info'}">${outStatus}</span></td>
         `;
         attendanceTable.appendChild(row);
       });
