@@ -334,14 +334,24 @@
     }
 
     async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
-      const scopedSnap = await schoolRef(scopedSubPath).once('value');
-      if (scopedSnap.exists()) return { snap: scopedSnap, source: 'scoped' };
-      const isSocrates = ['socrates-school', 'default', 'socrates'].includes(state.schoolId);
-      if (isSocrates) {
-        const legacySnap = await db.ref(legacyPath).once('value');
-        if (legacySnap.exists()) return { snap: legacySnap, source: 'legacy' };
+      let scopedSnap = null;
+      try {
+        scopedSnap = await schoolRef(scopedSubPath).once('value');
+        if (scopedSnap.exists()) return { snap: scopedSnap, source: 'scoped' };
+      } catch (err) {
+        if (!isPermissionDenied(err)) throw err;
       }
-      return { snap: scopedSnap, source: 'scoped' };
+      const legacySnap = await db.ref(legacyPath).once('value');
+      if (legacySnap.exists()) return { snap: legacySnap, source: 'legacy' };
+      return { snap: scopedSnap || legacySnap, source: 'scoped' };
+    }
+
+    function resolveWorkerIdFallback() {
+      const fromQuery = new URLSearchParams(window.location.search).get('workerId');
+      const fromStorage = localStorage.getItem('workerId')
+        || sessionStorage.getItem('workerId')
+        || sessionStorage.getItem('teacherWorkerId');
+      return (fromQuery || fromStorage || '').trim();
     }
 
     async function init() {
@@ -353,7 +363,7 @@
         normalizeNow();
         ensureLocalDeviceId();
 
-        const workerId = await getLinkedWorkerId();
+        const workerId = await getLinkedWorkerId() || resolveWorkerIdFallback();
         if (!workerId) {
           toast('Session ya worker haijakamilika. Ingia tena.', 'error');
           return;
@@ -365,7 +375,10 @@
           console.warn('Device link warning', linkErr);
         }
 
-        await Promise.all([loadProfile(), loadSettings()]);
+        await loadSettings();
+        await loadProfile().catch((err) => {
+          console.warn('Profile load warning:', err?.message || err);
+        });
         await refreshAll();
       } catch (error) {
         console.error('Attendance init failed', error);
@@ -698,7 +711,7 @@
             await schoolRef(scopedDayPath).update(payload);
           }
         } catch (writeErr) {
-          if (isSocratesLegacySchool() && source !== 'legacy' && isPermissionDenied(writeErr)) {
+          if (source !== 'legacy' && isPermissionDenied(writeErr)) {
             await db.ref(legacyDayPath).update(payload);
             writeSource = 'legacy';
           } else {
@@ -955,7 +968,7 @@
         try {
           await schoolRef(scopedDayPath).update({ approved: approveValue });
         } catch (approveErr) {
-          if (isSocratesLegacySchool() && isPermissionDenied(approveErr)) {
+          if (isPermissionDenied(approveErr)) {
             await db.ref(legacyDayPath).update({ approved: approveValue });
           } else {
             throw approveErr;
