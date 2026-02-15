@@ -158,7 +158,6 @@
                   <th>Admission No</th>
                   <th>Full Name</th>
                   <th>Class</th>
-                  <th>Date Registered</th>
                   <th>Parent Contact</th>
                   <th>Transport Start Date</th>
                   <th>Route (Morning)</th>
@@ -169,6 +168,8 @@
                   <th>Transport Debt (TO DATE)</th>
                   <th>Unpaid Months (TO DATE)</th>
                   <th>Total Combined Debt</th>
+                  <th>Total Year Fee</th>
+                  <th>Total Year Debt</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -254,6 +255,11 @@
         <div id="historyStartDateInfo" style="padding: 1rem; background: rgba(59, 130, 246, 0.1); border-radius: 12px; margin-bottom: 1rem; display: none;">
           <strong>Transport Start Date:</strong> <span id="historyStartDateValue">-</span>
         </div>
+        <div class="flex mb-2" style="flex-wrap: wrap; gap: 0.5rem;">
+          <button type="button" class="btn" id="openPaymentScheduleBtn" title="View and download year payment schedule for parent">
+            &#128196; Taarifa ya Malipo (Payment Schedule)
+          </button>
+        </div>
         <div style="overflow-x: auto; margin-top: 1.5rem;">
           <table class="table" id="historyTable">
             <thead>
@@ -273,6 +279,34 @@
             </tbody>
           </table>
           <div id="historyEmpty" class="empty hidden">No payments recorded</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Payment Schedule Modal (Taarifa ya Malipo) -->
+    <div id="paymentScheduleModal" class="modal hidden">
+      <div class="modal-content" style="max-width: 700px;">
+        <div class="flex space center mb-2">
+          <h2 style="margin: 0;">Taarifa ya Malipo ya Usafiri - Payment Schedule</h2>
+          <button class="btn secondary" onclick="closePaymentScheduleModal()">Close</button>
+        </div>
+        <div id="paymentScheduleStudentInfo" style="padding: 1rem; background: rgba(59, 130, 246, 0.1); border-radius: 12px; margin-bottom: 1rem;"></div>
+        <div id="paymentScheduleTableWrap" style="overflow-x: auto; margin-bottom: 1rem;">
+          <table class="table" id="paymentScheduleTable">
+            <thead>
+              <tr>
+                <th>Mkupuo / Month</th>
+                <th>Inatarajiwa / Expected</th>
+                <th>Imelipwa / Paid</th>
+                <th>Salio / Balance</th>
+              </tr>
+            </thead>
+            <tbody id="paymentScheduleBody"></tbody>
+          </table>
+        </div>
+        <div id="paymentScheduleTotals" style="padding: 1rem; background: rgba(15, 23, 42, 0.5); border-radius: 12px; margin-bottom: 1rem;"></div>
+        <div class="flex" style="gap: 0.5rem;">
+          <button type="button" class="btn success" id="downloadPaymentSchedulePdf">&#128196; Download PDF</button>
         </div>
       </div>
     </div>
@@ -675,6 +709,10 @@
         return new Intl.NumberFormat('en-TZ', { style: 'currency', currency: 'TZS', minimumFractionDigits: 0 }).format(amount || 0);
       }
 
+      function formatShortNum(amount) {
+        return new Intl.NumberFormat('en-TZ', { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(Math.round(amount || 0));
+      }
+
       function formatDate(timestamp) {
         if (!timestamp) return 'N/A';
         const date = new Date(timestamp);
@@ -767,17 +805,23 @@
         let totalExpected = 0;
         let totalPaid = 0;
         const unpaidMonths = [];
+        const unpaidMonthsWithAmounts = [];
+        let totalYearExpected = 0;
 
         monthResults.forEach(({ month, expected, paid }) => {
+          totalYearExpected += expected;
           if (!isMonthAlreadyDue(month)) return;
           totalExpected += expected;
           totalPaid += paid;
+          const balance = Math.max(0, expected - paid);
           if ((paid + 0.01) < expected && expected > 0) {
             unpaidMonths.push(MONTH_NAMES[month]);
+            unpaidMonthsWithAmounts.push({ month, name: MONTH_NAMES[month], balance });
           }
         });
 
         const debt = Math.max(0, totalExpected - totalPaid);
+        const totalYearDebt = Math.max(0, totalYearExpected - totalPaid);
 
         // Current month expected (already calculated above, reuse result)
         const currentMonthResult = monthResults.find(r => r.month === selectedMonth);
@@ -793,11 +837,20 @@
           }) || 0
         );
 
+        // Compact unpaid months with amounts: "Jan=114,000, Feb=76,000"
+        const unpaidMonthsDisplay = unpaidMonthsWithAmounts.length
+          ? unpaidMonthsWithAmounts.map(m => `${m.name.substring(0,3)}=${formatShortNum(m.balance)}`).join(', ')
+          : 'None';
+
         const result = {
           totalExpected,
           totalPaid,
           debt,
           unpaidMonths: unpaidMonths.join(', ') || 'None',
+          unpaidMonthsWithAmounts,
+          unpaidMonthsDisplay,
+          totalYearExpected,
+          totalYearDebt,
           monthlyFee: baseMonthlyFee, // Base fee for table display (e.g., 35,500)
           currentMonthExpected, // Month-specific fee with multiplier for KPIs
           startDateIso,
@@ -1020,12 +1073,14 @@
           const debtWarning = isDebtor ? '<span style="color: var(--accent-danger); font-weight: 800; font-size: 0.75rem;">&#9888; USIMCHUKUE ANADAIWA</span>' : '';
           
           const escapedId = String(studentId).replace(/'/g, "\\'");
+          const totalYearFee = transportStatus.totalYearExpected ?? transportStatus.totalExpected;
+          const totalYearDebt = transportStatus.totalYearDebt ?? transportStatus.debt;
+          const unpaidDisplay = transportStatus.unpaidMonthsDisplay ?? transportStatus.unpaidMonths;
           return `
             <tr ${rowClass}>
               <td>${student.admissionNumber || 'N/A'}</td>
               <td>${fullName}${debtWarning ? '<br>' + debtWarning : ''}</td>
               <td>${shiftedClass}</td>
-              <td>${formatDate(student.timestamp || student.createdAt)}</td>
               <td>${student.primaryParentContact || 'N/A'}</td>
               <td>${startDateDisplay}</td>
               <td>${enrollment.amStop || '&mdash;'}</td>
@@ -1041,10 +1096,12 @@
               <td style="color: ${transportDebt > 0 ? 'var(--accent-danger)' : 'var(--accent-success)'};">
                 ${formatCurrency(transportDebt)}
               </td>
-              <td style="font-size: 0.75rem;">${transportStatus.unpaidMonths}</td>
+              <td style="font-size: 0.7rem;" title="${transportStatus.unpaidMonths}">${unpaidDisplay}</td>
               <td style="color: ${transportDebt > 0 ? 'var(--accent-danger)' : 'var(--accent-success)'}; font-weight: 700;">
                 ${formatCurrency(transportDebt)}
               </td>
+              <td style="font-size: 0.75rem;">${formatCurrency(totalYearFee)}</td>
+              <td style="font-size: 0.75rem;">${formatCurrency(totalYearDebt)}</td>
               <td class="table-actions" style="justify-content: flex-end;">
                 <button class="btn success" data-action="pay" data-student="${escapedId}">&#128176; Pay</button>
                 <button class="btn secondary" data-action="history" data-student="${escapedId}">&#128221; History</button>
@@ -1343,6 +1400,7 @@
 
       // View payment history - with real-time approval status
       async function viewPaymentHistory(studentId) {
+        state.currentHistoryStudentId = studentId;
         const student = getStudentForTransport(studentId, state.transportEnrollments[studentId]);
         
         // Load transport assignment to get start date
@@ -1471,6 +1529,127 @@
         document.getElementById('historyModal').classList.add('hidden');
       }
 
+      // Payment Schedule Modal (Taarifa ya Malipo)
+      let paymentScheduleLedger = null;
+      let paymentScheduleStudent = null;
+      let paymentScheduleStudentId = null;
+
+      async function openPaymentScheduleModal() {
+        const studentId = state.currentHistoryStudentId;
+        if (!studentId) return;
+        const enrollment = state.transportEnrollments[studentId];
+        const student = getStudentForTransport(studentId, enrollment);
+        const payments = Object.values(state.transportPayments[studentId] || {});
+        const year = Number(state.year);
+        const multipliers = cachedMultipliers[year] || (await TransportPricing.loadYearMultipliers(year));
+        if (!cachedMultipliers[year]) cachedMultipliers[year] = multipliers;
+        const baseMonthlyFee = Number(enrollment?.baseMonthlyFee) || (await calculateBaseMonthlyFee(enrollment?.amStop || '', enrollment?.pmStop || '', year, getFocusedMonth()));
+        const startDate = resolveStartDate(enrollment);
+        const ledger = await TransportPricing.buildLedger({ year, baseMonthlyFee, amStop: enrollment?.amStop, pmStop: enrollment?.pmStop, startDate, payments, multipliers });
+        paymentScheduleLedger = ledger;
+        paymentScheduleStudent = student;
+        paymentScheduleStudentId = studentId;
+        const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
+        document.getElementById('paymentScheduleStudentInfo').innerHTML = `<strong>${fullName}</strong> (${student.admissionNumber || studentId}) &middot; Year ${year}`;
+        const tbody = document.getElementById('paymentScheduleBody');
+        const now = new Date();
+        const currentMonth = now.getMonth() + 1;
+        const currentDay = now.getDate();
+        const lastDueMonth = currentDay >= 3 ? currentMonth : Math.max(0, currentMonth - 1);
+        tbody.innerHTML = ledger.months.map(m => {
+          const isDue = m.month <= lastDueMonth;
+          const rowStyle = m.status === 'UNPAID' || m.status === 'PARTIAL' ? 'background: rgba(239, 68, 68, 0.1);' : (m.status === 'PAID' ? 'background: rgba(16, 185, 129, 0.08);' : '');
+          return `<tr style="${rowStyle}">
+            <td>Mkupuo wa ${m.month} - ${MONTH_NAMES[m.month]}</td>
+            <td>${formatCurrency(m.due)}</td>
+            <td style="color: var(--accent-success);">${formatCurrency(m.paid)}</td>
+            <td style="color: ${m.balance > 0 ? 'var(--accent-danger)' : 'inherit'};">${formatCurrency(m.balance)}</td>
+          </tr>`;
+        }).join('');
+        const totals = ledger.totals;
+        document.getElementById('paymentScheduleTotals').innerHTML = `
+          <div style="display: grid; gap: 0.5rem;">
+            <div style="display: flex; justify-content: space-between;"><span>Ada ya usafiri kwa mwaka (Total Year Transport Fee):</span><strong>${formatCurrency(totals.due)}</strong></div>
+            <div style="display: flex; justify-content: space-between;"><span>Ada uliolipa hadi sasa (Total Paid):</span><strong style="color: var(--accent-success);">${formatCurrency(totals.paid)}</strong></div>
+            <div style="display: flex; justify-content: space-between;"><span>Ada unaodaiwa hadi leo (Debt to Date):</span><strong style="color: var(--accent-danger);">${formatCurrency(totals.balance)}</strong></div>
+          </div>
+        `;
+        document.getElementById('paymentScheduleModal').classList.remove('hidden');
+      }
+
+      function closePaymentScheduleModal() {
+        document.getElementById('paymentScheduleModal').classList.add('hidden');
+      }
+
+      async function downloadPaymentSchedulePdf() {
+        if (!paymentScheduleLedger || !paymentScheduleStudent) return;
+        const student = paymentScheduleStudent;
+        const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
+        const year = state.year;
+        const today = new Date().toLocaleDateString('sw-TZ', { day: 'numeric', month: 'long', year: 'numeric' });
+        const ledger = paymentScheduleLedger;
+        const currentMonth = new Date().getMonth() + 1;
+        const monthsToDate = ledger.months.filter(m => m.month <= currentMonth);
+        const debtToDate = monthsToDate.reduce((s, m) => s + m.balance, 0);
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
+        const margin = 14;
+        let y = 18;
+        try {
+          const sid = window.SOMAP?.getSchool?.()?.id || '';
+          const logoPath = sid ? `schools/${sid}/profile/logoUrl` : null;
+          if (logoPath) {
+            const logoSnap = await db.ref(logoPath).once('value');
+            const logoUrl = logoSnap.val();
+            if (logoUrl) {
+              const img = await fetch(logoUrl).then(r => r.blob());
+              const reader = new FileReader();
+              const dataUrl = await new Promise((res, rej) => {
+                reader.onload = () => res(reader.result);
+                reader.onerror = rej;
+                reader.readAsDataURL(img);
+              });
+              doc.addImage(dataUrl, 'PNG', margin, y - 4, 24, 24);
+            }
+          }
+        } catch (_) {}
+        doc.setFontSize(18);
+        doc.text(schoolName || 'School', margin + 28, y + 6);
+        y += 16;
+        doc.setFontSize(12);
+        doc.text('Taarifa ya Malipo ya Usafiri - Transport Payment Schedule', margin, y);
+        y += 10;
+        const letterText = `Ndugu Mzazi wa ${fullName}, naomba leo tarehe ${today} upokee taarifa ya mwanao kuhusu malipo yake ya mwaka ${year}. Angalia kwa makini.
+
+Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi. Mkupuo wa kwanza ni January, wa pili February, wa tatu March, n.k.`;
+        const lines = doc.splitTextToSize(letterText, 180);
+        doc.setFontSize(10);
+        doc.text(lines, margin, y);
+        y += lines.length * 5 + 8;
+        doc.autoTable({
+          startY: y,
+          head: [['Mkupuo / Month', 'Inatarajiwa / Expected', 'Imelipwa / Paid', 'Salio / Balance']],
+          body: ledger.months.map(m => [MONTH_NAMES[m.month], formatCurrency(m.due), formatCurrency(m.paid), formatCurrency(m.balance)]),
+          theme: 'grid',
+          margin: { left: margin },
+          styles: { fontSize: 9 },
+        });
+        y = doc.lastAutoTable.finalY + 10;
+        doc.setFontSize(10);
+        doc.text(`Ada ya usafiri kwa mwaka (Total Year): ${formatCurrency(ledger.totals.due)}`, margin, y);
+        y += 6;
+        doc.text(`Ada uliolipa hadi sasa (Total Paid): ${formatCurrency(ledger.totals.paid)}`, margin, y);
+        y += 6;
+        doc.text(`Ada unaodaiwa hadi leo (Debt to Date): ${formatCurrency(ledger.totals.balance)}`, margin, y);
+        y += 14;
+        doc.text('_________________________', margin, y);
+        y += 6;
+        doc.text('Headteacher signature', margin, y);
+        doc.text(`Date: ${today}`, margin, y + 6);
+        doc.save(`Taarifa_Malipo_Usafiri_${fullName.replace(/\s+/g, '_')}_${year}.pdf`);
+        showToast('PDF downloaded!');
+      }
+
       // Add expense
       async function addExpense() {
         const category = document.getElementById('expenseCategory').value;
@@ -1546,11 +1725,13 @@
           const pmDriver = enrollment.eveningVehicle?.driverName || '';
           const driverDisplay = (amDriver && pmDriver && amDriver !== pmDriver)
             ? `AM: ${amDriver} / PM: ${pmDriver}` : (amDriver || pmDriver || '');
+          const unpaidDisp = transportStatus.unpaidMonthsDisplay ?? transportStatus.unpaidMonths;
+          const totalYearFee = transportStatus.totalYearExpected ?? transportStatus.totalExpected;
+          const totalYearDebt = transportStatus.totalYearDebt ?? transportStatus.debt;
           return {
             'Admission No': student.admissionNumber || studentId,
             'Full Name': fullName,
             'Class': shiftedClass,
-            'Date Registered': formatDate(student.timestamp || student.createdAt),
             'Parent Contact': student.primaryParentContact || '',
             'Transport Start Date': transportStatus.startDateDisplay,
             'Route (Morning)': enrollment.amStop || enrollment.morningRouteId || '',
@@ -1559,8 +1740,10 @@
             'Current Month Transport Fee': transportStatus.currentMonthExpected,
             'Transport Paid': transportStatus.totalPaid,
             'Transport Debt (TO DATE)': transportStatus.debt,
-            'Unpaid Months (TO DATE)': transportStatus.unpaidMonths,
+            'Unpaid Months (TO DATE)': unpaidDisp,
             'Total Combined Debt': transportStatus.debt,
+            'Total Year Fee': totalYearFee,
+            'Total Year Debt': totalYearDebt,
           };
         }));
         
@@ -1580,17 +1763,18 @@
         const paidCount = filteredData.filter(r => (Number(r['Transport Debt (TO DATE)']) || 0) === 0).length;
         const unpaidCount = filteredData.length - paidCount;
 
+        const emptyRow = { 'Admission No': '', 'Full Name': '', 'Class': '', 'Parent Contact': '', 'Transport Start Date': '', 'Route (Morning)': '', 'Route (Evening)': '', 'Driver': '', 'Current Month Transport Fee': '', 'Transport Paid': '', 'Transport Debt (TO DATE)': '', 'Unpaid Months (TO DATE)': '', 'Total Combined Debt': '', 'Total Year Fee': '', 'Total Year Debt': '' };
         const summaryRows = [
-          { 'Admission No': 'Report: Transport Payments', 'Full Name': schoolName, 'Class': '', 'Date Registered': '', 'Parent Contact': '', 'Transport Start Date': `Year: ${state.year}`, 'Route (Morning)': '', 'Route (Evening)': '', 'Driver': '', 'Current Month Transport Fee': '', 'Transport Paid': '', 'Transport Debt (TO DATE)': '', 'Unpaid Months (TO DATE)': '', 'Total Combined Debt': '' },
-          { 'Admission No': 'Total Expected (current month)', 'Full Name': '', 'Class': '', 'Date Registered': '', 'Parent Contact': '', 'Transport Start Date': '', 'Route (Morning)': '', 'Route (Evening)': '', 'Driver': '', 'Current Month Transport Fee': totalExpected, 'Transport Paid': '', 'Transport Debt (TO DATE)': '', 'Unpaid Months (TO DATE)': '', 'Total Combined Debt': '' },
-          { 'Admission No': 'Total Collected', 'Full Name': '', 'Class': '', 'Date Registered': '', 'Parent Contact': '', 'Transport Start Date': '', 'Route (Morning)': '', 'Route (Evening)': '', 'Driver': '', 'Current Month Transport Fee': '', 'Transport Paid': totalPaid, 'Transport Debt (TO DATE)': '', 'Unpaid Months (TO DATE)': '', 'Total Combined Debt': '' },
-          { 'Admission No': 'Total Transport Debt', 'Full Name': '', 'Class': '', 'Date Registered': '', 'Parent Contact': '', 'Transport Start Date': '', 'Route (Morning)': '', 'Route (Evening)': '', 'Driver': '', 'Current Month Transport Fee': '', 'Transport Paid': '', 'Transport Debt (TO DATE)': totalDebt, 'Unpaid Months (TO DATE)': '', 'Total Combined Debt': '' },
-          { 'Admission No': 'Students fully paid', 'Full Name': paidCount, 'Class': '', 'Date Registered': '', 'Parent Contact': '', 'Transport Start Date': '', 'Route (Morning)': '', 'Route (Evening)': '', 'Driver': '', 'Current Month Transport Fee': '', 'Transport Paid': '', 'Transport Debt (TO DATE)': '', 'Unpaid Months (TO DATE)': '', 'Total Combined Debt': '' },
-          { 'Admission No': 'Students with debt', 'Full Name': unpaidCount, 'Class': '', 'Date Registered': '', 'Parent Contact': '', 'Transport Start Date': '', 'Route (Morning)': '', 'Route (Evening)': '', 'Driver': '', 'Current Month Transport Fee': '', 'Transport Paid': '', 'Transport Debt (TO DATE)': '', 'Unpaid Months (TO DATE)': '', 'Total Combined Debt': '' },
+          { ...emptyRow, 'Admission No': 'Report: Transport Payments', 'Full Name': schoolName, 'Transport Start Date': `Year: ${state.year}` },
+          { ...emptyRow, 'Admission No': 'Total Expected (current month)', 'Current Month Transport Fee': totalExpected },
+          { ...emptyRow, 'Admission No': 'Total Collected', 'Transport Paid': totalPaid },
+          { ...emptyRow, 'Admission No': 'Total Transport Debt', 'Transport Debt (TO DATE)': totalDebt },
+          { ...emptyRow, 'Admission No': 'Students fully paid', 'Full Name': paidCount },
+          { ...emptyRow, 'Admission No': 'Students with debt', 'Full Name': unpaidCount },
         ];
         const combinedData = [...summaryRows, {}, ...filteredData];
         const ws = XLSX.utils.json_to_sheet(combinedData);
-        const colWidths = [14, 22, 14, 14, 16, 14, 18, 18, 28, 12, 12, 12, 20, 16];
+        const colWidths = [14, 22, 14, 16, 14, 18, 18, 28, 12, 12, 12, 20, 16, 14, 14];
         ws['!cols'] = colWidths.map(w => ({ wch: Math.min(w, 50) }));
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'Transport Payments');
@@ -1612,11 +1796,13 @@
           const amDriver = enrollment.morningVehicle?.driverName || '';
           const pmDriver = enrollment.eveningVehicle?.driverName || '';
           const driverDisplay = (amDriver && pmDriver && amDriver !== pmDriver) ? `AM: ${amDriver} / PM: ${pmDriver}` : (amDriver || pmDriver || '');
+          const unpaidDisp = transportStatus.unpaidMonthsDisplay ?? transportStatus.unpaidMonths;
+          const totalYearFee = transportStatus.totalYearExpected ?? transportStatus.totalExpected;
+          const totalYearDebt = transportStatus.totalYearDebt ?? transportStatus.debt;
           return [
             student.admissionNumber || studentId,
             fullName,
             shiftedClass,
-            formatDate(student.timestamp || student.createdAt),
             student.primaryParentContact || '',
             transportStatus.startDateDisplay,
             enrollment.amStop || '',
@@ -1625,20 +1811,22 @@
             String(transportStatus.currentMonthExpected),
             String(transportStatus.totalPaid),
             String(transportStatus.debt),
-            transportStatus.unpaidMonths,
+            unpaidDisp,
             String(transportStatus.debt),
+            String(totalYearFee),
+            String(totalYearDebt),
           ];
         }));
         let totalExpected = 0, totalPaid = 0, totalDebt = 0, maxDebt = 0, maxDebtName = '', paidCount = 0;
-        rows.forEach((r, i) => {
-          const fee = Number(r[9]) || 0, paid = Number(r[10]) || 0, debt = Number(r[11]) || 0;
+        rows.forEach((r) => {
+          const fee = Number(r[8]) || 0, paid = Number(r[9]) || 0, debt = Number(r[10]) || 0;
           totalExpected += fee; totalPaid += paid; totalDebt += debt;
           if (debt > maxDebt) { maxDebt = debt; maxDebtName = r[1]; }
           if (debt === 0) paidCount++;
         });
         const unpaidCount = rows.length - paidCount;
-        const minDebtRow = rows.filter(r => (Number(r[11]) || 0) > 0).sort((a, b) => (Number(a[11]) || 0) - (Number(b[11]) || 0))[0];
-        const leastDebt = minDebtRow ? (Number(minDebtRow[11]) || 0) : 0;
+        const minDebtRow = rows.filter(r => (Number(r[10]) || 0) > 0).sort((a, b) => (Number(a[10]) || 0) - (Number(b[10]) || 0))[0];
+        const leastDebt = minDebtRow ? (Number(minDebtRow[10]) || 0) : 0;
         const leastDebtName = minDebtRow ? minDebtRow[1] : '';
 
         const { jsPDF } = window.jspdf;
@@ -1686,10 +1874,10 @@
         doc.text(lines2, 14, y);
         y += lines2.length * lineH + 8;
 
-        const colHeaders = ['Admission No', 'Full Name', 'Class', 'Date Reg.', 'Parent Contact', 'Transport Start', 'Route (AM)', 'Route (PM)', 'Driver', 'Curr. Month Fee', 'Transport Paid', 'Transport Debt', 'Unpaid Months', 'Total Debt'];
+        const colHeaders = ['Admission No', 'Full Name', 'Class', 'Parent Contact', 'Transport Start', 'Route (AM)', 'Route (PM)', 'Driver', 'Curr. Month Fee', 'Transport Paid', 'Transport Debt', 'Unpaid Months', 'Total Debt', 'Total Year Fee', 'Total Year Debt'];
         doc.addPage('a4', 'l');
         const tablePageW = 297 - 28;
-        const colW = [16, 30, 14, 14, 20, 16, 20, 20, 32, 14, 14, 14, 24, 14];
+        const colW = [16, 30, 14, 20, 16, 20, 20, 28, 14, 14, 14, 24, 14, 14, 14];
         const colStyles = {};
         colW.forEach((w, i) => { colStyles[i] = { cellWidth: w, overflow: 'linebreak', minCellHeight: 6 }; });
         doc.autoTable({
@@ -1774,7 +1962,8 @@
             assignmentsScopedSnap,
             assignmentsLegacySnap,
             vehiclesSnap,
-            workersSnap
+            workersSnap,
+            catalogStopsSnap
           ] = await Promise.all([
             schoolRef(`years/${year}/transportEnrollments`).once('value'),
             isLegacyMerge ? db.ref('transport_enrollments').once('value') : Promise.resolve(null),
@@ -1784,7 +1973,19 @@
             isLegacyMerge ? db.ref(`transportAssignments/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
             schoolRef(`years/${year}/transport/buses`).once('value').catch(() => ({ val: () => null, exists: () => false })),
             schoolRef('workers').once('value').catch(() => ({ val: () => null, exists: () => false })),
+            (async () => {
+              try {
+                const s = await schoolRef(`transportCatalog/${year}/stops`).once('value');
+                return s && s.val ? s : { val: () => null };
+              } catch (_) {
+                try {
+                  const g = await db.ref(`transportCatalog/${year}/stops`).once('value');
+                  return g && g.val ? g : { val: () => null };
+                } catch (__) { return { val: () => null }; }
+              }
+            })(),
           ]);
+          const catalogStopsVal = catalogStopsSnap && catalogStopsSnap.val ? catalogStopsSnap.val() : null;
 
           const scopedEnrollments = (enrollScopedSnap && typeof enrollScopedSnap.val === 'function') ? (enrollScopedSnap.val() || {}) : {};
           const legacyEnrollmentsRaw = (enrollLegacySnap && typeof enrollLegacySnap.val === 'function') ? (enrollLegacySnap.val() || {}) : {};
@@ -1816,6 +2017,7 @@
             });
           }
           const routeVehicleMap = {};
+          const norm = (s) => String(s || '').toLowerCase().trim();
           Object.entries(vehicles).forEach(([vehicleId, v]) => {
             const raw = v.assignedRoutes;
             const list = !raw ? [] : Array.isArray(raw) ? raw : (typeof raw === 'object' ? Object.values(raw) : []);
@@ -1824,16 +2026,28 @@
             const entry = { vehicleId, driverName };
             list.forEach(r => {
               const routeName = (typeof r === 'string' ? r : (r && (r.route || r.name || r.id))) || '';
-              const key = String(routeName).toLowerCase().trim();
+              const key = norm(routeName);
               if (key && !routeVehicleMap[key]) routeVehicleMap[key] = entry;
             });
             if (list.length === 0 && (v.amStop || v.pmStop)) {
-              const k1 = String(v.amStop || '').toLowerCase().trim();
-              const k2 = String(v.pmStop || '').toLowerCase().trim();
+              const k1 = norm(v.amStop);
+              const k2 = norm(v.pmStop);
               if (k1) routeVehicleMap[k1] = entry;
               if (k2) routeVehicleMap[k2] = entry;
             }
           });
+          // Add stop ID aliases from transportCatalog so amStop/morningRouteId (which may be stop id) maps to driver
+          if (catalogStopsVal && typeof catalogStopsVal === 'object') {
+            Object.entries(catalogStopsVal).forEach(([stopId, stop]) => {
+              if (!stop) return;
+              const stopName = norm(stop.name || stop.id || '');
+              const entry = routeVehicleMap[stopName];
+              if (entry) {
+                if (!routeVehicleMap[stopId]) routeVehicleMap[stopId] = entry;
+                if (!routeVehicleMap[norm(stopId)]) routeVehicleMap[norm(stopId)] = entry;
+              }
+            });
+          }
 
           state.transportEnrollments = {};
 
@@ -2136,6 +2350,9 @@
         else if (action === 'history') viewPaymentHistory(studentId);
       });
 
+      document.getElementById('openPaymentScheduleBtn')?.addEventListener('click', () => openPaymentScheduleModal());
+      document.getElementById('downloadPaymentSchedulePdf')?.addEventListener('click', () => downloadPaymentSchedulePdf());
+
       // Update due date display: 3rd {MonthName} {Year}
       (function updateDueDate(){
         const params = new URLSearchParams(window.location.search);
@@ -2429,6 +2646,11 @@
         const { assign, payments, schoolFeePaid, student, resolvedTransportId } = await loadTransportContextStrict(year, studentId);
         const effectiveStudentId = resolvedTransportId || studentId;
         state.currentPaymentStudentId = effectiveStudentId;
+        if (assign && assign.status === 'Using') {
+          state.transportEnrollments[effectiveStudentId] = { ...assign, amStop: assign.amStop || assign.morningRouteId, pmStop: assign.pmStop || assign.eveningRouteId };
+        }
+        state.students[effectiveStudentId] = student;
+        state.transportPayments[effectiveStudentId] = payments;
         renderIdentityStrict(student);
         // If no year-scoped assignment, attempt to render using legacy enrollment data
         if (!assign || assign.status !== 'Using'){
@@ -2501,7 +2723,11 @@
         // Note: only show value; the rest of school columns are fed from student rows
         // We will update the single-row table to reflect school fee paid from finance ledger
 
-        const unpaid = monthsToDate.filter(m=>m.status==='UNPAID'||m.status==='PARTIAL').map(m=>MONTH_NAMES[m.month]).join(', ') || 'None';
+        const unpaidMonthsWithAmounts = monthsToDate.filter(m=>m.status==='UNPAID'||m.status==='PARTIAL').map(m=>({month:m.month,name:MONTH_NAMES[m.month],balance:Math.max(0,(Number(m.due)||0)-(Number(m.paid)||0))}));
+        const unpaidDisplay = unpaidMonthsWithAmounts.length ? unpaidMonthsWithAmounts.map(m=>`${m.name.substring(0,3)}=${formatShortNum(m.balance)}`).join(', ') : 'None';
+        const totalYearExpected = (ledger.months||[]).reduce((s,m)=>s+(Number(m.due)||0),0);
+        const totalPaidAll = (ledger.totals&&ledger.totals.paid) ? Number(ledger.totals.paid) : paidToDate;
+        const totalYearDebt = Math.max(0, totalYearExpected - totalPaidAll);
 
         const tbody = document.getElementById('paymentsBody');
         if (tbody){
@@ -2520,7 +2746,6 @@
               <td>${student.admissionNumber || 'N/A'}</td>
               <td>${fullName}</td>
               <td>${student.classLevel || '&mdash;'}</td>
-              <td>${formatDate(student.timestamp || student.createdAt)}</td>
               <td>${student.primaryParentContact || 'N/A'}</td>
               <td>${startDisplay}</td>
               <td>${morningRoute}</td>
@@ -2534,8 +2759,10 @@
               </td>
               <td style="color: var(--accent-success);">${formatCurrency(paidToDate)}</td>
               <td style="color: ${balanceToDate>0?'var(--accent-danger)':'var(--accent-success)'};">${formatCurrency(balanceToDate)}</td>
-              <td style="font-size: 0.75rem;">${unpaid}</td>
+              <td style="font-size: 0.7rem;">${unpaidDisplay}</td>
               <td style="color: ${balanceToDate>0?'var(--accent-danger)':'var(--accent-success)'}; font-weight: 700;">${formatCurrency(balanceToDate)}</td>
+              <td style="font-size: 0.75rem;">${formatCurrency(totalYearExpected)}</td>
+              <td style="font-size: 0.75rem;">${formatCurrency(totalYearDebt)}</td>
               <td class="table-actions" style="justify-content: flex-end;">
                 <button class="btn success" data-action="pay" data-student="${escapedId}">&#128176; Pay</button>
                 <button class="btn secondary" data-action="history" data-student="${escapedId}">&#128221; History</button>
