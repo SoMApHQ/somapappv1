@@ -1596,6 +1596,7 @@
         const margin = 14;
         let y = 18;
         try {
+          let logoDataUrl = null;
           const sid = window.SOMAP?.getSchool?.()?.id || '';
           const logoPath = sid ? `schools/${sid}/profile/logoUrl` : null;
           if (logoPath) {
@@ -1604,14 +1605,32 @@
             if (logoUrl) {
               const img = await fetch(logoUrl).then(r => r.blob());
               const reader = new FileReader();
-              const dataUrl = await new Promise((res, rej) => {
+              logoDataUrl = await new Promise((res, rej) => {
                 reader.onload = () => res(reader.result);
                 reader.onerror = rej;
                 reader.readAsDataURL(img);
               });
-              doc.addImage(dataUrl, 'PNG', margin, y - 4, 24, 24);
             }
           }
+          if (!logoDataUrl && (sid === 'socrates-school' || sid === 'default' || sid === 'socrates')) {
+            const logoCandidates = ['../images/socrates_logo.png', '../images/socrates-school-logo.png', '../images/somap-logo.png.jpg'];
+            for (const path of logoCandidates) {
+              try {
+                const r = await fetch(path, { mode: 'cors', cache: 'no-cache' });
+                if (r.ok) {
+                  const blob = await r.blob();
+                  logoDataUrl = await new Promise((res, rej) => {
+                    const reader = new FileReader();
+                    reader.onload = () => res(reader.result);
+                    reader.onerror = rej;
+                    reader.readAsDataURL(blob);
+                  });
+                  break;
+                }
+              } catch (_) {}
+            }
+          }
+          if (logoDataUrl) doc.addImage(logoDataUrl, 'PNG', margin, y - 4, 24, 24);
         } catch (_) {}
         doc.setFontSize(18);
         doc.text(schoolName || 'School', margin + 28, y + 6);
@@ -1971,16 +1990,57 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             isLegacyMerge ? db.ref(`transportRegistry/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
             schoolRef(`years/${year}/transportAssignments`).once('value').catch(() => ({ val: () => null })),
             isLegacyMerge ? db.ref(`transportAssignments/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
-            schoolRef(`years/${year}/transport/buses`).once('value').catch(() => ({ val: () => null, exists: () => false })),
             (async () => {
+              const merged = {};
+              const addFromSnap = (snap) => {
+                if (!snap || typeof snap.forEach !== 'function') return;
+                snap.forEach(child => {
+                  const v = child.val();
+                  if (v) merged[child.key] = { id: child.key, ...v };
+                });
+              };
+              try {
+                const primary = await schoolRef(`years/${year}/transport/buses`).once('value');
+                addFromSnap(primary);
+              } catch (_) {}
+              if (isLegacyMerge) {
+                try {
+                  const leg1 = await db.ref(`transport/socrates-school/${year}/buses`).once('value');
+                  const leg2 = await db.ref(`transport/socrates/${year}/buses`).once('value');
+                  addFromSnap(leg1);
+                  addFromSnap(leg2);
+                } catch (_) {}
+              }
+              return {
+                val: () => merged,
+                exists: () => Object.keys(merged).length > 0,
+                forEach: (cb) => Object.entries(merged).forEach(([key, v]) => cb({ key, val: () => v }))
+              };
+            })(),
+            (async () => {
+              const merged = {};
+              const addFromSnap = (snap) => {
+                if (!snap || !snap.val) return;
+                const v = snap.val();
+                if (v && typeof v === 'object') Object.assign(merged, v);
+              };
               try {
                 const primary = await schoolRef(`years/${year}/workers`).once('value');
-                if (primary && primary.exists && primary.exists() && primary.val()) return primary;
+                addFromSnap(primary);
               } catch (_) {}
+              if (isLegacyMerge) {
+                try {
+                  addFromSnap(await db.ref(`years/${year}/workers`).once('value'));
+                  addFromSnap(await db.ref('workers').once('value'));
+                } catch (_) {}
+              }
               try {
-                return await schoolRef('workers').once('value');
+                addFromSnap(await schoolRef('workers').once('value'));
               } catch (_) {}
-              return { val: () => null, exists: () => false };
+              return {
+                val: () => merged,
+                exists: () => Object.keys(merged).length > 0
+              };
             })(),
             (async () => {
               try {
@@ -2017,8 +2077,9 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             const workersVal = workersSnap.val() || {};
             Object.entries(workersVal).forEach(([uid, worker]) => {
               const profile = worker && worker.profile;
-              if (!profile || !isDriverRole(profile.role) || profile.active === false) return;
-              const fullName = profile.fullNameUpper || [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ') || uid;
+              const role = (profile && profile.role) || worker.role;
+              if (!isDriverRole(role) || (profile && profile.active === false)) return;
+              const fullName = (profile && profile.fullNameUpper) || [profile?.firstName, profile?.middleName, profile?.lastName].filter(Boolean).join(' ') || worker.fullName || uid;
               drivers.push({ id: uid, fullName });
             });
           }
@@ -2036,7 +2097,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             const list = !raw ? [] : Array.isArray(raw) ? raw : (typeof raw === 'object' ? Object.values(raw) : []);
             const driverUid = v.assignedDriverUid || v.driverId;
             const driver = driverUid ? drivers.find(d => d.id === driverUid) : null;
-            const driverNameFromVehicle = v.assignedDriverName || v.driverName || v.driverFullName || v.driver || '';
+            const driverNameFromVehicle = v.assignedDriverName || v.driverName || v.driverFullName || v.driverDisplayName || v.driver || v.assignedDriver || '';
             const driverName = driver ? driver.fullName : (driverNameFromVehicle && String(driverNameFromVehicle).trim()) || 'Not assigned';
             const entry = { vehicleId, driverName };
             list.forEach(r => {
