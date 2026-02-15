@@ -1972,7 +1972,16 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             schoolRef(`years/${year}/transportAssignments`).once('value').catch(() => ({ val: () => null })),
             isLegacyMerge ? db.ref(`transportAssignments/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
             schoolRef(`years/${year}/transport/buses`).once('value').catch(() => ({ val: () => null, exists: () => false })),
-            schoolRef('workers').once('value').catch(() => ({ val: () => null, exists: () => false })),
+            (async () => {
+              try {
+                const primary = await schoolRef(`years/${year}/workers`).once('value');
+                if (primary && primary.exists && primary.exists() && primary.val()) return primary;
+              } catch (_) {}
+              try {
+                return await schoolRef('workers').once('value');
+              } catch (_) {}
+              return { val: () => null, exists: () => false };
+            })(),
             (async () => {
               try {
                 const s = await schoolRef(`transportCatalog/${year}/stops`).once('value');
@@ -2000,11 +2009,15 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           const assignments = isLegacyMerge ? { ...legacyAssignments, ...scopedAssignments } : scopedAssignments;
 
           const drivers = [];
+          const isDriverRole = (r) => {
+            const role = String(r || '').toLowerCase().trim();
+            return role === 'driver' || role === 'dereva';
+          };
           if (workersSnap && workersSnap.exists && workersSnap.exists()) {
             const workersVal = workersSnap.val() || {};
             Object.entries(workersVal).forEach(([uid, worker]) => {
               const profile = worker && worker.profile;
-              if (!profile || profile.role !== 'driver' || profile.active === false) return;
+              if (!profile || !isDriverRole(profile.role) || profile.active === false) return;
               const fullName = profile.fullNameUpper || [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ') || uid;
               drivers.push({ id: uid, fullName });
             });
@@ -2021,8 +2034,10 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           Object.entries(vehicles).forEach(([vehicleId, v]) => {
             const raw = v.assignedRoutes;
             const list = !raw ? [] : Array.isArray(raw) ? raw : (typeof raw === 'object' ? Object.values(raw) : []);
-            const driver = drivers.find(d => d.id === (v.assignedDriverUid || v.driverId));
-            const driverName = driver ? driver.fullName : 'Not assigned';
+            const driverUid = v.assignedDriverUid || v.driverId;
+            const driver = driverUid ? drivers.find(d => d.id === driverUid) : null;
+            const driverNameFromVehicle = v.assignedDriverName || v.driverName || v.driverFullName || v.driver || '';
+            const driverName = driver ? driver.fullName : (driverNameFromVehicle && String(driverNameFromVehicle).trim()) || 'Not assigned';
             const entry = { vehicleId, driverName };
             list.forEach(r => {
               const routeName = (typeof r === 'string' ? r : (r && (r.route || r.name || r.id))) || '';
