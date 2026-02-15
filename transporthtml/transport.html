@@ -270,8 +270,18 @@
         return 'NJE YA MAENEO HAYA - 44,000 TZS/month/time';
       };
       async function loadRouteOptions() {
-        if (typeof TransportPricing?.loadStopsForYear !== 'function') return;
-        const stops = await TransportPricing.loadStopsForYear(state.year);
+        let stops = [];
+        if (typeof TransportPricing?.loadStopsForYear === 'function') {
+          stops = await TransportPricing.loadStopsForYear(state.year) || [];
+        }
+        if (stops.length === 0 && isSocratesSchool(schoolId)) {
+          const schoolPath = `schools/${schoolId}/transportCatalog/${state.year}/stops`;
+          try {
+            const snap = await db.ref(schoolPath).once('value');
+            const val = snap.val() || {};
+            stops = Object.entries(val).map(([id, s]) => ({ id, name: s?.name || id, baseFee: Number(s?.baseFee) || 0, active: s?.active !== false }));
+          } catch (_) {}
+        }
         ROUTE_OPTIONS = (stops || [])
           .filter(s => s.active !== false)
           .map(s => {
@@ -737,12 +747,28 @@
         searchTimeout = setTimeout(() => renderStudentsTable(), 300); // Wait 300ms after typing stops
       });
 
-      // Searchable route dropdown - init and bind
+      // Searchable route dropdown - opens UPWARDS, uses fixed position so not clipped by modal
       function initSearchableRoute(searchInputId, listId, selectEl, currentValue) {
         const input = document.getElementById(searchInputId);
         const list = document.getElementById(listId);
         if (!input || !list || !selectEl) return;
         const q = (term) => String(term || '').toLowerCase().trim();
+        if (input.dataset.routeSearchInit) {
+          input.value = currentValue ? (ROUTE_OPTIONS.find(r => r.v === currentValue)?.l || currentValue) : '';
+          selectEl.innerHTML = '<option value=""></option>' + ROUTE_OPTIONS.map(r => `<option value="${r.v}">${r.l}</option>`).join('');
+          if (currentValue) selectEl.value = currentValue;
+          return;
+        }
+        input.dataset.routeSearchInit = '1';
+        const positionList = () => {
+          const rect = input.getBoundingClientRect();
+          list.style.position = 'fixed';
+          list.style.left = rect.left + 'px';
+          list.style.width = rect.width + 'px';
+          list.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+          list.style.top = 'auto';
+          list.style.maxHeight = '320px';
+        };
         const renderList = (filterTerm) => {
           const term = q(filterTerm);
           const filtered = term ? ROUTE_OPTIONS.filter(r => q(r.l).includes(term) || q(r.v).includes(term)) : ROUTE_OPTIONS;
@@ -753,11 +779,11 @@
               lastGroup = r.g;
               html += `<div class="route-opt-group">${r.g}</div>`;
             }
-            const sel = r.v === (selectEl.value || '') ? ' selected' : '';
             html += `<div class="route-opt" data-value="${r.v}" data-label="${r.l.replace(/"/g, '&quot;')}">${r.l}</div>`;
           });
           list.innerHTML = html || '<div class="route-opt" style="color:var(--text-muted);">No matching routes</div>';
           list.classList.remove('hidden');
+          positionList();
           list.querySelectorAll('.route-opt[data-value]').forEach(el => {
             el.addEventListener('click', () => {
               const v = el.dataset.value;
@@ -773,6 +799,9 @@
         input.addEventListener('focus', () => renderList(input.value));
         input.addEventListener('input', () => renderList(input.value));
         input.addEventListener('blur', () => setTimeout(() => list.classList.add('hidden'), 200));
+        const onScrollOrResize = () => { if (!list.classList.contains('hidden')) positionList(); };
+        transportAssignModal?.addEventListener('scroll', onScrollOrResize, true);
+        window.addEventListener('resize', onScrollOrResize);
         // Populate hidden select
         selectEl.innerHTML = '<option value=""></option>' + ROUTE_OPTIONS.map(r => `<option value="${r.v}">${r.l}</option>`).join('');
         if (currentValue) selectEl.value = currentValue;
