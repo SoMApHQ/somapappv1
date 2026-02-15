@@ -419,6 +419,14 @@
       function formatCurrency(amount) {
         return new Intl.NumberFormat('en-TZ', { style: 'currency', currency: 'TZS' }).format(amount || 0);
       }
+      function routeMatches(assignedVal, target) {
+        const a = String(assignedVal || '').toLowerCase().trim();
+        const t = String(target || '').toLowerCase().trim();
+        if (!a || !t) return false;
+        if (a === t) return true;
+        if (a.includes(t) || t.includes(a)) return true;
+        return false;
+      }
 
       function formatDate(timestamp) {
         if (!timestamp) return 'N/A';
@@ -783,9 +791,13 @@
           });
           list.innerHTML = html || '<div class="route-opt" style="color:var(--text-muted);">No matching routes</div>';
           list.classList.remove('hidden');
-          positionList();
+          requestAnimationFrame(() => {
+            positionList();
+            list.scrollTop = 0;
+          });
           list.querySelectorAll('.route-opt[data-value]').forEach(el => {
-            el.addEventListener('click', () => {
+            el.addEventListener('mousedown', (e) => {
+              e.preventDefault();
               const v = el.dataset.value;
               const lbl = el.dataset.label;
               selectEl.value = v;
@@ -826,13 +838,17 @@
         document.getElementById('assignStudentInfo').textContent = 
           `${fullName} - ${student.admissionNumber} - ${displayClass}`;
 
-        // Reset form
+        // Reset form and route search state so both morning/evening get fresh init
         if (assignRouteSelect) assignRouteSelect.value = '';
         assignPeriod.value = '';
         assignMorningDrop.value = '';
         assignEveningDrop.value = '';
-        document.getElementById('assignMorningDropSearch').value = '';
-        document.getElementById('assignEveningDropSearch').value = '';
+        const morningSearch = document.getElementById('assignMorningDropSearch');
+        const eveningSearch = document.getElementById('assignEveningDropSearch');
+        if (morningSearch) delete morningSearch.dataset.routeSearchInit;
+        if (eveningSearch) delete eveningSearch.dataset.routeSearchInit;
+        if (morningSearch) morningSearch.value = '';
+        if (eveningSearch) eveningSearch.value = '';
         document.getElementById('dropOffSection').style.display = 'none';
         document.getElementById('farePreview').style.display = 'none';
         document.getElementById('vehicleAssignSection').style.display = 'none';
@@ -1051,7 +1067,7 @@
             return assigned.some(r => {
               if (!r) return false;
               const val = (typeof r === 'string') ? r : (r.route || r.name || r.id || '');
-              return String(val).toLowerCase().trim() === target;
+              return routeMatches(val, target);
             });
           });
 
@@ -1167,11 +1183,10 @@
               const list = Array.isArray(raw)
                 ? raw
                 : (typeof raw === 'object') ? Object.values(raw) : [];
-              const target = String(route).toLowerCase().trim();
               return list.some(r => {
                 if (!r) return false;
                 const val = (typeof r === 'string') ? r : (r.route || r.name || r.id || '');
-                return String(val).toLowerCase().trim() === target;
+                return routeMatches(val, route);
               });
             });
             
@@ -1273,6 +1288,10 @@
           const yearKey = String(state.year);
           const isLegacyMerge = isSocratesSchool(schoolId);
 
+          const legacyBusesPaths = isSocratesSchool(schoolId) ? [
+            `transport/socrates-school/${yearKey}/buses`,
+            `transport/socrates/${yearKey}/buses`
+          ] : [];
           const [
             enrollScopedSnap,
             enrollLegacySnap,
@@ -1280,7 +1299,8 @@
             registryLegacySnap,
             assignmentsScopedSnap,
             assignmentsLegacySnap,
-            vehiclesSnap
+            vehiclesSnap,
+            ...legacyBusesSnaps
           ] = await Promise.all([
             schoolRef(`years/${yearKey}/transportEnrollments`).once('value'),
             isLegacyMerge ? db.ref('transport_enrollments').once('value') : Promise.resolve(null),
@@ -1288,7 +1308,8 @@
             isLegacyMerge ? db.ref(`transportRegistry/${yearKey}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
             schoolRef(`years/${yearKey}/transportAssignments`).once('value').catch(() => ({ val: () => null })),
             isLegacyMerge ? db.ref(`transportAssignments/${yearKey}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
-            schoolRef(`years/${yearKey}/transport/buses`).once('value')
+            schoolRef(`years/${yearKey}/transport/buses`).once('value'),
+            ...legacyBusesPaths.map(p => db.ref(p).once('value').catch(() => ({ val: () => null })))
           ]);
 
           const scopedEnrollments = (enrollScopedSnap && typeof enrollScopedSnap.val === 'function') ? (enrollScopedSnap.val() || {}) : {};
@@ -1347,13 +1368,20 @@
             };
           });
           
-          // Process vehicles
+          // Process vehicles (merge scoped + legacy paths)
           state.vehicles = {};
-          if (vehiclesSnap.exists()) {
-            vehiclesSnap.forEach(child => {
-              state.vehicles[child.key] = { id: child.key, ...(child.val() || {}) };
+          const mergeBusesFromSnap = (snap) => {
+            if (!snap || !snap.val) return;
+            const val = typeof snap.val === 'function' ? snap.val() : snap.val;
+            if (!val || typeof val !== 'object') return;
+            Object.entries(val).forEach(([key, v]) => {
+              if (v && !state.vehicles[key]) {
+                state.vehicles[key] = { id: key, ...(v || {}) };
+              }
             });
-          }
+          };
+          mergeBusesFromSnap(vehiclesSnap);
+          (legacyBusesSnaps || []).forEach(mergeBusesFromSnap);
 
           // Load drivers (with caching)
           await loadDriversCached();
