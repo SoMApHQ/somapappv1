@@ -2102,81 +2102,170 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           const legacyAssignments = (assignmentsLegacySnap && typeof assignmentsLegacySnap.val === 'function') ? (assignmentsLegacySnap.val() || {}) : {};
           const assignments = isLegacyMerge ? { ...legacyAssignments, ...scopedAssignments } : scopedAssignments;
 
+          // --- DRIVER + VEHICLE RESOLUTION (FIX: Furaha not showing) ---
+          const norm = (s) => String(s || '').toLowerCase().trim();
+
+          // Build full name safely from MANY possible worker schemas
+          function buildWorkerFullName(uid, worker) {
+            const profile = worker?.profile || {};
+            const name =
+              profile.fullNameUpper ||
+              worker?.fullNameUpper ||
+              profile.fullName ||
+              worker?.fullName ||
+              worker?.name ||
+              [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ') ||
+              [worker?.firstName, worker?.middleName, worker?.lastName].filter(Boolean).join(' ') ||
+              uid;
+            return String(name || uid).trim() || uid;
+          }
+
+          function normalizePhone(raw) {
+            const s = String(raw || '').trim();
+            if (!s) return '';
+            const digits = s.replace(/[^\d]/g, '');
+            if (digits.startsWith('255')) return digits;
+            if (digits.length === 9) return '255' + digits;
+            if (digits.length === 10 && digits.startsWith('0')) return '255' + digits.slice(1);
+            return digits;
+          }
+
+          // Build lookup maps from ALL workers (not only role=driver)
           const drivers = [];
+          const workerNameByUid = new Map();
+          const workerNameByPhone = new Map();
+
           const isDriverRole = (worker) => {
             const profile = worker?.profile || {};
-            const roleRaw = profile.role || worker.role || profile.jobTitle || profile.position || '';
+            const roleRaw = profile.role || worker.role || profile.jobTitle || profile.position || worker.jobTitle || '';
             const role = String(roleRaw || '').toLowerCase().trim();
-            return role === 'driver' || role === 'dereva' || role.includes('driver') || role.includes('dereva');
+            return role === 'driver' || role === 'dereva';
           };
+
           if (workersSnap && workersSnap.exists && workersSnap.exists()) {
             const workersVal = workersSnap.val() || {};
             Object.entries(workersVal).forEach(([uid, worker]) => {
-              const profile = (worker && worker.profile && typeof worker.profile === 'object') ? worker.profile : {};
-              if (!isDriverRole(worker) || profile.active === false || worker?.active === false) return;
-              const fullName = (
-                profile.fullNameUpper ||
-                worker?.fullNameUpper ||
-                worker?.fullName ||
-                [profile.firstName || worker?.firstName, profile.middleName || worker?.middleName, profile.lastName || worker?.lastName].filter(Boolean).join(' ')
-              ) || uid;
-              drivers.push({ id: uid, fullName });
+              if (!worker) return;
+              const fullName = buildWorkerFullName(uid, worker);
+              workerNameByUid.set(uid, fullName);
+
+              const profile = worker?.profile || {};
+              const phone = normalizePhone(profile.phone || worker.phone || worker.mobile || profile.mobile || '');
+              if (phone && !workerNameByPhone.has(phone)) workerNameByPhone.set(phone, fullName);
+
+              if (isDriverRole(worker)) {
+                drivers.push({ id: uid, fullName });
+              }
             });
           }
+
+          function resolveWorkerName(uidOrPhone) {
+            const key = String(uidOrPhone || '').trim();
+            if (!key) return '';
+            const byUid = workerNameByUid.get(key);
+            if (byUid) return byUid;
+            const byPhone = workerNameByPhone.get(normalizePhone(key));
+            if (byPhone) return byPhone;
+            return '';
+          }
+
+          // Merge buses from multiple snaps (existing code style)
           const vehicles = {};
           const mergeBusesFromSnap = (snap) => {
             if (!snap || !snap.val) return;
             const val = typeof snap.val === 'function' ? snap.val() : snap.val;
             if (!val || typeof val !== 'object') return;
             Object.entries(val).forEach(([key, v]) => {
-              if (v && !vehicles[key]) {
-                vehicles[key] = { id: key, ...(v || {}) };
-              }
+              if (v && !vehicles[key]) vehicles[key] = { id: key, ...(v || {}) };
             });
           };
           mergeBusesFromSnap(vehiclesSnap);
           (legacyBusesSnaps || []).forEach(mergeBusesFromSnap);
+
+          // Create vehicle lookups by id + by plate
+          const vehicleIdByPlate = {};
+          Object.entries(vehicles).forEach(([vehicleId, v]) => {
+            const plateKey = norm(v.plate || v.plateNo || v.registration || '');
+            if (plateKey) vehicleIdByPlate[plateKey] = vehicleId;
+          });
+
+          function getVehicleByAnyRef(ref) {
+            const k = String(ref || '').trim();
+            if (!k) return null;
+            if (vehicles[k]) return vehicles[k];
+            const byPlate = vehicleIdByPlate[norm(k)];
+            if (byPlate && vehicles[byPlate]) return vehicles[byPlate];
+            return null;
+          }
+
+          // Normalize assignedRoutes safely (handles array, object-map, RTDB array-object)
+          function normalizeRoutes(raw) {
+            if (!raw) return [];
+            if (Array.isArray(raw)) return raw;
+            if (typeof raw === 'object') {
+              const entries = Object.entries(raw);
+              const isArrayLike = entries.every(([k]) => String(Number(k)) === k);
+              if (isArrayLike) {
+                return entries
+                  .sort((a, b) => Number(a[0]) - Number(b[0]))
+                  .map(([, v]) => v)
+                  .filter(Boolean);
+              }
+              const allBooleans = entries.every(([, v]) => v === true || v === 1 || v === '1');
+              if (allBooleans) return entries.map(([k]) => k).filter(Boolean);
+              return entries.map(([, v]) => v).filter(Boolean);
+            }
+            if (typeof raw === 'string') {
+              return raw.split(/[|;,]+/).map(s => s.trim()).filter(Boolean);
+            }
+            return [];
+          }
+
+          // Build route -> {vehicleId, driverName} map
           const routeVehicleMap = {};
           const vehicleIdToDriver = {};
-          const norm = (s) => String(s || '').toLowerCase().trim();
+
           Object.entries(vehicles).forEach(([vehicleId, v]) => {
-            const raw = v.assignedRoutes;
-            let list = [];
-            if (!raw) {
-              list = [];
-            } else if (Array.isArray(raw)) {
-              list = raw;
-            } else if (typeof raw === 'object') {
-              const values = Object.values(raw);
-              const looksLikeRouteMap = values.some(val => typeof val === 'boolean' || val === 0 || val === 1 || val == null);
-              list = looksLikeRouteMap ? Object.keys(raw) : values;
-            }
-            if (typeof raw === 'string' && raw.trim()) {
-              list = raw.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
-            }
-            const driverUid = v.assignedDriverUid || v.driverId;
-            const driverNameFromVehicle = (v.assignedDriverName || v.driverName || v.driverFullName || v.driver || '').trim();
-            let driver = driverUid ? drivers.find(d => d.id === driverUid) : null;
-            if (!driver && driverNameFromVehicle) {
-              const dn = driverNameFromVehicle.toUpperCase();
-              driver = drivers.find(d => (d.fullName || '').toUpperCase() === dn || (d.fullName || '').toUpperCase().includes(dn) || dn.includes((d.fullName || '').toUpperCase()));
-            }
-            const driverName = driver ? driver.fullName : (driverNameFromVehicle && driverNameFromVehicle.length > 0) ? driverNameFromVehicle : 'Not assigned';
-            const entry = { vehicleId, driverName };
-            vehicleIdToDriver[vehicleId] = driverName;
-            list.forEach(r => {
+            const routesList = normalizeRoutes(v.assignedRoutes);
+
+            const driverUid = v.assignedDriverUid || v.driverUid || v.driverId || v.driverUID || '';
+            const driverNameFromUid = resolveWorkerName(driverUid);
+
+            const driverNameFromVehicle =
+              String(
+                v.assignedDriverName ||
+                v.driverName ||
+                v.driverFullName ||
+                v.driver ||
+                ''
+              ).trim();
+
+            const resolvedDriverName =
+              driverNameFromUid ||
+              driverNameFromVehicle ||
+              (driverUid ? driverUid : '') ||
+              'Not assigned';
+
+            v._resolvedDriverName = resolvedDriverName;
+            v._resolvedDriverUid = driverUid;
+            vehicleIdToDriver[vehicleId] = resolvedDriverName;
+
+            const entry = { vehicleId, driverName: resolvedDriverName };
+
+            routesList.forEach(r => {
               const routeName = (typeof r === 'string' ? r : (r && (r.route || r.name || r.id))) || '';
               const key = norm(routeName);
               if (key && !routeVehicleMap[key]) routeVehicleMap[key] = entry;
             });
-            if (list.length === 0 && (v.amStop || v.pmStop)) {
+            if (routesList.length === 0 && (v.amStop || v.pmStop)) {
               const k1 = norm(v.amStop);
               const k2 = norm(v.pmStop);
               if (k1) routeVehicleMap[k1] = entry;
               if (k2) routeVehicleMap[k2] = entry;
             }
           });
-          // Add stop ID aliases from transportCatalog so amStop/morningRouteId (which may be stop id) maps to driver
+
+          // stop ID aliases from transportCatalog (existing idea kept)
           if (catalogStopsVal && typeof catalogStopsVal === 'object') {
             Object.entries(catalogStopsVal).forEach(([stopId, stop]) => {
               if (!stop) return;
@@ -2208,11 +2297,25 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
 
           function driverForRoute(routeName) {
             if (!routeName) return null;
-            const key = String(routeName).toLowerCase().trim();
+            const key = norm(routeName);
             const entry = routeVehicleMap[key];
             if (entry) return { driverName: entry.driverName, vehicleId: entry.vehicleId };
             const partial = Object.keys(routeVehicleMap).find(k => key.includes(k) || k.includes(key));
             return partial ? { driverName: routeVehicleMap[partial].driverName, vehicleId: routeVehicleMap[partial].vehicleId } : null;
+          }
+
+          function vehicleDriverFromEnrollment(enrollment) {
+            const ref =
+              enrollment?.vehicleId ||
+              enrollment?.busId ||
+              enrollment?.vehicle ||
+              enrollment?.assignedVehicleId ||
+              '';
+            const v = getVehicleByAnyRef(ref);
+            if (!v) return null;
+            const name =
+              String(v._resolvedDriverName || v.assignedDriverName || v.driverName || v.driver || '').trim();
+            return name ? { driverName: name } : null;
           }
 
           function enrichVehicleWithDriver(vehicleObj) {
@@ -2223,12 +2326,9 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               if (vehicleIdToDriver[vid]) {
                 return { vehicleId: vid, id: vid, driverName: vehicleIdToDriver[vid] };
               }
-              const v = vehicles[vid];
-              if (v) {
-                const dr = (v.assignedDriverName || v.driverName || v.driverFullName || v.driver || '').trim();
-                const driver = drivers.find(d => d.id === (v.assignedDriverUid || v.driverId));
-                const driverName = driver ? driver.fullName : dr;
-                if (driverName) return { vehicleId: vid, id: vid, driverName };
+              const v = vehicles[vid] || getVehicleByAnyRef(vid);
+              if (v && v._resolvedDriverName) {
+                return { vehicleId: vid, id: vid, driverName: v._resolvedDriverName };
               }
               return { vehicleId: vid, id: vid };
             }
@@ -2238,12 +2338,9 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             if (vid && vehicleIdToDriver[vid]) {
               return { ...vehicleObj, driverName: vehicleIdToDriver[vid] };
             }
-            const v = vehicles[vid];
-            if (v) {
-              const dr = (v.assignedDriverName || v.driverName || v.driverFullName || v.driver || '').trim();
-              const driver = drivers.find(d => d.id === (v.assignedDriverUid || v.driverId));
-              const driverName = driver ? driver.fullName : dr;
-              if (driverName) return { ...vehicleObj, driverName };
+            const v = vehicles[vid] || getVehicleByAnyRef(vid);
+            if (v && v._resolvedDriverName) {
+              return { ...vehicleObj, driverName: v._resolvedDriverName };
             }
             return vehicleObj;
           }
@@ -2285,6 +2382,20 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               morningVehicle: morningVehicle || existing.morningVehicle,
               eveningVehicle: eveningVehicle || existing.eveningVehicle,
             };
+          });
+
+          // Ensure ALL enrolled transport students get driver info (even if assignment record is missing)
+          Object.entries(state.transportEnrollments).forEach(([studentId, en]) => {
+            if (!en) return;
+            // 1) direct vehicle assignment wins (if present)
+            const directVehicle = vehicleDriverFromEnrollment(en);
+            if (directVehicle) {
+              en.morningVehicle = en.morningVehicle || directVehicle;
+              en.eveningVehicle = en.eveningVehicle || directVehicle;
+            }
+            // 2) fallback by route mapping
+            if (!en.morningVehicle && en.amStop) en.morningVehicle = driverForRoute(en.amStop);
+            if (!en.eveningVehicle && en.pmStop) en.eveningVehicle = driverForRoute(en.pmStop);
           });
 
           // STEP 2: Load ONLY students who are on transport (not all students!)
