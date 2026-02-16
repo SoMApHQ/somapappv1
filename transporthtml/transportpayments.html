@@ -2132,18 +2132,24 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           mergeBusesFromSnap(vehiclesSnap);
           (legacyBusesSnaps || []).forEach(mergeBusesFromSnap);
           const routeVehicleMap = {};
+          const vehicleIdToDriver = {};
           const norm = (s) => String(s || '').toLowerCase().trim();
           Object.entries(vehicles).forEach(([vehicleId, v]) => {
             const raw = v.assignedRoutes;
             let list = !raw ? [] : Array.isArray(raw) ? raw : (typeof raw === 'object' ? Object.values(raw) : []);
             if (typeof raw === 'string' && raw.trim()) {
-              list = raw.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+              list = raw.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
             }
             const driverUid = v.assignedDriverUid || v.driverId;
-            const driver = driverUid ? drivers.find(d => d.id === driverUid) : null;
             const driverNameFromVehicle = (v.assignedDriverName || v.driverName || v.driverFullName || v.driver || '').trim();
+            let driver = driverUid ? drivers.find(d => d.id === driverUid) : null;
+            if (!driver && driverNameFromVehicle) {
+              const dn = driverNameFromVehicle.toUpperCase();
+              driver = drivers.find(d => (d.fullName || '').toUpperCase() === dn || (d.fullName || '').toUpperCase().includes(dn) || dn.includes((d.fullName || '').toUpperCase()));
+            }
             const driverName = driver ? driver.fullName : (driverNameFromVehicle && driverNameFromVehicle.length > 0) ? driverNameFromVehicle : 'Not assigned';
             const entry = { vehicleId, driverName };
+            vehicleIdToDriver[vehicleId] = driverName;
             list.forEach(r => {
               const routeName = (typeof r === 'string' ? r : (r && (r.route || r.name || r.id))) || '';
               const key = norm(routeName);
@@ -2190,9 +2196,26 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             if (!routeName) return null;
             const key = String(routeName).toLowerCase().trim();
             const entry = routeVehicleMap[key];
-            if (entry) return { driverName: entry.driverName };
+            if (entry) return { driverName: entry.driverName, vehicleId: entry.vehicleId };
             const partial = Object.keys(routeVehicleMap).find(k => key.includes(k) || k.includes(key));
-            return partial ? { driverName: routeVehicleMap[partial].driverName } : null;
+            return partial ? { driverName: routeVehicleMap[partial].driverName, vehicleId: routeVehicleMap[partial].vehicleId } : null;
+          }
+
+          function enrichVehicleWithDriver(vehicleObj) {
+            if (!vehicleObj || typeof vehicleObj !== 'object') return vehicleObj;
+            if ((vehicleObj.driverName || vehicleObj.driver || vehicleObj.assignedDriverName || vehicleObj.driverFullName || '').toString().trim()) return vehicleObj;
+            const vid = vehicleObj.vehicleId || vehicleObj.id;
+            if (vid && vehicleIdToDriver[vid]) {
+              return { ...vehicleObj, driverName: vehicleIdToDriver[vid] };
+            }
+            const v = vehicles[vid];
+            if (v) {
+              const dr = (v.assignedDriverName || v.driverName || v.driverFullName || v.driver || '').trim();
+              const driver = drivers.find(d => d.id === (v.assignedDriverUid || v.driverId));
+              const driverName = driver ? driver.fullName : dr;
+              if (driverName) return { ...vehicleObj, driverName };
+            }
+            return vehicleObj;
           }
 
           Object.entries(assignments).forEach(([studentId, assignRecord]) => {
@@ -2208,16 +2231,18 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             const route = assignRecord.route || existing.route || amStop || pmStop || '';
             const period = amStop && pmStop ? 'both' : (amStop ? 'morning' : (pmStop ? 'evening' : ''));
             const hasDriver = (v) => v && (v.driverName || v.driver || v.assignedDriverName || v.driverFullName);
-            const morningVehicle = (hasDriver(existing.morningVehicle) && existing.morningVehicle)
+            let morningVehicle = (hasDriver(existing.morningVehicle) && existing.morningVehicle)
               ? existing.morningVehicle
               : (hasDriver(assignRecord.morningVehicle) && assignRecord.morningVehicle)
               ? assignRecord.morningVehicle
               : (driverForRoute(amStop) || existing.morningVehicle || assignRecord.morningVehicle);
-            const eveningVehicle = (hasDriver(existing.eveningVehicle) && existing.eveningVehicle)
+            let eveningVehicle = (hasDriver(existing.eveningVehicle) && existing.eveningVehicle)
               ? existing.eveningVehicle
               : (hasDriver(assignRecord.eveningVehicle) && assignRecord.eveningVehicle)
               ? assignRecord.eveningVehicle
               : (driverForRoute(pmStop) || existing.eveningVehicle || assignRecord.eveningVehicle);
+            morningVehicle = enrichVehicleWithDriver(morningVehicle);
+            eveningVehicle = enrichVehicleWithDriver(eveningVehicle);
             state.transportEnrollments[studentId] = {
               ...existing,
               ...assignRecord,
