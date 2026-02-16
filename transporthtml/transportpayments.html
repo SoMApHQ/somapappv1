@@ -2008,6 +2008,10 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           
           // STEP 1: Load and merge transport sources exactly like transport hub
           const isLegacyMerge = isSocratesSchool();
+          const legacyBusesPaths = isLegacyMerge ? [
+            `transport/socrates-school/${year}/buses`,
+            `transport/socrates/${year}/buses`
+          ] : [];
           const [
             enrollScopedSnap,
             enrollLegacySnap,
@@ -2017,7 +2021,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             assignmentsLegacySnap,
             vehiclesSnap,
             workersSnap,
-            catalogStopsSnap
+            catalogStopsSnap,
+            ...legacyBusesSnaps
           ] = await Promise.all([
             schoolRef(`years/${year}/transportEnrollments`).once('value'),
             isLegacyMerge ? db.ref('transport_enrollments').once('value') : Promise.resolve(null),
@@ -2034,9 +2039,13 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
                 if (primaryHasData) {
                   if (isLegacyMerge) {
                     try {
-                      const legacy = await db.ref('workers').once('value');
-                      const legacyVal = legacy?.val?.() || {};
-                      const merged = { ...legacyVal, ...primaryVal };
+                      const [legacyRoot, legacyYear] = await Promise.all([
+                        db.ref('workers').once('value').catch(() => null),
+                        db.ref(`years/${year}/workers`).once('value').catch(() => null)
+                      ]);
+                      const legacyVal = legacyRoot?.val() || {};
+                      const yearVal = legacyYear?.val() || {};
+                      const merged = { ...legacyVal, ...yearVal, ...primaryVal };
                       return { val: () => merged, exists: () => true };
                     } catch (_) {}
                   }
@@ -2044,6 +2053,16 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
                 }
               } catch (_) {}
               try {
+                if (isLegacyMerge) {
+                  const [legacyRoot, legacyYear] = await Promise.all([
+                    db.ref('workers').once('value').catch(() => null),
+                    db.ref(`years/${year}/workers`).once('value').catch(() => null)
+                  ]);
+                  const merged = { ...(legacyRoot?.val() || {}), ...(legacyYear?.val() || {}) };
+                  if (merged && typeof merged === 'object' && Object.keys(merged).length > 0) {
+                    return { val: () => merged, exists: () => true };
+                  }
+                }
                 const legacy = isLegacyMerge ? await db.ref('workers').once('value') : await schoolRef('workers').once('value');
                 return legacy || { val: () => null, exists: () => false };
               } catch (_) {}
@@ -2060,6 +2079,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
                 } catch (__) { return { val: () => null }; }
               }
             })(),
+            ...legacyBusesPaths.map(p => db.ref(p).once('value').catch(() => ({ val: () => null }))),
           ]);
           const catalogStopsVal = catalogStopsSnap && catalogStopsSnap.val ? catalogStopsSnap.val() : null;
 
@@ -2092,17 +2112,26 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             });
           }
           const vehicles = {};
-          if (vehiclesSnap && vehiclesSnap.exists && vehiclesSnap.exists()) {
-            vehiclesSnap.forEach(child => {
-              const v = child.val();
-              if (v) vehicles[child.key] = { id: child.key, ...v };
+          const mergeBusesFromSnap = (snap) => {
+            if (!snap || !snap.val) return;
+            const val = typeof snap.val === 'function' ? snap.val() : snap.val;
+            if (!val || typeof val !== 'object') return;
+            Object.entries(val).forEach(([key, v]) => {
+              if (v && !vehicles[key]) {
+                vehicles[key] = { id: key, ...(v || {}) };
+              }
             });
-          }
+          };
+          mergeBusesFromSnap(vehiclesSnap);
+          (legacyBusesSnaps || []).forEach(mergeBusesFromSnap);
           const routeVehicleMap = {};
           const norm = (s) => String(s || '').toLowerCase().trim();
           Object.entries(vehicles).forEach(([vehicleId, v]) => {
             const raw = v.assignedRoutes;
-            const list = !raw ? [] : Array.isArray(raw) ? raw : (typeof raw === 'object' ? Object.values(raw) : []);
+            let list = !raw ? [] : Array.isArray(raw) ? raw : (typeof raw === 'object' ? Object.values(raw) : []);
+            if (typeof raw === 'string' && raw.trim()) {
+              list = raw.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+            }
             const driverUid = v.assignedDriverUid || v.driverId;
             const driver = driverUid ? drivers.find(d => d.id === driverUid) : null;
             const driverNameFromVehicle = (v.assignedDriverName || v.driverName || v.driverFullName || v.driver || '').trim();
