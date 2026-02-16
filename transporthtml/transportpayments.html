@@ -719,6 +719,25 @@
         return date.toLocaleDateString('en-GB');
       }
 
+      function sanitizeDriverName(name) {
+        const v = String(name || '').trim();
+        if (!v) return '';
+        const n = v.toLowerCase();
+        if (n === 'not assigned' || n === 'n/a' || n === 'na' || n === 'none' || n === '-' || n === '—' || n === 'unknown') return '';
+        return v;
+      }
+
+      function driverNameFromVehicle(v) {
+        return sanitizeDriverName(v?.driverName || v?.assignedDriverName || v?.driverFullName || v?.driver || '');
+      }
+
+      function getDriverDisplay(enrollment) {
+        const amDriver = driverNameFromVehicle(enrollment?.morningVehicle);
+        const pmDriver = driverNameFromVehicle(enrollment?.eveningVehicle);
+        if (amDriver && pmDriver && amDriver !== pmDriver) return `AM: ${amDriver} / PM: ${pmDriver}`;
+        return amDriver || pmDriver || '&mdash;';
+      }
+
       // Calculate school debt till
       function calculateDebtTill(student) {
         // This matches the finance.html logic
@@ -1061,12 +1080,7 @@
           const baseFeeDisplay = formatCurrency(transportStatus.monthlyFee);
           const currentMonthDue = transportStatus.currentMonthExpected;
           
-          const driverFromVehicle = (v) => (v?.driverName || v?.assignedDriverName || v?.driverFullName || v?.driver || '').trim();
-          const amDriver = driverFromVehicle(enrollment.morningVehicle);
-          const pmDriver = driverFromVehicle(enrollment.eveningVehicle);
-          const driverDisplay = (amDriver && pmDriver && amDriver !== pmDriver)
-            ? `AM: ${amDriver} / PM: ${pmDriver}`
-            : (amDriver || pmDriver || '&mdash;');
+          const driverDisplay = getDriverDisplay(enrollment);
           
           const transportDebt = transportStatus.debt;
           const isDebtor = transportDebt > 0;
@@ -1739,11 +1753,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           const shiftedClass = shiftClass(baseClass, yearDelta);
           const payments = Object.values(state.transportPayments[studentId] || {});
           const transportStatus = await calculateTransportStatus(enrollment, payments, multipliers, studentId);
-          const driverFromVehicle = (v) => (v?.driverName || v?.assignedDriverName || v?.driverFullName || v?.driver || '').trim();
-          const amDriver = driverFromVehicle(enrollment.morningVehicle);
-          const pmDriver = driverFromVehicle(enrollment.eveningVehicle);
-          const driverDisplay = (amDriver && pmDriver && amDriver !== pmDriver)
-            ? `AM: ${amDriver} / PM: ${pmDriver}` : (amDriver || pmDriver || '');
+          const driverDisplay = getDriverDisplay(enrollment).replace('&mdash;', '');
           const unpaidDisp = transportStatus.unpaidMonthsDisplay ?? transportStatus.unpaidMonths;
           const totalYearFee = transportStatus.totalYearExpected ?? transportStatus.totalExpected;
           const totalYearDebt = transportStatus.totalYearDebt ?? transportStatus.debt;
@@ -1812,10 +1822,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           const shiftedClass = shiftClass(student.classLevel || '', yearDelta);
           const payments = Object.values(state.transportPayments[studentId] || {});
           const transportStatus = await calculateTransportStatus(enrollment, payments, multipliers, studentId);
-          const driverFromVehicle = (v) => (v?.driverName || v?.assignedDriverName || v?.driverFullName || v?.driver || '').trim();
-          const amDriver = driverFromVehicle(enrollment.morningVehicle);
-          const pmDriver = driverFromVehicle(enrollment.eveningVehicle);
-          const driverDisplay = (amDriver && pmDriver && amDriver !== pmDriver) ? `AM: ${amDriver} / PM: ${pmDriver}` : (amDriver || pmDriver || '');
+          const driverDisplay = getDriverDisplay(enrollment).replace('&mdash;', '');
           const unpaidDisp = transportStatus.unpaidMonthsDisplay ?? transportStatus.unpaidMonths;
           const totalYearFee = transportStatus.totalYearExpected ?? transportStatus.totalExpected;
           const totalYearDebt = transportStatus.totalYearDebt ?? transportStatus.debt;
@@ -2039,15 +2046,17 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
                 if (primaryHasData) {
                   if (isLegacyMerge) {
                     try {
-                      const [legacyRoot, legacyYear, schoolWorkers] = await Promise.all([
+                      const [legacyRoot, legacyYear, schoolWorkers, schoolYearWorkers] = await Promise.all([
                         db.ref('workers').once('value').catch(() => null),
                         db.ref(`years/${year}/workers`).once('value').catch(() => null),
-                        db.ref(`schools/${schoolId}/workers`).once('value').catch(() => null)
+                        db.ref(`schools/${schoolId}/workers`).once('value').catch(() => null),
+                        db.ref(`schools/${schoolId}/years/${year}/workers`).once('value').catch(() => null)
                       ]);
                       const legacyVal = legacyRoot?.val() || {};
                       const yearVal = legacyYear?.val() || {};
                       const schoolVal = schoolWorkers?.val() || {};
-                      const merged = { ...legacyVal, ...yearVal, ...schoolVal, ...primaryVal };
+                      const schoolYearVal = schoolYearWorkers?.val() || {};
+                      const merged = { ...legacyVal, ...yearVal, ...schoolVal, ...schoolYearVal, ...primaryVal };
                       return { val: () => merged, exists: () => true };
                     } catch (_) {}
                   }
@@ -2056,15 +2065,17 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               } catch (_) {}
               try {
                 if (isLegacyMerge) {
-                  const [legacyRoot, legacyYear, schoolWorkers] = await Promise.all([
+                  const [legacyRoot, legacyYear, schoolWorkers, schoolYearWorkers] = await Promise.all([
                     db.ref('workers').once('value').catch(() => null),
                     db.ref(`years/${year}/workers`).once('value').catch(() => null),
-                    db.ref(`schools/${schoolId}/workers`).once('value').catch(() => null)
+                    db.ref(`schools/${schoolId}/workers`).once('value').catch(() => null),
+                    db.ref(`schools/${schoolId}/years/${year}/workers`).once('value').catch(() => null)
                   ]);
                   const merged = {
                     ...(legacyRoot?.val() || {}),
                     ...(legacyYear?.val() || {}),
-                    ...(schoolWorkers?.val() || {})
+                    ...(schoolWorkers?.val() || {}),
+                    ...(schoolYearWorkers?.val() || {})
                   };
                   if (merged && typeof merged === 'object' && Object.keys(merged).length > 0) {
                     return { val: () => merged, exists: () => true };
@@ -2104,6 +2115,12 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
 
           // --- DRIVER + VEHICLE RESOLUTION (FIX: Furaha not showing) ---
           const norm = (s) => String(s || '').toLowerCase().trim();
+          const isUsableDriverName = (name) => {
+            const v = String(name || '').trim();
+            if (!v) return false;
+            const n = v.toLowerCase();
+            return n !== 'not assigned' && n !== 'n/a' && n !== 'na' && n !== 'none' && n !== '-' && n !== '—' && n !== 'unknown';
+          };
 
           // Build full name safely from MANY possible worker schemas
           function buildWorkerFullName(uid, worker) {
@@ -2169,6 +2186,28 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             return '';
           }
 
+          const hasDriver = (v) => {
+            if (!v) return false;
+            return isUsableDriverName(v.driverName || v.driver || v.assignedDriverName || v.driverFullName);
+          };
+
+          function extractDriverNameValue(raw) {
+            if (!raw) return '';
+            if (typeof raw === 'string' || typeof raw === 'number') return String(raw).trim();
+            if (typeof raw === 'object') {
+              return String(
+                raw.fullName ||
+                raw.fullNameUpper ||
+                raw.name ||
+                raw.driverName ||
+                raw.assignedDriverName ||
+                raw.label ||
+                ''
+              ).trim();
+            }
+            return '';
+          }
+
           // Merge buses from multiple snaps (existing code style)
           const vehicles = {};
           const mergeBusesFromSnap = (snap) => {
@@ -2216,7 +2255,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               return entries.map(([, v]) => v).filter(Boolean);
             }
             if (typeof raw === 'string') {
-              return raw.split(/[|;,]+/).map(s => s.trim()).filter(Boolean);
+              return raw.split(/[|;,\n]+/).map(s => s.trim()).filter(Boolean);
             }
             return [];
           }
@@ -2224,21 +2263,48 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           // Build route -> {vehicleId, driverName} map
           const routeVehicleMap = {};
           const vehicleIdToDriver = {};
+          const shouldReplaceRouteEntry = (existing, incoming) => {
+            if (!existing) return true;
+            const existingGood = isUsableDriverName(existing.driverName);
+            const incomingGood = isUsableDriverName(incoming.driverName);
+            return !existingGood && incomingGood;
+          };
 
           Object.entries(vehicles).forEach(([vehicleId, v]) => {
-            const routesList = normalizeRoutes(v.assignedRoutes);
+            const routeCandidates = [
+              v.assignedRoutes,
+              v.routes,
+              v.routeNames,
+              v.route,
+              v.routeName,
+              v.stopNames,
+              v.stops,
+              v.amStop,
+              v.pmStop,
+              v.morningRoute,
+              v.eveningRoute,
+            ];
+            const routesList = routeCandidates.flatMap(normalizeRoutes).filter(Boolean);
 
-            const driverUid = v.assignedDriverUid || v.driverUid || v.driverId || v.driverUID || '';
+            const driverUid =
+              v.assignedDriverUid ||
+              v.driverUid ||
+              v.driverId ||
+              v.driverUID ||
+              v.assignedDriverId ||
+              v.assignedDriver ||
+              v.driverUserId ||
+              '';
             const driverNameFromUid = resolveWorkerName(driverUid);
 
-            const driverNameFromVehicle =
-              String(
-                v.assignedDriverName ||
-                v.driverName ||
-                v.driverFullName ||
-                v.driver ||
-                ''
-              ).trim();
+            const driverNameFromVehicle = extractDriverNameValue(
+              v.assignedDriverName ||
+              v.driverName ||
+              v.driverFullName ||
+              v.assignedDriverFullName ||
+              v.driver ||
+              ''
+            );
 
             const resolvedDriverName =
               driverNameFromUid ||
@@ -2255,13 +2321,16 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             routesList.forEach(r => {
               const routeName = (typeof r === 'string' ? r : (r && (r.route || r.name || r.id))) || '';
               const key = norm(routeName);
-              if (key && !routeVehicleMap[key]) routeVehicleMap[key] = entry;
+              if (!key) return;
+              if (shouldReplaceRouteEntry(routeVehicleMap[key], entry)) {
+                routeVehicleMap[key] = entry;
+              }
             });
             if (routesList.length === 0 && (v.amStop || v.pmStop)) {
               const k1 = norm(v.amStop);
               const k2 = norm(v.pmStop);
-              if (k1) routeVehicleMap[k1] = entry;
-              if (k2) routeVehicleMap[k2] = entry;
+              if (k1 && shouldReplaceRouteEntry(routeVehicleMap[k1], entry)) routeVehicleMap[k1] = entry;
+              if (k2 && shouldReplaceRouteEntry(routeVehicleMap[k2], entry)) routeVehicleMap[k2] = entry;
             }
           });
 
@@ -2272,8 +2341,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               const stopName = norm(stop.name || stop.id || '');
               const entry = routeVehicleMap[stopName];
               if (entry) {
-                if (!routeVehicleMap[stopId]) routeVehicleMap[stopId] = entry;
-                if (!routeVehicleMap[norm(stopId)]) routeVehicleMap[norm(stopId)] = entry;
+                if (shouldReplaceRouteEntry(routeVehicleMap[stopId], entry)) routeVehicleMap[stopId] = entry;
+                if (shouldReplaceRouteEntry(routeVehicleMap[norm(stopId)], entry)) routeVehicleMap[norm(stopId)] = entry;
               }
             });
           }
@@ -2315,7 +2384,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             if (!v) return null;
             const name =
               String(v._resolvedDriverName || v.assignedDriverName || v.driverName || v.driver || '').trim();
-            return name ? { driverName: name } : null;
+            return isUsableDriverName(name) ? { driverName: name } : null;
           }
 
           function enrichVehicleWithDriver(vehicleObj) {
@@ -2333,7 +2402,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               return { vehicleId: vid, id: vid };
             }
             if (typeof vehicleObj !== 'object') return vehicleObj;
-            if ((vehicleObj.driverName || vehicleObj.driver || vehicleObj.assignedDriverName || vehicleObj.driverFullName || '').toString().trim()) return vehicleObj;
+            if (hasDriver(vehicleObj)) return vehicleObj;
             const vid = vehicleObj.vehicleId || vehicleObj.id;
             if (vid && vehicleIdToDriver[vid]) {
               return { ...vehicleObj, driverName: vehicleIdToDriver[vid] };
@@ -2357,7 +2426,6 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             const pmStop = assignRecord.eveningRouteId || assignRecord.pmStop || existing.pmStop || '';
             const route = assignRecord.route || existing.route || amStop || pmStop || '';
             const period = amStop && pmStop ? 'both' : (amStop ? 'morning' : (pmStop ? 'evening' : ''));
-            const hasDriver = (v) => v && (v.driverName || v.driver || v.assignedDriverName || v.driverFullName);
             let morningVehicle = (hasDriver(existing.morningVehicle) && existing.morningVehicle)
               ? existing.morningVehicle
               : (hasDriver(assignRecord.morningVehicle) && assignRecord.morningVehicle)
@@ -2390,12 +2458,14 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             // 1) direct vehicle assignment wins (if present)
             const directVehicle = vehicleDriverFromEnrollment(en);
             if (directVehicle) {
-              en.morningVehicle = en.morningVehicle || directVehicle;
-              en.eveningVehicle = en.eveningVehicle || directVehicle;
+              if (!hasDriver(en.morningVehicle)) en.morningVehicle = directVehicle;
+              if (!hasDriver(en.eveningVehicle)) en.eveningVehicle = directVehicle;
             }
             // 2) fallback by route mapping
-            if (!en.morningVehicle && en.amStop) en.morningVehicle = driverForRoute(en.amStop);
-            if (!en.eveningVehicle && en.pmStop) en.eveningVehicle = driverForRoute(en.pmStop);
+            if (!hasDriver(en.morningVehicle) && en.amStop) en.morningVehicle = driverForRoute(en.amStop);
+            if (!hasDriver(en.eveningVehicle) && en.pmStop) en.eveningVehicle = driverForRoute(en.pmStop);
+            en.morningVehicle = enrichVehicleWithDriver(en.morningVehicle);
+            en.eveningVehicle = enrichVehicleWithDriver(en.eveningVehicle);
           });
 
           // STEP 2: Load ONLY students who are on transport (not all students!)
@@ -3025,10 +3095,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           const fullName = `${student.firstName||''} ${student.middleName||''} ${student.lastName||''}`.replace(/\s+/g,' ').trim();
           const morningRoute = assign?.amStop || assign?.morningRouteId || '&mdash;';
           const eveningRoute = assign?.pmStop || assign?.eveningRouteId || '&mdash;';
-          const driverFromVehicle = (v) => (v?.driverName || v?.assignedDriverName || v?.driverFullName || v?.driver || '').trim();
-          const amDriver = driverFromVehicle(assign?.morningVehicle);
-          const pmDriver = driverFromVehicle(assign?.eveningVehicle);
-          const driverDisplay = (amDriver && pmDriver && amDriver !== pmDriver) ? `AM: ${amDriver} / PM: ${pmDriver}` : (amDriver || pmDriver || '&mdash;');
+          const driverDisplay = getDriverDisplay(assign);
           const currentMonthDue = Math.round(dueThisMonth);
           const baseDisplay = formatCurrency(base);
           const rowClass = balanceToDate > 0 ? 'style="background: rgba(239, 68, 68, 0.15); font-weight: 600;"' : '';
