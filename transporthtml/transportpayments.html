@@ -2107,14 +2107,19 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             const profile = worker?.profile || {};
             const roleRaw = profile.role || worker.role || profile.jobTitle || profile.position || '';
             const role = String(roleRaw || '').toLowerCase().trim();
-            return role === 'driver' || role === 'dereva';
+            return role === 'driver' || role === 'dereva' || role.includes('driver') || role.includes('dereva');
           };
           if (workersSnap && workersSnap.exists && workersSnap.exists()) {
             const workersVal = workersSnap.val() || {};
             Object.entries(workersVal).forEach(([uid, worker]) => {
-              const profile = worker && worker.profile;
-              if (!profile || !isDriverRole(worker) || profile.active === false) return;
-              const fullName = profile.fullNameUpper || [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ') || uid;
+              const profile = (worker && worker.profile && typeof worker.profile === 'object') ? worker.profile : {};
+              if (!isDriverRole(worker) || profile.active === false || worker?.active === false) return;
+              const fullName = (
+                profile.fullNameUpper ||
+                worker?.fullNameUpper ||
+                worker?.fullName ||
+                [profile.firstName || worker?.firstName, profile.middleName || worker?.middleName, profile.lastName || worker?.lastName].filter(Boolean).join(' ')
+              ) || uid;
               drivers.push({ id: uid, fullName });
             });
           }
@@ -2136,7 +2141,16 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           const norm = (s) => String(s || '').toLowerCase().trim();
           Object.entries(vehicles).forEach(([vehicleId, v]) => {
             const raw = v.assignedRoutes;
-            let list = !raw ? [] : Array.isArray(raw) ? raw : (typeof raw === 'object' ? Object.values(raw) : []);
+            let list = [];
+            if (!raw) {
+              list = [];
+            } else if (Array.isArray(raw)) {
+              list = raw;
+            } else if (typeof raw === 'object') {
+              const values = Object.values(raw);
+              const looksLikeRouteMap = values.some(val => typeof val === 'boolean' || val === 0 || val === 1 || val == null);
+              list = looksLikeRouteMap ? Object.keys(raw) : values;
+            }
             if (typeof raw === 'string' && raw.trim()) {
               list = raw.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
             }
@@ -2202,7 +2216,23 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           }
 
           function enrichVehicleWithDriver(vehicleObj) {
-            if (!vehicleObj || typeof vehicleObj !== 'object') return vehicleObj;
+            if (!vehicleObj) return vehicleObj;
+            if (typeof vehicleObj === 'string') {
+              const vid = vehicleObj.trim();
+              if (!vid) return vehicleObj;
+              if (vehicleIdToDriver[vid]) {
+                return { vehicleId: vid, id: vid, driverName: vehicleIdToDriver[vid] };
+              }
+              const v = vehicles[vid];
+              if (v) {
+                const dr = (v.assignedDriverName || v.driverName || v.driverFullName || v.driver || '').trim();
+                const driver = drivers.find(d => d.id === (v.assignedDriverUid || v.driverId));
+                const driverName = driver ? driver.fullName : dr;
+                if (driverName) return { vehicleId: vid, id: vid, driverName };
+              }
+              return { vehicleId: vid, id: vid };
+            }
+            if (typeof vehicleObj !== 'object') return vehicleObj;
             if ((vehicleObj.driverName || vehicleObj.driver || vehicleObj.assignedDriverName || vehicleObj.driverFullName || '').toString().trim()) return vehicleObj;
             const vid = vehicleObj.vehicleId || vehicleObj.id;
             if (vid && vehicleIdToDriver[vid]) {
@@ -3001,4 +3031,3 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
     </script>
   </body>
 </html>
-
