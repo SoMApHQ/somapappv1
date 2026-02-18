@@ -134,7 +134,7 @@
       setCount(cachedStudents);
 
       const rows = cachedStudents.map((s) => {
-        const sid = getStudentId(s);
+        const sid = getStudentId(s) || getAdmissionNo(s);
         return `
           <tr>
             <td>${esc(s.adm || '')}</td>
@@ -145,9 +145,9 @@
             <td>${money(s.feePaid || 0)}</td>
             <td>${money(s.balance || 0)}</td>
             <td style="white-space:nowrap">
-              <button class="somap-transfer-btn good" data-action="promote" data-id="${esc(sid)}">Promote</button>
-              <button class="somap-transfer-btn warn" data-action="demote" data-id="${esc(sid)}">Demote</button>
-              <button class="somap-transfer-btn" data-action="move" data-id="${esc(sid)}">Move</button>
+              <button type="button" class="somap-transfer-btn good" data-action="promote" data-id="${esc(sid)}">Promote</button>
+              <button type="button" class="somap-transfer-btn warn" data-action="demote" data-id="${esc(sid)}">Demote</button>
+              <button type="button" class="somap-transfer-btn" data-action="move" data-id="${esc(sid)}">Move</button>
             </td>
           </tr>
         `;
@@ -181,14 +181,27 @@
       if (closeBtn) closeBtn.onclick = () => { modal.style.display = 'none'; };
       modal.onclick = (ev) => { if (ev.target === modal) modal.style.display = 'none'; };
 
-      modal.querySelectorAll('[data-action]').forEach((btn) => {
-        btn.addEventListener('click', () => {
+      const body = modal.querySelector('.somap-transfer-body');
+      if (body) {
+        body.onclick = (ev) => {
+          const btn = ev.target && ev.target.closest ? ev.target.closest('[data-action]') : null;
+          if (!btn) return;
+          ev.preventDefault();
+          ev.stopPropagation();
           const sid = String(btn.getAttribute('data-id') || '').trim();
-          selectedStudent = cachedStudents.find((s) => getStudentId(s) === sid) || null;
           actionMode = String(btn.getAttribute('data-action') || 'move');
-          if (selectedStudent) renderForm();
-        });
-      });
+          selectedStudent = cachedStudents.find((s) => {
+            const a = getStudentId(s);
+            const b = getAdmissionNo(s);
+            return a === sid || b === sid || String(s.adm || '') === sid;
+          }) || null;
+          if (!selectedStudent) {
+            alert('Could not find selected student. Please close and reopen the transfer window.');
+            return;
+          }
+          renderForm();
+        };
+      }
     }
 
     function renderForm() {
