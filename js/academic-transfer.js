@@ -58,13 +58,15 @@
     const style = document.createElement('style');
     style.id = 'somapTransferStyles';
     style.textContent = `
-      .somap-transfer-modal{position:fixed;inset:0;background:rgba(2,6,23,.5);display:none;z-index:1200;padding:1rem}
+      .somap-transfer-modal{position:fixed;inset:0;background:rgba(2,6,23,.5);display:none;z-index:1200;padding:1rem;align-items:center;justify-content:center}
+      .somap-transfer-modal.show{display:flex!important}
       .somap-transfer-panel{background:#fff;max-width:1100px;margin:0 auto;border-radius:16px;box-shadow:0 24px 64px rgba(2,6,23,.25);overflow:hidden;max-height:94vh;display:flex;flex-direction:column}
       .somap-transfer-head{padding:14px 16px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between}
-      .somap-transfer-body{padding:14px 16px;overflow:auto}
+      .somap-transfer-body{padding:14px 16px;overflow:auto;max-height:60vh}
       .somap-transfer-table{width:100%;border-collapse:collapse;font-size:12px}
       .somap-transfer-table th,.somap-transfer-table td{border:1px solid #e2e8f0;padding:6px}
-      .somap-transfer-btn{border:1px solid #cbd5e1;background:#fff;padding:6px 10px;border-radius:8px;font-size:12px}
+      .somap-transfer-btn{border:1px solid #cbd5e1;background:#fff;padding:6px 10px;border-radius:8px;font-size:12px;cursor:pointer}
+      .somap-transfer-btn:hover{background:#f1f5f9}
       .somap-transfer-btn.primary{background:#2563eb;border-color:#2563eb;color:#fff}
       .somap-transfer-btn.good{background:#16a34a;border-color:#16a34a;color:#fff}
       .somap-transfer-btn.warn{background:#ea580c;border-color:#ea580c;color:#fff}
@@ -145,9 +147,9 @@
             <td>${money(s.feePaid || 0)}</td>
             <td>${money(s.balance || 0)}</td>
             <td style="white-space:nowrap">
-              <button type="button" class="somap-transfer-btn good" data-action="promote" data-id="${esc(sid)}" data-idx="${idx}">Promote</button>
-              <button type="button" class="somap-transfer-btn warn" data-action="demote" data-id="${esc(sid)}" data-idx="${idx}">Demote</button>
-              <button type="button" class="somap-transfer-btn" data-action="move" data-id="${esc(sid)}" data-idx="${idx}">Move</button>
+              <button type="button" class="somap-transfer-btn good" data-action="promote" data-id="${esc(sid)}" data-idx="${idx}" title="Promote to next class"><i class="fas fa-arrow-up"></i> Promote</button>
+              <button type="button" class="somap-transfer-btn warn" data-action="demote" data-id="${esc(sid)}" data-idx="${idx}" title="Demote to previous class"><i class="fas fa-arrow-down"></i> Demote</button>
+              <button type="button" class="somap-transfer-btn" data-action="move" data-id="${esc(sid)}" data-idx="${idx}" title="Move to any class">Move</button>
             </td>
           </tr>
         `;
@@ -175,11 +177,11 @@
           </div>
         </div>
       `;
-      modal.style.display = 'block';
+      modal.classList.add('show');
 
       const closeBtn = modal.querySelector('#somapTransferClose');
-      if (closeBtn) closeBtn.onclick = () => { modal.style.display = 'none'; };
-      modal.onclick = (ev) => { if (ev.target === modal) modal.style.display = 'none'; };
+      if (closeBtn) closeBtn.onclick = () => { modal.classList.remove('show'); };
+      modal.onclick = (ev) => { if (ev.target === modal) modal.classList.remove('show'); };
 
       const body = modal.querySelector('.somap-transfer-body');
       const handleAction = (ev) => {
@@ -238,6 +240,7 @@
       `;
       const cancelBtn = wrap.querySelector('#somapTransferCancel');
       if (cancelBtn) cancelBtn.onclick = () => { wrap.style.display = 'none'; };
+      wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       const form = wrap.querySelector('#somapTransferForm');
       if (form) {
         form.onsubmit = async (ev) => {
@@ -323,7 +326,7 @@
 
       await db.ref().update(updates);
       alert(`Class transfer saved. ${student.name || 'Student'} is now in ${payload.targetClass}.`);
-      modal.style.display = 'none';
+      modal.classList.remove('show');
       if (typeof opts.onSaved === 'function') opts.onSaved(transfer);
     }
 

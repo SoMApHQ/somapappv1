@@ -1,4 +1,4 @@
-﻿﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -409,6 +409,46 @@
     const db = window.db || firebase.database(); 
     const currentSchool = window.SOMAP && SOMAP.getSchool ? SOMAP.getSchool() : null;
     const isSocrates = String(currentSchool?.id || '').trim() === 'socrates-school';
+    const SOMAP_DEFAULT_YEAR = 2025;
+    const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
+    function normalizeClassNameForEnrollment(name) {
+      const s = String(name || '').trim();
+      if (!s) return 'Unknown';
+      const low = s.toLowerCase();
+      if (low.includes('baby')) return 'Baby Class';
+      if (low.includes('middle')) return 'Middle Class';
+      if (low.includes('pre') || low.includes('nursery') || low.includes('unit')) return 'Pre Unit Class';
+      const m = low.match(/class\s*(\d+)/) || low.match(/\b(\d+)\b/);
+      if (m) return `Class ${parseInt(m[1], 10)}`;
+      return s.replace(/\s+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    }
+    function shiftClassForYear(baseClass, deltaYears) {
+      const normalized = normalizeClassNameForEnrollment(baseClass);
+      const idx = CLASS_ORDER.findIndex(c => c.toLowerCase() === normalized.toLowerCase());
+      if (idx < 0) return normalized || 'Unknown';
+      const next = idx + Number(deltaYears || 0);
+      if (next < 0) return 'Pre-Admission';
+      if (next >= CLASS_ORDER.length) return 'GRADUATED';
+      return CLASS_ORDER[next];
+    }
+    function normalizeEnrollments(raw) {
+      if (!raw || typeof raw !== 'object') return {};
+      const normalized = {};
+      Object.entries(raw).forEach(([key, value]) => {
+        if (value && typeof value === 'object' && (value.studentId || value.id || value.className || value.classLevel || value.class || value.grade)) {
+          normalized[value.id || value.studentId || key] = { ...value };
+          return;
+        }
+        if (value && typeof value === 'object') {
+          Object.entries(value).forEach(([stuId, stuVal]) => {
+            const entry = (stuVal && typeof stuVal === 'object') ? { ...stuVal } : {};
+            if (!entry.className && !entry.classLevel && !entry.class && !entry.grade) entry.className = key;
+            normalized[entry.id || entry.studentId || stuId] = Object.assign(normalized[entry.id || entry.studentId || stuId] || {}, entry);
+          });
+        }
+      });
+      return normalized;
+    }
     function cleanPath(path) { return String(path || '').replace(/^\/+/, ''); }
     async function getSnapScopedOrLegacy(path) {
       const clean = cleanPath(path);
@@ -979,7 +1019,7 @@
         state.subjects = subjectListForClass(state.className, state.year) || state.subjects || [];
         const dbClass = state.classKey || state.className;
         const [students, attendance, fees, scoresRaw, detailsMap] = await Promise.all([
-          fetchStudents(dbClass, state.stream),
+          fetchStudents(dbClass, state.stream, state.year),
           fetchAttendance(state.year, state.month, dbClass, state.examKey, state.monthRaw),
           fetchFees(state.year, dbClass),
           fetchScores({year: state.year, className: dbClass, examKey: state.examKey, month: state.month, rawMonth: state.monthRaw}),
@@ -1015,54 +1055,90 @@
       }
     }
 
-    async function fetchStudents(className, stream){
-      const tryPaths = ['students','Students','StudentsList','Students_List','studentList','studentlist','attendance','school','schoolerp'];
+    async function fetchStudents(className, stream, yearOverride){
+      const year = String(yearOverride ?? state.year ?? new Date().getFullYear());
+      const baseMap = {};
+      const tryPaths = ['students','Students','StudentsList','Students_List'];
       for (const p of tryPaths){
-        try{
+        try {
           const snap = await getSnapScopedOrLegacy(p);
           if (snap && snap.exists && snap.exists()){
-            const data = snap.val();
-            const out = [];
-            if (Array.isArray(data)){
-              data.forEach((item, i) => item && out.push(normalizeStudentRecord(item.adm || item.admissionNumber || item.admNo || ('A'+i), item)));
-            }else{
-              Object.keys(data).forEach(k => {
-                const s = data[k] || {};
-                if (typeof s === 'object') {
-                  const adm = s.adm || s.admissionNumber || s.admNo || s.admission || k;
-                  out.push(normalizeStudentRecord(adm, s));
-                }
-              });
-            }
-            const filtered = out.filter(x => {
-              const cls = String(x.class || '').toUpperCase().replace(/[\s-]/g,'');
-              const want = className.toUpperCase().replace(/[\s-]/g,'');
-              const classMatches = !className || cls.includes(want);
-              const str = String(x.stream || '').toUpperCase().replace(/[\s-]/g,'');
-              const wantStr = (stream||'').toUpperCase().replace(/[\s-]/g,'');
-              const streamMatches = !stream || str.includes(wantStr);
-              return classMatches && streamMatches;
-            }).sort((a,b) => (a.name||'').localeCompare(b.name||''));
-            if (filtered.length) {
-              console.log('[Report] Found', filtered.length, 'students at', p, 'for class', className, 'stream', stream||'(none)');
-              return filtered;
-            }
-            // Retry without stream constraint if nothing found
-            const filteredNoStream = out.filter(x => {
-              const cls = String(x.class || '').toUpperCase().replace(/[\s-]/g,'');
-              const want = className.toUpperCase().replace(/[\s-]/g,'');
-              return !className || cls.includes(want);
-            }).sort((a,b) => (a.name||'').localeCompare(b.name||''));
-            if (filteredNoStream.length) {
-              console.warn('[Report] No matches with stream; using class-only results of', filteredNoStream.length, 'from', p);
-              return filteredNoStream;
-            }
+            const data = snap.val() || {};
+            Object.keys(data).forEach(k => {
+              const s = data[k] || {};
+              if (String(s.status || '').toLowerCase() === 'shifted') return;
+              baseMap[k] = Object.assign({}, baseMap[k] || {}, s, { _key: k });
+            });
+            break;
           }
-        }catch(err){
-          console.warn('fetchStudents trying', p, err && err.message);
-        }
+        } catch (e) { /* ignore */ }
       }
-      return [];
+      const toStudent = (id, raw) => {
+        const s = raw || {};
+        const name = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || s.fullName || '';
+        return {
+          id: s.id || id,
+          admissionNo: s.admissionNumber || s.admNo || s.admissionNo || '',
+          name,
+          class: s.className || s.classLevel || s.class || s.grade || 'Unknown',
+          stream: s.stream || s.streamName || s.section || '',
+          parentContact: s.parentContact || s.parentPhone || s.guardianPhone || '',
+          parentName: s.parentName || s.primaryParentName || s.guardianName || '',
+          gender: s.gender || s.Gender || '',
+          dob: s.dob || '',
+          reportingDate: s.reportingDate || '',
+          photoUrl: s.photoUrl || s.passport || s.avatarUrl || '',
+          meta: s
+        };
+      };
+      const baseStudents = Object.keys(baseMap).map(k => toStudent(k, baseMap[k])).filter(Boolean);
+      const normalizeAdmission = (v) => String(v || '').trim();
+
+      let enrollmentIndex = {};
+      let anchorIndex = {};
+      try {
+        const enrollSnap = await getSnapScopedOrLegacy(`enrollments/${year}`);
+        if (enrollSnap && enrollSnap.exists && enrollSnap.exists()) enrollmentIndex = normalizeEnrollments(enrollSnap.val());
+      } catch (e) { /* ignore */ }
+      try {
+        const anchorSnap = await getSnapScopedOrLegacy(`enrollments/${SOMAP_DEFAULT_YEAR}`);
+        if (anchorSnap && anchorSnap.exists && anchorSnap.exists()) anchorIndex = normalizeEnrollments(anchorSnap.val());
+      } catch (e) { /* ignore */ }
+
+      const deltaYears = Number(year) - SOMAP_DEFAULT_YEAR;
+      const selectedCanon = SomapSub().canonClass ? SomapSub().canonClass(className) : className;
+      const roster = baseStudents.reduce((acc, student) => {
+        const sid = student.id || '';
+        const admissionKey = normalizeAdmission(student.admissionNo);
+        const enroll = enrollmentIndex[sid] || (admissionKey ? enrollmentIndex[admissionKey] : null) || {};
+        let classRaw = enroll.className || enroll.classLevel || enroll.class || enroll.grade || '';
+
+        if (!classRaw) {
+          const anchor = anchorIndex[sid] || (admissionKey ? anchorIndex[admissionKey] : null) || {};
+          const baseClass = anchor.className || anchor.classLevel || anchor.class || anchor.grade ||
+            student.class || student.className || student.classLevel || student.grade || 'Unknown';
+          const shifted = shiftClassForYear(baseClass, deltaYears);
+          if (shifted === 'GRADUATED') return acc;
+          classRaw = shifted;
+        } else if (String(classRaw).trim().toUpperCase() === 'GRADUATED') return acc;
+
+        const classLevel = normalizeClassNameForEnrollment(classRaw);
+        const studentCanon = SomapSub().canonClass ? SomapSub().canonClass(classLevel) : classLevel;
+        const classMatches = !selectedCanon ||
+          (studentCanon && studentCanon.toLowerCase() === (selectedCanon || '').toLowerCase()) ||
+          (String(studentCanon || '').toLowerCase().includes(String(selectedCanon || '').toLowerCase()));
+        const normalizedStream = String(student.stream || '').toUpperCase().replace(/[\s-]/g, '');
+        const normalizedInputStream = (stream || '').toUpperCase().replace(/[\s-]/g, '');
+        const streamMatches = !stream || normalizedStream.includes(normalizedInputStream);
+        if (!classMatches || !streamMatches) return acc;
+
+        acc.push(normalizeStudentRecord(student.admissionNo || student.id, { ...student, class: classLevel }));
+        return acc;
+      }, []);
+
+      roster.sort((a,b) => (a.name || '').localeCompare(b.name || ''));
+      if (roster.length) console.log('[Report] Found', roster.length, 'students for class', className, 'year', year, 'stream', stream||'(none)');
+      return roster;
     }
 
     function normalizeStudentRecord(admKey, s){
