@@ -109,6 +109,8 @@
       </div>
     </section>
 
+    <section id="transferHubHost" class="mt-6"></section>
+
     <!-- KPI + Charts -->
     <section class="mt-6 grid lg:grid-cols-12 gap-4">
       <div class="lg:col-span-5 grid grid-cols-2 sm:grid-cols-3 gap-4">
@@ -186,6 +188,7 @@
     </div>
   </div>
 
+  <script src="js/academic-transfer.js"></script>
   <script>
     /* ---------- CONFIG ---------- */
     const SomapSub = () => window.SomapSubjects || {};
@@ -364,11 +367,41 @@
     if (!currentSchool || !currentSchool.id) {
        window.location.href = "somapappv1multischool/multischool.html";
     }
+    const currentSchoolId = String(currentSchool?.id || '').trim();
+    const isSocrates = currentSchoolId === 'socrates-school';
 
     function schoolRef(subPath) {
        const db = getDB();
        if (!db) return null;
        return db.ref(SOMAP.P(subPath));
+    }
+
+    function normalizedPath(path) {
+      return String(path || '').replace(/^\/+/, '');
+    }
+    function buildCandidateDbPaths(path) {
+      const clean = normalizedPath(path);
+      const scoped = SOMAP?.P ? SOMAP.P(clean) : clean;
+      const candidates = [scoped];
+      if (isSocrates && clean !== scoped) candidates.push(clean);
+      return candidates;
+    }
+    async function readFirstExisting(paths) {
+      const db = getDB();
+      if (!db) return null;
+      for (const rawPath of (paths || [])) {
+        for (const candidatePath of buildCandidateDbPaths(rawPath)) {
+          try {
+            const snap = await db.ref(candidatePath).get();
+            if (snap && snap.exists && snap.exists()) {
+              return { snap, path: candidatePath };
+            }
+          } catch (err) {
+            console.warn('[academic] read failed', candidatePath, err?.message || err);
+          }
+        }
+      }
+      return null;
     }
     
     // Update dashboard header with school name
@@ -421,20 +454,19 @@
 
     /* ---------- Robust student loader ---------- */
     async function fetchStudents(className, stream) {
-      const db = getDB();
-      if (!db) return [];
+      if (!getDB()) return [];
       const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List', 'studentList', 'studentlist', 'attendance', 'school', 'schoolerp'];
       for (const p of tryPaths) {
         try {
-          const snap = await db.ref(p).get();
-          if (snap && snap.exists && snap.exists()) {
-            const data = snap.val();
+          const found = await readFirstExisting([p]);
+          if (found?.snap && found.snap.exists && found.snap.exists()) {
+            const data = found.snap.val();
             const arr = [];
             if (Array.isArray(data)) {
               data.forEach((item, idx) => {
                 if (item) {
                   const adm = item.adm || item.admissionNumber || item.admNo || ('A' + idx);
-                  arr.push(normalizeStudentRecord(adm, item));
+                  arr.push(normalizeStudentRecord(adm, { ...(item || {}), _id: String(item?.studentId || item?.id || adm) }));
                 }
               });
             } else {
@@ -442,7 +474,7 @@
                 const s = data[k] || {};
                 if (typeof s === 'object' && (s.name || s.fullName || s.firstName || s.adm || s.admissionNumber || s.admissionNo || s.feeDue || s.feePaid)) {
                   const adm = s.adm || s.admissionNumber || s.admNo || s.admission || k;
-                  arr.push(normalizeStudentRecord(adm, s));
+                  arr.push(normalizeStudentRecord(adm, { ...s, _id: String(s?.studentId || s?.id || k) }));
                 }
               });
             }
@@ -483,19 +515,31 @@
         feePaid = Object.values(s.payments).reduce((sum, p) => sum + Number(p.amount || 0), 0);
       }
       const balance = Number(s.balance || Math.max(0, feeDue - feePaid) || 0);
-      return { adm: admKey, name, class: sClass, stream: sStream, feeDue, feePaid, balance, status: s.status || '', meta: s };
+      return {
+        id: String(s._id || s.studentId || s.id || admKey),
+        adm: String(admKey),
+        admissionNo: String(s.admissionNumber || s.admissionNo || s.admNo || admKey),
+        name,
+        class: sClass,
+        stream: sStream,
+        feeDue,
+        feePaid,
+        balance,
+        status: s.status || '',
+        parentContact: s.parentContact || s.parentPhone || s.guardianPhone || s.phone || '',
+        meta: s
+      };
     }
 
     /* ---------- Attendance + fees + scores fetchers ---------- */
     async function fetchAttendance(year, month, className) {
-      const db = getDB();
-      if (!db) return {};
-      const refPath = `/attendance/${year}/${month}/${className}`;
+      if (!getDB()) return {};
+      const refPath = `attendance/${year}/${month}/${className}`;
       try {
-        const snap = await db.ref(refPath).get();
+        const found = await readFirstExisting([refPath]);
         const out = {};
-        if (snap && snap.exists && snap.exists()) {
-          const val = snap.val();
+        if (found?.snap && found.snap.exists && found.snap.exists()) {
+          const val = found.snap.val();
           Object.keys(val).forEach(adm => {
             const a = val[adm] || {};
             out[adm] = { present: Number(a.present || a.daysPresent || 0), absent: Number(a.absent || a.daysAbsent || 0), days: Number(a.days || (Number(a.present || 0) + Number(a.absent || 0))) };
@@ -506,14 +550,13 @@
     }
 
     async function fetchFees(year, className) {
-      const db = getDB();
-      if (!db) return {};
-      const refPath = `/fees/${year}/${className}`;
+      if (!getDB()) return {};
+      const refPath = `fees/${year}/${className}`;
       try {
-        const snap = await db.ref(refPath).get();
+        const found = await readFirstExisting([refPath]);
         const out = {};
-        if (snap && snap.exists && snap.exists()) {
-          const val = snap.val();
+        if (found?.snap && found.snap.exists && found.snap.exists()) {
+          const val = found.snap.val();
           Object.keys(val).forEach(adm => {
             const f = val[adm] || {};
             const required = Number(f.required || f.expected || f.total || 0);
@@ -526,8 +569,7 @@
     }
 
     async function fetchScores({ year, className, examKey, month }) {
-      const db = getDB();
-      if (!db) return {};
+      if (!getDB()) return {};
 
       // 1. Build tolerant class key candidates: "Class 3" ↔ "3"
       const classCandidates = [];
@@ -563,8 +605,9 @@
 
       for (const refPath of paths) {
         try {
-          const snap = await db.ref(refPath).get();
-          console.log('[academic.fetchScores] trying', refPath, snap && snap.exists && snap.exists());
+          const found = await readFirstExisting([refPath]);
+          const snap = found?.snap || null;
+          console.log('[academic.fetchScores] trying', refPath, Boolean(snap && snap.exists && snap.exists()));
 
           if (snap && snap.exists && snap.exists()) {
             const val = snap.val() || {};
@@ -667,6 +710,8 @@
       });
 
       state.students = await fetchStudents(state.className, state.stream);
+      initTransferHubIfReady();
+      if (transferHub?.refresh) transferHub.refresh();
       state.attendance = await fetchAttendance(state.year, state.month, state.className) || {};
       state.fees = await fetchFees(state.year, state.className) || {};
 
@@ -735,6 +780,7 @@
         
         // Wait for DOM to stabilize before initial load
         setTimeout(() => {
+          initTransferHubIfReady();
           loadAll();
         }, 0);
       });
@@ -832,6 +878,22 @@
 
     /* ---------- Small helpers ---------- */
     function money(n) { n = Number(n || 0); return new Intl.NumberFormat('en-TZ', { style: 'currency', currency: 'TZS', maximumFractionDigits: 0 }).format(n); }
+    let transferHub = null;
+    function initTransferHubIfReady() {
+      if (transferHub || !window.SomapClassTransfer || !state.assignedClass) return;
+      transferHub = window.SomapClassTransfer.mount({
+        hostId: 'transferHubHost',
+        schoolId: currentSchoolId,
+        schoolName: currentSchool?.name || 'School',
+        getDB,
+        getContext: () => ({
+          className: state.className || state.assignedClass || '',
+          year: String(state.year || yearSelect?.value || new Date().getFullYear()),
+          students: Array.isArray(state.students) ? state.students : []
+        }),
+        onSaved: () => loadAll()
+      });
+    }
 
     /* ---------- Load on change ---------- */
     classSelect.addEventListener('change', () => {

@@ -25,6 +25,7 @@
 
   <!-- Your Firebase config wrapper (exports window.db, window.storage) -->
   <script src="../firebase.js"></script>
+  <script src="../somapappv1multischool/js/context.js"></script>
   <script type="module">
     import { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass } from '../js/modules/subjects.js';
     window.SomapSubjects = { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass };
@@ -385,10 +386,44 @@
       return firebase.database();
     }
 
+    const currentSchool = window.SOMAP && SOMAP.getSchool ? SOMAP.getSchool() : null;
+    const currentSchoolId = String(currentSchool?.id || '').trim();
+    const isSocrates = currentSchoolId === 'socrates-school';
+    function normalizePath(path) {
+      return String(path || '').replace(/^\/+/, '');
+    }
+    function buildCandidateDbPaths(path) {
+      const clean = normalizePath(path);
+      const scoped = SOMAP?.P ? SOMAP.P(clean) : clean;
+      const candidates = [scoped];
+      if (isSocrates && clean !== scoped) candidates.push(clean);
+      return candidates;
+    }
+    async function readFirstExisting(paths) {
+      const db = getDB();
+      if (!db) return null;
+      for (const rawPath of (paths || [])) {
+        for (const candidatePath of buildCandidateDbPaths(rawPath)) {
+          try {
+            const snap = await db.ref(candidatePath).get();
+            if (snap && snap.exists && snap.exists()) {
+              return { snap, path: candidatePath };
+            }
+          } catch (err) {
+            console.warn('[scoresheet] read failed', candidatePath, err?.message || err);
+          }
+        }
+      }
+      return null;
+    }
+    function scopedPath(path) {
+      const clean = normalizePath(path);
+      return SOMAP?.P ? SOMAP.P(clean) : clean;
+    }
+
     /* ---------- Robust student loader ---------- */
     async function fetchStudents(className, stream){
-      const db = getDB();
-      if(!db) {
+      if(!getDB()) {
         console.error('Firebase database not available');
         return [];
       }
@@ -399,9 +434,9 @@
       for(const p of tryPaths){
         try{
           console.log('Trying path:', p);
-          const snap = await db.ref(p).get();
-          if(snap && snap.exists && snap.exists()){
-            const data = snap.val();
+          const found = await readFirstExisting([p]);
+          if(found?.snap && found.snap.exists && found.snap.exists()){
+            const data = found.snap.val();
             console.log('Found data at path:', p, 'Type:', typeof data, 'Keys:', Object.keys(data || {}).length);
             
             const arr = [];
@@ -409,7 +444,7 @@
               data.forEach((item, idx)=> {
                 if(item) {
                   const adm = item.adm || item.admissionNumber || item.admNo || ('A'+idx);
-                  arr.push(normalizeStudentRecord(adm, item));
+                  arr.push(normalizeStudentRecord(adm, { ...(item || {}), _id: String(item?.studentId || item?.id || adm) }));
                 }
               });
             } else {
@@ -417,7 +452,7 @@
                 const s = data[k] || {};
                 if(typeof s === 'object' && (s.name || s.fullName || s.firstName || s.adm || s.admissionNumber || s.admissionNo || s.feeDue || s.feePaid)){
                   const adm = s.adm || s.admissionNumber || s.admNo || s.admission || k;
-                  arr.push(normalizeStudentRecord(adm, s));
+                  arr.push(normalizeStudentRecord(adm, { ...s, _id: String(s?.studentId || s?.id || k) }));
                 }
               });
             }
@@ -469,19 +504,29 @@
         feePaid = Object.values(s.payments).reduce((sum, p) => sum + Number(p.amount || 0), 0);
       }
       const balance = Number(s.balance || Math.max(0, feeDue - feePaid) || 0);
-      return { adm: String(admKey), name, class: sClass, stream: sStream, feeDue, feePaid, balance, meta: s };
+      return {
+        id: String(s._id || s.studentId || s.id || admKey),
+        adm: String(admKey),
+        admissionNo: String(s.admissionNumber || s.admissionNo || s.admNo || admKey),
+        name,
+        class: sClass,
+        stream: sStream,
+        feeDue,
+        feePaid,
+        balance,
+        meta: s
+      };
     }
 
     /* ---------- Attendance + fees + scores fetchers ---------- */
     async function fetchAttendance(year, month, className){
-      const db = getDB();
-      if(!db) return {};
-      const refPath = `/attendance/${year}/${month}/${className}`;
+      if(!getDB()) return {};
+      const refPath = `attendance/${year}/${month}/${className}`;
       try{
-        const snap = await db.ref(refPath).get();
+        const found = await readFirstExisting([refPath]);
         const out = {};
-        if(snap && snap.exists && snap.exists()){
-          const val = snap.val();
+        if(found?.snap && found.snap.exists && found.snap.exists()){
+          const val = found.snap.val();
           Object.keys(val).forEach(adm=>{
             const a = val[adm] || {};
             out[adm] = { present: Number(a.present || a.daysPresent || 0), absent: Number(a.absent || a.daysAbsent || 0), days: Number(a.days || (Number(a.present||0)+Number(a.absent||0))) };
@@ -492,14 +537,13 @@
     }
 
     async function fetchFees(year, className){
-      const db = getDB();
-      if(!db) return {};
-      const refPath = `/fees/${year}/${className}`;
+      if(!getDB()) return {};
+      const refPath = `fees/${year}/${className}`;
       try{
-        const snap = await db.ref(refPath).get();
+        const found = await readFirstExisting([refPath]);
         const out = {};
-        if(snap && snap.exists && snap.exists()){
-          const val = snap.val();
+        if(found?.snap && found.snap.exists && found.snap.exists()){
+          const val = found.snap.val();
           Object.keys(val).forEach(adm=>{
             const f = val[adm] || {};
             const required = Number(f.required || f.expected || f.total || 0);
@@ -512,8 +556,7 @@
     }
 
     async function fetchScores({ year, className, examKey, month }) {
-      const db = getDB();
-      if (!db) return {};
+      if (!getDB()) return {};
 
       // Tolerant class keys
       const classCandidates = [];
@@ -536,7 +579,7 @@
       const paths = [];
 
       classCandidates.forEach(clsKey => {
-        const base = `/scores/${year}/${clsKey}`;
+        const base = `scores/${year}/${clsKey}`;
         variants.forEach(v => {
           paths.push(`${base}/${examKey}/${v}`);
           paths.push(`${base}/${examKey.toLowerCase()}/${v}`);
@@ -550,7 +593,8 @@
 
       for (const refPath of paths) {
         try {
-          const candidateSnap = await db.ref(refPath).get();
+          const found = await readFirstExisting([refPath]);
+          const candidateSnap = found?.snap || null;
           console.log('[scoresheet.fetchScores] trying', refPath, candidateSnap && candidateSnap.exists && candidateSnap.exists());
           if (candidateSnap && candidateSnap.exists && candidateSnap.exists()) {
             snap = candidateSnap;
@@ -608,7 +652,7 @@
       const db = getDB();
       if(!db){ alert('Firebase not initialized'); return; }
       const { year, className, examKey, month } = state;
-      const baseRef = db.ref(`/scores/${year}/${className}/${examKey}/${month}`);
+      const basePath = `scores/${year}/${className}/${examKey}/${month}`;
       const payload = {};
       Object.keys(state.rowsByAdm).forEach(adm=>{
         const row = state.rowsByAdm[adm];
@@ -620,7 +664,10 @@
           payload[adm][subject.key] = { score, max, label: subject.label };
         });
       });
-      await baseRef.set(payload);
+      await db.ref(scopedPath(basePath)).set(payload);
+      if (isSocrates) {
+        await db.ref(basePath).set(payload);
+      }
       await persistComputedSummary().catch(()=>{});
       alert('Scores saved.');
     }
@@ -947,7 +994,11 @@
       });
       summary.attendance = { present: sumP, absent: sumA, days: sumD };
       summary.fees = { required: feeReq, paid: feePaid, balance: feeBal };
-      await db.ref(`/summaries/${state.year}/${state.className}/${state.examKey}/${state.month}`).set(summary);
+      const summaryPath = `summaries/${state.year}/${state.className}/${state.examKey}/${state.month}`;
+      await db.ref(scopedPath(summaryPath)).set(summary);
+      if (isSocrates) {
+        await db.ref(summaryPath).set(summary);
+      }
     }
 
     /* ---------- Load sequence (main entry) ---------- */
