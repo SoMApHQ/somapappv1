@@ -277,7 +277,11 @@
       const adm = getAdmissionNo(student);
       const nowIso = new Date().toISOString();
       const stamp = String(Date.now());
-      const year = String(data.year || new Date().getFullYear());
+      // Use effective date year for enrollment (so Class 5 2026 shows in classattendance 2026)
+      const effectiveYear = payload.effectiveDate
+        ? String(new Date(payload.effectiveDate + 'T12:00:00').getFullYear())
+        : '';
+      const year = effectiveYear || String(data.year || new Date().getFullYear());
       const transfer = {
         studentId: sid,
         admissionNo: adm || sid,
@@ -314,11 +318,22 @@
         class: payload.targetClass,
         updatedAt: nowIso
       };
-      setScoped(`enrollments/${year}/${sid}`, enrollmentPayload);
-      setScoped(`years/${year}/enrollments/${sid}`, enrollmentPayload);
-      if (adm && adm !== sid) {
-        setScoped(`enrollments/${year}/${adm}`, enrollmentPayload);
-        setScoped(`years/${year}/enrollments/${adm}`, enrollmentPayload);
+
+      // Write to effective year + future years (so classattendance, transport, parent see promoted class everywhere)
+      const baseYear = Number(year) || new Date().getFullYear();
+      const idx = CLASS_ORDER.findIndex((c) => String(c || '').toLowerCase() === String(payload.targetClass || '').toLowerCase());
+      for (let y = 0; y <= 3; y++) {
+        const targetYear = String(baseYear + y);
+        const j = idx >= 0 ? idx + y : -1;
+        const futureClass = j >= 0 && j < CLASS_ORDER.length ? CLASS_ORDER[j] : payload.targetClass;
+        if (futureClass === 'GRADUATED') break;
+        const futurePayload = { ...enrollmentPayload, className: futureClass, classLevel: futureClass, class: futureClass };
+        setScoped(`enrollments/${targetYear}/${sid}`, futurePayload);
+        setScoped(`years/${targetYear}/enrollments/${sid}`, futurePayload);
+        if (adm && adm !== sid) {
+          setScoped(`enrollments/${targetYear}/${adm}`, futurePayload);
+          setScoped(`years/${targetYear}/enrollments/${adm}`, futurePayload);
+        }
       }
 
       setScoped(`classTransfers/${year}/${sid}/${stamp}`, transfer);
