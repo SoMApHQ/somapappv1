@@ -2533,6 +2533,29 @@
         return out;
       }
 
+      function extractPaymentDetailsList(rawStudentPayments) {
+        const list = [];
+        Object.entries(rawStudentPayments || {}).forEach(([rawMonth, value]) => {
+          const mk = normalizeMonthKey(rawMonth);
+          if (!mk) return;
+          const monthLabel = REMEDIAL_MONTHS.find((m) => m.key === mk)?.label || `Month ${mk}`;
+          const collect = (entry) => {
+            if (!entry || typeof entry !== "object") return;
+            if (entry.amount !== undefined && parseMoney(entry.amount) > 0) {
+              list.push({
+                month: monthLabel,
+                amount: parseMoney(entry.amount),
+                paidAt: entry.paidAt || entry.recordedAt ? (typeof entry.recordedAt === "number" ? new Date(entry.recordedAt).toISOString().slice(0, 10) : null) : null,
+              });
+              return;
+            }
+            Object.values(entry).forEach((item) => collect(item));
+          };
+          collect(value);
+        });
+        return list.sort((a, b) => (a.paidAt || "").localeCompare(b.paidAt || ""));
+      }
+
       function dueMonthCountForYear(year, dueDay) {
         const y = Number(year);
         const now = new Date();
@@ -2714,11 +2737,20 @@
               <td>${formatTsh(r.debtToAugust)}</td>
               <td>${remedialEsc(r.status)}</td>
               <td>
-                <button class="remedial-btn bg-indigo-500/35 text-indigo-100 border-indigo-200/50" data-remedial-pay="${remedialEsc(
-                  r.id
-                )}">
-                  ${remedialEsc(actionLabel)}
-                </button>
+                <span class="inline-flex items-center gap-1">
+                  <button
+                    class="remedial-btn p-1.5 min-w-0 text-slate-300 hover:text-cyan-300 hover:bg-slate-600/40 border border-slate-500/40"
+                    data-remedial-view="${remedialEsc(r.id)}"
+                    title="View payment details"
+                  >
+                    <i class="fas fa-eye text-xs"></i>
+                  </button>
+                  <button class="remedial-btn bg-indigo-500/35 text-indigo-100 border-indigo-200/50" data-remedial-pay="${remedialEsc(
+                    r.id
+                  )}">
+                    ${remedialEsc(actionLabel)}
+                  </button>
+                </span>
               </td>
             </tr>`;
           })
@@ -2775,6 +2807,40 @@
         remedialState.rows = remedialRowsFromState();
         renderRemedialCard();
         renderRemedialModal();
+      }
+
+      function showRemedialPaymentDetails(studentId) {
+        const r = remedialState.rows.find((row) => row.id === studentId);
+        if (!r) return;
+        const details = extractPaymentDetailsList(
+          remedialState.paymentsByStudent?.[studentId] || {}
+        );
+        const totalPaid = r.totalPaidAug;
+        const debtLeft = r.debtToDate;
+        const expectedFull = 8 * parseMoney(remedialState.settings.monthlyPrice);
+        const rowsHtml =
+          details.length > 0
+            ? details
+                .map(
+                  (d) =>
+                    `<tr><td class="px-2 py-1">${remedialEsc(d.paidAt || "-")}</td><td class="px-2 py-1">${remedialEsc(d.month)}</td><td class="px-2 py-1 text-right">${formatTsh(d.amount)}</td></tr>`
+                )
+                .join("")
+            : "<tr><td colspan='3' class='px-2 py-2 text-slate-400'>No payments recorded yet.</td></tr>";
+        Swal.fire({
+          title: `Payment Details – ${remedialEsc(r.name)}`,
+          html:
+            `<div class="text-left space-y-3 text-slate-200">` +
+            `<p><strong>Total paid (Jan–Aug):</strong> ${formatTsh(totalPaid)}</p>` +
+            `<p><strong>Amount left to clear:</strong> ${formatTsh(debtLeft)}</p>` +
+            `<p><strong>Expected full year (8 months):</strong> ${formatTsh(expectedFull)}</p>` +
+            `<table class="w-full text-sm border border-slate-600/50 rounded overflow-hidden"><thead><tr class="bg-slate-700/50"><th class="px-2 py-1 text-left">Date</th><th class="px-2 py-1 text-left">Month</th><th class="px-2 py-1 text-right">Amount</th></tr></thead><tbody>${rowsHtml}</tbody></table>` +
+            `</div>`,
+          width: "480px",
+          background: "rgba(15, 23, 42, 0.95)",
+          color: "#e2e8f0",
+          confirmButtonColor: "#38bdf8",
+        });
       }
 
       async function upsertRemedialPayment(studentId) {
@@ -3264,6 +3330,12 @@
         document
           .getElementById("remedialTableBody")
           ?.addEventListener("click", (e) => {
+            const viewBtn = e.target.closest("[data-remedial-view]");
+            if (viewBtn) {
+              const sid = viewBtn.getAttribute("data-remedial-view");
+              if (sid) showRemedialPaymentDetails(sid);
+              return;
+            }
             const btn = e.target.closest("[data-remedial-pay]");
             if (!btn) return;
             const sid = btn.getAttribute("data-remedial-pay");
