@@ -462,6 +462,30 @@
         }
       }
 
+      // Fetch approvalsHistory from all paths approvals.js may write to (school-scoped + root for Socrates)
+      async function fetchApprovalsHistoryForYear(year) {
+        const yearStr = String(year);
+        const merged = {};
+        try {
+          const paths = [
+            schoolRef(`approvalsHistory/${yearStr}`),
+            db.ref(`approvalsHistory/${yearStr}`)
+          ];
+          for (const ref of paths) {
+            const snap = await ref.once('value').catch(() => null);
+            const val = snap?.val();
+            if (val && typeof val === 'object' && Object.keys(val).length > 0) {
+              Object.entries(val).forEach(([month, records]) => {
+                merged[month] = { ...(merged[month] || {}), ...(records || {}) };
+              });
+            }
+          }
+        } catch (err) {
+          console.warn('fetchApprovalsHistoryForYear:', err);
+        }
+        return merged;
+      }
+
       function maybeAutoAdvanceYear() {
         const ctx = window.somapYearContext;
         if (!ctx || typeof ctx.getSelectedYear !== 'function') return;
@@ -1470,11 +1494,10 @@
             }
           });
           
-          // Also check approvalsHistory for approved payments
+          // Also check approvalsHistory for approved payments (all paths)
           const year = String(state.year);
           const admissionNo = (student && (student.admissionNumber || student.admissionNo)) || '';
-          const historySnap = await scopedOrSocratesLegacy(`years/${year}/approvalsHistory`, `approvalsHistory/${year}`).catch(() => ({ val: () => null }));
-          const history = historySnap.val() || {};
+          const history = await fetchApprovalsHistoryForYear(year);
           const studentMatches = (r) => {
             if (!r || r.sourceModule !== 'transport') return false;
             const key = r.modulePayload?.studentKey;
@@ -1530,7 +1553,7 @@
             // Check approval status more thoroughly
             const isApproved = p.approved === true || p.approved === 'true' || p.approvedAt || (p.approvedBy && !p.approvedBy.includes('pending'));
             const statusBadge = isApproved 
-              ? '<span class="chip ok" style="background: rgba(16, 185, 129, 0.15); color: #86efac; border: 1px solid rgba(16, 185, 129, 0.35); padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700;">Approved</span>'
+              ? '<span class="chip ok" style="background: rgba(16, 185, 129, 0.15); color: #86efac; border: 1px solid rgba(16, 185, 129, 0.35); padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700;">Paid</span>'
               : '<span class="chip warn" style="background: rgba(245, 158, 11, 0.15); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.35); padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700;">Pending</span>';
             
             const d = p.paidAt ? new Date(p.paidAt).toLocaleDateString('en-GB') : (p.timestamp ? new Date(p.timestamp).toLocaleDateString('en-GB') : '-');
@@ -2643,10 +2666,9 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             }
           });
 
-          // Merge approval status from approvalsHistory (fixes approvals that wrote to wrong path before)
+          // Merge approval status from approvalsHistory (check all paths approvals.js may write to)
           try {
-            const historySnap = await scopedOrSocratesLegacy(`years/${year}/approvalsHistory`, `approvalsHistory/${year}`).catch(() => ({ val: () => null }));
-            const history = historySnap.val() || {};
+            const history = await fetchApprovalsHistoryForYear(year);
             const studentMatches = (r, sid, admNo) => {
               if (!r || r.sourceModule !== 'transport') return false;
               const key = r.modulePayload?.studentKey;

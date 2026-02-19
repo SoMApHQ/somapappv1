@@ -1393,34 +1393,62 @@
     if (!studentKey || !paymentData) throw new Error('Missing transport payload.');
 
     const year = String(paymentData.year || new Date().getFullYear());
-    // Use scoped path (schools/{id}/years/...) - matches transportpayments.html which uses schoolRef/scopedSubPath
-    const ledgerBase = scopedPath(`years/${year}/transportLedgers/${studentKey}/payments`);
-    
+    const referenceCode = record.paymentReferenceCode || paymentData.reference || paymentData.ref;
     const updates = {};
-    
+
+    // Try scoped path first (schools/{id}/years/...), then legacy for Socrates
+    const ledgerPaths = [
+      scopedPath(`years/${year}/transportLedgers/${studentKey}/payments`),
+      ...(isSocratesSchool() ? [`transportLedgers/${year}/${studentKey}/payments`] : []),
+    ];
+
     let paymentKey = record.paymentRef || record.modulePayload?.paymentRef;
-    
-    if (!paymentKey) {
-      const referenceCode = record.paymentReferenceCode || paymentData.reference;
-      if (referenceCode) {
+    let ledgerBaseUsed = null;
+
+    if (!paymentKey && referenceCode) {
+      for (const ledgerBase of ledgerPaths) {
         const ledgersSnap = await db.ref(ledgerBase).once('value').catch(() => ({ val: () => null }));
         const ledgerPayments = ledgersSnap.val() || {};
-        
-        Object.entries(ledgerPayments).forEach(([key, payment]) => {
+        for (const [key, payment] of Object.entries(ledgerPayments)) {
           if (payment && (payment.ref === referenceCode || payment.reference === referenceCode)) {
             paymentKey = key;
+            ledgerBaseUsed = ledgerBase;
+            break;
           }
-        });
+        }
+        if (paymentKey) break;
       }
     }
-    
-    if (paymentKey) {
-      const base = scopedPath(`years/${year}/transportLedgers/${studentKey}/payments/${paymentKey}`);
-      updates[`${base}/approved`] = true;
-      updates[`${base}/approvedBy`] = actorEmail();
-      updates[`${base}/approvedAt`] = firebase.database.ServerValue.TIMESTAMP;
+    if (paymentKey && !ledgerBaseUsed) {
+      ledgerBaseUsed = ledgerPaths[0];
     }
-    
+
+    if (paymentKey && ledgerBaseUsed) {
+      updates[`${ledgerBaseUsed}/${paymentKey}/approved`] = true;
+      updates[`${ledgerBaseUsed}/${paymentKey}/approvedBy`] = actorEmail();
+      updates[`${ledgerBaseUsed}/${paymentKey}/approvedAt`] = firebase.database.ServerValue.TIMESTAMP;
+      // Clear from pendingApprovals queue (transportpayments uses this for status)
+      updates[`${scopedPath(`pendingApprovals/transportPayments/${paymentKey}`)}`] = null;
+      if (isSocratesSchool()) {
+        updates[`pendingApprovals/transportPayments/${paymentKey}`] = null;
+      }
+    }
+
+    // Also update transportPayments canonical path (used by transportpayments.html)
+    const transportPaymentsBase = scopedPath(`years/${year}/transportPayments/${studentKey}`);
+    const paySnap = await db.ref(transportPaymentsBase).once('value').catch(() => ({ val: () => null }));
+    const existingPayments = paySnap.val() || {};
+    for (const [key, p] of Object.entries(existingPayments)) {
+      if (p && (p.ref === referenceCode || p.reference === referenceCode)) {
+        updates[`${transportPaymentsBase}/${key}/approved`] = true;
+        updates[`${transportPaymentsBase}/${key}/status`] = 'approved';
+        updates[`${transportPaymentsBase}/${key}/approvedBy`] = actorEmail();
+        updates[`${transportPaymentsBase}/${key}/approvedAt`] = firebase.database.ServerValue.TIMESTAMP;
+        break;
+      }
+    }
+
+    // Push to transport_payments (legacy/fallback path)
     const paymentsBase = scopedPath(`years/${year}/transport_payments/${studentKey}`);
     const pushRef = db.ref(paymentsBase).push();
     updates[`${paymentsBase}/${pushRef.key}`] = {
@@ -1429,7 +1457,7 @@
       approvedAt: firebase.database.ServerValue.TIMESTAMP,
       approvedBy: actorEmail(),
     };
-    
+
     await db.ref().update(updates);
   }
 
