@@ -2643,6 +2643,43 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             }
           });
 
+          // Merge approval status from approvalsHistory (fixes approvals that wrote to wrong path before)
+          try {
+            const historySnap = await scopedOrSocratesLegacy(`years/${year}/approvalsHistory`, `approvalsHistory/${year}`).catch(() => ({ val: () => null }));
+            const history = historySnap.val() || {};
+            const studentMatches = (r, sid, admNo) => {
+              if (!r || r.sourceModule !== 'transport') return false;
+              const key = r.modulePayload?.studentKey;
+              const adm = r.studentAdm || r.admissionNumber || r.modulePayload?.admissionNumber;
+              return key === sid || adm === sid || adm === admNo || key === admNo;
+            };
+            Object.values(history).forEach(months => {
+              Object.values(months || {}).forEach(records => {
+                Object.values(records || {}).forEach(record => {
+                  if (!record || record.finalStatus !== 'approved') return;
+                  const ref = record.paymentReferenceCode || record.modulePayload?.payment?.reference || record.modulePayload?.payment?.ref;
+                  if (!ref) return;
+                  studentIds.forEach(sid => {
+                    const enrollment = state.transportEnrollments[sid] || {};
+                    const student = state.students[sid];
+                    const admNo = student?.admissionNumber || enrollment?.admissionNumber || enrollment?.admissionNo || '';
+                    if (!studentMatches(record, sid, admNo)) return;
+                    const pays = paymentsData[sid];
+                    if (!pays || !Array.isArray(pays)) return;
+                    pays.forEach((p, i) => {
+                      const pr = p.ref || p.reference;
+                      if (pr === ref) {
+                        paymentsData[sid][i] = { ...p, approved: true, approvedAt: p.approvedAt || record.approvedAt };
+                      }
+                    });
+                  });
+                });
+              });
+            });
+          } catch (err) {
+            console.warn('Merge approval status from history:', err);
+          }
+
           state.transportPayments = paymentsData;
 
           // STEP 4: Load expenses (lightweight, can load all)
