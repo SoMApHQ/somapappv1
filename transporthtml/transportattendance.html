@@ -530,11 +530,22 @@
       const reasonCancel = document.getElementById("reasonCancel");
       const absNote = document.getElementById("absNote");
 
+      const now = new Date();
+      const hasDateOverride = urlParams.has("month") || urlParams.has("day");
+      let initialContext = TransportContext.getContext();
+      if (!hasDateOverride) {
+        initialContext = TransportContext.setContext({
+          month: now.getMonth() + 1,
+          day: now.getDate()
+        });
+      }
+
       const state = {
         user: null,
         role: "guest",
-        context: TransportContext.getContext(),
+        context: initialContext,
         buses: [],
+        drivers: [],
         students: {},
         assignments: [],
         attendanceMap: {},
@@ -542,7 +553,9 @@
         summaryMap: {},
         loadingLedgers: false,
         pendingAbsence: null,
-        preferredVehicle: preferredVehicleParam || null
+        preferredVehicle: preferredVehicleParam || null,
+        routeVehicleMap: {},
+        allEnrollments: {}
       };
 
       let contextRun = 0;
@@ -631,6 +644,17 @@
         refreshDayOptions(state.context.day);
       }
 
+      function getDriverNameForVehicle(vehicleId) {
+        const bus = state.buses.find(function(b) { return b.id === vehicleId; });
+        if (!bus) return "";
+        const uid = bus.assignedDriverUid || bus.driverUid || bus.driverId || bus.assignedDriverId || "";
+        if (uid && state.drivers) {
+          const d = state.drivers.find(function(dr) { return dr.id === uid; });
+          if (d) return d.fullName || "";
+        }
+        return bus.assignedDriverName || bus.driverName || bus.driverFullName || bus.driver || "";
+      }
+
       function setVehicleMeta() {
         const vehicleId = vehicleSelect.value;
         const bus = state.buses.find(function(item) { return item.id === vehicleId; });
@@ -649,8 +673,19 @@
         if (bus.capacity) {
           chips.push('<span class="chip muted">Capacity ' + escapeHtml(bus.capacity) + "</span>");
         }
+        const driverName = getDriverNameForVehicle(vehicleId);
+        if (driverName) {
+          chips.push('<span class="chip warn">Driver ' + escapeHtml(driverName) + "</span>");
+        } else {
+          chips.push('<span class="chip bad">Driver not assigned</span>');
+        }
         if (bus.route) {
           chips.push('<span class="chip muted">Route ' + escapeHtml(bus.route) + "</span>");
+        }
+        const routes = bus.assignedRoutes;
+        if (routes && (Array.isArray(routes) ? routes.length : Object.keys(routes || {}).length) > 0) {
+          const rList = Array.isArray(routes) ? routes : Object.values(routes || {});
+          chips.push('<span class="chip muted">Routes ' + escapeHtml(rList.slice(0, 3).join(", ")) + "</span>");
         }
         vehicleMeta.innerHTML = chips.join("");
       }
@@ -730,73 +765,253 @@
 
         setVehicleMeta();
       }
+      function normalizeRoutes(raw) {
+        if (!raw) return [];
+        if (Array.isArray(raw)) return raw.map(function(r) { return String(r || "").trim(); }).filter(Boolean);
+        if (typeof raw === "object") {
+          const entries = Object.entries(raw);
+          const isArrayLike = entries.every(function(e) { return String(Number(e[0])) === e[0]; });
+          if (isArrayLike) {
+            return entries.sort(function(a, b) { return Number(a[0]) - Number(b[0]); })
+              .map(function(e) { return String(e[1] || "").trim(); }).filter(Boolean);
+          }
+          return entries.map(function(e) { return String(e[1] || e[0] || "").trim(); }).filter(Boolean);
+        }
+        if (typeof raw === "string") return raw.split(/[|;,\n]+/).map(function(s) { return s.trim(); }).filter(Boolean);
+        return [];
+      }
+
+      function buildRouteVehicleMap() {
+        const map = {};
+        const norm = function(s) { return String(s || "").toLowerCase().trim(); };
+        state.buses.forEach(function(v) {
+          const routeCandidates = [
+            v.assignedRoutes, v.routes, v.routeNames, v.route, v.routeName,
+            v.stopNames, v.stops, v.amStop, v.pmStop, v.morningRoute, v.eveningRoute
+          ];
+          const routesList = [];
+          routeCandidates.forEach(function(rc) {
+            normalizeRoutes(rc).forEach(function(r) { if (r) routesList.push(r); });
+          });
+          routesList.forEach(function(routeName) {
+            const key = norm(routeName);
+            if (key && !map[key]) map[key] = v.id;
+          });
+        });
+        state.routeVehicleMap = map;
+      }
+
+      async function expandRouteVehicleMapWithCatalog() {
+        const year = state.context.year;
+        const school = state.context.school;
+        const paths = [
+          "schools/" + school + "/transportCatalog/" + year + "/stops",
+          "transportCatalog/" + year + "/stops"
+        ];
+        for (const p of paths) {
+          const snap = await firebase.database().ref(p).get();
+          if (snap.exists() && snap.val()) {
+            const catalog = snap.val();
+            const norm = function(s) { return String(s || "").toLowerCase().trim(); };
+            Object.keys(catalog).forEach(function(stopId) {
+              const stop = catalog[stopId];
+              if (!stop) return;
+              const stopName = norm(stop.name || stop.id || stopId || "");
+              const vehicleId = state.routeVehicleMap[stopName];
+              if (vehicleId) {
+                state.routeVehicleMap[norm(stopId)] = vehicleId;
+                state.routeVehicleMap[stopId] = vehicleId;
+              }
+            });
+            break;
+          }
+        }
+      }
+
+      function resolveBusIdFromRef(ref) {
+        const k = String(ref || "").trim();
+        if (!k) return null;
+        if (state.buses.some(function(b) { return b.id === k; })) return k;
+        const norm = function(s) { return String(s || "").toLowerCase().replace(/\s+/g, ""); };
+        const keyNorm = norm(k);
+        const byPlate = state.buses.find(function(b) {
+          return norm(b.plate || b.plateNo || b.registration || "") === keyNorm;
+        });
+        return byPlate ? byPlate.id : null;
+      }
+
+      function resolveVehicleIdForEnrollment(en) {
+        if (!en) return null;
+        const vid = en.vehicleId || en.busId || en.assignedVehicleId || "";
+        let resolved = resolveBusIdFromRef(vid);
+        if (resolved) return resolved;
+        const mv = en.morningVehicle;
+        const ev = en.eveningVehicle;
+        const mvId = (mv && (mv.vehicleId || mv.id)) || "";
+        const evId = (ev && (ev.vehicleId || ev.id)) || "";
+        resolved = resolveBusIdFromRef(mvId) || resolveBusIdFromRef(evId);
+        if (resolved) return resolved;
+        const norm = function(s) { return String(s || "").toLowerCase().trim(); };
+        const amStop = norm(en.amStop || en.pickupStop || en.morningStop || "");
+        const pmStop = norm(en.pmStop || en.dropoffStop || en.eveningStop || "");
+        if (amStop && state.routeVehicleMap[amStop]) return state.routeVehicleMap[amStop];
+        if (pmStop && state.routeVehicleMap[pmStop]) return state.routeVehicleMap[pmStop];
+        const partial = Object.keys(state.routeVehicleMap).find(function(k) {
+          return (amStop && (amStop.indexOf(k) >= 0 || k.indexOf(amStop) >= 0)) ||
+                 (pmStop && (pmStop.indexOf(k) >= 0 || k.indexOf(pmStop) >= 0));
+        });
+        return partial ? state.routeVehicleMap[partial] : null;
+      }
+
+      async function loadDrivers() {
+        const year = String(state.context.year);
+        const school = state.context.school;
+        const driverById = {};
+        const workerPaths = [
+          "workers",
+          "years/" + year + "/workers",
+          "schools/" + school + "/workers",
+          "schools/" + school + "/years/" + year + "/workers"
+        ];
+        for (const p of workerPaths) {
+          const snap = await firebase.database().ref(p).get();
+          if (snap.exists()) {
+            snap.forEach(function(child) {
+              if (driverById[child.key]) return;
+              const w = child.val() || {};
+              const profile = w.profile || {};
+              const role = String(profile.role || w.role || "").toLowerCase().trim();
+              if (role !== "driver" && role !== "dereva") return;
+              if (profile.active === false) return;
+              const fullName = profile.fullNameUpper || profile.fullName || w.fullName ||
+                [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(" ") ||
+                [w.firstName, w.middleName, w.lastName].filter(Boolean).join(" ") || child.key;
+              driverById[child.key] = { id: child.key, fullName: String(fullName || "").trim() || "Unknown" };
+            });
+          }
+        }
+        state.drivers = Object.values(driverById);
+      }
+
+      async function loadAllEnrollmentsAndAssignments() {
+        const year = String(state.context.year);
+        const school = state.context.school;
+        const validSchools = [school, "socrates-school", "socrates", "default", "-O_HndQaeuNugluTYPdp", "HndQaeuNugluTYPdp"];
+
+        const [enrollScoped, enrollLegacy, assignScoped, assignLegacy, registryScoped, registryLegacy] = await Promise.all([
+          firebase.database().ref("schools/" + school + "/years/" + year + "/transportEnrollments").get(),
+          isSocratesAlias() ? firebase.database().ref("transport_enrollments").get() : Promise.resolve({ exists: () => false }),
+          firebase.database().ref("schools/" + school + "/years/" + year + "/transportAssignments").get(),
+          isSocratesAlias() ? firebase.database().ref("transportAssignments/" + year).get() : Promise.resolve({ exists: () => false }),
+          firebase.database().ref("schools/" + school + "/years/" + year + "/transportRegistry").get().catch(function() { return { exists: () => false }; }),
+          isSocratesAlias() ? firebase.database().ref("transportRegistry/" + year).get().catch(function() { return { exists: () => false }; }) : Promise.resolve({ exists: () => false })
+        ]);
+
+        const enrollments = {};
+        if (enrollScoped.exists()) {
+          enrollScoped.forEach(function(c) {
+            const v = c.val();
+            if (v) enrollments[c.key] = { ...v, studentId: c.key };
+          });
+        }
+        if (enrollLegacy.exists()) {
+          enrollLegacy.forEach(function(c) {
+            const v = c.val() || {};
+            if (!v.school || validSchools.includes(v.school)) {
+              if (!enrollments[c.key]) enrollments[c.key] = { ...v, studentId: v.studentId || c.key };
+            }
+          });
+        }
+        if (registryScoped.exists()) {
+          registryScoped.forEach(function(c) {
+            const v = c.val();
+            if (v && v.using === true && !enrollments[c.key]) {
+              enrollments[c.key] = { studentId: c.key, amStop: v.routeId || "", pmStop: v.stopName || "" };
+            }
+          });
+        }
+        if (registryLegacy.exists()) {
+          registryLegacy.forEach(function(c) {
+            const v = c.val();
+            if (v && v.using === true && !enrollments[c.key]) {
+              enrollments[c.key] = { studentId: c.key, amStop: v.routeId || "", pmStop: v.stopName || "" };
+            }
+          });
+        }
+
+        const assignments = {};
+        if (assignScoped.exists()) {
+          assignScoped.forEach(function(c) {
+            const v = c.val();
+            if (v) assignments[c.key] = v;
+          });
+        }
+        if (assignLegacy.exists()) {
+          assignLegacy.forEach(function(c) {
+            const v = c.val();
+            if (v && !assignments[c.key]) assignments[c.key] = v;
+          });
+        }
+
+        Object.keys(assignments).forEach(function(studentId) {
+          const assign = assignments[studentId];
+          if (assign && assign.status !== "Using") {
+            delete enrollments[studentId];
+            return;
+          }
+          const existing = enrollments[studentId] || {};
+          const amStop = assign.morningRouteId || assign.amStop || existing.amStop || "";
+          const pmStop = assign.eveningRouteId || assign.pmStop || existing.pmStop || "";
+          const mv = assign.morningVehicle || existing.morningVehicle;
+          const ev = assign.eveningVehicle || existing.eveningVehicle;
+          const mvId = (mv && (mv.vehicleId || mv.id)) || null;
+          const evId = (ev && (ev.vehicleId || ev.id)) || null;
+          enrollments[studentId] = {
+            ...existing,
+            ...assign,
+            studentId: studentId,
+            amStop: amStop,
+            pmStop: pmStop,
+            morningVehicleId: mvId,
+            eveningVehicleId: evId
+          };
+        });
+
+        state.allEnrollments = enrollments;
+      }
+
       async function loadAssignmentsForVehicle(vehicleId) {
         if (!vehicleId) {
           state.assignments = [];
           return;
         }
-        // Get vehicle info to check assigned routes
-        const vehicle = state.buses.find(function(b) { return b.id === vehicleId; });
-        const vehicleRoutes = (vehicle && vehicle.assignedRoutes) || [];
-        
-        // Load all enrollments and filter manually since vehicleId may be nested
-        const ref = firebase.database().ref("transport_enrollments");
-        const snapshot = await ref.get();
+        buildRouteVehicleMap();
+        await expandRouteVehicleMapWithCatalog();
+
+        if (Object.keys(state.allEnrollments).length === 0) {
+          await loadAllEnrollmentsAndAssignments();
+        }
+
         const list = [];
-        snapshot.forEach(function(child) {
-          const value = child.val() || {};
-          
-          // Allow both old and new school IDs for backward compatibility (Socrates aliases)
-          const validSchools = [
-            state.context.school,
-            "socrates-school", "socrates", "default",
-            "-O_HndQaeuNugluTYPdp", "HndQaeuNugluTYPdp"
-          ];
-          if (value.school && !validSchools.includes(value.school)) return;
-          if (value.year && Number(value.year) !== Number(state.context.year)) return;
-          
-          // Check if this enrollment matches the vehicle
-          // vehicleId might be direct or in morningVehicle/eveningVehicle
-          const directVehicleId = value.vehicleId;
-          const morningVehicleId = value.morningVehicle && value.morningVehicle.vehicleId;
-          const eveningVehicleId = value.eveningVehicle && value.eveningVehicle.vehicleId;
-          
-          const matchesVehicleById = directVehicleId === vehicleId || 
-                                     morningVehicleId === vehicleId || 
-                                     eveningVehicleId === vehicleId;
-          
-          // If not matched by ID, try matching by route
-          let matchesVehicleByRoute = false;
-          if (!matchesVehicleById && vehicle && vehicleRoutes.length > 0) {
-            const amStop = value.amStop || value.pickupStop || value.morningStop || "";
-            const pmStop = value.pmStop || value.dropoffStop || value.eveningStop || "";
-            matchesVehicleByRoute = (amStop && vehicleRoutes.includes(amStop)) || 
-                                    (pmStop && vehicleRoutes.includes(pmStop));
-          }
-          
-          if (!matchesVehicleById && !matchesVehicleByRoute) return;
-          
-          const studentId = value.studentId || child.key;
-          if (!studentId) return;
-          
-          // Get student details from students collection
+        Object.keys(state.allEnrollments).forEach(function(studentId) {
+          const en = state.allEnrollments[studentId];
+          const resolvedVid = resolveVehicleIdForEnrollment(en);
+          if (resolvedVid !== vehicleId) return;
+
           const student = state.students[studentId] || {};
-          const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
-          
+          const fullName = [student.firstName, student.middleName, student.lastName].filter(Boolean).join(" ").trim();
           list.push({
-            ...value,
-            enrollmentId: child.key,
+            ...en,
+            enrollmentId: studentId,
             studentId: studentId,
-            studentName: fullName || value.studentName || value.name || value.displayName || "Unknown student",
-            className: student.classLevel || value.className || value.class || value.grade || "",
-            route: value.route || value.routeName || "",
-            amStop: value.amStop || value.pickupStop || value.morningStop || "",
-            pmStop: value.pmStop || value.dropoffStop || value.eveningStop || ""
+            studentName: fullName || en.studentName || en.name || en.displayName || "Unknown student",
+            className: student.classLevel || en.className || en.class || en.grade || "",
+            route: en.route || en.routeName || "",
+            amStop: en.amStop || en.pickupStop || en.morningStop || "",
+            pmStop: en.pmStop || en.dropoffStop || en.eveningStop || ""
           });
         });
-        list.sort(function(a, b) {
-          return (a.studentName || "").localeCompare(b.studentName || "");
-        });
+        list.sort(function(a, b) { return (a.studentName || "").localeCompare(b.studentName || ""); });
         state.assignments = list;
       }
 
@@ -1177,10 +1392,11 @@
         contextRun += 1;
         const runId = contextRun;
         state.context = ctx;
+        state.allEnrollments = {};
         syncSelectorsFromContext();
         updateSelectedDateLabel();
         try {
-          await Promise.all([loadBuses(), loadStudents()]);
+          await Promise.all([loadBuses(), loadStudents(), loadDrivers()]);
           if (runId !== contextRun) return;
           await reloadVehicleAndData();
         } catch (err) {
