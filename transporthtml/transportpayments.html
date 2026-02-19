@@ -783,6 +783,10 @@
         const hasExplicitStart = Boolean(enrollment?.startDate || enrollment?.start_date || enrollment?.startTimestamp || enrollment?.start_time);
 
         const paymentsArray = Array.isArray(payments) ? payments : Object.values(payments || {});
+        // Only approved payments count toward paid amounts (pending approvals are not recorded)
+        const approvedPayments = paymentsArray.filter(p =>
+          p.approved === true || p.approved === 'true' || !!p.approvedAt
+        );
 
         // OPTIMIZATION: Calculate all 12 months in parallel instead of sequentially
         const monthCalculations = Array.from({ length: 12 }, (_, i) => i + 1).map(month =>
@@ -796,8 +800,8 @@
             multipliers,
           }).then(monthlyExpected => {
             const expected = Math.round(monthlyExpected || 0);
-            // Handle both number and month name formats for payments
-            const monthPayments = paymentsArray.filter(p => {
+            // Handle both number and month name formats - only count approved payments
+            const monthPayments = approvedPayments.filter(p => {
               if (typeof p.month === 'number') return p.month === month;
               if (typeof p.month === 'string') return MONTH_NAMES[month] === p.month;
               return false;
@@ -1368,8 +1372,10 @@
             totalPaidBefore,
             newBalanceAfterThis: newBalance,
             createdAt: firebase.database.ServerValue.TIMESTAMP,
+            paymentRef: payRef.key,
             modulePayload: {
               studentKey: studentId,
+              paymentRef: payRef.key,
               payment: {
                 studentId,
                 month,
@@ -1472,7 +1478,7 @@
             Object.values(months || {}).forEach(records => {
               Object.values(records || {}).forEach(record => {
                 if (record && record.sourceModule === 'transport' && record.modulePayload?.studentKey === studentId) {
-                  const ref = record.paymentReferenceCode || record.modulePayload?.payment?.reference;
+                  const ref = record.paymentReferenceCode || record.modulePayload?.payment?.reference || record.modulePayload?.payment?.ref;
                   if (ref) {
                     approvalMap[ref] = {
                       approved: record.finalStatus === 'approved',
@@ -1554,7 +1560,8 @@
         if (!studentId) return;
         const enrollment = state.transportEnrollments[studentId];
         const student = getStudentForTransport(studentId, enrollment);
-        const payments = Object.values(state.transportPayments[studentId] || {});
+        const allPayments = Object.values(state.transportPayments[studentId] || {});
+        const payments = allPayments.filter(p => p.approved === true || p.approved === 'true' || !!p.approvedAt);
         const year = Number(state.year);
         const multipliers = cachedMultipliers[year] || (await TransportPricing.loadYearMultipliers(year));
         if (!cachedMultipliers[year]) cachedMultipliers[year] = multipliers;

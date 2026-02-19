@@ -1,4 +1,4 @@
-﻿
+
 (function () {
   'use strict';
 
@@ -1393,22 +1393,20 @@
     if (!studentKey || !paymentData) throw new Error('Missing transport payload.');
 
     const year = String(paymentData.year || new Date().getFullYear());
-    const prefix = window.currentSchoolId ? `schools/${window.currentSchoolId}/` : '';
+    const ledgerBase = P(`years/${year}/transportLedgers/${studentKey}/payments`);
     
     const updates = {};
     
-    // Find the payment key in transportLedgers
-    // First try to use paymentRef from record (saved when payment was queued)
+    // Find the payment key in transportLedgers (same path structure as transportpayments.html)
     let paymentKey = record.paymentRef || record.modulePayload?.paymentRef;
     
     if (!paymentKey) {
       // Fallback: Search by reference code
       const referenceCode = record.paymentReferenceCode || paymentData.reference;
       if (referenceCode) {
-        const ledgersSnap = await db.ref(`${prefix}transportLedgers/${year}/${studentKey}/payments`).once('value').catch(() => ({ val: () => null }));
+        const ledgersSnap = await db.ref(ledgerBase).once('value').catch(() => ({ val: () => null }));
         const ledgerPayments = ledgersSnap.val() || {};
         
-        // Find payment by reference code
         Object.entries(ledgerPayments).forEach(([key, payment]) => {
           if (payment && (payment.ref === referenceCode || payment.reference === referenceCode)) {
             paymentKey = key;
@@ -1418,15 +1416,15 @@
     }
     
     if (paymentKey) {
-      // Update the ledger entry to mark as approved
-      updates[`${prefix}transportLedgers/${year}/${studentKey}/payments/${paymentKey}/approved`] = true;
-      updates[`${prefix}transportLedgers/${year}/${studentKey}/payments/${paymentKey}/approvedBy`] = actorEmail();
-      updates[`${prefix}transportLedgers/${year}/${studentKey}/payments/${paymentKey}/approvedAt`] = firebase.database.ServerValue.TIMESTAMP;
+      updates[P(`years/${year}/transportLedgers/${studentKey}/payments/${paymentKey}/approved`)] = true;
+      updates[P(`years/${year}/transportLedgers/${studentKey}/payments/${paymentKey}/approvedBy`)] = actorEmail();
+      updates[P(`years/${year}/transportLedgers/${studentKey}/payments/${paymentKey}/approvedAt`)] = firebase.database.ServerValue.TIMESTAMP;
     }
     
-    // Also write to legacy path for backward compatibility
-    const pushRef = db.ref(`${prefix}transport_payments/${studentKey}`).push();
-    updates[`${prefix}transport_payments/${studentKey}/${pushRef.key}`] = {
+    // Also write to transport_payments path (year-scoped, same as transportpayments reads)
+    const paymentsBase = P(`years/${year}/transport_payments/${studentKey}`);
+    const pushRef = db.ref(paymentsBase).push();
+    updates[`${paymentsBase}/${pushRef.key}`] = {
       ...paymentData,
       approved: true,
       approvedAt: firebase.database.ServerValue.TIMESTAMP,
