@@ -34,23 +34,47 @@
   }
 
   async function buildLedger({year, baseMonthlyFee, amStop, pmStop, startDate, payments, multipliers}){
-    const paidByMonth = {};
-    (payments||[]).forEach(p => {
-      const m = parseInt(p.month,10);
-      if (m>=1 && m<=12) paidByMonth[m] = (paidByMonth[m]||0) + (Number(p.amount)||0);
+    const approvedPayments = Array.isArray(payments) ? payments : Object.values(payments || {});
+    const totalPaidInput = approvedPayments.reduce((sum, p) => {
+      const amount = Number(p?.amount || p?.paidAmount || p?.value || 0);
+      return sum + (Number.isFinite(amount) ? amount : 0);
+    }, 0);
+
+    const monthNumbers = Array.from({ length: 12 }, (_, i) => i + 1);
+    const dues = await Promise.all(
+      monthNumbers.map((m) => dueForMonth({ year, month: m, baseMonthlyFee, amStop, pmStop, startDate, multipliers }))
+    );
+
+    // Business rule: approved amount covers oldest unpaid month(s) first.
+    const months = [];
+    let totalDue = 0;
+    let carry = totalPaidInput;
+    monthNumbers.forEach((m, idx) => {
+      const due = Number(dues[idx] || 0);
+      const paid = Math.min(due, Math.max(0, carry));
+      carry = Math.max(0, carry - paid);
+      const balance = Math.max(0, +(due - paid).toFixed(2));
+      const status = (due === 0) ? 'SKIP' : (paid <= 0 ? 'UNPAID' : (balance > 0 ? 'PARTIAL' : 'PAID'));
+      months.push({
+        month: m,
+        mult: (multipliers?.[m] ?? DEFAULT_MULTIPLIERS[m] ?? 1.0),
+        due: +due.toFixed(2),
+        paid: +paid.toFixed(2),
+        balance,
+        status
+      });
+      totalDue += due;
     });
 
-    const months = [];
-    let totalDue=0, totalPaid=0;
-    for(let m=1; m<=12; m++){
-      const due = await dueForMonth({year, month:m, baseMonthlyFee, amStop, pmStop, startDate, multipliers});
-      const paid = paidByMonth[m] || 0;
-      const balance = Math.max(0, +(due - paid).toFixed(2));
-      const status = (due===0) ? 'SKIP' : (paid<=0 ? 'UNPAID' : (balance>0?'PARTIAL':'PAID'));
-      months.push({month:m, mult:(multipliers?.[m] ?? DEFAULT_MULTIPLIERS[m] ?? 1.0), due:+due.toFixed(2), paid:+paid.toFixed(2), balance, status});
-      totalDue += due; totalPaid += paid;
-    }
-    return { months, totals: { due:+totalDue.toFixed(2), paid:+totalPaid.toFixed(2), balance:+Math.max(0,totalDue-totalPaid).toFixed(2) } };
+    return {
+      months,
+      totals: {
+        due: +totalDue.toFixed(2),
+        paid: +Number(totalPaidInput || 0).toFixed(2),
+        balance: +Math.max(0, totalDue - totalPaidInput).toFixed(2),
+        credit: +Math.max(0, totalPaidInput - totalDue).toFixed(2)
+      }
+    };
   }
 
   // === DB helpers (Firebase compat assumed present on page) ===

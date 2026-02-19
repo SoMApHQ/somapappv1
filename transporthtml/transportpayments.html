@@ -813,30 +813,20 @@
           p.approved === true || p.approved === 'true' || !!p.approvedAt
         );
 
-        // OPTIMIZATION: Calculate all 12 months in parallel instead of sequentially
-        const monthCalculations = Array.from({ length: 12 }, (_, i) => i + 1).map(month =>
-          TransportPricing.dueForMonth({
-            year,
-            month,
-            amStop,
-            pmStop,
-            baseMonthlyFee,
-            startDate: startDateIso,
-            multipliers,
-          }).then(monthlyExpected => {
-            const expected = Math.round(monthlyExpected || 0);
-            // Handle both number and month name formats - only count approved payments
-            const monthPayments = approvedPayments.filter(p => {
-              if (typeof p.month === 'number') return p.month === month;
-              if (typeof p.month === 'string') return MONTH_NAMES[month] === p.month;
-              return false;
-            });
-            const monthPaid = monthPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
-            return { month, expected, paid: monthPaid };
-          })
-        );
-
-        const monthResults = await Promise.all(monthCalculations);
+        const ledger = await TransportPricing.buildLedger({
+          year,
+          baseMonthlyFee,
+          amStop,
+          pmStop,
+          startDate: startDateIso,
+          payments: approvedPayments,
+          multipliers,
+        });
+        const monthResults = ledger.months.map(m => ({
+          month: m.month,
+          expected: Number(m.due || 0),
+          paid: Number(m.paid || 0),
+        }));
         
         // Debt only includes months already due: payment due date is 3rd of same month; paying on/from 3rd is late.
         const now = new Date();
@@ -869,21 +859,23 @@
         });
 
         const debt = Math.max(0, totalExpected - totalPaid);
-        const totalYearDebt = Math.max(0, totalYearExpected - totalPaid);
+        const totalYearDebt = Math.max(0, Number(ledger?.totals?.balance || 0));
 
         // Current month expected (already calculated above, reuse result)
         const currentMonthResult = monthResults.find(r => r.month === selectedMonth);
-        const currentMonthExpected = currentMonthResult ? currentMonthResult.expected : Math.round(
-          await TransportPricing.dueForMonth({
-            year,
-            month: selectedMonth,
-            amStop,
-            pmStop,
-            baseMonthlyFee,
-            startDate: startDateIso,
-            multipliers,
-          }) || 0
-        );
+        const currentMonthExpected = currentMonthResult
+          ? currentMonthResult.expected
+          : Math.round(
+            await TransportPricing.dueForMonth({
+              year,
+              month: selectedMonth,
+              amStop,
+              pmStop,
+              baseMonthlyFee,
+              startDate: startDateIso,
+              multipliers,
+            }) || 0
+          );
 
         // Compact unpaid months with amounts: "Jan=114,000, Feb=76,000"
         const unpaidMonthsDisplay = unpaidMonthsWithAmounts.length
