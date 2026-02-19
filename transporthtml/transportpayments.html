@@ -1476,6 +1476,47 @@
         } else {
           payments = [];
         }
+
+        // Fallback: if no payments in state, fetch approved from history (fixes "History still nothing")
+        if (payments.length === 0) {
+          try {
+            const history = await fetchApprovalsHistoryForYear(year);
+            const admissionNo = (student && (student.admissionNumber || student.admissionNo)) || '';
+            const studentMatches = (r) => {
+              if (!r || r.sourceModule !== 'transport') return false;
+              const key = r.modulePayload?.studentKey;
+              const adm = r.studentAdm || r.admissionNumber || r.modulePayload?.admissionNumber;
+              return key === studentId || adm === studentId || adm === admissionNo || key === admissionNo;
+            };
+            Object.values(history).forEach(months => {
+              Object.values(months || {}).forEach(records => {
+                Object.values(records || {}).forEach(record => {
+                  if (!record || record.finalStatus !== 'approved' || !studentMatches(record)) return;
+                  const pmt = record.modulePayload?.payment;
+                  const ref = record.paymentReferenceCode || pmt?.reference || pmt?.ref;
+                  if (!ref || !pmt) return;
+                  const monthNum = typeof pmt.month === 'number' ? pmt.month : (MONTH_NAMES.indexOf(pmt.month) >= 1 ? MONTH_NAMES.indexOf(pmt.month) : new Date(record.datePaid || record.createdAt || Date.now()).getMonth() + 1);
+                  payments.push({
+                    amount: record.amountPaidNow ?? pmt.amount,
+                    method: record.paymentMethod ?? pmt.method,
+                    ref, reference: ref,
+                    payerName: record.payerName ?? pmt.payerName,
+                    paidAt: record.datePaid ?? pmt.paidAt ?? record.createdAt,
+                    timestamp: record.createdAt ?? pmt.timestamp,
+                    month: monthNum,
+                    notes: record.notes ?? pmt.notes ?? '',
+                    approved: true,
+                    approvedAt: record.approvedAt,
+                    approvedBy: record.approvedBy
+                  });
+                });
+              });
+            });
+            payments = payments.sort((a, b) => (b.timestamp || b.paidAt || 0) - (a.timestamp || a.paidAt || 0));
+          } catch (err) {
+            console.warn('Fallback fetch approvals for history:', err);
+          }
+        }
         
         // Also check pendingApprovals to get latest approval status
         try {
@@ -2666,7 +2707,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             }
           });
 
-          // Merge approval status from approvalsHistory (check all paths approvals.js may write to)
+          // Merge approval status from approvalsHistory + inject approved payments not in ledger
           try {
             const history = await fetchApprovalsHistoryForYear(year);
             const studentMatches = (r, sid, admNo) => {
@@ -2679,21 +2720,42 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               Object.values(months || {}).forEach(records => {
                 Object.values(records || {}).forEach(record => {
                   if (!record || record.finalStatus !== 'approved') return;
-                  const ref = record.paymentReferenceCode || record.modulePayload?.payment?.reference || record.modulePayload?.payment?.ref;
+                  const pmt = record.modulePayload?.payment;
+                  const ref = record.paymentReferenceCode || pmt?.reference || pmt?.ref;
                   if (!ref) return;
                   studentIds.forEach(sid => {
                     const enrollment = state.transportEnrollments[sid] || {};
                     const student = state.students[sid];
                     const admNo = student?.admissionNumber || enrollment?.admissionNumber || enrollment?.admissionNo || '';
                     if (!studentMatches(record, sid, admNo)) return;
+                    if (!paymentsData[sid]) paymentsData[sid] = [];
                     const pays = paymentsData[sid];
-                    if (!pays || !Array.isArray(pays)) return;
+                    let found = false;
                     pays.forEach((p, i) => {
                       const pr = p.ref || p.reference;
                       if (pr === ref) {
                         paymentsData[sid][i] = { ...p, approved: true, approvedAt: p.approvedAt || record.approvedAt };
+                        found = true;
                       }
                     });
+                    // Inject approved payment from history when not in ledger (fixes "History still nothing")
+                    if (!found && pmt) {
+                      const monthNum = typeof pmt.month === 'number' ? pmt.month : (MONTH_NAMES.indexOf(pmt.month) >= 1 ? MONTH_NAMES.indexOf(pmt.month) : new Date(record.datePaid || record.createdAt || Date.now()).getMonth() + 1);
+                      paymentsData[sid].push({
+                        amount: record.amountPaidNow ?? pmt.amount,
+                        method: record.paymentMethod ?? pmt.method,
+                        ref: ref,
+                        reference: ref,
+                        payerName: record.payerName ?? pmt.payerName,
+                        paidAt: record.datePaid ?? pmt.paidAt ?? record.createdAt,
+                        timestamp: record.createdAt ?? pmt.timestamp,
+                        month: monthNum,
+                        notes: record.notes ?? pmt.notes ?? '',
+                        approved: true,
+                        approvedAt: record.approvedAt,
+                        approvedBy: record.approvedBy
+                      });
+                    }
                   });
                 });
               });
