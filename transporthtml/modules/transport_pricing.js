@@ -161,9 +161,10 @@
         // Fallback to legacy synchronous priceForStop (defined later)
         return getLegacyPriceForStop(stopName);
       }
-      
-      const d = onDate ? new Date(onDate) : new Date();
-      const iso = d.toISOString().slice(0,10);
+      // Use date string directly when already YYYY-MM-DD (avoids timezone shift from toISOString)
+      const iso = (typeof onDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(onDate))
+        ? onDate
+        : (onDate ? new Date(onDate) : new Date()).toISOString().slice(0, 10);
       return pickPriceForDate(stop, iso);
     } catch (err) {
       console.warn('Error in baseFeeOnDate, using legacy:', err);
@@ -195,9 +196,11 @@
     return hit ? legacyMap[hit] : 28000;
   }
 
-  // Get month start ISO date
+  // Get month start ISO date (timezone-safe: avoid toISOString which shifts to UTC)
   function monthStartIso(year, month){ 
-    return new Date(year, month-1, 1).toISOString().slice(0,10); 
+    const y = String(Number(year) || new Date().getFullYear());
+    const m = String(Number(month) || 1).padStart(2, '0');
+    return `${y}-${m}-01`;
   }
 
   // Compute base monthly fee for a specific month (using priceHistory)
