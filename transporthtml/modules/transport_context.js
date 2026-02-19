@@ -87,9 +87,9 @@
 
   function getContext() {
     const base = {
-      school: getStored("school", "socrates"),
+      school: getStored("school", "socrates-school"),
       schoolName: getStored("schoolName", "Socrates School"),
-      year: Number(getStored("year", String(new Date().getFullYear()))) || 2024,
+      year: Number(getStored("year", String(new Date().getFullYear()))) || 2026,
       month: Number(getStored("month", String(new Date().getMonth() + 1))) || 1,
       day: Number(getStored("day", "1")) || 1,
     };

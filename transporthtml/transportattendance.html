@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Transport Attendance - SoMAp</title>
 
-  <link rel="stylesheet" href="../css/transport.css"/>
+  <link rel="stylesheet" href="./css/transport.css"/>
 
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
@@ -655,23 +655,34 @@
         vehicleMeta.innerHTML = chips.join("");
       }
 
+      function isSocratesAlias() {
+        const s = String(state.context.school || "").toLowerCase().trim();
+        return s === "socrates-school" || s === "socrates" || s === "default";
+      }
+
       async function loadBuses() {
         const items = [];
-        const primaryPath = "transport/" + state.context.school + "/" + state.context.year + "/buses";
-        let snapshot = await firebase.database().ref(primaryPath).get();
-        
-        snapshot.forEach(function(child) {
-          const value = child.val() || {};
-          items.push({
-            id: child.key,
-            ...value
-          });
-        });
-        
-        // Try fallback path for old school ID if no vehicles found
-        if (items.length === 0) {
-          const fallbackPath = "transport/-O_HndQaeuNugluTYPdp/" + state.context.year + "/buses";
-          snapshot = await firebase.database().ref(fallbackPath).get();
+        const year = state.context.year;
+        const school = state.context.school;
+
+        const pathsToTry = [
+          "transport/" + school + "/" + year + "/buses",
+          "schools/" + school + "/years/" + year + "/transport/buses"
+        ];
+        if (isSocratesAlias()) {
+          pathsToTry.push("transport/socrates-school/" + year + "/buses");
+          pathsToTry.push("transport/socrates/" + year + "/buses");
+        }
+        pathsToTry.push("transport/-O_HndQaeuNugluTYPdp/" + year + "/buses");
+
+        let snapshot = null;
+        for (const p of pathsToTry) {
+          snapshot = await firebase.database().ref(p).get();
+          if (snapshot.exists() && snapshot.val() && typeof snapshot.val() === "object" && Object.keys(snapshot.val()).length > 0) {
+            break;
+          }
+        }
+        if (snapshot) {
           snapshot.forEach(function(child) {
             const value = child.val() || {};
             items.push({
@@ -735,8 +746,12 @@
         snapshot.forEach(function(child) {
           const value = child.val() || {};
           
-          // Allow both old and new school IDs for backward compatibility
-          const validSchools = [state.context.school, "-O_HndQaeuNugluTYPdp", "HndQaeuNugluTYPdp"];
+          // Allow both old and new school IDs for backward compatibility (Socrates aliases)
+          const validSchools = [
+            state.context.school,
+            "socrates-school", "socrates", "default",
+            "-O_HndQaeuNugluTYPdp", "HndQaeuNugluTYPdp"
+          ];
           if (value.school && !validSchools.includes(value.school)) return;
           if (value.year && Number(value.year) !== Number(state.context.year)) return;
           
@@ -790,9 +805,21 @@
           state.attendanceMap = {};
           return;
         }
-        const path = "transport/" + state.context.school + "/" + state.context.year + "/attendance/" + ymd + "/" + vehicleId;
-        const snapshot = await firebase.database().ref(path).get();
-        state.attendanceMap = snapshot.val() || {};
+        const school = state.context.school;
+        const year = state.context.year;
+        const pathsToTry = ["transport/" + school + "/" + year + "/attendance/" + ymd + "/" + vehicleId];
+        if (isSocratesAlias()) {
+          pathsToTry.push("transport/socrates-school/" + year + "/attendance/" + ymd + "/" + vehicleId);
+          pathsToTry.push("transport/socrates/" + year + "/attendance/" + ymd + "/" + vehicleId);
+        }
+        let merged = {};
+        for (const p of pathsToTry) {
+          const snapshot = await firebase.database().ref(p).get();
+          if (snapshot.exists() && snapshot.val()) {
+            merged = { ...merged, ...snapshot.val() };
+          }
+        }
+        state.attendanceMap = merged;
       }
 
       async function loadSummaryForVehicle(vehicleId) {
@@ -800,9 +827,21 @@
           state.summaryMap = {};
           return;
         }
-        const path = "transport/" + state.context.school + "/" + state.context.year + "/attendance_summary/" + vehicleId;
-        const snapshot = await firebase.database().ref(path).get();
-        state.summaryMap = snapshot.val() || {};
+        const school = state.context.school;
+        const year = state.context.year;
+        const pathsToTry = ["transport/" + school + "/" + year + "/attendance_summary/" + vehicleId];
+        if (isSocratesAlias()) {
+          pathsToTry.push("transport/socrates-school/" + year + "/attendance_summary/" + vehicleId);
+          pathsToTry.push("transport/socrates/" + year + "/attendance_summary/" + vehicleId);
+        }
+        let merged = {};
+        for (const p of pathsToTry) {
+          const snapshot = await firebase.database().ref(p).get();
+          if (snapshot.exists() && snapshot.val()) {
+            merged = { ...merged, ...snapshot.val() };
+          }
+        }
+        state.summaryMap = merged;
       }
 
       async function loadLedgersForMonth() {
@@ -1085,11 +1124,27 @@
       }
 
       async function loadStudents() {
-        const snapshot = await firebase.database().ref("students").get();
         const students = {};
-        snapshot.forEach(function(child) {
-          students[child.key] = child.val();
-        });
+        const year = state.context.year;
+        const school = state.context.school;
+
+        const pathsToTry = ["students"];
+        if (school) {
+          pathsToTry.push("schools/" + school + "/students");
+          pathsToTry.push("schools/" + school + "/years/" + year + "/students");
+        }
+        if (isSocratesAlias()) {
+          pathsToTry.push("years/" + year + "/students");
+        }
+
+        for (const p of pathsToTry) {
+          const snapshot = await firebase.database().ref(p).get();
+          if (snapshot.exists()) {
+            snapshot.forEach(function(child) {
+              if (!students[child.key]) students[child.key] = child.val();
+            });
+          }
+        }
         state.students = students;
       }
 
