@@ -139,6 +139,15 @@
       else break;
     }
     
+    // If target is in same month as most recent priceHistory entry, use that entry's amount
+    // (so route edits made mid-month apply to the whole current month)
+    if (list.length > 0) {
+      const last = list[list.length - 1];
+      const targetYM = target.slice(0, 7); // "2026-02"
+      const lastYM = last.eff.slice(0, 7);
+      if (targetYM === lastYM) price = last.amount;
+    }
+    
     return price;
   }
 
