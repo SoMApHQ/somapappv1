@@ -1393,15 +1393,14 @@
     if (!studentKey || !paymentData) throw new Error('Missing transport payload.');
 
     const year = String(paymentData.year || new Date().getFullYear());
-    const ledgerBase = P(`years/${year}/transportLedgers/${studentKey}/payments`);
+    // Use scoped path (schools/{id}/years/...) - matches transportpayments.html which uses schoolRef/scopedSubPath
+    const ledgerBase = scopedPath(`years/${year}/transportLedgers/${studentKey}/payments`);
     
     const updates = {};
     
-    // Find the payment key in transportLedgers (same path structure as transportpayments.html)
     let paymentKey = record.paymentRef || record.modulePayload?.paymentRef;
     
     if (!paymentKey) {
-      // Fallback: Search by reference code
       const referenceCode = record.paymentReferenceCode || paymentData.reference;
       if (referenceCode) {
         const ledgersSnap = await db.ref(ledgerBase).once('value').catch(() => ({ val: () => null }));
@@ -1416,13 +1415,13 @@
     }
     
     if (paymentKey) {
-      updates[P(`years/${year}/transportLedgers/${studentKey}/payments/${paymentKey}/approved`)] = true;
-      updates[P(`years/${year}/transportLedgers/${studentKey}/payments/${paymentKey}/approvedBy`)] = actorEmail();
-      updates[P(`years/${year}/transportLedgers/${studentKey}/payments/${paymentKey}/approvedAt`)] = firebase.database.ServerValue.TIMESTAMP;
+      const base = scopedPath(`years/${year}/transportLedgers/${studentKey}/payments/${paymentKey}`);
+      updates[`${base}/approved`] = true;
+      updates[`${base}/approvedBy`] = actorEmail();
+      updates[`${base}/approvedAt`] = firebase.database.ServerValue.TIMESTAMP;
     }
     
-    // Also write to transport_payments path (year-scoped, same as transportpayments reads)
-    const paymentsBase = P(`years/${year}/transport_payments/${studentKey}`);
+    const paymentsBase = scopedPath(`years/${year}/transport_payments/${studentKey}`);
     const pushRef = db.ref(paymentsBase).push();
     updates[`${paymentsBase}/${pushRef.key}`] = {
       ...paymentData,
