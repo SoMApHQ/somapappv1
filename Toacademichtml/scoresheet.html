@@ -549,7 +549,9 @@
 
       for (const p of tryPaths) {
         try {
-          const snap = await scopedOrSocratesLegacy(p, p);
+          // Try both scoped and legacy paths (readFirstExisting tries multiple candidates)
+          const found = await readFirstExisting([p]);
+          const snap = found?.snap;
           if (!snap?.exists?.()) continue;
           const data = snap.val() || {};
           const roster = Object.keys(data).map((k) => {
@@ -684,18 +686,20 @@
     async function fetchScores({ year, className, examKey, month }) {
       if (!getDB()) return {};
 
-      // Tolerant class keys
+      // Tolerant class keys (Pre-Unit <-> Pre Unit Class, Class 1, etc.)
       const classCandidates = [];
       if (className) {
         const cls = String(className).trim();
         classCandidates.push(cls);
-
+        if (cls.toLowerCase().includes('pre') && cls.toLowerCase().includes('unit')) {
+          if (!classCandidates.includes('Pre Unit Class')) classCandidates.push('Pre Unit Class');
+          if (!classCandidates.includes('Pre-Unit')) classCandidates.push('Pre-Unit');
+        }
         const match = cls.match(/(\d+)/);
         if (match) {
           const num = match[1];
           const numericKey = num;
           const withPrefix = `Class ${num}`;
-
           if (!classCandidates.includes(numericKey)) classCandidates.push(numericKey);
           if (!classCandidates.includes(withPrefix)) classCandidates.push(withPrefix);
         }
@@ -1189,9 +1193,27 @@
       console.log('Effective stream:', state.stream);
 
 
-      console.log('Fetching students...');
-      state.students = await fetchStudents(state.className, state.stream, state.year);
-      console.log('Students fetched:', state.students.length);
+      // Use roster from parent (academic) when available - instant load, same 11 as transfer
+      let useCached = false;
+      try {
+        const cached = sessionStorage.getItem('somap_scoresheet_roster');
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          const match = parsed.className && parsed.year && 
+            (canonicalClassKey(parsed.className) === canonicalClassKey(state.className)) &&
+            String(parsed.year) === String(state.year);
+          if (match && Array.isArray(parsed.students) && parsed.students.length > 0) {
+            state.students = parsed.students;
+            useCached = true;
+            console.log('Scoresheet: using cached roster from parent', state.students.length, 'students');
+          }
+        }
+      } catch (e) { /* ignore */ }
+      if (!useCached) {
+        console.log('Fetching students...');
+        state.students = await fetchStudents(state.className, state.stream, state.year);
+        console.log('Students fetched:', state.students.length);
+      }
       
       if(state.students.length === 0) {
         console.warn('No students found! Trying alternative class name variations...');

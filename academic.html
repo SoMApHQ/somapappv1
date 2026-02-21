@@ -852,6 +852,8 @@
         monthLabel: state.month
       });
 
+      kpiTopStudent.textContent = 'Loading…';
+      kpiTopScore.textContent = '';
       state.students = await fetchStudents(state.className, state.stream, state.year);
       initTransferHubIfReady();
       if (transferHub?.refresh) transferHub.refresh();
@@ -934,13 +936,51 @@
 
     /* ---------- Computation: totals/averages/positions/grades ---------- */
     function updateKPIs() {
-      const list = Object.values(state.students).map(s => {
+      const students = Array.isArray(state.students) ? state.students : [];
+      const list = students.map(s => {
         const sum = studentAveragePercent(s);
         return { name: s.name, avg: sum.pct, attemptedCount: sum.attemptedCount };
       });
       const contributors = list.filter(x => (x.attemptedCount || 0) > 0);
       if (contributors.length === 0) {
-        ['kpiTopStudent', 'kpiTopScore', 'kpiBottomStudent', 'kpiBottomScore', 'kpiClassMax', 'kpiClassGrade', 'kpiPresent', 'kpiAbsent', 'kpiFeeRequired', 'kpiFeePaid', 'kpiFeeBalance'].forEach(id => document.getElementById(id).textContent = '-');
+        // No scores yet: show student names when we have roster
+        if (students.length > 0) {
+          const sorted = students.slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+          kpiTopStudent.textContent = sorted[0]?.name || '–';
+          kpiTopScore.textContent = 'No scores yet';
+          kpiBottomStudent.textContent = sorted[sorted.length - 1]?.name || '–';
+          kpiBottomScore.textContent = 'No scores yet';
+          kpiClassMax.textContent = '–';
+          kpiClassGrade.textContent = '–';
+        } else {
+          kpiTopStudent.textContent = '–';
+          kpiTopScore.textContent = '–';
+          kpiBottomStudent.textContent = '–';
+          kpiBottomScore.textContent = '–';
+          kpiClassMax.textContent = '–';
+          kpiClassGrade.textContent = '–';
+        }
+        let sumPresent = 0, sumAbsent = 0, sumDays = 0;
+        students.forEach(s => {
+          const att = state.attendance[s.adm] || { present: 0, absent: 0, days: 0 };
+          sumPresent += att.present;
+          sumAbsent += att.absent;
+          sumDays += att.days || (att.present + att.absent);
+        });
+        const pctPresent = sumDays ? (sumPresent / sumDays) * 100 : 0;
+        const pctAbsent = sumDays ? (sumAbsent / sumDays) * 100 : 0;
+        kpiPresent.textContent = pctPresent.toFixed(1) + '%';
+        kpiAbsent.textContent = pctAbsent.toFixed(1) + '%';
+        let totalReq = 0, totalPaid = 0, totalBal = 0;
+        students.forEach(s => {
+          const fee = state.fees[s.adm] || { required: s.feeDue || 0, paid: s.feePaid || 0, balance: s.balance || 0 };
+          totalReq += fee.required || 0;
+          totalPaid += fee.paid || 0;
+          totalBal += fee.balance || 0;
+        });
+        kpiFeeRequired.textContent = money(totalReq);
+        kpiFeePaid.textContent = money(totalPaid);
+        kpiFeeBalance.textContent = money(totalBal);
         return;
       }
       const sorted = contributors.slice().sort((a, b) => b.avg - a.avg);
@@ -1107,6 +1147,18 @@
         examType,
         month
       });
+
+      // Pass roster to scoresheet for instant load (same 11 as transfer/academic)
+      try {
+        const roster = JSON.stringify({
+          students: Array.isArray(state.students) ? state.students : [],
+          className,
+          year,
+          stream: stream || '',
+          timestamp: Date.now()
+        });
+        sessionStorage.setItem('somap_scoresheet_roster', roster);
+      } catch (e) { /* ignore */ }
 
       scoresheetFrame.src = `Toacademichtml/scoresheet.html?${queryParams.toString()}`;
       scoresheetModal.style.display = 'block';
