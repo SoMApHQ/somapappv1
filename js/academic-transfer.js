@@ -122,9 +122,13 @@
       const base = opts.getContext ? opts.getContext() : {};
       const className = canonClass(base.className || '');
       const students = Array.isArray(base.students) ? base.students : [];
-      const filtered = students.filter((s) => canonClass(s.class || s.className || s.classLevel || '') === className);
+      // Compare canonical forms so "Pre-Unit" and "Pre Unit Class" both match
+      const filtered = students.filter((s) => {
+        const sClass = canonClass(s.class || s.className || s.classLevel || '');
+        return sClass && className && sClass.toLowerCase() === className.toLowerCase();
+      });
       return {
-        className,
+        className: className || (base.className || ''),
         year: String(base.year || new Date().getFullYear()),
         students: filtered
       };

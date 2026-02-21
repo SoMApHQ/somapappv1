@@ -26,6 +26,7 @@
   <!-- Your Firebase config wrapper (exports window.db, window.storage) -->
   <script src="../firebase.js"></script>
   <script src="../somapappv1multischool/js/context.js"></script>
+  <script src="../Todashboardhtml/yearContext.js"></script>
   <script>
     const SOMAP_DEFAULT_YEAR = 2025;
     const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
@@ -568,12 +569,15 @@
         } else if (String(classRaw).trim().toUpperCase() === 'GRADUATED') {
           return acc;
         } else if (useAnchorShiftForClass) {
-          // Year > 2025: derive class from anchor+shift so promotions apply
-          const baseClass = anchor.className || anchor.classLevel || anchor.class || anchor.grade ||
-            student.class || student.className || student.classLevel || student.grade || 'Unknown';
-          const shifted = shiftClassForYear(baseClass, deltaYears);
-          if (shifted === 'GRADUATED') return acc;
-          classRaw = shifted;
+          // Year > 2025: only use anchor+shift when year enrollment is missing (align with classattendance)
+          const hasYearEnrollment = !!(enroll.className || enroll.classLevel || enroll.class || enroll.grade);
+          if (!hasYearEnrollment) {
+            const baseClass = anchor.className || anchor.classLevel || anchor.class || anchor.grade ||
+              student.class || student.className || student.classLevel || student.grade || 'Unknown';
+            const shifted = shiftClassForYear(baseClass, deltaYears);
+            if (shifted === 'GRADUATED') return acc;
+            classRaw = shifted;
+          }
         }
 
         const classLevel = normalizeClassNameForEnrollment(classRaw);
@@ -1132,7 +1136,7 @@
       state.className = qp.className || ss.getItem('className') || '';
       let inputStream = qp.stream || ss.getItem('stream') || '';
       state.month = qp.month || ss.getItem('month') || '';
-      state.year = qp.year || ss.getItem('year') || '';
+      state.year = qp.year || ss.getItem('year') || (window.somapYearContext?.getSelectedYear?.() || '') || '';
       
       const examTypeLabel = qp.examTypeLabel || ss.getItem('examTypeLabel') || 'Monthly';
       state.examKey = EXAM_KEYS[examTypeLabel] || 'monthly';
@@ -1180,16 +1184,20 @@
       if(state.students.length === 0) {
         console.warn('No students found! Trying alternative class name variations...');
         
-        // Try alternative class name variations
+        // Try alternative class name variations (Pre-Unit <-> Pre Unit Class, etc.)
         const alternatives = [];
         if(state.className.includes('Class')) {
           alternatives.push(state.className.replace('Class', '').trim());
         }
         if(state.className.includes(' ')) {
-          alternatives.push(state.className.replace(' ', ''));
+          alternatives.push(state.className.replace(/\s+/g, ''));
         }
         if(!state.className.includes('Class') && !state.className.includes(' ')) {
           alternatives.push(state.className + ' Class');
+        }
+        // Pre-Unit <-> Pre Unit Class
+        if (state.className.toLowerCase().includes('pre') && state.className.toLowerCase().includes('unit')) {
+          alternatives.push('Pre Unit Class', 'Pre-Unit');
         }
         
         console.log('Trying alternatives:', alternatives);
