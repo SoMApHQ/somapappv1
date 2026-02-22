@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -867,10 +867,12 @@
     const overdueWindowLabel = (isOverdueDebt && latestOverdue)
       ? `${new Date(Number(latestOverdue.fromTS || 0)).toLocaleDateString()} - ${new Date(Number(latestOverdue.toTS || 0)).toLocaleDateString()}`
       : '-';
-    const debtForCollection = Math.max(
-      0,
-      (hasCarryOutstanding ? carryOutstanding : 0) + overdueBaseOutstanding
-    );
+    // Use alloc.debtTillNow for overdue debt: it correctly sums expected-to-date minus
+    // allocated payments per period. overdueBaseOutstanding used a flawed formula that
+    // could show wrong amounts (e.g. 30,400 instead of 58,000) and risk wrong send-home decisions.
+    const debtForCollection = isOverdueDebt
+      ? Math.max(0, alloc.debtTillNow || 0)
+      : Math.max(0, (hasCarryOutstanding ? carryOutstanding : 0) + overdueBaseOutstanding);
     return {
       feePerYear,
       previousDebt,
@@ -1327,8 +1329,10 @@ function buildFinanceStudents(
           stOverridesSnap,
           studentFeesSnap,
           plansSnap,
-        ledgerSnap,
-        carrySnap,
+          ledgerSnap,
+          carrySnap,
+          studentPlansSnap,
+          financePlansSnap,
         ] = await Promise.all([
         schoolRef('students').once('value'),
         schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
@@ -1339,6 +1343,8 @@ function buildFinanceStudents(
         schoolRef(`installmentPlans/${key}`).once('value'),
         schoolRef(`financeLedgers/${key}`).once('value'),
         schoolRef(`financeCarryForward/${key}`).once('value'),
+        schoolRef(`finance/${key}/studentPlans`).once('value'),
+        schoolRef(`finance/${key}/plans`).once('value'),
         ]);
 
         let baseStudents = baseSnap.val() || {};
@@ -1384,14 +1390,31 @@ function buildFinanceStudents(
           console.warn('Student fee override read failed (helper)', studentFeesErr?.message || studentFeesErr);
         }
 
+        // Merge studentPlans (finance/{year}/studentPlans) into overrides so plan overrides
+        // from paymentedits.html "Save + Apply" are reflected in finance.html and payment.html
+        const stOverridesRaw = stOverridesSnap.val() || {};
+        const studentPlansRaw = studentPlansSnap.val() || {};
+        const mergedOverrides = { ...stOverridesRaw };
+        Object.keys(studentPlansRaw || {}).forEach((sid) => {
+          const sp = studentPlansRaw[sid];
+          if (sp && (sp.planId || sp.id)) {
+            mergedOverrides[sid] = { ...(mergedOverrides[sid] || {}), planId: sp.planId || sp.id };
+          }
+        });
+
+        // Merge finance/{year}/plans with installmentPlans so new plans from monthly modal appear
+        const legacyPlans = plansSnap.val() || {};
+        const financePlansRaw = financePlansSnap.val() || {};
+        const mergedPlans = { ...legacyPlans, ...(financePlansRaw || {}) };
+
         const approvalsByStudent = await loadApprovedFinanceApprovals(key);
         const built = buildFinanceStudents(
           baseStudents,
           anchorEnrollments,
           yearEnrollments,
           classFeesSnap.val() || {},
-          stOverridesSnap.val() || {},
-          plansSnap.val() || {},
+          mergedOverrides,
+          mergedPlans,
           ledgerData,
           carrySnap.val() || {},
           studentFeesData,
@@ -2453,7 +2476,9 @@ function buildFinanceStudents(
         plansSnap,
         ledgerSnap,
         carrySnap,
-        studentFeesSnap
+        studentFeesSnap,
+        studentPlansSnap,
+        financePlansSnap,
       ] = await Promise.all([
         schoolRef('students').once('value'),
         schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
@@ -2464,6 +2489,8 @@ function buildFinanceStudents(
         schoolRef(`financeLedgers/${targetYear}`).once('value'),
         schoolRef(`financeCarryForward/${targetYear}`).once('value'),
         schoolRef(`studentFees/${targetYear}`).once('value'),
+        schoolRef(`finance/${targetYear}/studentPlans`).once('value'),
+        schoolRef(`finance/${targetYear}/plans`).once('value'),
       ]);
       let baseStudents = baseSnap.val() || {};
       let anchorEnrollments = anchorEnrollSnap.val() || {};
@@ -2506,14 +2533,26 @@ function buildFinanceStudents(
       } catch (studentFeesErr) {
         console.warn('Student fee override read failed', studentFeesErr?.message || studentFeesErr);
       }
+      const stOverridesRaw = stOverridesSnap.val() || {};
+      const studentPlansRaw = studentPlansSnap.val() || {};
+      const mergedOverrides = { ...stOverridesRaw };
+      Object.keys(studentPlansRaw || {}).forEach((sid) => {
+        const sp = studentPlansRaw[sid];
+        if (sp && (sp.planId || sp.id)) {
+          mergedOverrides[sid] = { ...(mergedOverrides[sid] || {}), planId: sp.planId || sp.id };
+        }
+      });
+      const legacyPlans = plansSnap.val() || {};
+      const financePlansRaw = financePlansSnap.val() || {};
+      const mergedPlans = { ...legacyPlans, ...(financePlansRaw || {}) };
       const approvalsByStudent = await loadApprovedFinanceApprovals(targetYear, true);
       cachedStudents = buildFinanceStudents(
         baseStudents,
         anchorEnrollments,
         yearEnrollments,
         classFeesSnap.val() || {},
-        stOverridesSnap.val() || {},
-        plansSnap.val() || {},
+        mergedOverrides,
+        mergedPlans,
         ledgerData,
         carrySnap.val() || {},
         studentFeesData,

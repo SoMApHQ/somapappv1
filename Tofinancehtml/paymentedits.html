@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -308,7 +308,7 @@
           <input id="mpPlanName" class="border rounded px-2 py-1 w-full text-sm" placeholder="Monthly (40k) — Standard"/>
         </label>
         <label class="text-sm text-slate-700">Monthly Amount (TSh)
-          <input id="mpAmount" type="number" inputmode="numeric" class="border rounded px-2 py-1 w-full text-sm" placeholder="40000"/>
+          <input id="mpAmount" type="number" inputmode="numeric" min="0" max="9999999" step="1" class="border rounded px-2 py-1 w-full text-sm" placeholder="e.g. 7000 or 40000" title="Enter amount without commas (e.g. 7000 for 7,000 TSh)"/>
         </label>
         <label class="text-sm text-slate-700">Due Day Start
           <input id="mpFromDay" type="number" class="border rounded px-2 py-1 w-full text-sm" value="1" min="1" max="28"/>
@@ -324,7 +324,7 @@
         </div>
         <div class="text-sm text-slate-700 col-span-2">
           Exclude Months (mark months that should NOT be paid)
-          <div class="grid grid-cols-3 gap-1 mt-1 text-xs" id="mpExcluded">
+          <div class="grid grid-cols-3 gap-1 mt-1 text-xs text-slate-800" id="mpExcluded">
             <!-- checkboxes will be populated by JS -->
           </div>
         </div>
@@ -2053,21 +2053,36 @@
     function fillExcludedMonthChecks() {
       if (!elExcluded) return;
       elExcluded.innerHTML = MONTHS.map((m, i) => `
-        <label class="inline-flex items-center gap-1 text-xs">
+        <label class="inline-flex items-center gap-1 text-xs font-medium text-slate-800 cursor-pointer">
           <input type="checkbox" value="${i + 1}" class="mpExcluded" title="Exclude ${m} from payment">
-          <span class="text-red-600">✕</span> ${m}
+          <span class="text-red-600">✕</span> <span>${m}</span>
         </label>
       `).join('');
     }
 
-    function openMonthlyPlanModal({ attachTo, className = null, studentId = null, studentName = null }) {
+    async function openMonthlyPlanModal({ attachTo, className = null, studentId = null, studentName = null }) {
       MP_STATE = { attachTo, className, studentId, studentName };
       const year = state.year || window.somapYearContext?.getSelectedYear() || SOMAP_DEFAULT_YEAR;
       
       if (ctx) {
-        ctx.textContent = attachTo === 'class'
+        let hint = attachTo === 'class'
           ? `Target: Class ${className} · Year ${year}`
-          : `Target: Student ${studentName} (${studentId}) · Year ${year}`;
+          : `Target: Student ${studentName || studentId} · Year ${year}`;
+        if (attachTo === 'student' && studentId && window.financePlansService) {
+          try {
+            const studentClass = (await db.ref(`students/${studentId}`).once('value')).val()?.classLevel || '';
+            const classPlanId = studentClass ? await window.financePlansService.getClassDefaultPlanId(studentClass) : null;
+            const overridePlanId = await window.financePlansService.getStudentPlan(studentId);
+            const effectivePlanId = overridePlanId || classPlanId;
+            const plan = effectivePlanId ? (state.plans[effectivePlanId] || await window.financePlansService.getPlan(effectivePlanId)) : null;
+            const currentPlanName = plan?.name || effectivePlanId || 'Class default';
+            const isMonthly = String(currentPlanName || '').toLowerCase().includes('monthly');
+            if (!isMonthly) {
+              hint += ` · Changing from: ${currentPlanName} → Monthly plan`;
+            }
+          } catch (_) {}
+        }
+        ctx.textContent = hint;
       }
       
       if (elPlanId) elPlanId.value = elPlanId.value || 'monthly-40k-standard';
@@ -2110,6 +2125,7 @@
     }
 
     function buildMonthlySchedule(monthlyAmount, fromDay, winLen, doubleMonths, excludedMonths) {
+      monthlyAmount = parseAmountInput(monthlyAmount);
       const pad = (n) => String(n).padStart(2, '0');
       const rows = [];
       for (let m = 1; m <= 12; m++) {
@@ -2129,12 +2145,17 @@
       return rows;
     }
 
+    function parseAmountInput(val) {
+      const s = String(val || '').replace(/[,\s]/g, '');
+      return Math.max(0, Math.round(Number(s) || 0));
+    }
+
     function previewSchedule() {
       if (!elPlanId || !elPlanName || !elAmt || !elFrom || !elLen || !prevBox) return null;
       
       const planId = elPlanId.value.trim();
       const planName = elPlanName.value.trim();
-      const monthlyAmount = Number(elAmt.value || 0);
+      const monthlyAmount = parseAmountInput(elAmt.value);
       const fromDay = Math.max(1, Math.min(28, Number(elFrom.value || 1)));
       const winLen = Math.max(3, Math.min(20, Number(elLen.value || 10)));
       const dbl = getSelectedDoubleMonths();
@@ -2195,6 +2216,7 @@
         
         if (applyToStudent && MP_STATE.studentId) {
           await window.financePlansService.setStudentPlanOverride(MP_STATE.studentId, planId, { year, by: currentUser() });
+          await setStudentOverride(MP_STATE.studentId, { planId, planName, paymentPlan: planName }, { silent: true });
         }
         
         toast('Monthly plan saved.');
