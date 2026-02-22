@@ -298,15 +298,26 @@
       if (carryAmount > 0) {
         if (amounts.length) amounts[0] += carryAmount; else amounts.push(carryAmount);
       }
-      const sc = student._planSchedule.map((s, i) => ({
-        key: `inst${i + 1}`,
-        label: s.label || `Inst ${i + 1}`,
-        fromTS: s.from ? new Date(s.from).getTime() : 0,
-        toTS: s.to ? new Date(s.to).getTime() : 0,
-        amount: Math.max(0, amounts[i] || 0),
-        paidAllocated: 0,
-        status: 'Pending'
-      }));
+      const isMonthlyPlan = student._planSchedule.some((s) => String(s.label || '').includes('Monthly:'));
+      const sc = student._planSchedule.map((s, i) => {
+        let toTS = s.to ? new Date(s.to).getTime() : 0;
+        if (isMonthlyPlan && toTS > 0 && !Number.isNaN(toTS)) {
+          const d = new Date(toTS);
+          const day = d.getDate();
+          if (day >= 15 && day <= 31) {
+            toTS = new Date(d.getFullYear(), d.getMonth(), 10, 23, 59, 59, 999).getTime();
+          }
+        }
+        return {
+          key: `inst${i + 1}`,
+          label: s.label || `Inst ${i + 1}`,
+          fromTS: s.from ? new Date(s.from).getTime() : 0,
+          toTS,
+          amount: Math.max(0, amounts[i] || 0),
+          paidAllocated: 0,
+          status: 'Pending'
+        };
+      });
       let lastDueIndex = -1, periodLabel = '-', expectedToDate = 0;
       const now = Date.now();
       sc.forEach((it, idx) => { if (it.toTS < now) { lastDueIndex = idx; expectedToDate += it.amount; } });

@@ -705,12 +705,19 @@
           return ad - bd;
         });
 
+        const isMonthlyPlan = sorted.some(r => String(r?.label || '').includes('Monthly:'));
         const sc = sorted.map((row, idx) => {
           const fromPair = Array.isArray(row?.window?.from) ? row.window.from : null;
           const toPair = Array.isArray(row?.window?.to) ? row.window.to : null;
           const fallback = getConfig(student).windows?.[idx] || { from: [1, 1], to: [1, 10] };
           const fromTS = parseScheduleTS(fromPair || fallback.from, false, academicYear);
-          const toTS = parseScheduleTS(toPair || fallback.to, true, academicYear);
+          let toTS = parseScheduleTS(toPair || fallback.to, true, academicYear);
+          if (isMonthlyPlan && toTS > 0) {
+            const d = new Date(toTS);
+            if (d.getDate() >= 15 && d.getDate() <= 31) {
+              toTS = dateFromYMD(d.getFullYear(), d.getMonth() + 1, 10, true);
+            }
+          }
           return {
             key: row.id || `classinst${idx + 1}`,
             label: row.label || `Inst ${idx + 1}`,
@@ -746,16 +753,27 @@
       if (carryAmount > 0) {
         if (amounts.length) amounts[0] += carryAmount; else amounts.push(carryAmount);
       }
-      const sc = student._planSchedule.map((s, i) => ({
-        key: `inst${i+1}`,
-        label: s.label || `Inst ${i+1}`,
-        fromTS: parseScheduleTS(s.from, false, academicYear),
-        toTS: parseScheduleTS(s.to, true, academicYear),
-        amount: Math.max(0, amounts[i] || 0),
-        carryComponent: 0,
-        paidAllocated: 0,
-        status: 'Pending'
-      }));
+      const isMonthlyPlan = student._planSchedule.some(s => String(s.label || '').includes('Monthly:'));
+      const sc = student._planSchedule.map((s, i) => {
+        let toTS = parseScheduleTS(s.to, true, academicYear);
+        if (isMonthlyPlan && toTS > 0) {
+          const d = new Date(toTS);
+          const day = d.getDate();
+          if (day >= 15 && day <= 31) {
+            toTS = dateFromYMD(d.getFullYear(), d.getMonth() + 1, 10, true);
+          }
+        }
+        return {
+          key: `inst${i+1}`,
+          label: s.label || `Inst ${i+1}`,
+          fromTS: parseScheduleTS(s.from, false, academicYear),
+          toTS,
+          amount: Math.max(0, amounts[i] || 0),
+          carryComponent: 0,
+          paidAllocated: 0,
+          status: 'Pending'
+        };
+      });
       if (carryAmount > 0 && sc.length) {
         sc[0].carryComponent = Math.max(0, Number(sc[0].carryComponent || 0)) + carryAmount;
       }
@@ -869,10 +887,11 @@
     const overdueWindowLabel = (isOverdueDebt && latestOverdue)
       ? `${new Date(Number(latestOverdue.fromTS || 0)).toLocaleDateString()} - ${new Date(Number(latestOverdue.toTS || 0)).toLocaleDateString()}`
       : '-';
-    // Use alloc.debtTillNow for overdue debt: it correctly sums expected-to-date minus
+    // Always use alloc.debtTillNow for overdue debt: it correctly sums expected-to-date minus
     // allocated payments per period. overdueBaseOutstanding used a flawed formula that
     // could show wrong amounts (e.g. 30,400 instead of 58,000) and risk wrong send-home decisions.
-    const debtForCollection = isOverdueDebt
+    // When there are overdue periods with remaining balance, debt = alloc.debtTillNow (never overdueBaseOutstanding).
+    const debtForCollection = (isOverdueDebt || overdueRows.length > 0)
       ? Math.max(0, alloc.debtTillNow || 0)
       : Math.max(0, (hasCarryOutstanding ? carryOutstanding : 0) + overdueBaseOutstanding);
     return {
