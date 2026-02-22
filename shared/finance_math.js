@@ -212,7 +212,7 @@
   function getConfig(student){
     const plan = L(student?.paymentPlan || '');
     const cls = L(student?.classLevel || student?.className || '');
-    if (plan.includes('monthly')) return installmentConfigs.monthly || installmentConfigs.lower;
+    if (plan.includes('monthly') || plan.includes('mwezi')) return installmentConfigs.monthly || installmentConfigs.lower;
     if (plan.includes('2')) return installmentConfigs['2inst'];
     if (plan.includes('full')) return installmentConfigs.full;
     if (plan.includes('4') || (plan.includes('inst') && (cls === 'class 4' || cls === 'class 7'))) return installmentConfigs.class4_7;
@@ -298,13 +298,14 @@
       if (carryAmount > 0) {
         if (amounts.length) amounts[0] += carryAmount; else amounts.push(carryAmount);
       }
-      const isMonthlyPlan = student._planSchedule.some((s) => String(s.label || '').includes('Monthly:'));
+      const planName = String(student.paymentPlan || '').toLowerCase();
+      const isMonthlyPlan = planName.includes('monthly') || planName.includes('mwezi') ||
+        student._planSchedule.some((s) => String(s.label || '').includes('Monthly:'));
       const sc = student._planSchedule.map((s, i) => {
         let toTS = s.to ? new Date(s.to).getTime() : 0;
         if (isMonthlyPlan && toTS > 0 && !Number.isNaN(toTS)) {
           const d = new Date(toTS);
-          const day = d.getDate();
-          if (day >= 15 && day <= 31) {
+          if (d.getDate() !== 10) {
             toTS = new Date(d.getFullYear(), d.getMonth(), 10, 23, 59, 59, 999).getTime();
           }
         }
