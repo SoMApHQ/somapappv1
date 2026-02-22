@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -689,8 +689,14 @@
       return { items: sc, periodLabelNow: periodLabel, expectedToDate };
     }
 
-    // 2) Class default edited installments (paymentedits) if present
-    if (student._classInstallments && typeof student._classInstallments === 'object') {
+    const classDefaultPlanId = String(student?._classDefaults?.defaultPlanId || student?._classDefaults?.defaultPlan || '').trim();
+    const overridePlanId = String(student?.override?.planId || '').trim();
+    const hasExplicitPlanOverride = Boolean(overridePlanId) && (!classDefaultPlanId || overridePlanId !== classDefaultPlanId);
+    const hasPlanSchedule = Array.isArray(student._planSchedule) && student._planSchedule.length > 0;
+
+    // 2) Class default edited installments (paymentedits) if present.
+    // If this student has an explicit plan override, prefer the overridden plan schedule.
+    if (!hasExplicitPlanOverride && student._classInstallments && typeof student._classInstallments === 'object') {
       const rawRows = Array.isArray(student._classInstallments)
         ? student._classInstallments
         : Object.values(student._classInstallments || {});
@@ -745,7 +751,7 @@
     }
 
     // 3) Year plan schedule (from installmentPlans/{y})
-    if (Array.isArray(student._planSchedule) && student._planSchedule.length) {
+    if (hasPlanSchedule) {
       const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
       const carryAmount = Math.max(0, Number(student.carryAmount || 0));
       const weights = student._planSchedule.map(s => Math.max(0, Number(s.weight) || 0));
@@ -893,8 +899,12 @@
     // allocated payments per period. overdueBaseOutstanding used a flawed formula that
     // could show wrong amounts (e.g. 30,400 instead of 58,000) and risk wrong send-home decisions.
     // When there are overdue periods with remaining balance, debt = alloc.debtTillNow (never overdueBaseOutstanding).
+    const debtTillNowCapped = Math.min(
+      Math.max(0, Number(alloc.debtTillNow || 0)),
+      Math.max(0, Number(yearBalance || 0))
+    );
     const debtForCollection = (isOverdueDebt || overdueRows.length > 0)
-      ? Math.max(0, alloc.debtTillNow || 0)
+      ? debtTillNowCapped
       : Math.max(0, (hasCarryOutstanding ? carryOutstanding : 0) + overdueBaseOutstanding);
     return {
       feePerYear,
@@ -1137,6 +1147,9 @@ function buildFinanceStudents(
       const classDefaults = classFees[classLevel] || classFees[baseClass] || {};
       const resolvedPlanId = override.planId || classDefaults.defaultPlanId || null;
       const resolvedPlan = resolvedPlanId ? plans[resolvedPlanId] : null;
+      const classDefaultPlanId = classDefaults.defaultPlanId || classDefaults.defaultPlan || '';
+      const hasPlanOverride = Boolean(override.planId) &&
+        (!classDefaultPlanId || String(override.planId) !== String(classDefaultPlanId));
 
       const isMonthlyPlan = resolvedPlan?.schedule && Array.isArray(resolvedPlan.schedule) &&
         resolvedPlan.schedule.some((row) => String(row.label || '').includes('Monthly:'));
@@ -1274,6 +1287,7 @@ function buildFinanceStudents(
       if (!record.lastName && enrollment.lastName) record.lastName = enrollment.lastName;
       if (!record.middleName && enrollment.middleName) record.middleName = enrollment.middleName;
       if (override && Object.keys(override).length) record.override = override;
+      record._hasPlanOverride = hasPlanOverride;
       record._classDefaults = classDefaults;
       map[id] = record;
     });
