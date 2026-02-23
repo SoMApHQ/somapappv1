@@ -950,15 +950,14 @@
     const overdueThroughTs = latestOverdue ? Number(latestOverdue.toTS || 0) : 0;
     const isOverdueDebt = overdueThroughTs > 0 && alloc.debtTillNow > 0;
     const prevYearNum = Number.isFinite(Number(financeYear)) ? Number(financeYear) - 1 : new Date().getFullYear() - 1;
-    const carryOverdueTs = hasCarryOutstanding && !isOverdueDebt
-      ? new Date(prevYearNum, 11, 31, 23, 59, 59, 999).getTime()
-      : 0;
+    const carryOverdueTs = new Date(prevYearNum, 11, 31, 23, 59, 59, 999).getTime();
+    const effectivelyCarryDebt = (hasCarryOutstanding || (carryAmount > 0 && yearBalance > 0 && yearBalance <= carryAmount + 100)) && !isOverdueDebt;
     const periodDebtLabel = isOverdueDebt
       ? new Date(overdueThroughTs).toLocaleDateString()
-      : (hasCarryOutstanding ? new Date(carryOverdueTs).toLocaleDateString() : '-');
+      : (effectivelyCarryDebt ? new Date(carryOverdueTs).toLocaleDateString() : '-');
     const overdueWindowLabel = (isOverdueDebt && latestOverdue)
       ? `${new Date(Number(latestOverdue.fromTS || 0)).toLocaleDateString()} - ${new Date(Number(latestOverdue.toTS || 0)).toLocaleDateString()}`
-      : (hasCarryOutstanding && !isOverdueDebt && carryOverdueTs > 0
+      : (effectivelyCarryDebt
           ? `Carry from ${prevYearNum} — due by ${new Date(carryOverdueTs).toLocaleDateString()}`
           : '-');
     // Always use alloc.debtTillNow for overdue debt: it correctly sums expected-to-date minus
@@ -972,17 +971,20 @@
     const debtForCollection = (isOverdueDebt || overdueRows.length > 0)
       ? debtTillNowCapped
       : Math.max(0, (hasCarryOutstanding ? carryOutstanding : 0) + overdueBaseOutstanding);
+    const debtForDisplay = debtForCollection > 0 ? debtForCollection : (effectivelyCarryDebt && yearBalance > 0 ? yearBalance : 0);
+    const finalPeriodDebtLabel = (debtForDisplay > 0 && effectivelyCarryDebt) ? new Date(carryOverdueTs).toLocaleDateString() : periodDebtLabel;
+    const finalOverdueWindowLabel = (debtForDisplay > 0 && effectivelyCarryDebt) ? `Carry from ${prevYearNum} — due by ${new Date(carryOverdueTs).toLocaleDateString()}` : overdueWindowLabel;
     return {
       feePerYear,
       previousDebt,
       paidAmount: alloc.totalPaid,
       balance: yearBalance,
-      periodDebtLabel,
-      periodDebtValue: debtForCollection,
+      periodDebtLabel: finalPeriodDebtLabel,
+      periodDebtValue: debtForDisplay,
       isOverdueDebt,
       overdueThroughTs,
-      overdueWindowLabel,
-      hasCarryOutstanding,
+      overdueWindowLabel: finalOverdueWindowLabel,
+      hasCarryOutstanding: hasCarryOutstanding || effectivelyCarryDebt,
       carryOutstanding,
       credit: alloc.credit,
       scheduleItems: alloc.scheduleItems
@@ -2889,10 +2891,43 @@ function buildFinanceStudents(
     }
     const uniqueAdms = [...new Set(rows.map(r => r.adm))];
     const cfMap = new Map();
-    await Promise.all(uniqueAdms.map(async (adm) => {
-      const carry = await getPrevYearBalance(adm, prevYear);
-      cfMap.set(adm, Math.max(0, Number(carry) || 0));
-    }));
+    if (typeof window.__finance_getBalanceForYearAdmission === 'function') {
+      await Promise.all(uniqueAdms.map(async (adm) => {
+        const carry = await window.__finance_getBalanceForYearAdmission(prevYear, adm);
+        cfMap.set(adm, Math.max(0, Number(carry) || 0));
+      }));
+    } else if (window.firebase?.database && uniqueAdms.length > 2) {
+      try {
+        const baseRef = window.firebase.database().ref(`finance/${prevYear}/students`);
+        const snap = await baseRef.once('value');
+        const students = snap.val() || {};
+        uniqueAdms.forEach((adm) => {
+          let carry = 0;
+          const lookup = typeof window.__finance_lookupStudent === 'function' ? window.__finance_lookupStudent(adm) : null;
+          const id = lookup?.id || adm;
+          const d = students[id] || students[adm];
+          if (d) {
+            if (d.balance !== undefined) carry = Number(d.balance) || 0;
+            else {
+              const feeYear = Number(String(d.feeYear || d.fee || 0).replace(/[^\d]/g, '')) || 0;
+              const paid = Number(String(d.paid || 0).replace(/[^\d]/g, '')) || 0;
+              carry = Math.max(feeYear - paid, 0);
+            }
+          }
+          cfMap.set(adm, Math.max(0, carry));
+        });
+      } catch (err) {
+        await Promise.all(uniqueAdms.map(async (adm) => {
+          const carry = await getPrevYearBalance(adm, prevYear);
+          cfMap.set(adm, Math.max(0, Number(carry) || 0));
+        }));
+      }
+    } else {
+      await Promise.all(uniqueAdms.map(async (adm) => {
+        const carry = await getPrevYearBalance(adm, prevYear);
+        cfMap.set(adm, Math.max(0, Number(carry) || 0));
+      }));
+    }
 
     rows.forEach(row => {
       const carry = cfMap.get(row.adm) || 0;
