@@ -2155,6 +2155,8 @@ function buildFinanceStudents(
   }
 
   // ===== CSV/PDF downloaders (parent-scoped) =====
+  // IMPORTANT: Exports must read exactly what the UI table displays to avoid mismatches
+  // (e.g. PDF showing debt 356,000 while UI shows 0 — causes parent complaints and lost customers).
   function getStudentContact(student) {
     return (
       student?.primaryParentContact ||
@@ -2166,18 +2168,65 @@ function buildFinanceStudents(
     );
   }
 
+  function parseNumberFromCell(el) {
+    if (!el) return 0;
+    const raw = (el.innerText || el.textContent || '').replace(/\s/g, '');
+    const cleaned = raw.replace(/[^\d]/g, '');
+    return Math.max(0, parseInt(cleaned, 10) || 0);
+  }
+
+  function getTableRowsForExport() {
+    const table = document.getElementById('financeTable');
+    if (!table) return [];
+    const result = [];
+    const allRows = table.querySelectorAll('tbody tr');
+    allRows.forEach((tr) => {
+      const tds = tr.querySelectorAll('td');
+      if (tds.length < 10) return;
+      const adm = (tds[1]?.innerText || '').trim();
+      if (!adm) return;
+      const fullName = (tds[2]?.innerText || '').trim();
+      const classVal = (tds[3]?.innerText || '').replace(/\s*No finance records.*|\s*Graduated\s*/gi, '').trim();
+      const feeVal = tr.dataset.carryForwardTotal ? Number(tr.dataset.carryForwardTotal) || 0 : parseNumberFromCell(tds[4]);
+      const plan = (tds[5]?.innerText || '').trim();
+      const paidVal = parseNumberFromCell(tds[6]);
+      const balanceVal = parseNumberFromCell(tds[7]);
+      const debtCellText = (tds[8]?.innerText || '').trim();
+      const debtAmountVal = parseNumberFromCell(tds[8]);
+      let debtLabel = '-';
+      if (debtAmountVal > 0 && debtCellText) {
+        const dateMatch = debtCellText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/);
+        debtLabel = dateMatch ? dateMatch[0] : debtCellText.replace(/\d[\d,]*\s*$/, '').replace(/^Overdue till\s*/i, '').trim() || new Date().toLocaleDateString();
+      }
+      const lookup = lookupStudentByAdmission(adm);
+      const parentContact = lookup?.student ? getStudentContact(lookup.student) : '--';
+      result.push({
+        admissionNumber: adm,
+        fullName,
+        parentContact,
+        classLevel: classVal,
+        feePerYear: feeVal,
+        paymentPlan: plan,
+        paidAmount: paidVal,
+        balance: balanceVal,
+        periodDebtLabel: debtLabel,
+        periodDebtValue: debtAmountVal
+      });
+    });
+    return result;
+  }
+
   function downloadCSV_Main() {
-    const rows = [['Admission No', 'Full Name', 'Parent Contact', 'Class', 'Fee (Year)', 'Plan', 'Paid', 'Balance (Year)', 'Debt till …', 'Debt Amount']];
+    const headerRow = ['Admission No', 'Full Name', 'Parent Contact', 'Class', 'Fee (Year)', 'Plan', 'Paid', 'Balance (Year)', 'Debt till …', 'Debt Amount'];
+    const rows = [headerRow];
+    const tableRows = getTableRowsForExport();
     let totalFee = 0, totalPaid = 0, totalBal = 0, totalDebt = 0;
-    const filterClass = classFilter.value;
-    Object.entries(cachedStudents).forEach(([id, s]) => {
-      if (filterClass && s.classLevel !== filterClass) return;
-      const fin = computeStudentFinancials(s);
-      if (showingDebtorsOnly && (fin.balance <= 0 && fin.periodDebtValue <= 0)) return;
-      const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
-      const parentContact = getStudentContact(s);
-      rows.push([s.admissionNumber || '', fullName, parentContact, s.classLevel || '', fin.feePerYear, s.paymentPlan || '', fin.paidAmount, fin.balance, fin.periodDebtLabel, fin.periodDebtValue]);
-      totalFee += fin.feePerYear; totalPaid += fin.paidAmount; totalBal += fin.balance; totalDebt += fin.periodDebtValue;
+    tableRows.forEach((r) => {
+      rows.push([r.admissionNumber, r.fullName, r.parentContact, r.classLevel, r.feePerYear, r.paymentPlan, r.paidAmount, r.balance, r.periodDebtLabel, r.periodDebtValue]);
+      totalFee += r.feePerYear;
+      totalPaid += r.paidAmount;
+      totalBal += r.balance;
+      totalDebt += r.periodDebtValue;
     });
     rows.push(['TOTAL', '', '', '', totalFee, '', totalPaid, totalBal, '', totalDebt]);
     const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -2199,18 +2248,12 @@ function buildFinanceStudents(
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation: 'landscape' });
     const headers = [['Admission No', 'Full Name', 'Parent Contact', 'Class', 'Fee (Year)', 'Plan', 'Paid', 'Balance (Year)', 'Debt till …', 'Debt Amount']];
-    const body = [];
-    let totalFee = 0, totalPaid = 0, totalBal = 0, totalDebt = 0;
-    const filterClass = classFilter.value;
-    Object.entries(cachedStudents).forEach(([id, s]) => {
-      if (filterClass && s.classLevel !== filterClass) return;
-      const fin = computeStudentFinancials(s);
-      if (showingDebtorsOnly && (fin.balance <= 0 && fin.periodDebtValue <= 0)) return;
-      const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
-      const parentContact = getStudentContact(s);
-      body.push([s.admissionNumber || '', fullName, parentContact, s.classLevel || '', fin.feePerYear, s.paymentPlan || '', fin.paidAmount, fin.balance, fin.periodDebtLabel, fin.periodDebtValue]);
-      totalFee += fin.feePerYear; totalPaid += fin.paidAmount; totalBal += fin.balance; totalDebt += fin.periodDebtValue;
-    });
+    const tableRows = getTableRowsForExport();
+    const body = tableRows.map((r) => [r.admissionNumber, r.fullName, r.parentContact, r.classLevel, r.feePerYear, r.paymentPlan, r.paidAmount, r.balance, r.periodDebtLabel, r.periodDebtValue]);
+    const totalFee = tableRows.reduce((s, r) => s + r.feePerYear, 0);
+    const totalPaid = tableRows.reduce((s, r) => s + r.paidAmount, 0);
+    const totalBal = tableRows.reduce((s, r) => s + r.balance, 0);
+    const totalDebt = tableRows.reduce((s, r) => s + r.periodDebtValue, 0);
     body.push(['TOTAL', '', '', '', totalFee, '', totalPaid, totalBal, '', totalDebt]);
     doc.setFontSize(14); doc.text('SoMAp Finance Report', 14, 14);
     doc.autoTable({ head: headers, body, startY: 20, styles: { fontSize: 8 } });
@@ -2227,18 +2270,10 @@ function buildFinanceStudents(
   }
 
   function _gatherDebtNow() {
-    const rows = []; let totalDebt = 0;
-    const filterClass = classFilter.value;
-    Object.entries(cachedStudents).forEach(([id, s]) => {
-      if (filterClass && s.classLevel !== filterClass) return;
-      const fin = computeStudentFinancials(s);
-      if (fin.periodDebtValue > 0) {
-        const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
-        const parentContact = getStudentContact(s);
-        rows.push([s.admissionNumber || '', fullName, parentContact, s.classLevel || '', s.paymentPlan || '', fin.periodDebtLabel, fin.periodDebtValue]);
-        totalDebt += fin.periodDebtValue;
-      }
-    });
+    const tableRows = getTableRowsForExport();
+    const debtorRows = tableRows.filter((r) => r.periodDebtValue > 0);
+    const rows = debtorRows.map((r) => [r.admissionNumber, r.fullName, r.parentContact, r.classLevel, r.paymentPlan, r.periodDebtLabel, r.periodDebtValue]);
+    const totalDebt = debtorRows.reduce((s, r) => s + r.periodDebtValue, 0);
     return { rows, totalDebt };
   }
 
