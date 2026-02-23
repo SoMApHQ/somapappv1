@@ -28,6 +28,11 @@ function currentTimestamp() {
 
 function withSchoolPrefix(path) {
   if (!path) return path;
+  // Prefer the official multi-school path helper when available.
+  // For Socrates School it returns the root (legacy), for others it prefixes schools/{id}/...
+  if (window.SOMAP && typeof window.SOMAP.P === 'function') {
+    try { return window.SOMAP.P(path); } catch (_) { /* ignore */ }
+  }
   return window.currentSchoolId ? `schools/${window.currentSchoolId}/${path}` : path;
 }
 
@@ -144,39 +149,70 @@ async function ensureFinanceData(year = getSelectedYear()) {
           plansVal = legacyPlansSnap.val() || {};
         }
 
-        if (!Object.keys(studentFeesVal).length || !Object.keys(studentPlansVal).length) {
-          const legacyOverridesSnap = await db.ref(withSchoolPrefix(`studentOverrides/${key}`)).once('value');
-          const legacyOverrides = legacyOverridesSnap.val() || {};
-          if (!Object.keys(studentFeesVal).length) {
-            const mappedFees = {};
-            Object.entries(legacyOverrides).forEach(([id, record]) => {
-              if (!record) return;
-              if (record.feePerYear !== undefined) {
-                mappedFees[id] = {
-                  feePerYear: coerceNumber(record.feePerYear, 0),
-                  locked: record.locked === undefined ? true : Boolean(record.locked),
-                  updatedAt: record.updatedAt || record.lastUpdated || null,
-                  updatedBy: record.updatedBy || record.updatedById || null,
-                };
-              }
-            });
-            if (Object.keys(mappedFees).length) studentFeesVal = mappedFees;
-          }
-          if (!Object.keys(studentPlansVal).length) {
-            const mappedPlans = {};
-            Object.entries(legacyOverrides).forEach(([id, record]) => {
-              if (!record) return;
-              const planId = record.planId || record.defaultPlanId || record.paymentPlanId || null;
-              if (planId) {
-                mappedPlans[id] = {
-                  planId,
-                  updatedAt: record.updatedAt || record.lastUpdated || null,
-                  updatedBy: record.updatedBy || record.updatedById || null,
-                };
-              }
-            });
-            if (Object.keys(mappedPlans).length) studentPlansVal = mappedPlans;
-          }
+        // Always consider legacy studentOverrides as a fallback/merge layer.
+        // This prevents cases where overrides were saved under studentOverrides/{year}
+        // but finance/{year}/studentFees or finance/{year}/studentPlans is empty/partial,
+        // causing payment.html and finance.html to disagree.
+        const legacyOverridesSnap = await db.ref(withSchoolPrefix(`studentOverrides/${key}`)).once('value');
+        const legacyOverrides = legacyOverridesSnap.val() || {};
+
+        // ---- Fee overrides (legacy -> new structure merge)
+        if (!Object.keys(studentFeesVal).length) {
+          const mappedFees = {};
+          Object.entries(legacyOverrides).forEach(([id, record]) => {
+            if (!record) return;
+            if (record.feePerYear !== undefined) {
+              mappedFees[id] = {
+                feePerYear: coerceNumber(record.feePerYear, 0),
+                locked: record.locked === undefined ? true : Boolean(record.locked),
+                updatedAt: record.updatedAt || record.lastUpdated || null,
+                updatedBy: record.updatedBy || record.updatedById || null,
+              };
+            }
+          });
+          if (Object.keys(mappedFees).length) studentFeesVal = mappedFees;
+        } else {
+          Object.entries(legacyOverrides).forEach(([id, record]) => {
+            if (!record || record.feePerYear === undefined) return;
+            if (studentFeesVal[id] === undefined) {
+              studentFeesVal[id] = {
+                feePerYear: coerceNumber(record.feePerYear, 0),
+                locked: record.locked === undefined ? true : Boolean(record.locked),
+                updatedAt: record.updatedAt || record.lastUpdated || null,
+                updatedBy: record.updatedBy || record.updatedById || null,
+              };
+            }
+          });
+        }
+
+        // ---- Plan overrides (legacy -> new structure merge)
+        if (!Object.keys(studentPlansVal).length) {
+          const mappedPlans = {};
+          Object.entries(legacyOverrides).forEach(([id, record]) => {
+            if (!record) return;
+            const planId = record.planId || record.defaultPlanId || record.paymentPlanId || null;
+            if (planId) {
+              mappedPlans[id] = {
+                planId,
+                updatedAt: record.updatedAt || record.lastUpdated || null,
+                updatedBy: record.updatedBy || record.updatedById || null,
+              };
+            }
+          });
+          if (Object.keys(mappedPlans).length) studentPlansVal = mappedPlans;
+        } else {
+          Object.entries(legacyOverrides).forEach(([id, record]) => {
+            if (!record) return;
+            const planId = record.planId || record.defaultPlanId || record.paymentPlanId || null;
+            if (!planId) return;
+            if (studentPlansVal[id] === undefined) {
+              studentPlansVal[id] = {
+                planId,
+                updatedAt: record.updatedAt || record.lastUpdated || null,
+                updatedBy: record.updatedBy || record.updatedById || null,
+              };
+            }
+          });
         }
 
         const normalizedClasses = {};

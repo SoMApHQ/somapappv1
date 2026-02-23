@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -742,6 +742,29 @@
           sc[0].carryComponent = Math.max(0, Number(sc[0].carryComponent || 0)) + carryAmount;
         }
 
+        // If class installments were saved as explicit amounts for the class default fee,
+        // but this student has a fee override, scale installments to the student's base fee.
+        // This prevents impossible debts (e.g. debt 228,000 while yearly fee is 84,000).
+        const studentBaseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - carryAmount)) || 0));
+        const plannedTotal = sc.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
+        const plannedBase = Math.max(0, plannedTotal - carryAmount);
+        if (studentBaseFee > 0 && plannedBase > 0) {
+          const tolerance = Math.max(100, Math.round(studentBaseFee * 0.01));
+          if (Math.abs(plannedBase - studentBaseFee) > tolerance) {
+            const ratio = studentBaseFee / plannedBase;
+            sc.forEach((row) => {
+              const carryPart = Math.max(0, Number(row.carryComponent || 0));
+              const basePart = Math.max(0, Number(row.amount || 0) - carryPart);
+              row.amount = Math.max(0, Math.floor(basePart * ratio) + carryPart);
+            });
+            // Fix rounding remainder on last row
+            const afterTotal = sc.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
+            const targetTotal = studentBaseFee + carryAmount;
+            const diff = targetTotal - afterTotal;
+            if (sc.length) sc[sc.length - 1].amount = Math.max(0, Number(sc[sc.length - 1].amount || 0) + diff);
+          }
+        }
+
         let lastDueIndex = -1, periodLabel = '-', expectedToDate = 0;
         const now = Date.now();
         sc.forEach((it, idx) => { if (it.toTS < now) { lastDueIndex = idx; expectedToDate += it.amount; } });
@@ -754,14 +777,49 @@
     if (hasPlanSchedule) {
       const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
       const carryAmount = Math.max(0, Number(student.carryAmount || 0));
-      const weights = student._planSchedule.map(s => Math.max(0, Number(s.weight) || 0));
-      const amounts = apportion(baseFee, weights);
-      if (carryAmount > 0) {
-        if (amounts.length) amounts[0] += carryAmount; else amounts.push(carryAmount);
+
+      // IMPORTANT:
+      // - Newer plans (especially Monthly plans from paymentedits.html) store explicit `amount` per row.
+      // - Older plans store only `weight` and we must apportion by weight.
+      // Finance.html MUST mirror payment.html logic, otherwise you get wrong "debt till now"
+      // (e.g. 30,400 instead of 58,000) and can send kids home wrongly.
+      const rawExplicit = student._planSchedule.map(s => Math.max(0, Number(s?.amount) || 0));
+      const explicitSum = rawExplicit.reduce((a, b) => a + b, 0);
+      const hasExplicitAmounts = rawExplicit.some(a => a > 0) && explicitSum > 0;
+
+      let amounts = [];
+      if (hasExplicitAmounts) {
+        // Use plan's explicit amounts, but scale to baseFee if it was built for a different class fee.
+        amounts = rawExplicit.slice();
+        if (baseFee > 0) {
+          const tolerance = Math.max(100, Math.round(baseFee * 0.01));
+          if (Math.abs(explicitSum - baseFee) > tolerance) {
+            const ratio = baseFee / explicitSum;
+            amounts = amounts.map(a => Math.floor(a * ratio));
+            let rem = baseFee - amounts.reduce((a, b) => a + b, 0);
+            for (let i = 0; i < amounts.length && rem > 0; i++) {
+              amounts[i] += 1;
+              rem -= 1;
+            }
+          }
+        }
+      } else {
+        // Weight-based plan: apportion the student's baseFee using the row weights (fallback).
+        let weights = student._planSchedule.map(s => Math.max(0, Number(s?.weight) || 0));
+        if (!weights.some(w => w > 0)) weights = weights.map(() => 1);
+        amounts = apportion(baseFee, weights);
       }
+
+      // Add carry forward on top of the first period
+      if (carryAmount > 0) {
+        if (amounts.length) amounts[0] += carryAmount;
+        else amounts = [carryAmount];
+      }
+
       const planName = String(student.paymentPlan || '').toLowerCase();
-      const isMonthlyPlan = planName.includes('monthly') || planName.includes('mwezi') ||
+      const isMonthlyPlan = planName.includes('monthly') || planName.includes('monthyl') || planName.includes('mwezi') ||
         student._planSchedule.some(s => String(s.label || '').includes('Monthly:'));
+
       const sc = student._planSchedule.map((s, i) => {
         let toTS = parseScheduleTS(s.to, true, academicYear);
         if (isMonthlyPlan && toTS > 0) {
@@ -772,19 +830,21 @@
           }
         }
         return {
-          key: `inst${i+1}`,
-          label: s.label || `Inst ${i+1}`,
+          key: (s && (s.id || s.key)) ? (s.id || s.key) : `inst${i + 1}`,
+          label: s.label || `Inst ${i + 1}`,
           fromTS: parseScheduleTS(s.from, false, academicYear),
           toTS,
-          amount: Math.max(0, amounts[i] || 0),
+          amount: Math.max(0, Number(amounts[i] || 0)),
           carryComponent: 0,
           paidAllocated: 0,
           status: 'Pending'
         };
       });
+
       if (carryAmount > 0 && sc.length) {
         sc[0].carryComponent = Math.max(0, Number(sc[0].carryComponent || 0)) + carryAmount;
       }
+
       let lastDueIndex = -1, periodLabel = '-', expectedToDate = 0;
       const now = Date.now();
       sc.forEach((it, idx) => { if (it.toTS < now) { lastDueIndex = idx; expectedToDate += it.amount; } });

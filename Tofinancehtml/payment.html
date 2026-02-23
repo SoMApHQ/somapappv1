@@ -1004,7 +1004,15 @@
           }
 
           const classDefaults = effectiveFinance?.classCfg || classFees[classLevel] || classFees[baseClass] || {};
-          const resolvedPlanId = effectiveFinance?.planId || override.planId || classDefaults.defaultPlanId || null;
+          const classPlanId = classDefaults.defaultPlanId || classDefaults.defaultPlan || null;
+          const explicitPlanOverrideId =
+            (override && override.planId ? String(override.planId).trim() : '') ||
+            (effectiveFinance?.planOverride?.planId ? String(effectiveFinance.planOverride.planId).trim() : '') ||
+            '';
+          // Prefer explicit student override planId over class defaults
+          const resolvedPlanId = (explicitPlanOverrideId && (!classPlanId || explicitPlanOverrideId !== String(classPlanId)))
+            ? explicitPlanOverrideId
+            : (effectiveFinance?.planId || classPlanId || null);
           let resolvedPlan = null;
           if (resolvedPlanId) {
             try {
@@ -1015,16 +1023,23 @@
             if (!resolvedPlan && plans[resolvedPlanId]) resolvedPlan = plans[resolvedPlanId];
           }
 
+          // Fee resolution MUST prioritize explicit student overrides.
+          // effectiveFinance.fee may be the class default and must NOT mask override.feePerYear.
+          const legacyFeeOverride = Number(override.feePerYear ?? override.fee ?? override.feeDue ?? 0);
+          const serviceFeeOverride = Number(effectiveFinance?.feeOverride?.feePerYear ?? 0);
           const effectiveFeeValue = Number(effectiveFinance?.fee);
+
           const baseFeeCandidate =
-            (Number.isFinite(effectiveFeeValue) && effectiveFeeValue > 0)
-              ? effectiveFeeValue
-              : (override.feePerYear ??
-                classDefaults.feePerYear ??
-                baseStudent.feePerYear ??
-                baseStudent.feeDue ??
-                baseStudent.requiredFee ??
-                0);
+            (Number.isFinite(legacyFeeOverride) && legacyFeeOverride > 0)
+              ? legacyFeeOverride
+              : ((Number.isFinite(serviceFeeOverride) && serviceFeeOverride > 0)
+                  ? serviceFeeOverride
+                  : (classDefaults.feePerYear ??
+                    baseStudent.feePerYear ??
+                    baseStudent.feeDue ??
+                    baseStudent.requiredFee ??
+                    (Number.isFinite(effectiveFeeValue) ? effectiveFeeValue : 0) ??
+                    0));
           const baseFee = Math.max(0, Math.round(Number(baseFeeCandidate) || 0));
           const carryAmount = Math.max(0, Number(carry.amount ?? carry.balance ?? 0));
           const effectiveFee = Math.max(0, baseFee + carryAmount);
