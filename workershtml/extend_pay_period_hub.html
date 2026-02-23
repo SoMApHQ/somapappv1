@@ -50,6 +50,26 @@
     .top h1 { margin: 0; font-size: 1.6rem; }
     .top p { margin: 0; color: #cfe9ff; }
     .top-row { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .top-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .pill {
+      background: rgba(255,255,255,.18);
+      border: 1px solid rgba(255,255,255,.25);
+      color: #fff;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: .86rem;
+      font-weight: 700;
+    }
+    .pill select {
+      border: 0;
+      background: transparent;
+      color: #fff;
+      font: inherit;
+      min-width: 96px;
+      outline: none;
+      cursor: pointer;
+    }
+    .pill select option { color: #0f172a; }
     .btn {
       border: 0;
       border-radius: 10px;
@@ -132,6 +152,12 @@
         <div>
           <h1>EXTEND PAY PERIOD HUB</h1>
           <p id="hubMeta">Loading context...</p>
+        </div>
+        <div class="top-meta">
+          <div class="pill">School: <span id="schoolNamePill">-</span></div>
+          <label class="pill" for="yearSelectHub">Year:
+            <select id="yearSelectHub" aria-label="Academic year selector"></select>
+          </label>
         </div>
         <div>
           <button class="btn btn-main" id="backBtn">Back to Teacher Dashboard</button>
@@ -266,6 +292,8 @@
     let selectedWorkerId = String(localStorage.getItem('workerId') || sessionStorage.getItem('workerId') || '').trim();
 
     const hubMeta = document.getElementById('hubMeta');
+    const schoolNamePill = document.getElementById('schoolNamePill');
+    const yearSelectHub = document.getElementById('yearSelectHub');
     const resultList = document.getElementById('resultList');
     const searchInput = document.getElementById('searchInput');
     const searchResultCount = document.getElementById('searchResultCount');
@@ -387,9 +415,43 @@
       return summary || null;
     }
 
+    function populateYearSelector() {
+      const YEARS = [2024, 2025, 2026, 2027];
+      yearSelectHub.innerHTML = YEARS
+        .map((y) => `<option value="${y}">${y}</option>`)
+        .join('');
+      if (YEARS.includes(Number(year))) {
+        yearSelectHub.value = String(year);
+      } else {
+        yearSelectHub.value = String(YEARS[YEARS.length - 1]);
+        year = yearSelectHub.value;
+      }
+    }
+
     async function loadStudents() {
-      const snap = await schoolRef('students').once('value');
-      students = snap.val() || {};
+      const win = await ensureFinanceBridge();
+      let rows = [];
+      try {
+        rows = await win.__finance_getStudentsForYear?.(year);
+      } catch (_) {}
+      if (!Array.isArray(rows)) rows = [];
+      rows = rows.filter((row) => {
+        const cls = String(row?.classLevel || '').trim().toUpperCase();
+        return cls !== 'GRADUATED';
+      });
+      students = {};
+      rows.forEach((row) => {
+        const id = String(row?.id || '').trim();
+        if (!id) return;
+        students[id] = {
+          firstName: '',
+          middleName: '',
+          lastName: '',
+          classLevel: row.classLevel || '',
+          admissionNumber: row.admissionNumber || id,
+          _fullName: row.fullName || '',
+        };
+      });
     }
 
     async function loadExtensions() {
@@ -403,7 +465,7 @@
       const rows = Object.entries(students || {}).map(([id, student]) => ({
         id,
         student,
-        fullName: getFullName(student),
+        fullName: String(student._fullName || getFullName(student)).trim(),
         admission: admissionOf(student, id),
         cls: String(student.classLevel || student.className || '').trim(),
       }));
@@ -603,6 +665,8 @@
         window.location.href = 'workertasks.html';
         return;
       }
+      schoolNamePill.textContent = school.name || school.id || 'School';
+      populateYearSelector();
       hubMeta.textContent = `${school.name || school.id} | Academic Year ${year}`;
 
       try {
@@ -618,19 +682,42 @@
       document.getElementById('backBtn').addEventListener('click', () => {
         window.location.href = 'workertasks.html';
       });
+      yearSelectHub.addEventListener('change', async (e) => {
+        const nextYear = String(e.target.value || '').trim();
+        if (!nextYear || nextYear === year) return;
+        year = nextYear;
+        hubMeta.textContent = `${school.name || school.id} | Academic Year ${year}`;
+        selected = null;
+        selectedSummary = null;
+        students = {};
+        studentInfo.textContent = 'Select a child on the left.';
+        debtCards.style.display = 'none';
+        historyBody.innerHTML = '<tr><td colspan="5" class="muted">No child selected.</td></tr>';
+        try {
+          await Promise.all([loadStudents(), loadExtensions(), ensureFinanceBridge()]);
+        } catch (err) {
+          console.warn(err);
+        }
+        renderSearchResults();
+      });
 
       if (window.somapYearContext?.onYearChanged) {
         window.somapYearContext.onYearChanged(async (next) => {
           const normalized = String(next || '').trim();
           if (!normalized || normalized === year) return;
           year = normalized;
+          if (yearSelectHub && yearSelectHub.value !== normalized) {
+            const exists = Array.from(yearSelectHub.options || []).some((opt) => String(opt.value) === normalized);
+            if (exists) yearSelectHub.value = normalized;
+          }
           hubMeta.textContent = `${school.name || school.id} | Academic Year ${year}`;
           selected = null;
           selectedSummary = null;
+          students = {};
           studentInfo.textContent = 'Select a child on the left.';
           debtCards.style.display = 'none';
           historyBody.innerHTML = '<tr><td colspan="5" class="muted">No child selected.</td></tr>';
-          await Promise.all([loadExtensions(), ensureFinanceBridge()]);
+          await Promise.all([loadStudents(), loadExtensions(), ensureFinanceBridge()]);
           renderSearchResults();
         });
       }
