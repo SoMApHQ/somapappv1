@@ -143,6 +143,23 @@ async function ensureFinanceData(year = getSelectedYear()) {
           const legacyClassesSnap = await db.ref(withSchoolPrefix(`feesStructure/${key}`)).once('value');
           classesVal = legacyClassesSnap.val() || {};
         }
+        // Merge installments from feesStructure (paymentedits saves class-specific amounts there)
+        const feesStructureSnap = await db.ref(withSchoolPrefix(`feesStructure/${key}`)).once('value');
+        const feesStructureVal = feesStructureSnap.val() || {};
+        if (Object.keys(feesStructureVal).length) {
+          Object.entries(feesStructureVal).forEach(([clsName, cfg]) => {
+            if (!cfg || typeof cfg !== 'object') return;
+            const inst = cfg.installments;
+            if (inst && typeof inst === 'object' && Object.keys(inst).length > 0) {
+              const target = classesVal[clsName];
+              if (target && typeof target === 'object') {
+                classesVal[clsName] = { ...target, installments: inst };
+              } else if (!classesVal[clsName]) {
+                classesVal[clsName] = { ...cfg };
+              }
+            }
+          });
+        }
 
         if (!Object.keys(plansVal).length) {
           const legacyPlansSnap = await db.ref(withSchoolPrefix(`installmentPlans/${key}`)).once('value');

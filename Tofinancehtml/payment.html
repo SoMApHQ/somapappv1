@@ -514,12 +514,11 @@
         
         // PRIORITY 2: Check if class-level edited installments exist (from paymentedits.html)
         // These are stored in feesStructure/{year}/{Class}/installments
-        // Use class defaults for the whole school unless the student has an explicit custom schedule override.
+        // Use class defaults unless the student has an explicit override (custom schedule or different plan).
+        // Class installments from paymentedits are the source of truth for amounts (e.g. Mku.1=356,000).
         const overridePlanId = String(override?.planId || '').trim();
         const classDefaultPlanId = String(classDefaults?.defaultPlanId || classDefaults?.defaultPlan || '').trim();
         const hasPlanOverride = Boolean(overridePlanId) && (!classDefaultPlanId || overridePlanId !== classDefaultPlanId);
-
-        const hasPlanSchedule = Array.isArray(student?._planSchedule) && student._planSchedule.length > 0;
 
         const hasStudentOverride = override && (
           (Array.isArray(override.customSchedule) && override.customSchedule.length > 0) ||
@@ -534,7 +533,9 @@
                 ? classDefaults.installments
                 : null);
 
-        if (!hasStudentOverride && !hasPlanSchedule && classInstallmentsSource) {
+        // Use class installments when available and no student override. Do NOT require !hasPlanSchedule:
+        // the plan may have weight-based amounts; class installments from paymentedits have explicit amounts.
+        if (!hasStudentOverride && classInstallmentsSource) {
           const installmentsObj = classInstallmentsSource;
           const entries = Object.values(installmentsObj).filter(inst => inst && inst.active !== false);
           
@@ -1003,7 +1004,14 @@
             console.warn('resolveEffectiveFinance error', effErr?.message || effErr);
           }
 
-          const classDefaults = effectiveFinance?.classCfg || classFees[classLevel] || classFees[baseClass] || {};
+          // Prefer feesStructure (classFees) when it has installments - paymentedits saves class-specific
+          // amounts (e.g. Dirisha la malipo: Mku.1 = 356,000) there. finance/classes may lack installments.
+          const fromCfg = effectiveFinance?.classCfg || {};
+          const fromFees = classFees[classLevel] || classFees[baseClass] || {};
+          const hasInstallmentsInFees = fromFees.installments && typeof fromFees.installments === 'object' && Object.keys(fromFees.installments || {}).length > 0;
+          const classDefaults = hasInstallmentsInFees
+            ? { ...fromCfg, ...fromFees }
+            : (fromCfg && Object.keys(fromCfg).length ? fromCfg : fromFees);
           const classPlanId = classDefaults.defaultPlanId || classDefaults.defaultPlan || null;
           const explicitPlanOverrideId =
             (override && override.planId ? String(override.planId).trim() : '') ||
@@ -1102,6 +1110,10 @@
             prepared._customSchedule = effectiveOverride.customSchedule;
           } else if (resolvedPlan && Array.isArray(resolvedPlan.schedule)) {
             prepared._planSchedule = resolvedPlan.schedule; // [{label, from, to, weight}]
+          }
+          // Attach class installments from paymentedits so buildSchedule uses them (not plan weight-based amounts)
+          if (classDefaults.installments && typeof classDefaults.installments === 'object' && Object.keys(classDefaults.installments).length > 0) {
+            prepared._classInstallments = classDefaults.installments;
           }
 
           // Keep iframe breakdown in lockstep with finance table logic for class/plan/fee/payments.
