@@ -90,8 +90,8 @@
       <article class="stat"><div class="k">Waliopo</div><div class="v good" id="kPresent">0</div></article>
       <article class="stat"><div class="k">Hawapo</div><div class="v bad" id="kAbsent">0</div></article>
       <article class="stat"><div class="k">Bado Kumark</div><div class="v" id="kUnmarked">0</div></article>
-      <article class="stat"><div class="k">Wamelipa</div><div class="v good" id="kPaid">0</div></article>
-      <article class="stat"><div class="k">Wanaodaiwa</div><div class="v bad" id="kDebt">0</div></article>
+      <article class="stat"><div class="k">Wamelipa (Mwezi)</div><div class="v good" id="kPaid">0</div></article>
+      <article class="stat"><div class="k">Wanaodaiwa (Mwezi)</div><div class="v bad" id="kDebt">0</div></article>
     </section>
 
     <section class="panel">
@@ -119,6 +119,7 @@
 
   <script src="../modules/transport_helpers.js"></script>
   <script src="../modules/transport_context.js"></script>
+  <script src="../modules/transport_pricing.js"></script>
   <script src="../modules/transportauto_tracker.js" defer></script>
   <script>
     const urlParams = new URLSearchParams(window.location.search);
@@ -162,6 +163,28 @@
     function normalizeRoutes(raw){if(!raw)return[];if(Array.isArray(raw))return raw.map(v=>String(v||"").trim()).filter(Boolean);if(typeof raw==="object")return Object.values(raw).map(v=>String(v||"").trim()).filter(Boolean);if(typeof raw==="string")return raw.split(/[|;,\n]+/).map(v=>v.trim()).filter(Boolean);return[];}
     function actorId(){return (state.user&&state.user.uid)||state.driverHint.uid||"driver-local";}
     function clean(v){return String(v||"").trim();}
+    function normalizeDateInput(raw, fallbackYear){
+      if(!raw){
+        const yr=Number.isFinite(fallbackYear)?fallbackYear:new Date().getFullYear();
+        return `${yr}-01-01`;
+      }
+      if(typeof raw==='number'){const d=new Date(raw);if(!Number.isNaN(d.getTime())) return d.toISOString().slice(0,10);}
+      const text=String(raw).trim();
+      if(/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+      if(/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(text)){const [dd,mm,yy]=text.split('/').map(Number);const d=new Date(yy,mm-1,dd);if(!Number.isNaN(d.getTime())) return d.toISOString().slice(0,10);}
+      const d2=new Date(text);if(!Number.isNaN(d2.getTime())) return d2.toISOString().slice(0,10);
+      const yr=Number.isFinite(fallbackYear)?fallbackYear:new Date().getFullYear();
+      return `${yr}-01-01`;
+    }
+    function resolveStartDate(enrollment){
+      if(!enrollment) return normalizeDateInput(null,state.context.year);
+      if(enrollment.startDate) return normalizeDateInput(enrollment.startDate,state.context.year);
+      if(enrollment.start_date) return normalizeDateInput(enrollment.start_date,state.context.year);
+      if(enrollment.startTimestamp) return normalizeDateInput(Number(enrollment.startTimestamp),state.context.year);
+      if(enrollment.start_time) return normalizeDateInput(enrollment.start_time,state.context.year);
+      if(enrollment.dateRegistered) return normalizeDateInput(enrollment.dateRegistered,state.context.year);
+      return normalizeDateInput(null,state.context.year);
+    }
     function currentDriverNames(){return [state.profile.fullName,state.profile.name,state.profile.displayName,[state.profile.firstName,state.profile.middleName,state.profile.lastName].filter(Boolean).join(" "),(state.user&&state.user.displayName)||"",state.driverHint.name].map(nName).filter(Boolean);}
     function currentDriverUid(){return (state.user&&state.user.uid)||state.driverHint.uid||"";}
     function enrollmentMatchesCurrentDriver(en){
@@ -310,7 +333,7 @@
 
     async function loadAssignments(vehicleId){
       if(!vehicleId){state.assignments=[];return;}buildRouteMap();await expandRouteMap();if(!Object.keys(state.allEnrollments).length)await loadAllEnrollments();
-      const list=[];Object.keys(state.allEnrollments).forEach(id=>{const en=state.allEnrollments[id];const resolved=resolveVehicle(en);if(resolved!==vehicleId && !(enrollmentMatchesCurrentDriver(en)&&!resolved))return;const st=state.students[id]||{};const full=[st.firstName,st.middleName,st.lastName].filter(Boolean).join(" ").trim();list.push({...en,studentId:id,studentName:full||en.studentName||en.name||en.displayName||"Unknown student",className:st.classLevel||en.className||en.class||en.grade||"-",route:en.route||en.routeName||"",amStop:en.amStop||en.pickupStop||en.morningStop||"",pmStop:en.pmStop||en.dropoffStop||en.eveningStop||""});});
+      const list=[];Object.keys(state.allEnrollments).forEach(id=>{const en=state.allEnrollments[id];const resolved=resolveVehicle(en);if(resolved!==vehicleId && !(enrollmentMatchesCurrentDriver(en)&&!resolved))return;const st=state.students[id]||{};const full=[st.firstName,st.middleName,st.lastName].filter(Boolean).join(" ").trim();list.push({...en,studentId:id,studentName:full||en.studentName||en.name||en.displayName||en.admissionNumber||id,className:st.classLevel||en.className||en.class||en.grade||"-",route:en.route||en.routeName||"",amStop:en.amStop||en.pickupStop||en.morningStop||"",pmStop:en.pmStop||en.dropoffStop||en.eveningStop||""});});
       list.sort((a,b)=>String(a.studentName||"").localeCompare(String(b.studentName||"")));state.assignments=list;
     }
 
@@ -320,7 +343,32 @@
     }
 
     async function loadLedgers(){
-      state.ledgerMap={};const year=Number(state.context.year),month=Number(state.context.month);const tasks=state.assignments.map(st=>{if(!st.studentId)return Promise.resolve();const path=TransportHelpers.paths.ledgerMonth(st.studentId,year,month);return firebase.database().ref(path).get().then(s=>{const l=s.val()||{},e=Number(l.expected||0),p=Number(l.paid||0),b=Number(l.balance!==undefined?l.balance:e-p);state.ledgerMap[st.studentId]={expected:e,paid:p,balance:b};}).catch(()=>{});});await Promise.allSettled(tasks);
+      state.ledgerMap={};
+      const year=Number(state.context.year),month=Number(state.context.month);
+      const multipliers=(window.TransportPricing&&TransportPricing.loadYearMultipliers)?await TransportPricing.loadYearMultipliers(year).catch(()=>null):null;
+      const tasks=state.assignments.map(st=>{
+        if(!st.studentId)return Promise.resolve();
+        const path=TransportHelpers.paths.ledgerMonth(st.studentId,year,month);
+        return firebase.database().ref(path).get().then(async s=>{
+          const l=s.val()||{};
+          let expected=Number(l.expected||0);
+          const paid=Number(l.paid||0);
+          if(expected<=0 && window.TransportPricing && TransportPricing.dueForMonth){
+            expected=Number(await TransportPricing.dueForMonth({
+              year,
+              month,
+              baseMonthlyFee:Number(st.baseMonthlyFee||0),
+              amStop:st.amStop||"",
+              pmStop:st.pmStop||"",
+              startDate:resolveStartDate(st),
+              multipliers:multipliers||undefined
+            }))||0;
+          }
+          const balance=Number(l.balance!==undefined?l.balance:Math.max(0,expected-paid));
+          state.ledgerMap[st.studentId]={expected:expected,paid:paid,balance:Math.max(0,balance),hasBilling:expected>0};
+        }).catch(()=>{});
+      });
+      await Promise.allSettled(tasks);
     }
 
     function renderVehicle(){
@@ -348,12 +396,22 @@
           const isPresent = !!(a&&a.status==="present");
           const isAbsent = !!(a&&a.status==="absent");
           let status='<span class="status s-un">• Unmarked</span>';if(isPresent){present++;status='<span class="status s-pres">✓ Present</span>';}else if(isAbsent){absent++;status='<span class="status s-abs">✕ Absent</span>';}else{unmarked++;}
-          let pay='<span class="status s-un">No ledger</span>';if(l){if(Number(l.balance||0)<=0){paid++;pay='<span class="status s-paid">✓ Paid</span>';}else{debt++;pay=`<span class="status s-debt">⚠ Deni ${esc(tzs(l.balance))}</span>`;debtors.push({name:st.studentName,amount:l.balance});}}
+          let pay='<span class="status s-un">No billing data</span>';
+          if(l && l.hasBilling){
+            if(Number(l.balance||0)<=0){
+              paid++;
+              pay=`<span class="status s-paid">Paid (This Month)</span><div class="mini">Paid ${esc(tzs(l.paid))} / Due ${esc(tzs(l.expected))}</div>`;
+            }else{
+              debt++;
+              pay=`<span class="status s-debt">Left ${esc(tzs(l.balance))}</span><div class="mini">Paid ${esc(tzs(l.paid))} / Due ${esc(tzs(l.expected))}</div>`;
+              debtors.push({name:st.studentName,amount:l.balance});
+            }
+          }
           const route=[];if(st.route)route.push(`Route ${st.route}`);if(st.amStop||st.pmStop)route.push(`AM ${st.amStop||"-"} / PM ${st.pmStop||"-"}`);
           const reason=(a&&a.reason)?`<div class="mini">Reason: ${esc(a.reason)}</div>`:"";
           const pClass = isPresent ? "active-present" : "";
           const aClass = isAbsent ? "active-absent" : "";
-          return `<div class="row" data-student="${esc(sid)}"><div><div class="name">${esc(st.studentName||"Unknown student")}</div><div class="mini">${esc(route.join(" | ")||"Hakuna route details")}</div>${reason}</div><div>${esc(st.className||"-")}</div><div>${pay}</div><div>${status}</div><div class="ra"><button class="btn present-btn ${pClass}" type="button" data-action="present">✓ Present</button><button class="btn abs ${aClass}" type="button" data-action="absent">✕ Absent</button></div></div>`;
+          return `<div class="row" data-student="${esc(sid)}"><div><div class="name">${esc(st.studentName||sid)}</div><div class="mini">${esc(route.join(" | ")||"Hakuna route details")}</div>${reason}</div><div>${esc(st.className||"-")}</div><div>${pay}</div><div>${status}</div><div class="ra"><button class="btn present-btn ${pClass}" type="button" data-action="present">✓ Present</button><button class="btn abs ${aClass}" type="button" data-action="absent">✕ Absent</button></div></div>`;
         }).join("");
       }
       refs.kAssigned.textContent=String(assigned);refs.kPresent.textContent=String(present);refs.kAbsent.textContent=String(absent);refs.kUnmarked.textContent=String(unmarked);refs.kPaid.textContent=String(paid);refs.kDebt.textContent=String(debt);
