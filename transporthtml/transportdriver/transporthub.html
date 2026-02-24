@@ -143,6 +143,30 @@
     function normalizeRoutes(raw){if(!raw)return[];if(Array.isArray(raw))return raw.map(v=>String(v||"").trim()).filter(Boolean);if(typeof raw==="object")return Object.values(raw).map(v=>String(v||"").trim()).filter(Boolean);if(typeof raw==="string")return raw.split(/[|;,\n]+/).map(v=>v.trim()).filter(Boolean);return[];}
     function actorId(){return (state.user&&state.user.uid)||state.driverHint.uid||"driver-local";}
     function clean(v){return String(v||"").trim();}
+    function currentDriverNames(){return [state.profile.fullName,state.profile.name,state.profile.displayName,[state.profile.firstName,state.profile.middleName,state.profile.lastName].filter(Boolean).join(" "),(state.user&&state.user.displayName)||"",state.driverHint.name].map(nName).filter(Boolean);}
+    function currentDriverUid(){return (state.user&&state.user.uid)||state.driverHint.uid||"";}
+    function enrollmentMatchesCurrentDriver(en){
+      if(!en) return false;
+      const uid=currentDriverUid();
+      const names=currentDriverNames();
+      const uidFields=[en.driverUid,en.assignedDriverUid,en.driverId,en.assignedDriverId,(en.morningVehicle&&en.morningVehicle.driverUid),(en.eveningVehicle&&en.eveningVehicle.driverUid),(en.morningVehicle&&en.morningVehicle.assignedDriverUid),(en.eveningVehicle&&en.eveningVehicle.assignedDriverUid)].filter(Boolean).map(v=>String(v));
+      if(uid && uidFields.some(v=>v===String(uid))) return true;
+      const nameFields=[en.driverName,en.assignedDriverName,(en.morningVehicle&&en.morningVehicle.driverName),(en.eveningVehicle&&en.eveningVehicle.driverName),(en.morningVehicle&&en.morningVehicle.assignedDriverName),(en.eveningVehicle&&en.eveningVehicle.assignedDriverName)].map(nName).filter(Boolean);
+      return names.length ? nameFields.some(n=>names.includes(n)) : false;
+    }
+    function extractVehicleCandidates(en){
+      if(!en) return [];
+      return [en.vehicleId,en.busId,en.assignedVehicleId,en.morningVehicleId,en.eveningVehicleId,(en.morningVehicle&&en.morningVehicle.vehicleId),(en.eveningVehicle&&en.eveningVehicle.vehicleId),(en.morningVehicle&&en.morningVehicle.id),(en.eveningVehicle&&en.eveningVehicle.id)].map(clean).filter(Boolean);
+    }
+    function inferVehicleFromEnrollmentsForDriver(){
+      const counts={};
+      Object.values(state.allEnrollments||{}).forEach(en=>{
+        if(!enrollmentMatchesCurrentDriver(en)) return;
+        extractVehicleCandidates(en).forEach(id=>{ counts[id]=(counts[id]||0)+1; });
+      });
+      const ranked=Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+      return ranked.length?ranked[0][0]:"";
+    }
 
     function hydrateDriverHintFromQueryAndStorage(){
       const storedUid = localStorage.getItem("somap_driver_uid") || "";
@@ -219,7 +243,7 @@
       for(const p of paths){const s=await firebase.database().ref(p).get();if(!s.exists()||!s.val())continue;const c=s.val();Object.keys(c).forEach(id=>{const stop=c[id]||{};const n=norm(stop.name||stop.id||id);const vid=state.routeVehicleMap[n];if(vid){state.routeVehicleMap[norm(id)]=vid;state.routeVehicleMap[String(id)]=vid;}});break;}
     }
 
-    function busIdFromRef(ref){const key=String(ref||"").trim();if(!key)return null;if(state.buses.some(b=>b.id===key))return key;const clean=v=>String(v||"").toLowerCase().replace(/\s+/g,"");const n=clean(key);const b=state.buses.find(x=>clean(x.plate||x.plateNo||x.registration||"")===n);return b?b.id:null;}
+    function busIdFromRef(ref){const key=String(ref||"").trim();if(!key)return null;if(!state.buses.length)return key;if(state.buses.some(b=>b.id===key))return key;const cleanRef=v=>String(v||"").toLowerCase().replace(/\s+/g,"");const n=cleanRef(key);const b=state.buses.find(x=>cleanRef(x.plate||x.plateNo||x.registration||"")===n);return b?b.id:null;}
 
     function resolveVehicle(en){
       if(!en)return null;
@@ -267,7 +291,7 @@
 
     async function loadAssignments(vehicleId){
       if(!vehicleId){state.assignments=[];return;}buildRouteMap();await expandRouteMap();if(!Object.keys(state.allEnrollments).length)await loadAllEnrollments();
-      const list=[];Object.keys(state.allEnrollments).forEach(id=>{const en=state.allEnrollments[id];if(resolveVehicle(en)!==vehicleId)return;const st=state.students[id]||{};const full=[st.firstName,st.middleName,st.lastName].filter(Boolean).join(" ").trim();list.push({...en,studentId:id,studentName:full||en.studentName||en.name||en.displayName||"Unknown student",className:st.classLevel||en.className||en.class||en.grade||"-",route:en.route||en.routeName||"",amStop:en.amStop||en.pickupStop||en.morningStop||"",pmStop:en.pmStop||en.dropoffStop||en.eveningStop||""});});
+      const list=[];Object.keys(state.allEnrollments).forEach(id=>{const en=state.allEnrollments[id];const resolved=resolveVehicle(en);if(resolved!==vehicleId && !(enrollmentMatchesCurrentDriver(en)&&!resolved))return;const st=state.students[id]||{};const full=[st.firstName,st.middleName,st.lastName].filter(Boolean).join(" ").trim();list.push({...en,studentId:id,studentName:full||en.studentName||en.name||en.displayName||"Unknown student",className:st.classLevel||en.className||en.class||en.grade||"-",route:en.route||en.routeName||"",amStop:en.amStop||en.pickupStop||en.morningStop||"",pmStop:en.pmStop||en.dropoffStop||en.eveningStop||""});});
       list.sort((a,b)=>String(a.studentName||"").localeCompare(String(b.studentName||"")));state.assignments=list;
     }
 
@@ -282,7 +306,14 @@
 
     function renderVehicle(){
       const bus=state.buses.find(b=>b.id===state.vehicleId);
-      if(!bus){refs.vehicleName.textContent="Bado hujapangiwa gari";refs.vehicleChips.innerHTML='<span class="chipV" style="background:#fff7ed;color:#9a3412;">Admin ampangie dereva gari kwanza.</span>';return;}
+      if(!bus){
+        if(state.vehicleId){
+          refs.vehicleName.textContent=state.vehicleId;
+          refs.vehicleChips.innerHTML='<span class="chipV">Mapped kutoka assignments</span>';
+          return;
+        }
+        refs.vehicleName.textContent="Bado hujapangiwa gari";refs.vehicleChips.innerHTML='<span class="chipV" style="background:#fff7ed;color:#9a3412;">Admin ampangie dereva gari kwanza.</span>';return;
+      }
       refs.vehicleName.textContent=bus.alias||bus.name||bus.plate||bus.id;
       const chips=[];if(bus.plate)chips.push(`Plate ${bus.plate}`);if(bus.capacity)chips.push(`Capacity ${bus.capacity}`);const r=normalizeRoutes(bus.assignedRoutes||bus.routes||bus.routeName||bus.route).slice(0,3).join(", ");if(r)chips.push(`Route ${r}`);
       refs.vehicleChips.innerHTML=chips.length?chips.map(c=>`<span class="chipV">${esc(c)}</span>`).join(""):`<span class="chipV">Vehicle ID ${esc(state.vehicleId)}</span>`;
@@ -417,6 +448,11 @@
       setYearSelectFromContext();
       await loadBuses();
       state.vehicleId=pickVehicle();
+      if(!state.vehicleId){
+        await loadAllEnrollments();
+        const inferred = inferVehicleFromEnrollmentsForDriver();
+        if(inferred) state.vehicleId=inferred;
+      }
       if(!state.vehicleId){
         renderVehicle();
         refs.ridersBody.className="placeholder";
