@@ -381,12 +381,11 @@
           const classLevel = String(enroll.className || enroll.classLevel || anchor.className || anchor.classLevel || base.classLevel || base.class || '').trim();
           const parentContact = String(base.primaryParentContact || base.parentPhone || base.guardianPhone || base.contact || enroll.parentPhone || enroll.guardianPhone || '').trim();
           const rec = { _fullName: fullName || undefined, classLevel, parentContact, admissionNumber: adm };
-          if (adm) {
-            const existing = studentsByAdmission[adm];
-            const merged = { ...(existing || {}), ...rec };
-            if (fullName) merged._fullName = fullName;
-            studentsByAdmission[adm] = merged;
-          }
+          const existing = adm ? studentsByAdmission[adm] : null;
+          const merged = { ...(existing || {}), ...rec };
+          if (fullName) merged._fullName = fullName;
+          if (adm) studentsByAdmission[adm] = merged;
+          if (id && id !== adm) studentsByAdmission[id] = merged;
         });
         Object.entries(baseStudents).forEach(([k, base]) => {
           const adm = String(base?.admissionNumber || base?.admissionNo || k || '').trim();
@@ -415,7 +414,7 @@
     }
 
     function getChildName(row) {
-      const name = String(row.fullName || '').trim();
+      const name = String(row.fullName || row.studentName || row.childName || '').trim();
       if (name) return name;
       const s = resolveStudentForRow(row);
       if (s) return s._fullName || getFullName(s);
@@ -531,15 +530,17 @@
         const key = sid || adm;
         if (!key || resolvedExtensionStudents[key]) continue;
         try {
-          const summary = await fetchFinanceSummary(sid || adm);
+          let summary = await fetchFinanceSummary(adm || sid);
+          if (!summary && adm !== sid) summary = await fetchFinanceSummary(sid);
           if (summary && summary.fullName) {
-            resolvedExtensionStudents[key] = {
+            const resolved = {
               _fullName: summary.fullName,
               classLevel: summary.classLevel || '',
               parentContact: summary.parentContact || '',
             };
-            if (adm) resolvedExtensionStudents[adm] = resolvedExtensionStudents[key];
-            if (sid) resolvedExtensionStudents[sid] = resolvedExtensionStudents[key];
+            resolvedExtensionStudents[key] = resolved;
+            if (adm) resolvedExtensionStudents[adm] = resolved;
+            if (sid) resolvedExtensionStudents[sid] = resolved;
             renderAllHistory();
           }
         } catch (_) {}
@@ -692,6 +693,7 @@
           const existing = studentsByAdmission[adm];
           studentsByAdmission[adm] = { ...(existing || {}), ...rec };
         }
+        if (id && id !== adm) studentsByAdmission[id] = { ...(studentsByAdmission[id] || {}), ...rec };
       });
     }
 
@@ -894,13 +896,33 @@
       }
     }
 
-    function downloadHistoryPdf() {
+    async function downloadHistoryPdf() {
       if (!selectedHistoryRecord) {
         alert('Select an agreement from Extension History first.');
         return;
       }
+      let row = selectedHistoryRecord;
+      if (getChildName(row) === 'Unknown') {
+        const sid = String(row.studentId || '').trim();
+        const adm = String(row.admissionNumber || '').trim();
+        const key = sid || adm;
+        if (key) {
+          try {
+            let summary = await fetchFinanceSummary(adm || sid);
+            if (!summary && adm !== sid) summary = await fetchFinanceSummary(sid);
+            if (summary && summary.fullName) {
+              const resolved = { _fullName: summary.fullName, classLevel: summary.classLevel || '', parentContact: summary.parentContact || '' };
+              resolvedExtensionStudents[key] = resolved;
+              if (adm) resolvedExtensionStudents[adm] = resolved;
+              if (sid) resolvedExtensionStudents[sid] = resolved;
+              row = { ...row, fullName: summary.fullName };
+              renderAllHistory();
+              showDetailView(row);
+            }
+          } catch (_) {}
+        }
+      }
       try {
-        const row = selectedHistoryRecord;
         const { jsPDF } = window.jspdf;
         const doc = new jsPDF();
         const schoolName = school?.name || school?.id || 'School';
