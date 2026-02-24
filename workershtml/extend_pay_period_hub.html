@@ -346,41 +346,57 @@
 
     const schoolRef = (path) => db.ref(SOMAP.P(path));
     const isSocrates = () => String(school?.id || '').toLowerCase().includes('socrates');
+    const SOMAP_DEFAULT_YEAR = 2025;
 
     async function loadStudentsFromFirebase() {
       if (!db) return;
       try {
-        const [baseSnap, enrollSnap] = await Promise.all([
+        const [baseSnap, anchorSnap, enrollSnap] = await Promise.all([
           schoolRef('students').once('value'),
+          schoolRef(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
           schoolRef(`enrollments/${year}`).once('value'),
         ]);
         let baseStudents = baseSnap.val() || {};
-        let enrollments = enrollSnap.val() || {};
+        let anchorEnrollments = anchorSnap.val() || {};
+        let yearEnrollments = enrollSnap.val() || {};
         if (isSocrates()) {
           try {
-            const [legacyBase, legacyEnroll] = await Promise.all([
+            const [legacyBase, legacyAnchor, legacyYear] = await Promise.all([
               db.ref('students').once('value'),
+              db.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
               db.ref(`enrollments/${year}`).once('value'),
             ]);
             baseStudents = { ...(legacyBase.val() || {}), ...baseStudents };
-            enrollments = { ...(legacyEnroll.val() || {}), ...enrollments };
+            anchorEnrollments = { ...(legacyAnchor.val() || {}), ...anchorEnrollments };
+            yearEnrollments = { ...(legacyYear.val() || {}), ...yearEnrollments };
           } catch (_) {}
         }
-        const ids = new Set([...Object.keys(baseStudents), ...Object.keys(enrollments)]);
+        const ids = new Set([...Object.keys(baseStudents), ...Object.keys(anchorEnrollments), ...Object.keys(yearEnrollments)]);
         ids.forEach((id) => {
           const base = baseStudents[id] || {};
-          const enroll = enrollments[id] || {};
-          const adm = String(base.admissionNumber || base.admissionNo || enroll.admissionNumber || enroll.admissionNo || id).trim();
+          const anchor = anchorEnrollments[id] || {};
+          const enroll = yearEnrollments[id] || {};
+          const adm = String(base.admissionNumber || base.admissionNo || anchor.admissionNumber || anchor.admissionNo || enroll.admissionNumber || enroll.admissionNo || id).trim();
           const fullName = `${base.firstName || ''} ${base.middleName || ''} ${base.lastName || ''}`.replace(/\s+/g, ' ').trim();
-          const classLevel = enroll.className || enroll.classLevel || base.classLevel || base.class || '';
+          const classLevel = String(enroll.className || enroll.classLevel || anchor.className || anchor.classLevel || base.classLevel || base.class || '').trim();
           const parentContact = String(base.primaryParentContact || base.parentPhone || base.guardianPhone || base.contact || enroll.parentPhone || enroll.guardianPhone || '').trim();
           const rec = { _fullName: fullName || undefined, classLevel, parentContact, admissionNumber: adm };
-          if (!students[id]) students[id] = rec;
           if (adm) {
             const existing = studentsByAdmission[adm];
             const merged = { ...(existing || {}), ...rec };
             if (fullName) merged._fullName = fullName;
             studentsByAdmission[adm] = merged;
+          }
+        });
+        Object.entries(baseStudents).forEach(([k, base]) => {
+          const adm = String(base?.admissionNumber || base?.admissionNo || k || '').trim();
+          if (!adm) return;
+          const fullName = `${base.firstName || ''} ${base.middleName || ''} ${base.lastName || ''}`.replace(/\s+/g, ' ').trim();
+          const existing = studentsByAdmission[adm] || {};
+          if (fullName && !existing._fullName) {
+            studentsByAdmission[adm] = { ...existing, _fullName: fullName, classLevel: existing.classLevel || base.classLevel || base.class || '', parentContact: existing.parentContact || base.primaryParentContact || base.parentPhone || base.guardianPhone || base.contact || '' };
+          } else if (!existing._fullName && !existing.classLevel) {
+            studentsByAdmission[adm] = { ...existing, classLevel: base.classLevel || base.class || '', parentContact: existing.parentContact || base.primaryParentContact || base.parentPhone || base.guardianPhone || base.contact || '', admissionNumber: adm };
           }
         });
       } catch (err) {
@@ -653,9 +669,11 @@
       }
       if (!Array.isArray(rows)) rows = [];
       rows = rows.filter((row) => {
+        if (row?.isGraduated) return false;
         const cls = String(row?.classLevel || '').trim().toUpperCase();
         return cls !== 'GRADUATED';
       });
+      students = {};
       rows.forEach((row) => {
         const id = String(row?.id || '').trim();
         if (!id) return;
@@ -670,7 +688,10 @@
           parentContact: row.parentContact || '',
         };
         students[id] = rec;
-        if (adm) studentsByAdmission[adm] = rec;
+        if (adm) {
+          const existing = studentsByAdmission[adm];
+          studentsByAdmission[adm] = { ...(existing || {}), ...rec };
+        }
       });
     }
 
