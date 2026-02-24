@@ -101,6 +101,8 @@
   <script src="../modules/transport_context.js"></script>
   <script src="../modules/transportauto_tracker.js" defer></script>
   <script>
+    const urlParams = new URLSearchParams(window.location.search);
+
     const refs = {
       welcome: document.getElementById("welcome"), vehicleName: document.getElementById("vehicleName"), vehicleChips: document.getElementById("vehicleChips"),
       openAttendance: document.getElementById("openAttendance"), panelSub: document.getElementById("panelSub"), dateInput: document.getElementById("dateInput"),
@@ -110,7 +112,21 @@
       kUnmarked: document.getElementById("kUnmarked"), kPaid: document.getElementById("kPaid"), kDebt: document.getElementById("kDebt")
     };
 
-    const state = { user:null, profile:{}, role:"guest", context:TransportContext.getContext(), vehicleId:"", buses:[], routeVehicleMap:{}, students:{}, allEnrollments:{}, assignments:[], attendanceMap:{}, ledgerMap:{} };
+    const state = {
+      user:null,
+      profile:{},
+      role:"guest",
+      context:TransportContext.getContext(),
+      vehicleId:"",
+      buses:[],
+      routeVehicleMap:{},
+      students:{},
+      allEnrollments:{},
+      assignments:[],
+      attendanceMap:{},
+      ledgerMap:{},
+      driverHint:{ uid:"", name:"", vehicle:"" }
+    };
 
     function esc(v){return String(v??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]||ch));}
     function tzs(v){return (window.TransportHelpers&&TransportHelpers.fmtTZS)?TransportHelpers.fmtTZS(Number(v||0)):("TZS "+Number(v||0).toLocaleString("en-US"));}
@@ -122,6 +138,22 @@
     function setDateFromContext(){refs.dateInput.value=ymd();}
     function setContextDate(v){const p=String(v||"").split("-");if(p.length!==3)return;state.context=TransportContext.setContext({year:Number(p[0]),month:Number(p[1]),day:Number(p[2])});}
     function normalizeRoutes(raw){if(!raw)return[];if(Array.isArray(raw))return raw.map(v=>String(v||"").trim()).filter(Boolean);if(typeof raw==="object")return Object.values(raw).map(v=>String(v||"").trim()).filter(Boolean);if(typeof raw==="string")return raw.split(/[|;,\n]+/).map(v=>v.trim()).filter(Boolean);return[];}
+    function actorId(){return (state.user&&state.user.uid)||state.driverHint.uid||"driver-local";}
+    function clean(v){return String(v||"").trim();}
+
+    function hydrateDriverHintFromQueryAndStorage(){
+      const storedUid = localStorage.getItem("somap_driver_uid") || "";
+      const storedName = localStorage.getItem("somap_driver_name") || "";
+      const storedVehicle = localStorage.getItem("somap_vehicleId") || "";
+      state.driverHint = {
+        uid: clean(urlParams.get("driverUid") || urlParams.get("uid") || storedUid),
+        name: clean(urlParams.get("driverName") || urlParams.get("driver") || urlParams.get("name") || storedName),
+        vehicle: clean(urlParams.get("vehicle") || storedVehicle)
+      };
+      if (state.driverHint.uid) localStorage.setItem("somap_driver_uid", state.driverHint.uid);
+      if (state.driverHint.name) localStorage.setItem("somap_driver_name", state.driverHint.name);
+      if (state.driverHint.vehicle) localStorage.setItem("somap_vehicleId", state.driverHint.vehicle);
+    }
 
     function updateAttendanceLink(){
       const q=new URLSearchParams({school:state.context.school||"",year:String(state.context.year||""),month:String(state.context.month||""),day:String(state.context.day||""),vehicle:state.vehicleId||""});
@@ -237,29 +269,133 @@
     function attendancePath(sid){return `transport/${state.context.school}/${state.context.year}/attendance/${ymd()}/${state.vehicleId}/${sid}`;}
     function summaryPath(sid){return `transport/${state.context.school}/${state.context.year}/attendance_summary/${state.vehicleId}/${sid}`;}
 
-    async function markPresent(sid){const rec={status:"present",reason:"OK",by:state.user.uid,ts:Date.now()};await firebase.database().ref(attendancePath(sid)).set(rec);await firebase.database().ref(summaryPath(sid)).update({last_present_ymd:ymd(),consecutive_absent_days:0});state.attendanceMap[sid]=rec;}
-    async function markAbsent(sid){const note=window.prompt("Andika sababu ya absent (mfano: SICK, NO SHOW, ALICHELEWA)","NO SHOW");if(note===null)return;const reason=String(note||"NO SHOW").trim()||"NO SHOW";const rec={status:"absent",reason,by:state.user.uid,ts:Date.now()};await firebase.database().ref(attendancePath(sid)).set(rec);const r=firebase.database().ref(summaryPath(sid)),s=await r.get(),v=s.val()||{};await r.update({consecutive_absent_days:Number(v.consecutive_absent_days||0)+1});state.attendanceMap[sid]=rec;}
+    async function markPresent(sid){const rec={status:"present",reason:"OK",by:actorId(),ts:Date.now()};await firebase.database().ref(attendancePath(sid)).set(rec);await firebase.database().ref(summaryPath(sid)).update({last_present_ymd:ymd(),consecutive_absent_days:0});state.attendanceMap[sid]=rec;}
+    async function markAbsent(sid){const note=window.prompt("Andika sababu ya absent (mfano: SICK, NO SHOW, ALICHELEWA)","NO SHOW");if(note===null)return;const reason=String(note||"NO SHOW").trim()||"NO SHOW";const rec={status:"absent",reason,by:actorId(),ts:Date.now()};await firebase.database().ref(attendancePath(sid)).set(rec);const r=firebase.database().ref(summaryPath(sid)),s=await r.get(),v=s.val()||{};await r.update({consecutive_absent_days:Number(v.consecutive_absent_days||0)+1});state.attendanceMap[sid]=rec;}
 
     async function finalizeDay(){
       const unmarked=state.assignments.filter(st=>st.studentId&&!state.attendanceMap[st.studentId]);if(!unmarked.length){toast("Wote tayari wamewekewa status");return;}
       if(!window.confirm(`Una uhakika? Wanafunzi ${unmarked.length} watawekwa ABSENT (NO SHOW).`))return;
-      const updates={},now=Date.now(),d=ymd();unmarked.forEach(st=>{updates[`transport/${state.context.school}/${state.context.year}/attendance/${d}/${state.vehicleId}/${st.studentId}`]={status:"absent",reason:"NO SHOW",by:state.user.uid,ts:now};});
+      const updates={},now=Date.now(),d=ymd();unmarked.forEach(st=>{updates[`transport/${state.context.school}/${state.context.year}/attendance/${d}/${state.vehicleId}/${st.studentId}`]={status:"absent",reason:"NO SHOW",by:actorId(),ts:now};});
       await firebase.database().ref().update(updates);
       for(const st of unmarked){const r=firebase.database().ref(summaryPath(st.studentId)),s=await r.get(),v=s.val()||{};await r.update({consecutive_absent_days:Number(v.consecutive_absent_days||0)+1});}
       await loadAttendance();render();toast("Siku imefungwa. Unmarked wote wamewekwa absent.");
     }
 
     function pickVehicle(){
-      const local=localStorage.getItem("somap_vehicleId")||"";if(local&&state.buses.some(b=>b.id===local))return local;
-      const uid=state.user.uid;const byUid=state.buses.find(b=>{const d=b.assignedDriverUid||b.driverUid||b.driverId||b.assignedDriverId;return d&&String(d)===String(uid);});if(byUid)return byUid.id;
-      const names=[state.profile.fullName,state.profile.name,state.profile.displayName,[state.profile.firstName,state.profile.middleName,state.profile.lastName].filter(Boolean).join(" "),state.user.displayName].map(nName).filter(Boolean);
+      const preferred = state.driverHint.vehicle || localStorage.getItem("somap_vehicleId") || "";
+      if(preferred&&state.buses.some(b=>b.id===preferred))return preferred;
+      const uid=(state.user&&state.user.uid)||state.driverHint.uid||"";
+      const byUid=state.buses.find(b=>{const d=b.assignedDriverUid||b.driverUid||b.driverId||b.assignedDriverId;return d&&String(d)===String(uid);});if(byUid)return byUid.id;
+      const names=[state.profile.fullName,state.profile.name,state.profile.displayName,[state.profile.firstName,state.profile.middleName,state.profile.lastName].filter(Boolean).join(" "),(state.user&&state.user.displayName)||"",state.driverHint.name].map(nName).filter(Boolean);
       if(names.length){const byName=state.buses.find(b=>[b.assignedDriverName,b.driverName,b.driverFullName,b.driver].map(nName).filter(Boolean).some(n=>names.includes(n)));if(byName)return byName.id;}
       return "";
     }
 
+    async function loadDriversForFallback(){
+      const year=String(state.context.year||"");
+      const school=state.context.school;
+      const paths=["workers",`years/${year}/workers`,`schools/${school}/workers`,`schools/${school}/years/${year}/workers`];
+      const driversById={};
+      for(const path of paths){
+        const snap=await firebase.database().ref(path).get().catch(()=>({exists:()=>false}));
+        if(!snap.exists()) continue;
+        snap.forEach(child=>{
+          if(driversById[child.key]) return;
+          const w=child.val()||{}, p=w.profile||{};
+          const role=String(p.role||w.role||"").toLowerCase().trim();
+          if(role!=="driver"&&role!=="dereva") return;
+          if(p.active===false) return;
+          const full = p.fullNameUpper||p.fullName||w.fullName||[p.firstName,p.middleName,p.lastName].filter(Boolean).join(" ")||[w.firstName,w.middleName,w.lastName].filter(Boolean).join(" ")||child.key;
+          const phone = p.phone||w.phone||w.phoneNumber||"";
+          driversById[child.key]={id:child.key,name:String(full).trim(),phone:String(phone||"").trim()};
+        });
+      }
+      return Object.values(driversById);
+    }
+
+    async function fallbackChooseDriver(){
+      const drivers = await loadDriversForFallback();
+      if(!drivers.length) return null;
+      const top = drivers.slice(0, 25);
+      const lines = top.map((d,i)=>`${i+1}. ${d.name}${d.phone?` (${d.phone})`:""}`).join("\n");
+      const pick = window.prompt("Chagua dereva kwa namba:\n"+lines+"\n\nAndika namba (mfano 1):","1");
+      if(pick===null) return null;
+      const idx = Number(pick)-1;
+      if(Number.isNaN(idx)||idx<0||idx>=top.length) return null;
+      const chosen = top[idx];
+      localStorage.setItem("somap_driver_uid", chosen.id);
+      localStorage.setItem("somap_driver_name", chosen.name);
+      return chosen;
+    }
+
+    async function autoPickDriverWithoutAuth(){
+      const drivers = await loadDriversForFallback();
+      if(!drivers.length) return null;
+
+      const hinted = state.driverHint.uid
+        ? drivers.find(d => String(d.id) === String(state.driverHint.uid))
+        : null;
+      if(hinted) return hinted;
+
+      const byName = state.driverHint.name
+        ? drivers.find(d => nName(d.name) === nName(state.driverHint.name))
+        : null;
+      if(byName) return byName;
+
+      return drivers[0];
+    }
+
+    async function initializeDashboard(){
+      setDateFromContext();
+      await loadStudents();
+      await loadBuses();
+      state.vehicleId=pickVehicle();
+      if(!state.vehicleId){
+        renderVehicle();
+        refs.ridersBody.className="placeholder";
+        refs.ridersBody.textContent="Bado hujapangiwa gari. Mwambie admin akuweke kwenye gari lako.";
+        refs.finalizeBtn.disabled=true;
+        updateAttendanceLink();
+        return;
+      }
+      localStorage.setItem("somap_vehicleId",state.vehicleId);
+      state.driverHint.vehicle = state.vehicleId;
+      renderVehicle();
+      await loadAssignments(state.vehicleId);
+      await loadAttendance();
+      await loadLedgers();
+      updateAttendanceLink();
+      render();
+    }
+
     async function boot(){
+      hydrateDriverHintFromQueryAndStorage();
       firebase.auth().onAuthStateChanged(async user=>{
-        if(!user){refs.welcome.textContent="Ingia kwanza kama dereva.";refs.vehicleName.textContent="No access";refs.ridersBody.className="placeholder";refs.ridersBody.textContent="Hakuna session ya dereva.";return;}
+        if(!user){
+          state.role="driver";
+          let fallback = null;
+          if (state.driverHint.uid || state.driverHint.name) {
+            fallback = { id: state.driverHint.uid || "driver-local", name: state.driverHint.name || "Dereva" };
+          } else {
+            fallback = await autoPickDriverWithoutAuth();
+            if (!fallback) fallback = await fallbackChooseDriver();
+          }
+          if(!fallback){
+            refs.welcome.textContent="Hakuna session ya dereva na hakuna driver records.";
+            refs.vehicleName.textContent="No access";
+            refs.ridersBody.className="placeholder";
+            refs.ridersBody.textContent="Weka dereva kwanza kwenye workers/buses.";
+            return;
+          }
+          state.driverHint.uid = fallback.id || state.driverHint.uid;
+          state.driverHint.name = fallback.name || state.driverHint.name;
+          localStorage.setItem("somap_driver_uid", state.driverHint.uid || "");
+          localStorage.setItem("somap_driver_name", state.driverHint.name || "");
+          state.profile = { role: "driver", fullName: state.driverHint.name || "Dereva" };
+          refs.welcome.innerHTML=`Karibu <strong>${esc(state.profile.fullName)}</strong> | ${esc(state.context.schoolName||state.context.school||"School")} | Year ${esc(state.context.year)}`;
+          try { await initializeDashboard(); } catch(err){ console.error(err); refs.ridersBody.className="placeholder"; refs.ridersBody.textContent="Imeshindikana kupakia taarifa. Jaribu refresh."; toast("Imeshindikana kupakia taarifa",true); }
+          return;
+        }
         state.user=user;
         try {
           const [pSnap,rSnap,dSnap]=await Promise.all([firebase.database().ref(`users/${user.uid}`).get(),firebase.database().ref(`users/${user.uid}/role`).get(),firebase.database().ref(TransportHelpers.paths.deviceVehicle(user.uid)).get().catch(()=>({val:()=>""}))]);
@@ -268,9 +404,11 @@
           const name=state.profile.fullName||state.profile.name||user.displayName||"Dereva";
           refs.welcome.innerHTML=`Karibu <strong>${esc(name)}</strong> | ${esc(state.context.schoolName||state.context.school||"School")} | Year ${esc(state.context.year)}`;
           if(dSnap&&typeof dSnap.val==="function"){const m=dSnap.val();if(m)localStorage.setItem("somap_vehicleId",m);}
-          setDateFromContext();await loadStudents();await loadBuses();state.vehicleId=pickVehicle();
-          if(!state.vehicleId){renderVehicle();refs.ridersBody.className="placeholder";refs.ridersBody.textContent="Bado hujapangiwa gari. Mwambie admin akuweke kwenye gari lako.";refs.finalizeBtn.disabled=true;updateAttendanceLink();return;}
-          localStorage.setItem("somap_vehicleId",state.vehicleId);renderVehicle();await loadAssignments(state.vehicleId);await loadAttendance();await loadLedgers();updateAttendanceLink();render();
+          state.driverHint.uid = user.uid;
+          state.driverHint.name = name;
+          localStorage.setItem("somap_driver_uid", user.uid);
+          localStorage.setItem("somap_driver_name", name);
+          await initializeDashboard();
         } catch(err){console.error(err);refs.ridersBody.className="placeholder";refs.ridersBody.textContent="Imeshindikana kupakia taarifa. Jaribu refresh.";toast("Imeshindikana kupakia taarifa",true);}
       });
     }
