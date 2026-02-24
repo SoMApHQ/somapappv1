@@ -191,7 +191,14 @@
       const items=[];const school=state.context.school;const year=String(state.context.year||"");
       const paths=[`transport/${school}/${year}/buses`,`schools/${school}/years/${year}/transport/buses`];
       if(isSoc()){paths.push(`transport/socrates-school/${year}/buses`,`transport/socrates/${year}/buses`);}paths.push(`transport/-O_HndQaeuNugluTYPdp/${year}/buses`);
-      for(const p of paths){const s=await firebase.database().ref(p).get();if(!s.exists())continue;const v=s.val();if(!v||typeof v!=="object")continue;Object.keys(v).forEach(id=>items.push({id,...(v[id]||{})}));if(items.length)break;}
+      for(const p of paths){
+        let s=null;
+        try { s=await firebase.database().ref(p).get(); } catch(_err) { continue; }
+        if(!s||!s.exists())continue;
+        const v=s.val();if(!v||typeof v!=="object")continue;
+        Object.keys(v).forEach(id=>items.push({id,...(v[id]||{})}));
+        if(items.length)break;
+      }
       items.sort((a,b)=>String(a.alias||a.name||a.plate||a.id||"").toLowerCase().localeCompare(String(b.alias||b.name||b.plate||b.id||"").toLowerCase()));
       state.buses=items;
     }
@@ -224,21 +231,29 @@
     }
 
     async function loadStudents(){
-      const sMap={};const paths=["students"];
-      if(state.context.school){paths.push(`schools/${state.context.school}/students`,`schools/${state.context.school}/years/${state.context.year}/students`);}if(isSoc())paths.push(`years/${state.context.year}/students`);
-      for(const p of paths){const s=await firebase.database().ref(p).get();if(!s.exists())continue;s.forEach(c=>{if(!sMap[c.key])sMap[c.key]=c.val()||{};});}
+      const sMap={};const paths=[];
+      if(state.context.school){paths.push(`schools/${state.context.school}/years/${state.context.year}/students`,`schools/${state.context.school}/students`);}
+      if(isSoc())paths.push(`years/${state.context.year}/students`);
+      paths.push("students");
+      for(const p of paths){
+        let s=null;
+        try { s=await firebase.database().ref(p).get(); } catch(_err) { continue; }
+        if(!s||!s.exists())continue;
+        s.forEach(c=>{if(!sMap[c.key])sMap[c.key]=c.val()||{};});
+      }
       state.students=sMap;
     }
 
     async function loadAllEnrollments(){
       const year=String(state.context.year),school=state.context.school,valid=[school,"socrates-school","socrates","default","-O_HndQaeuNugluTYPdp","HndQaeuNugluTYPdp"];
+      const safeGet = (path) => firebase.database().ref(path).get().catch(()=>({exists:()=>false,val:()=>null,forEach:()=>{}}));
       const [enS,enL,asS,asL,reS,reL]=await Promise.all([
-        firebase.database().ref(`schools/${school}/years/${year}/transportEnrollments`).get(),
-        isSoc()?firebase.database().ref("transport_enrollments").get():Promise.resolve({exists:()=>false}),
-        firebase.database().ref(`schools/${school}/years/${year}/transportAssignments`).get(),
-        isSoc()?firebase.database().ref(`transportAssignments/${year}`).get():Promise.resolve({exists:()=>false}),
-        firebase.database().ref(`schools/${school}/years/${year}/transportRegistry`).get().catch(()=>({exists:()=>false})),
-        isSoc()?firebase.database().ref(`transportRegistry/${year}`).get().catch(()=>({exists:()=>false})):Promise.resolve({exists:()=>false})
+        safeGet(`schools/${school}/years/${year}/transportEnrollments`),
+        isSoc()?safeGet("transport_enrollments"):Promise.resolve({exists:()=>false,val:()=>null,forEach:()=>{}}),
+        safeGet(`schools/${school}/years/${year}/transportAssignments`),
+        isSoc()?safeGet(`transportAssignments/${year}`):Promise.resolve({exists:()=>false,val:()=>null,forEach:()=>{}}),
+        safeGet(`schools/${school}/years/${year}/transportRegistry`),
+        isSoc()?safeGet(`transportRegistry/${year}`):Promise.resolve({exists:()=>false,val:()=>null,forEach:()=>{}})
       ]);
       const en={};
       if(enS.exists())enS.forEach(c=>{const v=c.val();if(v)en[c.key]={...v,studentId:c.key};});
@@ -400,7 +415,6 @@
     async function initializeDashboard(){
       setDateFromContext();
       setYearSelectFromContext();
-      await loadStudents();
       await loadBuses();
       state.vehicleId=pickVehicle();
       if(!state.vehicleId){
@@ -414,6 +428,7 @@
       localStorage.setItem("somap_vehicleId",state.vehicleId);
       state.driverHint.vehicle = state.vehicleId;
       renderVehicle();
+      await loadStudents();
       await loadAssignments(state.vehicleId);
       await loadAttendance();
       await loadLedgers();
