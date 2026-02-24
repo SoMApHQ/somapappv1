@@ -345,6 +345,48 @@
     const detailContent = document.getElementById('detailContent');
 
     const schoolRef = (path) => db.ref(SOMAP.P(path));
+    const isSocrates = () => String(school?.id || '').toLowerCase().includes('socrates');
+
+    async function loadStudentsFromFirebase() {
+      if (!db) return;
+      try {
+        const [baseSnap, enrollSnap] = await Promise.all([
+          schoolRef('students').once('value'),
+          schoolRef(`enrollments/${year}`).once('value'),
+        ]);
+        let baseStudents = baseSnap.val() || {};
+        let enrollments = enrollSnap.val() || {};
+        if (isSocrates()) {
+          try {
+            const [legacyBase, legacyEnroll] = await Promise.all([
+              db.ref('students').once('value'),
+              db.ref(`enrollments/${year}`).once('value'),
+            ]);
+            baseStudents = { ...(legacyBase.val() || {}), ...baseStudents };
+            enrollments = { ...(legacyEnroll.val() || {}), ...enrollments };
+          } catch (_) {}
+        }
+        const ids = new Set([...Object.keys(baseStudents), ...Object.keys(enrollments)]);
+        ids.forEach((id) => {
+          const base = baseStudents[id] || {};
+          const enroll = enrollments[id] || {};
+          const adm = String(base.admissionNumber || base.admissionNo || enroll.admissionNumber || enroll.admissionNo || id).trim();
+          const fullName = `${base.firstName || ''} ${base.middleName || ''} ${base.lastName || ''}`.replace(/\s+/g, ' ').trim();
+          const classLevel = enroll.className || enroll.classLevel || base.classLevel || base.class || '';
+          const parentContact = String(base.primaryParentContact || base.parentPhone || base.guardianPhone || base.contact || enroll.parentPhone || enroll.guardianPhone || '').trim();
+          const rec = { _fullName: fullName || undefined, classLevel, parentContact, admissionNumber: adm };
+          if (!students[id]) students[id] = rec;
+          if (adm) {
+            const existing = studentsByAdmission[adm];
+            const merged = { ...(existing || {}), ...rec };
+            if (fullName) merged._fullName = fullName;
+            studentsByAdmission[adm] = merged;
+          }
+        });
+      } catch (err) {
+        console.warn('Extend hub: Firebase student load failed', err?.message);
+      }
+    }
 
     function resolveStudentForRow(row) {
       const sid = String(row.studentId || '').trim();
@@ -614,8 +656,6 @@
         const cls = String(row?.classLevel || '').trim().toUpperCase();
         return cls !== 'GRADUATED';
       });
-      students = {};
-      studentsByAdmission = {};
       rows.forEach((row) => {
         const id = String(row?.id || '').trim();
         if (!id) return;
@@ -635,6 +675,7 @@
     }
 
     async function loadExtensions() {
+      if (!db) return;
       const snap = await schoolRef(`financeDeadlineExtensions/${year}`).once('value');
       extensionsByStudent = snap.val() || {};
       computeStats();
@@ -912,16 +953,32 @@
       populateYearSelector();
       hubMeta.textContent = `${school.name || school.id} | Academic Year ${year}`;
 
+      showDetailPlaceholder();
+      historyBody.innerHTML = '<tr><td colspan="8" class="muted">Loading...</td></tr>';
+
+      const frame = document.getElementById('financeBridge');
+      if (frame) {
+        frame.src = `../finance.html?year=${encodeURIComponent(year)}&bridge=1`;
+      }
+
       try {
-        await ensureFinanceBridge();
-        await loadStudents();
-        await loadExtensions();
+        await Promise.all([loadExtensions(), loadStudentsFromFirebase()]);
       } catch (err) {
         console.warn(err);
       }
-      showDetailPlaceholder();
       renderAllHistory();
       renderSearchResults();
+
+      (async function loadFinanceInBackground() {
+        try {
+          await ensureFinanceBridge();
+          await loadStudents();
+          renderAllHistory();
+          renderSearchResults();
+        } catch (err) {
+          console.warn('Finance bridge:', err?.message);
+        }
+      })();
 
       searchInput.addEventListener('input', renderSearchResults);
       document.getElementById('saveExtensionBtn').addEventListener('click', saveExtension);
@@ -943,15 +1000,22 @@
         resolvedExtensionStudents = {};
         showDetailPlaceholder();
         debtCards.style.display = 'none';
+        historyBody.innerHTML = '<tr><td colspan="8" class="muted">Loading...</td></tr>';
         try {
-          await ensureFinanceBridge();
-          await loadStudents();
-          await loadExtensions();
+          await Promise.all([loadExtensions(), loadStudentsFromFirebase()]);
         } catch (err) {
           console.warn(err);
         }
         renderAllHistory();
         renderSearchResults();
+        try {
+          await ensureFinanceBridge();
+          await loadStudents();
+          renderAllHistory();
+          renderSearchResults();
+        } catch (err) {
+          console.warn('Finance bridge:', err?.message);
+        }
       });
 
       if (window.somapYearContext?.onYearChanged) {
@@ -972,11 +1036,18 @@
           resolvedExtensionStudents = {};
           showDetailPlaceholder();
           debtCards.style.display = 'none';
-          await ensureFinanceBridge();
-          await loadStudents();
-          await loadExtensions();
+          historyBody.innerHTML = '<tr><td colspan="8" class="muted">Loading...</td></tr>';
+          await Promise.all([loadExtensions(), loadStudentsFromFirebase()]);
           renderAllHistory();
           renderSearchResults();
+          try {
+            await ensureFinanceBridge();
+            await loadStudents();
+            renderAllHistory();
+            renderSearchResults();
+          } catch (err) {
+            console.warn('Finance bridge:', err?.message);
+          }
         });
       }
     }
