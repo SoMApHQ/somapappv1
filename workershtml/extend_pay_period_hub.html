@@ -198,6 +198,8 @@
             <thead>
               <tr>
                 <th>Child</th>
+                <th>Class</th>
+                <th>Contact</th>
                 <th>Date</th>
                 <th>From</th>
                 <th>To</th>
@@ -206,7 +208,7 @@
               </tr>
             </thead>
             <tbody id="historyBody">
-              <tr><td colspan="6" class="muted">Loading...</td></tr>
+              <tr><td colspan="8" class="muted">Loading...</td></tr>
             </tbody>
           </table>
         </div>
@@ -309,7 +311,9 @@
     let school = null;
     let year = String(window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear());
     let students = {};
+    let studentsByAdmission = {};
     let extensionsByStudent = {};
+    let resolvedExtensionStudents = {};
     let selected = null;
     let selectedSummary = null;
     let selectedHistoryRecord = null;
@@ -342,14 +346,38 @@
 
     const schoolRef = (path) => db.ref(SOMAP.P(path));
 
+    function resolveStudentForRow(row) {
+      const sid = String(row.studentId || '').trim();
+      const adm = String(row.admissionNumber || '').trim();
+      const cacheKey = sid || adm;
+      const fromCache = cacheKey ? resolvedExtensionStudents[cacheKey] : null;
+      const fromRow = row.fullName ? { _fullName: row.fullName, classLevel: row.classLevel, parentContact: row.parentContact } : null;
+      const fromStudents = students[sid] || (adm ? studentsByAdmission[adm] : null) || (sid ? studentsByAdmission[sid] : null);
+      return fromCache || fromRow || fromStudents;
+    }
+
     function getChildName(row) {
       const name = String(row.fullName || '').trim();
       if (name) return name;
-      const sid = String(row.studentId || '').trim();
+      const s = resolveStudentForRow(row);
+      if (s) return s._fullName || getFullName(s);
       const adm = String(row.admissionNumber || '').trim();
-      const student = students[sid] || (adm ? Object.values(students).find((s) => String(s?.admissionNumber || '').trim() === adm) : null);
-      if (student) return getFullName(student);
+      const sid = String(row.studentId || '').trim();
       return adm || sid || 'Unknown';
+    }
+
+    function getStudentClass(row) {
+      const c = String(row.classLevel || '').trim();
+      if (c) return c;
+      const s = resolveStudentForRow(row);
+      return s ? (s.classLevel || s.className || '-') : '-';
+    }
+
+    function getStudentContact(row) {
+      const c = String(row.parentContact || row.parentPhone || '').trim();
+      if (c) return c;
+      const s = resolveStudentForRow(row);
+      return s ? (s.parentContact || s.primaryParentContact || s.parentPhone || s.guardianPhone || '-') : '-';
     }
 
     function getFullName(student) {
@@ -395,21 +423,25 @@
       const flat = flattenExtensions(extensionsByStudent)
         .sort((a, b) => Number(b.createdAt || b.approvedAt || 0) - Number(a.createdAt || a.approvedAt || 0));
       if (!flat.length) {
-        historyBody.innerHTML = '<tr><td colspan="6" class="muted">No extension agreements yet for this year.</td></tr>';
+        historyBody.innerHTML = '<tr><td colspan="8" class="muted">No extension agreements yet for this year.</td></tr>';
         return;
       }
       historyBody.innerHTML = flat.map((row, idx) => {
         const status = String(row.status || 'approved');
         const statusClass = status.toLowerCase() === 'approved' ? 'ok' : (status.toLowerCase() === 'rejected' ? 'danger' : '');
         const childName = getChildName(row);
+        const cls = getStudentClass(row);
+        const contact = getStudentContact(row);
         const isSelected = selectedHistoryRecord && selectedHistoryRecord.id === row.id && String(selectedHistoryRecord.studentId || '') === String(row.studentId || '');
         return `<tr class="history-row ${isSelected ? 'selected' : ''}" data-idx="${idx}" data-row-id="${row.id}" data-student-id="${row.studentId || ''}">
-          <td><strong>${String(childName).slice(0, 40)}</strong></td>
+          <td><strong>${String(childName).slice(0, 35)}</strong></td>
+          <td>${cls}</td>
+          <td>${String(contact).slice(0, 15)}</td>
           <td>${fmtDate(row.createdAt || row.approvedAt)}</td>
           <td>${fmtDate(row.oldDeadlineTs)}</td>
           <td>${fmtDate(row.newDeadlineTs)}</td>
           <td class="${statusClass}">${status}</td>
-          <td>${String(row.headteacherReason || row.parentReason || '-').slice(0, 80)}</td>
+          <td>${String(row.headteacherReason || row.parentReason || '-').slice(0, 60)}</td>
         </tr>`;
       }).join('');
       historyBody.querySelectorAll('.history-row').forEach((el) => {
@@ -428,6 +460,32 @@
           }
         });
       });
+
+      enrichUnknownStudents(flat);
+    }
+
+    async function enrichUnknownStudents(flat) {
+      const toFetch = flat.filter((row) => getChildName(row) === 'Unknown');
+      if (!toFetch.length) return;
+      for (const row of toFetch) {
+        const sid = String(row.studentId || '').trim();
+        const adm = String(row.admissionNumber || '').trim();
+        const key = sid || adm;
+        if (!key || resolvedExtensionStudents[key]) continue;
+        try {
+          const summary = await fetchFinanceSummary(sid || adm);
+          if (summary && summary.fullName) {
+            resolvedExtensionStudents[key] = {
+              _fullName: summary.fullName,
+              classLevel: summary.classLevel || '',
+              parentContact: summary.parentContact || '',
+            };
+            if (adm) resolvedExtensionStudents[adm] = resolvedExtensionStudents[key];
+            if (sid) resolvedExtensionStudents[sid] = resolvedExtensionStudents[key];
+            renderAllHistory();
+          }
+        } catch (_) {}
+      }
     }
 
     function showDetailPlaceholder() {
@@ -448,10 +506,14 @@
       detailForm.style.display = 'none';
       detailView.style.display = 'block';
       const childName = getChildName(row);
+      const cls = getStudentClass(row);
+      const contact = getStudentContact(row);
       detailContent.innerHTML = `
         <div class="ibox" style="margin-bottom:10px;"><div class="k">Child</div><div class="n">${childName}</div></div>
         <div class="ibox" style="margin-bottom:10px;"><div class="k">Admission No</div><div class="n">${row.admissionNumber || row.studentId || '-'}</div></div>
-        <div class="ibox" style="margin-bottom:10px;"><div class="k">Class</div><div class="n">${row.classLevel || '-'}</div></div>
+        <div class="ibox" style="margin-bottom:10px;"><div class="k">Class</div><div class="n">${cls}</div></div>
+        <div class="ibox" style="margin-bottom:10px;"><div class="k">Parent/Guardian Contact</div><div class="n">${contact}</div></div>
+        <div class="ibox" style="margin-bottom:10px;"><div class="k">Year</div><div class="n">${row.year || year}</div></div>
         <div class="ibox" style="margin-bottom:10px;"><div class="k">Debt Amount</div><div class="n">${fmtNum(row.debtAmount || 0)}</div></div>
         <div class="ibox" style="margin-bottom:10px;"><div class="k">Old Deadline</div><div class="n">${fmtDate(row.oldDeadlineTs)}</div></div>
         <div class="ibox" style="margin-bottom:10px;"><div class="k">New Deadline</div><div class="n">${fmtDate(row.newDeadlineTs)}</div></div>
@@ -553,17 +615,22 @@
         return cls !== 'GRADUATED';
       });
       students = {};
+      studentsByAdmission = {};
       rows.forEach((row) => {
         const id = String(row?.id || '').trim();
         if (!id) return;
-        students[id] = {
+        const adm = String(row?.admissionNumber || id).trim();
+        const rec = {
           firstName: '',
           middleName: '',
           lastName: '',
           classLevel: row.classLevel || '',
-          admissionNumber: row.admissionNumber || id,
+          admissionNumber: adm,
           _fullName: row.fullName || '',
+          parentContact: row.parentContact || '',
         };
+        students[id] = rec;
+        if (adm) studentsByAdmission[adm] = rec;
       });
     }
 
@@ -608,7 +675,7 @@
         el.addEventListener('click', async () => {
           const id = el.getAttribute('data-id');
           const student = students[id] || {};
-          selected = { id, student, admission: admissionOf(student, id), fullName: getFullName(student) };
+          selected = { id, student, admission: admissionOf(student, id), fullName: student._fullName || getFullName(student) };
           selectedHistoryRecord = null;
           await refreshSelectedStudent();
           renderSearchResults();
@@ -631,9 +698,11 @@
       const debtTill = selectedSummary?.periodDebtLabel || '-';
       const used = approvedCountForStudent(selected.id, selected.admission);
       const blocked = used >= MAX_EXTENSIONS_PER_YEAR;
+      const parentContact = selectedSummary?.parentContact || selected.student?.parentContact || '-';
       studentInfo.innerHTML = `
         <div><strong>${selected.fullName}</strong> (${selected.admission || selected.id})</div>
         <div class="muted">Class: ${selectedSummary?.classLevel || selected.student.classLevel || '-'}</div>
+        <div class="muted">Parent contact: ${parentContact}</div>
         ${blocked ? '<div class="badge badge-bad" style="margin-top:6px;">Limit reached: 5 approved extensions this year</div>' : '<div class="badge badge-good" style="margin-top:6px;">Eligible for extension</div>'}
       `;
       debtCards.style.display = 'grid';
@@ -692,6 +761,7 @@
         headteacherReason: headteacherReason.value.trim(),
         managementConsulted: managementConsulted.value,
         parentName: parentName.value.trim(),
+        parentContact: selectedSummary?.parentContact || '',
         requestedBy: 'Parent/Guardian',
         status: 'approved',
         approvedByWorkerId: selectedWorkerId || 'headteacher',
@@ -731,6 +801,9 @@
           ['Admission No', payload.admissionNumber],
           ['Child Name', payload.fullName],
           ['Class', payload.classLevel || '-'],
+          ['Year', payload.year || year],
+          ['Parent/Guardian Name', payload.parentName || '-'],
+          ['Parent/Guardian Contact', payload.parentContact || '-'],
           ['Debt Amount', fmtNum(payload.debtAmount)],
           ['Old Deadline', fmtDate(payload.oldDeadlineTs)],
           ['New Deadline', fmtDate(payload.newDeadlineTs)],
@@ -738,7 +811,6 @@
           ['Parent Explanation', payload.parentReason],
           ['Headteacher Notes', payload.headteacherReason],
           ['Management Consulted', payload.managementConsulted],
-          ['Parent/Guardian Name', payload.parentName || '-'],
         ];
         doc.autoTable({
           startY: 33,
@@ -771,16 +843,21 @@
         const doc = new jsPDF();
         const schoolName = school?.name || school?.id || 'School';
         const childName = getChildName(row);
+        const cls = getStudentClass(row);
+        const contact = getStudentContact(row);
         doc.setFontSize(14);
         doc.text(`${schoolName} - School Fee Extension Agreement`, 14, 14);
         doc.setFontSize(10);
-        doc.text(`Academic Year: ${year}`, 14, 21);
+        doc.text(`Academic Year: ${row.year || year}`, 14, 21);
         doc.text(`Generated: ${new Date().toLocaleString('en-US', { timeZone: 'Africa/Nairobi' })}`, 14, 27);
 
         const body = [
           ['Admission No', row.admissionNumber || row.studentId || '-'],
           ['Child Name', childName],
-          ['Class', row.classLevel || '-'],
+          ['Class', cls],
+          ['Year', row.year || year],
+          ['Parent/Guardian Name', row.parentName || '-'],
+          ['Parent/Guardian Contact', contact],
           ['Debt Amount', fmtNum(row.debtAmount || 0)],
           ['Old Deadline', fmtDate(row.oldDeadlineTs)],
           ['New Deadline', fmtDate(row.newDeadlineTs)],
@@ -788,7 +865,6 @@
           ['Parent Explanation', row.parentReason || '-'],
           ['Headteacher Notes', row.headteacherReason || '-'],
           ['Management Consulted', row.managementConsulted || '-'],
-          ['Parent/Guardian Name', row.parentName || '-'],
           ['Status', row.status || 'approved'],
         ];
         doc.autoTable({
@@ -837,7 +913,9 @@
       hubMeta.textContent = `${school.name || school.id} | Academic Year ${year}`;
 
       try {
-        await Promise.all([loadStudents(), loadExtensions(), ensureFinanceBridge()]);
+        await ensureFinanceBridge();
+        await loadStudents();
+        await loadExtensions();
       } catch (err) {
         console.warn(err);
       }
@@ -861,10 +939,14 @@
         selectedSummary = null;
         selectedHistoryRecord = null;
         students = {};
+        studentsByAdmission = {};
+        resolvedExtensionStudents = {};
         showDetailPlaceholder();
         debtCards.style.display = 'none';
         try {
-          await Promise.all([loadStudents(), loadExtensions(), ensureFinanceBridge()]);
+          await ensureFinanceBridge();
+          await loadStudents();
+          await loadExtensions();
         } catch (err) {
           console.warn(err);
         }
@@ -886,9 +968,13 @@
           selectedSummary = null;
           selectedHistoryRecord = null;
           students = {};
+          studentsByAdmission = {};
+          resolvedExtensionStudents = {};
           showDetailPlaceholder();
           debtCards.style.display = 'none';
-          await Promise.all([loadStudents(), loadExtensions(), ensureFinanceBridge()]);
+          await ensureFinanceBridge();
+          await loadStudents();
+          await loadExtensions();
           renderAllHistory();
           renderSearchResults();
         });
