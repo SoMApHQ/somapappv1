@@ -470,23 +470,30 @@
 
     async function loadRequests() {
       const path = `expenseApprovals/${state.year}`;
-      let snap = await schoolRef(path).once('value');
-      let data = snap.val() || {};
+      const sid = state.school?.id || inferSchool()?.id;
+      const isSocrates = isSocratesLegacy(sid);
       state.expenseApprovalsUseRoot = false;
       state.expenseApprovalsUseSchoolsSocrates = false;
-      if (Object.keys(data).length === 0 && isSocratesLegacy(state.school?.id || inferSchool()?.id)) {
-        snap = await rootRef(path).once('value');
-        data = snap.val() || {};
-        state.expenseApprovalsUseRoot = Object.keys(data).length > 0;
+
+      // Try paths in order: for Socrates, root first (finance writes via SOMAP.P = root path)
+      const tryOrder = isSocrates
+        ? [rootRef(path), schoolsSocratesRef(path), schoolRef(path)]
+        : [schoolRef(path), rootRef(path)];
+      const tryOrderKeys = isSocrates ? ['root', 'socrates', 'school'] : ['school', 'root'];
+
+      for (let i = 0; i < tryOrder.length; i++) {
+        try {
+          const snap = await tryOrder[i].once('value');
+          const val = snap.val();
+          if (val && typeof val === 'object' && !Array.isArray(val) && Object.keys(val).length > 0) {
+            state.requests = val;
+            if (tryOrderKeys[i] === 'root') state.expenseApprovalsUseRoot = true;
+            if (tryOrderKeys[i] === 'socrates') state.expenseApprovalsUseSchoolsSocrates = true;
+            return;
+          }
+        } catch (_) {}
       }
-      if (Object.keys(data).length === 0 && isSocratesLegacy(state.school?.id || inferSchool()?.id)) {
-        snap = await schoolsSocratesRef(path).once('value');
-        data = snap.val() || {};
-        if (Object.keys(data).length > 0) {
-          state.expenseApprovalsUseSchoolsSocrates = true;
-        }
-      }
-      state.requests = data;
+      state.requests = {};
     }
 
     function expenseApprovalRef(id) {
