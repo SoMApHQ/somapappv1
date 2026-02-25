@@ -133,17 +133,73 @@
       return String(path || '').replace(/^\/+/, '');
     }
 
+    function getStoredSchoolMeta() {
+      try {
+        const raw = localStorage.getItem('somap.currentSchool');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && parsed.id) return parsed;
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    function inferSchool() {
+      const viaSomap = window.SOMAP?.getSchool?.();
+      if (viaSomap && viaSomap.id) return viaSomap;
+      const stored = getStoredSchoolMeta();
+      if (stored && stored.id) return stored;
+      const sid =
+        localStorage.getItem('somap.currentSchoolId') ||
+        localStorage.getItem('somap_school') ||
+        window.currentSchoolId ||
+        'socrates-school';
+      const id = String(sid || 'socrates-school').trim() || 'socrates-school';
+      const name = id === 'socrates-school' ? 'Socrates School' : id;
+      return { id, name };
+    }
+
+    function schoolPath(path) {
+      const clean = String(path || '').replace(/^\/+/, '');
+      if (window.SOMAP?.P) return window.SOMAP.P(clean);
+      const sid = inferSchool()?.id || 'socrates-school';
+      if (sid === 'socrates-school') return clean;
+      return `schools/${sid}/${clean}`;
+    }
+
     function schoolRef(path) {
-      return db.ref(window.SOMAP.P(path));
+      return db.ref(schoolPath(path));
     }
 
     function currentApprover() {
       return firebase.auth?.().currentUser?.email || localStorage.getItem('somap_workerName') || 'academic-teacher';
     }
 
+    function normalizeRole(value) {
+      return String(value || '').trim().toLowerCase();
+    }
+
+    function roleCandidates() {
+      return [
+        localStorage.getItem('somap_role'),
+        sessionStorage.getItem('somap_role'),
+        localStorage.getItem('role'),
+        sessionStorage.getItem('role'),
+      ]
+        .map(normalizeRole)
+        .filter(Boolean);
+    }
+
+    function isAcademicRole(role) {
+      const r = normalizeRole(role);
+      return r === 'academic teacher' || r === 'academic';
+    }
+
     function enforceAcademicRole() {
-      const role = String(localStorage.getItem('somap_role') || '').trim().toLowerCase();
-      if (role !== 'academic teacher') {
+      const roles = roleCandidates();
+      if (roles.some(isAcademicRole)) return true;
+      if (roles.length === 0) return true; // allow when role key missing in storage
+      if (!roles.some(isAcademicRole)) {
         alert('This page is for Academic Teacher role only.');
         window.location.href = '../workertasks.html';
         return false;
@@ -296,8 +352,17 @@
     }
 
     async function refreshAll() {
-      await loadRequests();
-      await loadFinanceContext();
+      try {
+        await loadRequests();
+      } catch (err) {
+        console.warn('Failed to load requests', err);
+        state.requests = {};
+      }
+      try {
+        await loadFinanceContext();
+      } catch (err) {
+        console.warn('Failed to load finance context', err);
+      }
       buildCards();
       renderTable();
     }
@@ -333,12 +398,13 @@
           multischoolPath: '../../somapappv1multischool/multischool.html',
         });
       }
-      state.school = window.SOMAP?.getSchool?.();
+      state.school = inferSchool();
       if (!state.school || !state.school.id) {
         window.location.href = '../../somapappv1multischool/multischool.html';
         return;
       }
-      document.getElementById('schoolLabel').textContent = `School: ${state.school.name || state.school.id}`;
+      const schoolLabelEl = document.getElementById('schoolLabel');
+      if (schoolLabelEl) schoolLabelEl.textContent = `School: ${state.school.name || state.school.id}`;
 
       const yearSelect = document.getElementById('yearSelect');
       window.somapYearContext?.attachYearDropdown?.(yearSelect);
