@@ -178,6 +178,7 @@
       moduleExpenses: {},
       school: null,
       expenseApprovalsUseRoot: false,
+      expenseApprovalsUseSchoolsSocrates: false,
       loading: false,
       approvalUnsubscribe: null,
     };
@@ -250,8 +251,10 @@
     function schoolPath(path) {
       const clean = String(path || '').replace(/^\/+/, '');
       if (window.SOMAP?.P) {
-        const p = window.SOMAP.P(clean);
-        if (p) return p;
+        try {
+          const p = window.SOMAP.P(clean);
+          if (p) return p;
+        } catch (_) {}
       }
       const sid = inferSchool()?.id || 'socrates-school';
       if (isSocratesLegacy(sid)) return clean;
@@ -259,11 +262,17 @@
     }
 
     function schoolRef(path) {
-      return db.ref(schoolPath(path));
+      const p = schoolPath(path);
+      return db.ref(p);
     }
 
     function rootRef(path) {
       return db.ref(String(path || '').replace(/^\/+/, ''));
+    }
+
+    function schoolsSocratesRef(subpath) {
+      const clean = String(subpath || '').replace(/^\/+/, '');
+      return db.ref(clean ? `schools/socrates-school/${clean}` : 'schools/socrates-school');
     }
 
     function currentApprover() {
@@ -434,6 +443,12 @@
           rootRef(expensesPath).once('value')
         ]);
       }
+      if (useRoot && !fundingSnap.exists() && !expSnap.exists()) {
+        [fundingSnap, expSnap] = await Promise.all([
+          schoolsSocratesRef(fundingPath).once('value'),
+          schoolsSocratesRef(expensesPath).once('value')
+        ]);
+      }
       const fundingRaw = fundingSnap.val() || {};
       const expenseRaw = expSnap.val() || {};
       const fundingEntries = Array.isArray(fundingRaw)
@@ -458,17 +473,27 @@
       let snap = await schoolRef(path).once('value');
       let data = snap.val() || {};
       state.expenseApprovalsUseRoot = false;
+      state.expenseApprovalsUseSchoolsSocrates = false;
       if (Object.keys(data).length === 0 && isSocratesLegacy(state.school?.id || inferSchool()?.id)) {
         snap = await rootRef(path).once('value');
         data = snap.val() || {};
         state.expenseApprovalsUseRoot = Object.keys(data).length > 0;
+      }
+      if (Object.keys(data).length === 0 && isSocratesLegacy(state.school?.id || inferSchool()?.id)) {
+        snap = await schoolsSocratesRef(path).once('value');
+        data = snap.val() || {};
+        if (Object.keys(data).length > 0) {
+          state.expenseApprovalsUseSchoolsSocrates = true;
+        }
       }
       state.requests = data;
     }
 
     function expenseApprovalRef(id) {
       const path = `expenseApprovals/${state.year}${id ? '/' + id : ''}`;
-      return state.expenseApprovalsUseRoot ? rootRef(path) : schoolRef(path);
+      if (state.expenseApprovalsUseRoot) return rootRef(path);
+      if (state.expenseApprovalsUseSchoolsSocrates) return schoolsSocratesRef(path);
+      return schoolRef(path);
     }
 
     async function loadModuleRecordedCounts() {
@@ -482,6 +507,7 @@
           const isPreform = m.key === 'preform_one';
           let snap = isPreform ? await rootRef(p).once('value') : await schoolRef(p).once('value');
           if (!isPreform && useRoot && !snap.exists()) snap = await rootRef(p).once('value');
+          if (!isPreform && useRoot && !snap.exists()) snap = await schoolsSocratesRef(p).once('value');
           const val = snap.val();
           const count = Array.isArray(val) ? val.filter(Boolean).length : (val ? Object.keys(val).length : 0);
           state.recordedByModule[m.key] = count;
@@ -502,6 +528,7 @@
           const isPreform = m.key === 'preform_one';
           let snap = isPreform ? await rootRef(p).once('value') : await schoolRef(p).once('value');
           if (!isPreform && useRoot && !snap.exists()) snap = await rootRef(p).once('value');
+          if (!isPreform && useRoot && !snap.exists()) snap = await schoolsSocratesRef(p).once('value');
           const val = snap.val();
           const entries = Array.isArray(val) ? val.filter(Boolean) : (val ? Object.entries(val).map(([id, row]) => ({ id, ...row })) : []);
           state.moduleExpenses[m.key] = entries;
@@ -651,7 +678,10 @@
         state.approvalUnsubscribe = null;
       }
       const path = `expenseApprovals/${state.year}`;
-      const ref = state.expenseApprovalsUseRoot ? rootRef(path) : schoolRef(path);
+      let ref;
+      if (state.expenseApprovalsUseRoot) ref = rootRef(path);
+      else if (state.expenseApprovalsUseSchoolsSocrates) ref = schoolsSocratesRef(path);
+      else ref = schoolRef(path);
       state.approvalUnsubscribe = ref.on('value', (snap) => {
         const data = snap.val() || {};
         state.requests = data;
