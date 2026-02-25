@@ -1,64 +1,147 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <title>SoMAp — Preform One Expenses</title>
-  <!-- Same -->
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SoMAp - Preform One Expenses</title>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="../somapappv1multischool/js/context.js"></script>
+  <script src="../firebase.js"></script>
   <script src="prefonecommon.js"></script>
-  <style> body { background: linear-gradient(to right, #667eea, #764ba2); } </style>
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <style>
+    body { background: linear-gradient(to right, #667eea, #764ba2); }
+  </style>
 </head>
 <body class="min-h-screen bg-gradient-to-br from-blue-400 to-purple-600 text-white p-4">
   <div class="max-w-4xl mx-auto">
     <h1 class="text-3xl font-bold mb-6"><i class="fas fa-receipt"></i> Preform One Expenses</h1>
     <a href="prefonefinance.html" class="bg-gray-500 p-2 rounded mb-4 inline-block">< Back to Finance</a>
-    
+
     <select id="category" class="p-2 rounded bg-white/20 text-white mb-4">
       <option>FOOD</option><option>SALARIES</option><option>OFFICE</option><option>EDUCATION</option><option>WATER & ELECTRICITY</option>
-      <!-- Add all from user: SANITATION, etc. -->
+      <option>SANITATION</option><option>HEALTH</option><option>TRANSPORT</option><option>BOOKS</option><option>MISCELLANEOUS</option>
     </select>
     <input type="text" id="desc" placeholder="Description" class="p-2 rounded bg-white/20 text-white mb-4">
     <input type="number" id="amount" placeholder="Amount" class="p-2 rounded bg-white/20 text-white mb-4">
     <label><input type="checkbox" id="refundable"> Refundable?</label>
     <button onclick="addExpense()" class="bg-blue-500 p-2 rounded mb-4">Add Expense</button>
-    
+
     <table class="w-full bg-white/10 rounded">
       <thead><tr class="bg-white/20"><th>Category</th><th>Description</th><th>Amount</th><th>Date</th><th>Refundable</th></tr></thead>
       <tbody id="expBody"></tbody>
     </table>
-    
+
     <button onclick="exportExpenses()" class="bg-green-500 p-2 rounded mt-4">Download Report (CSV/PDF)</button>
   </div>
 
   <script>
+    const db = window.db || firebase.database();
+
+    function normalizePath(path) {
+      return String(path || '').replace(/^\/+/, '');
+    }
+
+    function getCurrentSchool() {
+      try {
+        if (window.SOMAP?.init) {
+          window.SOMAP.init({
+            db,
+            allowQuerySchoolParam: true,
+            redirectIfMissingSchool: false,
+          });
+        }
+      } catch (_) {}
+      const school = window.SOMAP?.getSchool?.();
+      if (school && school.id) return school;
+      return { id: 'socrates-school', name: 'Socrates School' };
+    }
+
+    function preformExpensePath(year) {
+      const school = getCurrentSchool();
+      const schoolName = String(school?.name || 'Socrates School').trim() || 'Socrates School';
+      return `schools/${schoolName} Preform one/${year}/expenses`;
+    }
+
+    function approvalQueuePath(year) {
+      const y = String(year || currentYear || new Date().getFullYear());
+      if (window.SOMAP?.P) return window.SOMAP.P(`expenseApprovals/${y}`);
+      return `expenseApprovals/${y}`;
+    }
+
+    function currentRequester() {
+      return firebase.auth?.().currentUser?.email || 'preform-accountant';
+    }
+
     function addExpense() {
       const cat = document.getElementById('category').value;
-      const desc = document.getElementById('desc').value;
-      const amt = parseInt(document.getElementById('amount').value);
+      const desc = document.getElementById('desc').value.trim();
+      const amt = parseInt(document.getElementById('amount').value, 10);
       const ref = document.getElementById('refundable').checked;
       const date = new Date().toISOString().split('T')[0];
-      db.ref(`/schools/Socrates School Preform one/${currentYear}/expenses`).push({ category: cat, description: desc, amount: amt, date, refundable: ref }).then(() => {
-        Swal.fire('Added!', 'Expense recorded.', 'success');
-        document.getElementById('desc').value = ''; document.getElementById('amount').value = ''; document.getElementById('refundable').checked = false;
+
+      if (!cat || !desc || !amt || amt <= 0) {
+        Swal.fire('Missing data', 'Enter category, description, and amount.', 'warning');
+        return;
+      }
+
+      const school = getCurrentSchool();
+      const requester = currentRequester();
+      const targetPayload = {
+        category: cat,
+        description: desc,
+        amount: amt,
+        date,
+        refundable: ref,
+        createdBy: requester,
+        createdAt: Date.now(),
+      };
+
+      const approvalPayload = {
+        module: 'preform_one',
+        moduleLabel: 'Preform One Expenses',
+        status: 'pending',
+        year: String(currentYear),
+        schoolId: school?.id || '',
+        schoolName: school?.name || 'Socrates School',
+        requestedAt: firebase.database.ServerValue.TIMESTAMP,
+        requestedBy: requester,
+        amount: Number(amt) || 0,
+        category: String(cat || ''),
+        description: String(desc || ''),
+        expenseDate: date,
+        targetPath: preformExpensePath(currentYear),
+        targetPayload,
+      };
+
+      db.ref(normalizePath(approvalQueuePath(currentYear))).push(approvalPayload).then(() => {
+        Swal.fire('Submitted!', 'Expense sent for Academic Teacher approval.', 'success');
+        document.getElementById('desc').value = '';
+        document.getElementById('amount').value = '';
+        document.getElementById('refundable').checked = false;
         loadExpenses();
       });
     }
-    
+
     function loadExpenses() {
-      db.ref(`/schools/Socrates School Preform one/${currentYear}/expenses`).once('value', snap => {
+      db.ref(preformExpensePath(currentYear)).once('value', snap => {
         const tbody = document.getElementById('expBody');
-        tbody.innerHTML = Object.values(snap.val() || {}).map(ex => 
+        tbody.innerHTML = Object.values(snap.val() || {}).map(ex =>
           `<tr><td>${ex.category}</td><td>${ex.description}</td><td>${ex.amount}</td><td>${ex.date}</td><td>${ex.refundable ? 'Yes' : 'No'}</td></tr>`
         ).join('');
       });
     }
-    
+
     function exportExpenses() {
-      db.ref(`/schools/Socrates School Preform one/${currentYear}/expenses`).once('value', snap => {
+      db.ref(preformExpensePath(currentYear)).once('value', snap => {
         const data = Object.values(snap.val() || {});
         exportCSV(data, 'expenses.csv');
         generatePDF('Expenses Report\n' + JSON.stringify(data, null, 2), 'expenses.pdf');
       });
     }
-    
+
     loadExpenses();
   </script>
 </body>

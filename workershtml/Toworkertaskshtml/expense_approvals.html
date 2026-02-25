@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Academic Expense Approvals</title>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="../../somapappv1multischool/js/context.js"></script>
+  <script src="../../Todashboardhtml/yearContext.js"></script>
+  <script src="../../firebase.js"></script>
+  <script src="../../js/finance_cashbook.js"></script>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --card: #111b2f;
+      --line: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --ok: #16a34a;
+      --warn: #f59e0b;
+      --bad: #dc2626;
+      --accent: #2563eb;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: radial-gradient(circle at 0% 0%, #1e293b, var(--bg)); color: var(--text); }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 20px; }
+    .top { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; justify-content: space-between; margin-bottom: 16px; }
+    .chips { display: flex; gap: 10px; flex-wrap: wrap; }
+    .chip { background: #1e293b; border: 1px solid var(--line); padding: 8px 10px; border-radius: 10px; color: var(--muted); }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; cursor: pointer; }
+    .card.active { border-color: #60a5fa; box-shadow: 0 0 0 1px #60a5fa inset; }
+    .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+    .v { font-size: 22px; font-weight: 700; margin-top: 6px; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+    select, button { background: #0f172a; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+    button.primary { background: var(--accent); border-color: #1d4ed8; }
+    button.ok { background: #14532d; border-color: #166534; }
+    button.bad { background: #7f1d1d; border-color: #991b1b; }
+    .panel { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #223047; text-align: left; padding: 10px 8px; font-size: 13px; vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+    .status { padding: 4px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+    .pending { background: #78350f; color: #fde68a; }
+    .approved { background: #14532d; color: #bbf7d0; }
+    .rejected { background: #7f1d1d; color: #fecaca; }
+    .empty { color: var(--muted); padding: 18px 0; }
+    .small { font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1 style="margin:0 0 6px 0;">Academic Expense Approvals</h1>
+        <div class="small" id="schoolLabel">School: -</div>
+      </div>
+      <div class="toolbar">
+        <label class="small" for="yearSelect">Year</label>
+        <select id="yearSelect" data-somap-year-select data-somap-year-min="2024" data-somap-year-max="2042"></select>
+        <a href="../workertasks.html"><button type="button">Back</button></a>
+      </div>
+    </div>
+
+    <div class="chips" style="margin-bottom: 14px;">
+      <div class="chip">Finance Received: <b id="financeReceived">TSh 0</b></div>
+      <div class="chip">Finance Approved Spent: <b id="financeSpent">TSh 0</b></div>
+      <div class="chip">Finance Pocket: <b id="financePocket">TSh 0</b></div>
+    </div>
+
+    <div class="cards" id="moduleCards"></div>
+
+    <div class="panel">
+      <div class="toolbar">
+        <select id="statusFilter">
+          <option value="pending">Pending only</option>
+          <option value="all">All statuses</option>
+          <option value="approved">Approved only</option>
+          <option value="rejected">Rejected only</option>
+        </select>
+        <button type="button" id="allModulesBtn">Show All Modules</button>
+        <button type="button" class="primary" id="refreshBtn">Refresh</button>
+      </div>
+      <div style="overflow:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Requested</th>
+              <th>Module</th>
+              <th>Category</th>
+              <th>Description</th>
+              <th>Amount</th>
+              <th>Status</th>
+              <th>Requested By</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div id="empty" class="empty" style="display:none;">No records for this filter.</div>
+    </div>
+  </div>
+
+  <script>
+    const db = window.db || firebase.database();
+    const state = {
+      year: String(window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear()),
+      moduleFilter: 'all',
+      statusFilter: 'pending',
+      requests: {},
+      school: null,
+    };
+
+    const MODULES = [
+      { key: 'finance', label: 'Finance Expense Approval' },
+      { key: 'remedial', label: 'Remedial Expense Approval' },
+      { key: 'transport', label: 'Transport Expense Approval' },
+      { key: 'preform_one', label: 'Preform One Expense Approval' },
+    ];
+
+    const fmt = (n) => `TSh ${(Math.round(Number(n) || 0)).toLocaleString('en-US')}`;
+    const dt = (v) => {
+      const n = Number(v || 0);
+      if (!n) return '-';
+      return new Date(n).toLocaleString();
+    };
+
+    function normalizePath(path) {
+      return String(path || '').replace(/^\/+/, '');
+    }
+
+    function schoolRef(path) {
+      return db.ref(window.SOMAP.P(path));
+    }
+
+    function currentApprover() {
+      return firebase.auth?.().currentUser?.email || localStorage.getItem('somap_workerName') || 'academic-teacher';
+    }
+
+    function enforceAcademicRole() {
+      const role = String(localStorage.getItem('somap_role') || '').trim().toLowerCase();
+      if (role !== 'academic teacher') {
+        alert('This page is for Academic Teacher role only.');
+        window.location.href = '../workertasks.html';
+        return false;
+      }
+      return true;
+    }
+
+    function buildCards() {
+      const wrap = document.getElementById('moduleCards');
+      if (!wrap) return;
+      wrap.innerHTML = MODULES.map((m) => {
+        const records = Object.values(state.requests || {}).filter((r) => String(r.module || '').toLowerCase() === m.key);
+        const pending = records.filter((r) => String(r.status || 'pending') === 'pending');
+        const amount = pending.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+        const active = state.moduleFilter === m.key ? 'active' : '';
+        return `<div class="card ${active}" data-module="${m.key}"><div class="k">${m.label}</div><div class="v">${pending.length}</div><div class="small">Pending ${fmt(amount)}</div></div>`;
+      }).join('');
+
+      wrap.querySelectorAll('[data-module]').forEach((el) => {
+        el.addEventListener('click', () => {
+          state.moduleFilter = el.getAttribute('data-module') || 'all';
+          buildCards();
+          renderTable();
+        });
+      });
+    }
+
+    function renderTable() {
+      const tbody = document.getElementById('rows');
+      const empty = document.getElementById('empty');
+      if (!tbody || !empty) return;
+      const list = Object.entries(state.requests || {}).map(([id, row]) => ({ id, ...row }));
+      const filtered = list
+        .filter((r) => state.moduleFilter === 'all' || String(r.module || '').toLowerCase() === state.moduleFilter)
+        .filter((r) => {
+          if (state.statusFilter === 'all') return true;
+          return String(r.status || 'pending') === state.statusFilter;
+        })
+        .sort((a, b) => Number(b.requestedAt || 0) - Number(a.requestedAt || 0));
+
+      if (!filtered.length) {
+        tbody.innerHTML = '';
+        empty.style.display = '';
+        return;
+      }
+      empty.style.display = 'none';
+
+      tbody.innerHTML = filtered.map((r) => {
+        const status = String(r.status || 'pending');
+        const canAct = status === 'pending';
+        const statusClass = status === 'approved' ? 'approved' : status === 'rejected' ? 'rejected' : 'pending';
+        const reqAt = Number(r.requestedAt || r.createdAt || 0);
+        return `
+          <tr>
+            <td>${dt(reqAt)}</td>
+            <td>${r.moduleLabel || r.module || '-'}</td>
+            <td>${r.category || '-'}</td>
+            <td>${r.description || '-'}</td>
+            <td>${fmt(r.amount)}</td>
+            <td><span class="status ${statusClass}">${status}</span></td>
+            <td>${r.requestedBy || '-'}</td>
+            <td>
+              ${canAct ? `<button class="ok" data-approve="${r.id}">Approve</button> <button class="bad" data-reject="${r.id}">Reject</button>` : '-'}
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      tbody.querySelectorAll('[data-approve]').forEach((btn) => {
+        btn.addEventListener('click', () => approveRequest(btn.getAttribute('data-approve')));
+      });
+      tbody.querySelectorAll('[data-reject]').forEach((btn) => {
+        btn.addEventListener('click', () => rejectRequest(btn.getAttribute('data-reject')));
+      });
+    }
+
+    async function loadFinanceContext() {
+      const y = state.year;
+      const [fundingSnap, expSnap] = await Promise.all([
+        schoolRef(`cashbook/${y}/funding`).once('value'),
+        schoolRef(`expenses/${y}`).once('value')
+      ]);
+      const fundingRaw = fundingSnap.val() || {};
+      const expenseRaw = expSnap.val() || {};
+      const fundingEntries = Array.isArray(fundingRaw)
+        ? fundingRaw.filter(Boolean)
+        : Object.entries(fundingRaw).map(([id, row]) => window.SomapFinanceCashbook?.normalizeFundingEntry?.(row, id) || row);
+      const expenseEntries = Array.isArray(expenseRaw) ? expenseRaw.filter(Boolean) : Object.values(expenseRaw);
+      const sum = window.SomapFinanceCashbook?.summarize?.({ fundingEntries, expenseEntries }) || {
+        totalReceived: fundingEntries.reduce((s, r) => s + (Number(r.amount) || 0), 0),
+        totalExpenses: expenseEntries.reduce((s, r) => s + (Number(r.amount) || 0), 0),
+        inPocket: 0,
+      };
+      if (!Number.isFinite(sum.inPocket)) {
+        sum.inPocket = Number(sum.totalReceived || 0) - Number(sum.totalExpenses || 0);
+      }
+      document.getElementById('financeReceived').textContent = fmt(sum.totalReceived || 0);
+      document.getElementById('financeSpent').textContent = fmt(sum.totalExpenses || 0);
+      document.getElementById('financePocket').textContent = fmt(sum.inPocket || 0);
+    }
+
+    async function loadRequests() {
+      const snap = await schoolRef(`expenseApprovals/${state.year}`).once('value');
+      state.requests = snap.val() || {};
+    }
+
+    async function approveRequest(id) {
+      if (!id) return;
+      const reqRef = schoolRef(`expenseApprovals/${state.year}/${id}`);
+      const snap = await reqRef.once('value');
+      const row = snap.val();
+      if (!row || String(row.status || 'pending') !== 'pending') {
+        alert('This request is already processed.');
+        await refreshAll();
+        return;
+      }
+      const targetPath = normalizePath(row.targetPath);
+      if (!targetPath) {
+        alert('Missing target path in request.');
+        return;
+      }
+      const writer = db.ref(targetPath).push();
+      await writer.set({
+        ...(row.targetPayload || {}),
+        approvedAt: firebase.database.ServerValue.TIMESTAMP,
+        approvedBy: currentApprover(),
+        approvalRequestId: id,
+        approvalSource: 'academic_expense_approval',
+      });
+      await reqRef.update({
+        status: 'approved',
+        approvedAt: firebase.database.ServerValue.TIMESTAMP,
+        approvedBy: currentApprover(),
+        finalRecordPath: `${targetPath}/${writer.key}`,
+      });
+      await refreshAll();
+    }
+
+    async function rejectRequest(id) {
+      if (!id) return;
+      const reason = prompt('Reason for rejection (required):');
+      if (!reason || !reason.trim()) return;
+      await schoolRef(`expenseApprovals/${state.year}/${id}`).update({
+        status: 'rejected',
+        rejectedAt: firebase.database.ServerValue.TIMESTAMP,
+        rejectedBy: currentApprover(),
+        rejectionReason: String(reason).trim(),
+      });
+      await refreshAll();
+    }
+
+    async function refreshAll() {
+      await loadRequests();
+      await loadFinanceContext();
+      buildCards();
+      renderTable();
+    }
+
+    function setupFilters() {
+      const statusFilter = document.getElementById('statusFilter');
+      if (statusFilter) {
+        statusFilter.value = state.statusFilter;
+        statusFilter.addEventListener('change', (e) => {
+          state.statusFilter = e.target.value || 'pending';
+          renderTable();
+        });
+      }
+      const refreshBtn = document.getElementById('refreshBtn');
+      if (refreshBtn) refreshBtn.addEventListener('click', refreshAll);
+      const allModulesBtn = document.getElementById('allModulesBtn');
+      if (allModulesBtn) {
+        allModulesBtn.addEventListener('click', () => {
+          state.moduleFilter = 'all';
+          buildCards();
+          renderTable();
+        });
+      }
+    }
+
+    async function init() {
+      if (!enforceAcademicRole()) return;
+      if (window.SOMAP?.init) {
+        window.SOMAP.init({
+          db,
+          allowQuerySchoolParam: true,
+          redirectIfMissingSchool: true,
+          multischoolPath: '../../somapappv1multischool/multischool.html',
+        });
+      }
+      state.school = window.SOMAP?.getSchool?.();
+      if (!state.school || !state.school.id) {
+        window.location.href = '../../somapappv1multischool/multischool.html';
+        return;
+      }
+      document.getElementById('schoolLabel').textContent = `School: ${state.school.name || state.school.id}`;
+
+      const yearSelect = document.getElementById('yearSelect');
+      window.somapYearContext?.attachYearDropdown?.(yearSelect);
+      yearSelect.value = String(window.somapYearContext?.getSelectedYear?.() || state.year);
+      state.year = String(yearSelect.value || state.year);
+      yearSelect.addEventListener('change', async (e) => {
+        state.year = String(e.target.value || state.year);
+        window.somapYearContext?.setSelectedYear?.(state.year);
+        await refreshAll();
+      });
+
+      setupFilters();
+      await refreshAll();
+    }
+
+    init();
+  </script>
+</body>
+</html>
