@@ -49,6 +49,8 @@
     .rejected { background: #7f1d1d; color: #fecaca; }
     .empty { color: var(--muted); padding: 18px 0; }
     .small { font-size: 12px; color: var(--muted); }
+    .loading { opacity: 0.6; pointer-events: none; }
+    .section-title { font-size: 13px; color: var(--muted); margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: .08em; }
   </style>
 </head>
 <body>
@@ -82,8 +84,8 @@
     <div class="panel">
       <div class="toolbar">
         <select id="statusFilter">
-          <option value="pending">Pending only</option>
           <option value="all">All statuses</option>
+          <option value="pending">Pending only</option>
           <option value="approved">Approved only</option>
           <option value="rejected">Rejected only</option>
         </select>
@@ -108,6 +110,24 @@
         </table>
       </div>
       <div id="empty" class="empty" style="display:none;">No records for this filter.</div>
+      <div id="recordedSection" style="display:none;">
+        <div class="section-title" id="recordedSectionTitle">Recorded expenses</div>
+        <div style="overflow:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Category</th>
+                <th>Description</th>
+                <th>Amount</th>
+                <th>Recorded By</th>
+              </tr>
+            </thead>
+            <tbody id="recordedRows"></tbody>
+          </table>
+        </div>
+        <div id="recordedEmpty" class="empty" style="display:none;">No recorded expenses in this module yet.</div>
+      </div>
     </div>
   </div>
 
@@ -152,16 +172,29 @@
     const state = {
       year: String(window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear()),
       moduleFilter: 'all',
-      statusFilter: 'pending',
+      statusFilter: 'all',
       requests: {},
+      recordedByModule: {},
+      moduleExpenses: {},
       school: null,
+      expenseApprovalsUseRoot: false,
+      loading: false,
+      approvalUnsubscribe: null,
     };
 
+    function getModuleExpensePath(m, y) {
+      if (m.key === 'preform_one') {
+        const schoolName = String(state.school?.name || state.school?.id || 'Socrates School').trim() || 'Socrates School';
+        return `schools/${schoolName} Preform one/${y}/expenses`;
+      }
+      return m.expensePath ? m.expensePath(y) : null;
+    }
+
     const MODULES = [
-      { key: 'finance', label: 'Finance Expense Approval' },
-      { key: 'remedial', label: 'Remedial Expense Approval' },
-      { key: 'transport', label: 'Transport Expense Approval' },
-      { key: 'preform_one', label: 'Preform One Expense Approval' },
+      { key: 'finance', label: 'Finance Expense Approval', expensePath: (y) => `expenses/${y}` },
+      { key: 'remedial', label: 'Remedial Expense Approval', expensePath: (y) => `remedial/expenses/${y}` },
+      { key: 'transport', label: 'Transport Expense Approval', expensePath: (y) => `years/${y}/transport_expenses` },
+      { key: 'preform_one', label: 'Preform One Expense Approval', expensePath: (y) => `schools/Socrates School Preform one/${y}/expenses` },
     ];
 
     const fmt = (n) => `TSh ${(Math.round(Number(n) || 0)).toLocaleString('en-US')}`;
@@ -209,16 +242,28 @@
       return { id, name };
     }
 
+    function isSocratesLegacy(sid) {
+      const s = String(sid || '').trim().toLowerCase();
+      return s === 'socrates-school' || s === 'socrates' || s === 'default';
+    }
+
     function schoolPath(path) {
       const clean = String(path || '').replace(/^\/+/, '');
-      if (window.SOMAP?.P) return window.SOMAP.P(clean);
+      if (window.SOMAP?.P) {
+        const p = window.SOMAP.P(clean);
+        if (p) return p;
+      }
       const sid = inferSchool()?.id || 'socrates-school';
-      if (sid === 'socrates-school') return clean;
+      if (isSocratesLegacy(sid)) return clean;
       return `schools/${sid}/${clean}`;
     }
 
     function schoolRef(path) {
       return db.ref(schoolPath(path));
+    }
+
+    function rootRef(path) {
+      return db.ref(String(path || '').replace(/^\/+/, ''));
     }
 
     function currentApprover() {
@@ -264,8 +309,9 @@
         const records = Object.values(state.requests || {}).filter((r) => String(r.module || '').toLowerCase() === m.key);
         const pending = records.filter((r) => String(r.status || 'pending') === 'pending');
         const amount = pending.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+        const recorded = Number(state.recordedByModule?.[m.key] || 0);
         const active = state.moduleFilter === m.key ? 'active' : '';
-        return `<div class="card ${active}" data-module="${m.key}"><div class="k">${m.label}</div><div class="v">${pending.length}</div><div class="small">Pending ${fmt(amount)}</div></div>`;
+        return `<div class="card ${active}" data-module="${m.key}"><div class="k">${m.label}</div><div class="v">${pending.length}</div><div class="small">Pending ${fmt(amount)}</div>${recorded > 0 ? `<div class="small" style="margin-top:4px;color:var(--ok);">Recorded: ${recorded}</div>` : ''}</div>`;
       }).join('');
 
       wrap.querySelectorAll('[data-module]').forEach((el) => {
@@ -324,14 +370,70 @@
       tbody.querySelectorAll('[data-reject]').forEach((btn) => {
         btn.addEventListener('click', () => rejectRequest(btn.getAttribute('data-reject')));
       });
+
+      renderRecordedExpenses();
+    }
+
+    function normalizeExpenseRow(row, moduleKey) {
+      const ts = Number(row.timestamp || row.approvedAt || row.createdAt || 0);
+      const dateStr = row.date || row.expenseDate || (ts ? new Date(ts).toLocaleDateString() : '-');
+      const category = row.category || row.label || '-';
+      const desc = row.description || row.label || '-';
+      const amount = Number(row.amount) || 0;
+      const by = row.approvedBy || row.createdBy || row.addedBy || '-';
+      return { dateStr, category, desc, amount, by };
+    }
+
+    function renderRecordedExpenses() {
+      const section = document.getElementById('recordedSection');
+      const title = document.getElementById('recordedSectionTitle');
+      const tbody = document.getElementById('recordedRows');
+      const empty = document.getElementById('recordedEmpty');
+      if (!section || !tbody) return;
+      if (state.moduleFilter === 'all') {
+        section.style.display = 'none';
+        return;
+      }
+      const mod = MODULES.find((m) => m.key === state.moduleFilter);
+      if (!mod) {
+        section.style.display = 'none';
+        return;
+      }
+      const expenses = state.moduleExpenses?.[state.moduleFilter] || [];
+      section.style.display = '';
+      if (title) title.textContent = `Recorded expenses – ${mod.label}`;
+      if (expenses.length === 0) {
+        tbody.innerHTML = '';
+        if (empty) empty.style.display = '';
+        return;
+      }
+      if (empty) empty.style.display = 'none';
+      const sorted = [...expenses].sort((a, b) => {
+        const ta = Number(a.timestamp || a.approvedAt || a.createdAt || 0);
+        const tb = Number(b.timestamp || b.approvedAt || b.createdAt || 0);
+        return tb - ta;
+      });
+      tbody.innerHTML = sorted.map((r) => {
+        const { dateStr, category, desc, amount, by } = normalizeExpenseRow(r, state.moduleFilter);
+        return `<tr><td>${dateStr}</td><td>${category}</td><td>${desc}</td><td>${fmt(amount)}</td><td>${by}</td></tr>`;
+      }).join('');
     }
 
     async function loadFinanceContext() {
       const y = state.year;
-      const [fundingSnap, expSnap] = await Promise.all([
-        schoolRef(`cashbook/${y}/funding`).once('value'),
-        schoolRef(`expenses/${y}`).once('value')
+      const useRoot = isSocratesLegacy(state.school?.id || inferSchool()?.id);
+      const fundingPath = `cashbook/${y}/funding`;
+      const expensesPath = `expenses/${y}`;
+      let [fundingSnap, expSnap] = await Promise.all([
+        schoolRef(fundingPath).once('value'),
+        schoolRef(expensesPath).once('value')
       ]);
+      if (useRoot && !fundingSnap.exists() && !expSnap.exists()) {
+        [fundingSnap, expSnap] = await Promise.all([
+          rootRef(fundingPath).once('value'),
+          rootRef(expensesPath).once('value')
+        ]);
+      }
       const fundingRaw = fundingSnap.val() || {};
       const expenseRaw = expSnap.val() || {};
       const fundingEntries = Array.isArray(fundingRaw)
@@ -352,13 +454,66 @@
     }
 
     async function loadRequests() {
-      const snap = await schoolRef(`expenseApprovals/${state.year}`).once('value');
-      state.requests = snap.val() || {};
+      const path = `expenseApprovals/${state.year}`;
+      let snap = await schoolRef(path).once('value');
+      let data = snap.val() || {};
+      state.expenseApprovalsUseRoot = false;
+      if (Object.keys(data).length === 0 && isSocratesLegacy(state.school?.id || inferSchool()?.id)) {
+        snap = await rootRef(path).once('value');
+        data = snap.val() || {};
+        state.expenseApprovalsUseRoot = Object.keys(data).length > 0;
+      }
+      state.requests = data;
+    }
+
+    function expenseApprovalRef(id) {
+      const path = `expenseApprovals/${state.year}${id ? '/' + id : ''}`;
+      return state.expenseApprovalsUseRoot ? rootRef(path) : schoolRef(path);
+    }
+
+    async function loadModuleRecordedCounts() {
+      const y = state.year;
+      const useRoot = isSocratesLegacy(state.school?.id || inferSchool()?.id);
+      state.recordedByModule = {};
+      await Promise.all(MODULES.map(async (m) => {
+        const p = getModuleExpensePath(m, y);
+        if (!p) return;
+        try {
+          const isPreform = m.key === 'preform_one';
+          let snap = isPreform ? await rootRef(p).once('value') : await schoolRef(p).once('value');
+          if (!isPreform && useRoot && !snap.exists()) snap = await rootRef(p).once('value');
+          const val = snap.val();
+          const count = Array.isArray(val) ? val.filter(Boolean).length : (val ? Object.keys(val).length : 0);
+          state.recordedByModule[m.key] = count;
+        } catch (_) {
+          state.recordedByModule[m.key] = 0;
+        }
+      }));
+    }
+
+    async function loadModuleExpenses() {
+      const y = state.year;
+      const useRoot = isSocratesLegacy(state.school?.id || inferSchool()?.id);
+      state.moduleExpenses = {};
+      await Promise.all(MODULES.map(async (m) => {
+        const p = getModuleExpensePath(m, y);
+        if (!p) return;
+        try {
+          const isPreform = m.key === 'preform_one';
+          let snap = isPreform ? await rootRef(p).once('value') : await schoolRef(p).once('value');
+          if (!isPreform && useRoot && !snap.exists()) snap = await rootRef(p).once('value');
+          const val = snap.val();
+          const entries = Array.isArray(val) ? val.filter(Boolean) : (val ? Object.entries(val).map(([id, row]) => ({ id, ...row })) : []);
+          state.moduleExpenses[m.key] = entries;
+        } catch (_) {
+          state.moduleExpenses[m.key] = [];
+        }
+      }));
     }
 
     async function approveRequest(id) {
       if (!id) return;
-      const reqRef = schoolRef(`expenseApprovals/${state.year}/${id}`);
+      const reqRef = expenseApprovalRef(id);
       const snap = await reqRef.once('value');
       const row = snap.val();
       if (!row || String(row.status || 'pending') !== 'pending') {
@@ -392,7 +547,7 @@
       if (!id) return;
       const reason = prompt('Reason for rejection (required):');
       if (!reason || !reason.trim()) return;
-      await schoolRef(`expenseApprovals/${state.year}/${id}`).update({
+      await expenseApprovalRef(id).update({
         status: 'rejected',
         rejectedAt: firebase.database.ServerValue.TIMESTAMP,
         rejectedBy: currentApprover(),
@@ -402,6 +557,9 @@
     }
 
     async function refreshAll() {
+      state.loading = true;
+      const wrapEl = document.querySelector('.wrap');
+      if (wrapEl) wrapEl.classList.add('loading');
       try {
         await loadRequests();
       } catch (err) {
@@ -413,8 +571,23 @@
       } catch (err) {
         console.warn('Failed to load finance context', err);
       }
+      try {
+        await loadModuleRecordedCounts();
+      } catch (err) {
+        console.warn('Failed to load module recorded counts', err);
+        state.recordedByModule = {};
+      }
+      try {
+        await loadModuleExpenses();
+      } catch (err) {
+        console.warn('Failed to load module expenses', err);
+        state.moduleExpenses = {};
+      }
       buildCards();
       renderTable();
+    } finally {
+      state.loading = false;
+      if (wrapEl) wrapEl.classList.remove('loading');
     }
 
     function setupFilters() {
@@ -464,10 +637,27 @@
         state.year = String(e.target.value || state.year);
         window.somapYearContext?.setSelectedYear?.(state.year);
         await refreshAll();
+        setupRealtimeApprovals();
       });
 
       setupFilters();
       await refreshAll();
+      setupRealtimeApprovals();
+    }
+
+    function setupRealtimeApprovals() {
+      if (state.approvalUnsubscribe) {
+        state.approvalUnsubscribe();
+        state.approvalUnsubscribe = null;
+      }
+      const path = `expenseApprovals/${state.year}`;
+      const ref = state.expenseApprovalsUseRoot ? rootRef(path) : schoolRef(path);
+      state.approvalUnsubscribe = ref.on('value', (snap) => {
+        const data = snap.val() || {};
+        state.requests = data;
+        buildCards();
+        renderTable();
+      });
     }
 
     init().catch((err) => {
