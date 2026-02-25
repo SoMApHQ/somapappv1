@@ -174,7 +174,7 @@
       moduleFilter: 'all',
       statusFilter: 'all',
       requests: {},
-      requestSourceById: {},
+      requestMetaById: {},
       recordedByModule: {},
       moduleExpenses: {},
       school: null,
@@ -472,7 +472,7 @@
     async function loadRequests() {
       state.expenseApprovalsUseRoot = false;
       state.expenseApprovalsUseSchoolsSocrates = false;
-      state.requestSourceById = {};
+      state.requestMetaById = {};
       const refs = getExpenseApprovalRefs();
       const merged = {};
 
@@ -486,28 +486,59 @@
             if (!id) return;
             if (!merged[id]) {
               merged[id] = row;
-              state.requestSourceById[id] = source;
+              state.requestMetaById[id] = { source, year: String(state.year) };
               return;
             }
             const existingTs = Number(merged[id]?.requestedAt || merged[id]?.createdAt || 0);
             const incomingTs = Number(row?.requestedAt || row?.createdAt || 0);
             if (incomingTs > existingTs) {
               merged[id] = row;
-              state.requestSourceById[id] = source;
+              state.requestMetaById[id] = { source, year: String(state.year) };
             }
           });
         } catch (_) {}
       }
 
+      if (!Object.keys(merged).length) {
+        const allYearRefs = getExpenseApprovalRootRefs();
+        for (let i = 0; i < allYearRefs.length; i++) {
+          const source = allYearRefs[i].key;
+          try {
+            const rootSnap = await allYearRefs[i].ref.once('value');
+            const rootVal = rootSnap.val();
+            if (!rootVal || typeof rootVal !== 'object' || Array.isArray(rootVal)) continue;
+            Object.entries(rootVal).forEach(([yearKey, yearNode]) => {
+              if (!yearNode || typeof yearNode !== 'object' || Array.isArray(yearNode)) return;
+              Object.entries(yearNode).forEach(([id, row]) => {
+                if (!id) return;
+                if (!merged[id]) {
+                  merged[id] = row;
+                  state.requestMetaById[id] = { source, year: String(yearKey || row?.year || state.year) };
+                  return;
+                }
+                const existingTs = Number(merged[id]?.requestedAt || merged[id]?.createdAt || 0);
+                const incomingTs = Number(row?.requestedAt || row?.createdAt || 0);
+                if (incomingTs > existingTs) {
+                  merged[id] = row;
+                  state.requestMetaById[id] = { source, year: String(yearKey || row?.year || state.year) };
+                }
+              });
+            });
+          } catch (_) {}
+        }
+      }
+
       state.requests = merged;
-      const sourceValues = Object.values(state.requestSourceById);
+      const sourceValues = Object.values(state.requestMetaById).map((v) => v?.source).filter(Boolean);
       if (sourceValues.includes('root')) state.expenseApprovalsUseRoot = true;
       if (sourceValues.includes('socrates')) state.expenseApprovalsUseSchoolsSocrates = true;
     }
 
     function expenseApprovalRef(id) {
-      const path = `expenseApprovals/${state.year}${id ? '/' + id : ''}`;
-      const source = id ? state.requestSourceById?.[id] : '';
+      const meta = id ? state.requestMetaById?.[id] : null;
+      const targetYear = String(meta?.year || state.year);
+      const path = `expenseApprovals/${targetYear}${id ? '/' + id : ''}`;
+      const source = meta?.source || '';
       if (source === 'root') return rootRef(path);
       if (source === 'socrates') return schoolsSocratesRef(path);
       if (state.expenseApprovalsUseRoot) return rootRef(path);
@@ -517,6 +548,23 @@
 
     function getExpenseApprovalRefs() {
       const path = `expenseApprovals/${state.year}`;
+      const sid = state.school?.id || inferSchool()?.id;
+      const isSocrates = isSocratesLegacy(sid);
+      if (isSocrates) {
+        return [
+          { key: 'root', ref: rootRef(path) },
+          { key: 'socrates', ref: schoolsSocratesRef(path) },
+          { key: 'school', ref: schoolRef(path) },
+        ];
+      }
+      return [
+        { key: 'school', ref: schoolRef(path) },
+        { key: 'root', ref: rootRef(path) },
+      ];
+    }
+
+    function getExpenseApprovalRootRefs() {
+      const path = 'expenseApprovals';
       const sid = state.school?.id || inferSchool()?.id;
       const isSocrates = isSocratesLegacy(sid);
       if (isSocrates) {
@@ -720,7 +768,7 @@
       const snapshots = {};
       const applyMerged = () => {
         const merged = {};
-        state.requestSourceById = {};
+        state.requestMetaById = {};
         refs.forEach(({ key }) => {
           const data = snapshots[key];
           if (!data || typeof data !== 'object' || Array.isArray(data)) return;
@@ -728,14 +776,14 @@
             if (!id) return;
             if (!merged[id]) {
               merged[id] = row;
-              state.requestSourceById[id] = key;
+              state.requestMetaById[id] = { source: key, year: String(state.year) };
               return;
             }
             const existingTs = Number(merged[id]?.requestedAt || merged[id]?.createdAt || 0);
             const incomingTs = Number(row?.requestedAt || row?.createdAt || 0);
             if (incomingTs > existingTs) {
               merged[id] = row;
-              state.requestSourceById[id] = key;
+              state.requestMetaById[id] = { source: key, year: String(state.year) };
             }
           });
         });
