@@ -11,6 +11,8 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
   <script src="../../js/finance_cashbook.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.0/jspdf.plugin.autotable.min.js"></script>
   <style>
     :root {
       --bg: #0b1220;
@@ -91,6 +93,8 @@
         </select>
         <button type="button" id="allModulesBtn">Show All Modules</button>
         <button type="button" class="primary" id="refreshBtn">Refresh</button>
+        <button type="button" id="downloadCsvBtn">Download CSV</button>
+        <button type="button" id="downloadPdfBtn">Download PDF</button>
       </div>
       <div style="overflow:auto;">
         <table>
@@ -338,14 +342,20 @@
     function buildCards() {
       const wrap = document.getElementById('moduleCards');
       if (!wrap) return;
-      wrap.innerHTML = MODULES.map((m) => {
-        const records = Object.values(state.requests || {}).filter((r) => String(r.module || '').toLowerCase() === m.key);
+      const allRecords = Object.values(state.requests || {});
+      const allPending = allRecords.filter((r) => String(r.status || 'pending') === 'pending');
+      const allAmount = allPending.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+      const allActive = state.moduleFilter === 'all' ? 'active' : '';
+      const allCard = `<div class="card ${allActive}" data-module="all"><div class="k">All Modules</div><div class="v">${allPending.length}</div><div class="small">Pending ${fmt(allAmount)}</div></div>`;
+      const moduleCards = MODULES.map((m) => {
+        const records = allRecords.filter((r) => String(r.module || '').toLowerCase() === m.key);
         const pending = records.filter((r) => String(r.status || 'pending') === 'pending');
         const amount = pending.reduce((s, r) => s + (Number(r.amount) || 0), 0);
         const recorded = Number(state.recordedByModule?.[m.key] || 0);
         const active = state.moduleFilter === m.key ? 'active' : '';
         return `<div class="card ${active}" data-module="${m.key}"><div class="k">${m.label}</div><div class="v">${pending.length}</div><div class="small">Pending ${fmt(amount)}</div>${recorded > 0 ? `<div class="small" style="margin-top:4px;color:var(--ok);">Recorded: ${recorded}</div>` : ''}</div>`;
       }).join('');
+      wrap.innerHTML = allCard + moduleCards;
 
       wrap.querySelectorAll('[data-module]').forEach((el) => {
         el.addEventListener('click', () => {
@@ -518,8 +528,11 @@
         `schools/socrates-school/expenseApprovals/${y}`,
       ];
       sidVariants.forEach((v) => {
-        raw.push(`schools/${v}/years/${y}/expenseApprovals`);
-        raw.push(`schools/${v}/expenseApprovals/${y}`);
+        const n = normalizeSchoolId(v);
+        if (n) {
+          raw.push(`schools/${n}/years/${y}/expenseApprovals`);
+          raw.push(`schools/${n}/expenseApprovals/${y}`);
+        }
       });
       return uniqPaths(raw);
     }
@@ -713,6 +726,67 @@
       }
     }
 
+    function getFilteredRowsForExport() {
+      const list = Object.entries(state.requests || {}).map(([id, row]) => ({ id, ...row }));
+      return list
+        .filter((r) => state.moduleFilter === 'all' || String(r.module || '').toLowerCase() === state.moduleFilter)
+        .filter((r) => {
+          if (state.statusFilter === 'all') return true;
+          return String(r.status || 'pending') === state.statusFilter;
+        })
+        .sort((a, b) => Number(b.requestedAt || 0) - Number(a.requestedAt || 0));
+    }
+
+    function downloadCsv() {
+      const rows = getFilteredRowsForExport();
+      const headers = ['Requested', 'Module', 'Category', 'Description', 'Amount', 'Status', 'Requested By'];
+      const lines = [headers.join(',')];
+      rows.forEach((r) => {
+        const reqAt = Number(r.requestedAt || r.createdAt || 0);
+        const dateStr = reqAt ? new Date(reqAt).toLocaleString() : '-';
+        lines.push([
+          `"${String(dateStr).replace(/"/g, '""')}"`,
+          `"${String(r.moduleLabel || r.module || '-').replace(/"/g, '""')}"`,
+          `"${String(r.category || '-').replace(/"/g, '""')}"`,
+          `"${String(r.description || '-').replace(/"/g, '""')}"`,
+          String(r.amount || 0),
+          `"${String(r.status || 'pending').replace(/"/g, '""')}"`,
+          `"${String(r.requestedBy || '-').replace(/"/g, '""')}"`,
+        ].join(','));
+      });
+      const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `expense_approvals_${state.school?.id || 'school'}_${state.year}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    function downloadPdf() {
+      if (!window.jspdf || !window.jspdf.jsPDF) {
+        alert('PDF library not loaded.');
+        return;
+      }
+      const rows = getFilteredRowsForExport();
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: 'landscape' });
+      doc.setFontSize(14);
+      doc.text(`Academic Expense Approvals - ${state.school?.name || state.school?.id || 'School'} (${state.year})`, 14, 14);
+      doc.setFontSize(10);
+      const tableData = rows.map((r) => {
+        const reqAt = Number(r.requestedAt || r.createdAt || 0);
+        const dateStr = reqAt ? new Date(reqAt).toLocaleString() : '-';
+        return [dateStr, r.moduleLabel || r.module || '-', r.category || '-', (r.description || '-').substring(0, 40), fmt(r.amount), r.status || 'pending', (r.requestedBy || '-').substring(0, 25)];
+      });
+      doc.autoTable({
+        head: [['Requested', 'Module', 'Category', 'Description', 'Amount', 'Status', 'Requested By']],
+        body: tableData,
+        startY: 22,
+        styles: { fontSize: 8 },
+      });
+      doc.save(`expense_approvals_${state.school?.id || 'school'}_${state.year}.pdf`);
+    }
+
     function setupFilters() {
       const statusFilter = document.getElementById('statusFilter');
       if (statusFilter) {
@@ -732,10 +806,28 @@
           renderTable();
         });
       }
+      const downloadCsvBtn = document.getElementById('downloadCsvBtn');
+      if (downloadCsvBtn) downloadCsvBtn.addEventListener('click', downloadCsv);
+      const downloadPdfBtn = document.getElementById('downloadPdfBtn');
+      if (downloadPdfBtn) downloadPdfBtn.addEventListener('click', downloadPdf);
     }
 
     async function init() {
       if (!enforceAcademicRole()) return;
+      const params = new URLSearchParams(window.location.search || '');
+      const schoolParam = params.get('school') || params.get('schoolId');
+      const yearParam = params.get('year');
+      if (schoolParam && window.SOMAP?.setSchoolId) {
+        try {
+          const sid = normalizeSchoolId(schoolParam);
+          window.SOMAP.setSchoolId(sid || schoolParam);
+        } catch (_) {}
+      }
+      if (yearParam && window.somapYearContext?.setSelectedYear) {
+        try {
+          window.somapYearContext.setSelectedYear(String(yearParam), { manual: false });
+        } catch (_) {}
+      }
       if (window.SOMAP?.init) {
         window.SOMAP.init({
           db,
