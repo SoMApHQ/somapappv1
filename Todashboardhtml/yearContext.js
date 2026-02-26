@@ -39,19 +39,20 @@
 
   function getSelectedYear() {
     const stored = localStorage.getItem(STORAGE_KEY);
-    // Force 2025 as minimum (SoMAp anchor year)
     const MIN_YEAR = 2025;
+    const currentYear = new Date().getFullYear();
     if (stored) {
       const yearNum = Number(stored);
       if (yearNum < MIN_YEAR) {
-        const defaultYear = String(MIN_YEAR);
+        const defaultYear = String(Math.max(MIN_YEAR, currentYear));
         localStorage.setItem(STORAGE_KEY, defaultYear);
         setManualFlag(false);
         return defaultYear;
       }
       return stored;
     }
-    const defaultYear = String(MIN_YEAR);
+    // Default to current year when nothing stored (so approvals match Finance in 2026+)
+    const defaultYear = String(Math.max(MIN_YEAR, currentYear));
     localStorage.setItem(STORAGE_KEY, defaultYear);
     setManualFlag(false);
     return defaultYear;

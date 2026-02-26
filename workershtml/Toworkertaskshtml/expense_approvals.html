@@ -114,6 +114,9 @@
         </table>
       </div>
       <div id="empty" class="empty" style="display:none;">No records for this filter. Submit an expense from Finance, Remedial, or Transport first—they will appear here for approval.</div>
+      <div id="emptyHint" class="small" style="display:none;margin-top:8px;padding:10px;background:#1e293b;border-radius:8px;border:1px solid var(--line);">
+        <strong>If you expected to see items:</strong> (1) Ensure the <b>Year</b> dropdown matches the year used in Finance when you submitted. (2) Check the debug info below for permission errors.
+      </div>
       <div id="approvalDebug" class="small" style="margin:8px 0 4px 0;padding:8px;background:#1e293b;border-radius:8px;border:1px solid var(--line);"></div>
       <div id="recordedSection" style="display:none;">
         <div class="section-title" id="recordedSectionTitle">Recorded expenses</div>
@@ -175,7 +178,12 @@
 
     const db = window.db || firebase.database();
     const state = {
-      year: String(window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear()),
+      year: String(
+        new URLSearchParams(window.location.search || '').get('year') ||
+        window.somapYearContext?.getSelectedYear?.() ||
+        (() => { try { return sessionStorage.getItem('somap_selected_year'); } catch (_) { return null; } })() ||
+        new Date().getFullYear()
+      ),
       moduleFilter: 'all',
       statusFilter: 'all',
       requests: {},
@@ -369,6 +377,7 @@
     function renderTable() {
       const tbody = document.getElementById('rows');
       const empty = document.getElementById('empty');
+      const emptyHint = document.getElementById('emptyHint');
       if (!tbody || !empty) return;
       const list = Object.entries(state.requests || {}).map(([id, row]) => ({ id, ...row }));
       const filtered = list
@@ -382,9 +391,11 @@
       if (!filtered.length) {
         tbody.innerHTML = '';
         empty.style.display = '';
+        if (emptyHint) emptyHint.style.display = (Object.keys(state.requests || {}).length === 0) ? '' : 'none';
         return;
       }
       empty.style.display = 'none';
+      if (emptyHint) emptyHint.style.display = 'none';
 
       tbody.innerHTML = filtered.map((r) => {
         const status = String(r.status || 'pending');
@@ -533,9 +544,9 @@
       const schoolLegacyPath = schoolPath(`expenseApprovals/${y}`);
       const canonicalPath = window.SOMAP?.P ? window.SOMAP.P(`years/${y}/expenseApprovals`) : `years/${y}/expenseApprovals`;
       const raw = [
+        canonicalPath,
         `years/${y}/expenseApprovals`,
         `schools/socrates-school/years/${y}/expenseApprovals`,
-        canonicalPath,
         schoolYearPath,
         schoolLegacyPath,
         `expenseApprovals/${y}`,
@@ -868,7 +879,16 @@
       if (yearParam && window.somapYearContext?.setSelectedYear) {
         try {
           window.somapYearContext.setSelectedYear(String(yearParam), { manual: false });
+          state.year = String(yearParam);
         } catch (_) {}
+      } else {
+        const sessionYear = (() => { try { return sessionStorage.getItem('somap_selected_year'); } catch (_) { return null; } })();
+        if (sessionYear && window.somapYearContext?.setSelectedYear) {
+          try {
+            window.somapYearContext.setSelectedYear(String(sessionYear), { manual: false });
+            state.year = String(sessionYear);
+          } catch (_) {}
+        }
       }
       if (window.SOMAP?.init) {
         window.SOMAP.init({
@@ -883,6 +903,9 @@
         window.location.href = '../../somapappv1multischool/multischool.html';
         return;
       }
+      if (window.SOMAP?.setSchoolId) {
+        try { window.SOMAP.setSchoolId(state.school.id); } catch (_) {}
+      }
       const schoolLabelEl = document.getElementById('schoolLabel');
       if (schoolLabelEl) schoolLabelEl.textContent = `School: ${state.school.name || state.school.id}`;
 
@@ -893,6 +916,7 @@
       yearSelect.addEventListener('change', async (e) => {
         state.year = String(e.target.value || state.year);
         window.somapYearContext?.setSelectedYear?.(state.year);
+        try { sessionStorage.setItem('somap_selected_year', state.year); } catch (_) {}
         await refreshAll();
         setupRealtimeApprovals();
       });
