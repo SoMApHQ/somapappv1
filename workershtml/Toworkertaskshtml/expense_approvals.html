@@ -91,7 +91,7 @@
           <option value="approved">Approved only</option>
           <option value="rejected">Rejected only</option>
         </select>
-        <button type="button" id="allModulesBtn">Show All Modules</button>
+        <button type="button" id="allModulesBtn" style="display:none;">Show All Modules</button>
         <button type="button" class="primary" id="refreshBtn">Refresh</button>
         <button type="button" id="downloadCsvBtn">Download CSV</button>
         <button type="button" id="downloadPdfBtn">Download PDF</button>
@@ -184,7 +184,7 @@
         (() => { try { return sessionStorage.getItem('somap_selected_year'); } catch (_) { return null; } })() ||
         new Date().getFullYear()
       ),
-      moduleFilter: 'all',
+      moduleFilter: 'finance',
       statusFilter: 'all',
       requests: {},
       requestMetaById: {},
@@ -351,19 +351,12 @@
       const wrap = document.getElementById('moduleCards');
       if (!wrap) return;
       const allRecords = Object.values(state.requests || {});
-      const allPending = allRecords.filter((r) => String(r.status || 'pending') === 'pending');
-      const allAmount = allPending.reduce((s, r) => s + (Number(r.amount) || 0), 0);
-      const allActive = state.moduleFilter === 'all' ? 'active' : '';
-      const allCard = `<div class="card ${allActive}" data-module="all"><div class="k">All Modules</div><div class="v">${allPending.length}</div><div class="small">Pending ${fmt(allAmount)}</div></div>`;
-      const moduleCards = MODULES.map((m) => {
-        const records = allRecords.filter((r) => String(r.module || '').toLowerCase() === m.key);
-        const pending = records.filter((r) => String(r.status || 'pending') === 'pending');
-        const amount = pending.reduce((s, r) => s + (Number(r.amount) || 0), 0);
-        const recorded = Number(state.recordedByModule?.[m.key] || 0);
-        const active = state.moduleFilter === m.key ? 'active' : '';
-        return `<div class="card ${active}" data-module="${m.key}"><div class="k">${m.label}</div><div class="v">${pending.length}</div><div class="small">Pending ${fmt(amount)}</div>${recorded > 0 ? `<div class="small" style="margin-top:4px;color:var(--ok);">Recorded: ${recorded}</div>` : ''}</div>`;
-      }).join('');
-      wrap.innerHTML = allCard + moduleCards;
+      const financeRecords = allRecords.filter((r) => String(r.module || '').toLowerCase() === 'finance');
+      const financePending = financeRecords.filter((r) => String(r.status || 'pending') === 'pending');
+      const financeAmount = financePending.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+      const recorded = Number(state.recordedByModule?.finance || 0);
+      const active = state.moduleFilter === 'finance' ? 'active' : '';
+      wrap.innerHTML = `<div class="card ${active}" data-module="finance"><div class="k">Finance Expense Approval</div><div class="v">${financePending.length}</div><div class="small">Pending ${fmt(financeAmount)}</div>${recorded > 0 ? `<div class="small" style="margin-top:4px;color:var(--ok);">Recorded: ${recorded}</div>` : ''}</div>`;
 
       wrap.querySelectorAll('[data-module]').forEach((el) => {
         el.addEventListener('click', () => {
@@ -538,33 +531,15 @@
 
     function candidateApprovalBasePaths(year) {
       const y = String(year || state.year || new Date().getFullYear());
-      const sid = normalizeSchoolId(state.school?.id || inferSchool()?.id || 'socrates-school');
-      const sidVariants = schoolIdVariants();
-      const schoolYearPath = schoolPath(`years/${y}/expenseApprovals`);
-      const schoolLegacyPath = schoolPath(`expenseApprovals/${y}`);
-      const canonicalPath = window.SOMAP?.P ? window.SOMAP.P(`years/${y}/expenseApprovals`) : `years/${y}/expenseApprovals`;
+      const queuePath = `years/${y}/expenseApprovals`;
+      const canonicalPath = window.SOMAP?.P ? window.SOMAP.P(queuePath) : queuePath;
+      const sid = normalizeSchoolId(state.school?.id || inferSchool()?.id || window.SOMAP?.getSchoolId?.() || 'socrates-school');
       const raw = [
         canonicalPath,
-        `years/${y}/expenseApprovals`,
-        `schools/socrates-school/years/${y}/expenseApprovals`,
-        schoolYearPath,
-        schoolLegacyPath,
-        `expenseApprovals/${y}`,
-        `schools/${sid}/years/${y}/expenseApprovals`,
-        `schools/${sid}/expenseApprovals/${y}`,
-        `schools/socrates-school/expenseApprovals/${y}`,
+        queuePath,
+        `schools/socrates-school/${queuePath}`,
+        `schools/${sid}/${queuePath}`,
       ];
-      sidVariants.forEach((v) => {
-        const n = normalizeSchoolId(v);
-        if (n) {
-          raw.push(`schools/${n}/years/${y}/expenseApprovals`);
-          raw.push(`schools/${n}/expenseApprovals/${y}`);
-        }
-        if (v && String(v).trim() && v !== n) {
-          raw.push(`schools/${String(v).trim()}/years/${y}/expenseApprovals`);
-          raw.push(`schools/${String(v).trim()}/expenseApprovals/${y}`);
-        }
-      });
       return uniqPaths(raw);
     }
 
@@ -647,6 +622,10 @@
       }
       mergeApprovalRows(rowsByPath, state.year);
       renderApprovalDebug();
+      const loaded = Object.keys(state.requests || {}).length;
+      if (loaded === 0 && state.approvalBasePaths?.length) {
+        console.log('[ExpenseApprovalQueue] Finance path (same as finance.html):', state.approvalBasePaths[0]);
+      }
     }
 
     function expenseApprovalRef(id) {
