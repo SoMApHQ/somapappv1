@@ -110,6 +110,7 @@
         </table>
       </div>
       <div id="empty" class="empty" style="display:none;">No records for this filter.</div>
+      <div id="approvalDebug" class="small" style="margin:8px 0 4px 0;"></div>
       <div id="recordedSection" style="display:none;">
         <div class="section-title" id="recordedSectionTitle">Recorded expenses</div>
         <div style="overflow:auto;">
@@ -178,17 +179,13 @@
       recordedByModule: {},
       moduleExpenses: {},
       school: null,
-      expenseApprovalsUseRoot: false,
-      expenseApprovalsUseSchoolsSocrates: false,
+      approvalBasePaths: [],
+      lastApprovalErrors: [],
       loading: false,
       approvalUnsubscribe: [],
     };
 
     function getModuleExpensePath(m, y) {
-      if (m.key === 'preform_one') {
-        const schoolName = String(state.school?.name || state.school?.id || 'Socrates School').trim() || 'Socrates School';
-        return `schools/${schoolName} Preform one/${y}/expenses`;
-      }
       return m.expensePath ? m.expensePath(y) : null;
     }
 
@@ -196,7 +193,6 @@
       { key: 'finance', label: 'Finance Expense Approval', expensePath: (y) => `expenses/${y}` },
       { key: 'remedial', label: 'Remedial Expense Approval', expensePath: (y) => `remedial/expenses/${y}` },
       { key: 'transport', label: 'Transport Expense Approval', expensePath: (y) => `years/${y}/transport_expenses` },
-      { key: 'preform_one', label: 'Preform One Expense Approval', expensePath: (y) => `schools/Socrates School Preform one/${y}/expenses` },
     ];
 
     const fmt = (n) => `TSh ${(Math.round(Number(n) || 0)).toLocaleString('en-US')}`;
@@ -208,6 +204,23 @@
 
     function normalizePath(path) {
       return String(path || '').replace(/^\/+/, '');
+    }
+
+    function normalizeSchoolId(sid) {
+      const raw = String(sid || '').trim();
+      if (!raw) return '';
+      const lowered = raw.toLowerCase();
+      if (
+        lowered === 'socrates school' ||
+        lowered === 'socrates school pre and primary' ||
+        lowered === 'socrates school pre & primary' ||
+        lowered === 'socrates-school' ||
+        lowered === 'socrates' ||
+        lowered === 'default'
+      ) {
+        return 'socrates-school';
+      }
+      return raw;
     }
 
     const isPlaceholder = (v) => !v || String(v || '').trim() === '' || String(v || '').trim() === '-';
@@ -226,26 +239,28 @@
     function inferSchool() {
       const viaSomap = window.SOMAP?.getSchool?.();
       if (viaSomap && viaSomap.id && !isPlaceholder(viaSomap.id)) {
-        const name = viaSomap.name || viaSomap.id;
-        return { id: viaSomap.id, name: isPlaceholder(name) ? (viaSomap.id === 'socrates-school' ? 'Socrates School' : viaSomap.id) : name };
+        const id = normalizeSchoolId(viaSomap.id);
+        const name = viaSomap.name || id;
+        return { id, name: isPlaceholder(name) ? (isSocratesLegacy(id) ? 'Socrates School' : id) : name };
       }
       const stored = getStoredSchoolMeta();
       if (stored && stored.id) {
-        const name = stored.name || stored.id;
-        return { id: stored.id, name: isPlaceholder(name) ? (stored.id === 'socrates-school' ? 'Socrates School' : stored.id) : name };
+        const id = normalizeSchoolId(stored.id);
+        const name = stored.name || id;
+        return { id, name: isPlaceholder(name) ? (isSocratesLegacy(id) ? 'Socrates School' : id) : name };
       }
       const sid =
         localStorage.getItem('somap.currentSchoolId') ||
         localStorage.getItem('somap_school') ||
         window.currentSchoolId ||
         'socrates-school';
-      const id = String(sid || 'socrates-school').trim() || 'socrates-school';
-      const name = (id === 'socrates-school' || id === 'socrates' || id === 'default') ? 'Socrates School' : id;
+      const id = normalizeSchoolId(String(sid || 'socrates-school').trim() || 'socrates-school');
+      const name = isSocratesLegacy(id) ? 'Socrates School' : id;
       return { id, name };
     }
 
     function isSocratesLegacy(sid) {
-      const s = String(sid || '').trim().toLowerCase();
+      const s = normalizeSchoolId(sid).toLowerCase();
       return s === 'socrates-school' || s === 'socrates' || s === 'default';
     }
 
@@ -257,7 +272,7 @@
           if (p) return p;
         } catch (_) {}
       }
-      const sid = inferSchool()?.id || 'socrates-school';
+      const sid = normalizeSchoolId(inferSchool()?.id || 'socrates-school');
       if (isSocratesLegacy(sid)) return clean;
       return `schools/${sid}/${clean}`;
     }
@@ -356,7 +371,7 @@
       tbody.innerHTML = filtered.map((r) => {
         const status = String(r.status || 'pending');
         const canAct = status === 'pending';
-        const statusClass = status === 'approved' ? 'approved' : status === 'rejected' ? 'rejected' : 'pending';
+        const statusClass = (status === 'approved' || status === 'recorded') ? 'approved' : status === 'rejected' ? 'rejected' : 'pending';
         const reqAt = Number(r.requestedAt || r.createdAt || 0);
         return `
           <tr>
@@ -469,115 +484,97 @@
       document.getElementById('financePocket').textContent = fmt(sum.inPocket || 0);
     }
 
-    async function loadRequests() {
-      state.expenseApprovalsUseRoot = false;
-      state.expenseApprovalsUseSchoolsSocrates = false;
-      state.requestMetaById = {};
-      const refs = getExpenseApprovalRefs();
+    function uniqPaths(paths) {
+      const seen = new Set();
+      return (paths || []).map((p) => normalizePath(p).replace(/\/+/g, '/')).filter((p) => {
+        if (!p || seen.has(p)) return false;
+        seen.add(p);
+        return true;
+      });
+    }
+
+    function candidateApprovalBasePaths(year) {
+      const y = String(year || state.year || new Date().getFullYear());
+      const sid = normalizeSchoolId(state.school?.id || inferSchool()?.id || 'socrates-school');
+      const schoolYearPath = schoolPath(`years/${y}/expenseApprovals`);
+      const schoolLegacyPath = schoolPath(`expenseApprovals/${y}`);
+      const raw = [
+        schoolYearPath,
+        schoolLegacyPath,
+        `years/${y}/expenseApprovals`,
+        `expenseApprovals/${y}`,
+        `schools/${sid}/years/${y}/expenseApprovals`,
+        `schools/${sid}/expenseApprovals/${y}`,
+        `schools/socrates-school/years/${y}/expenseApprovals`,
+        `schools/socrates-school/expenseApprovals/${y}`,
+      ];
+      return uniqPaths(raw);
+    }
+
+    function getExpenseApprovalRefs() {
+      const basePaths = candidateApprovalBasePaths(state.year);
+      state.approvalBasePaths = basePaths;
+      return basePaths.map((basePath) => ({ basePath, ref: db.ref(basePath) }));
+    }
+
+    function mergeApprovalRows(rowsByPath, year) {
       const merged = {};
+      state.requestMetaById = {};
+      Object.entries(rowsByPath || {}).forEach(([basePath, data]) => {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+        Object.entries(data).forEach(([id, row]) => {
+          if (!id) return;
+          if (!merged[id]) {
+            merged[id] = row;
+            state.requestMetaById[id] = { path: `${basePath}/${id}`, basePath, year: String(year || state.year) };
+            return;
+          }
+          const existingTs = Number(merged[id]?.requestedAt || merged[id]?.createdAt || 0);
+          const incomingTs = Number(row?.requestedAt || row?.createdAt || 0);
+          if (incomingTs > existingTs) {
+            merged[id] = row;
+            state.requestMetaById[id] = { path: `${basePath}/${id}`, basePath, year: String(year || state.year) };
+          }
+        });
+      });
+      state.requests = merged;
+    }
 
+    function renderApprovalDebug() {
+      const el = document.getElementById('approvalDebug');
+      if (!el) return;
+      const year = String(state.year || '');
+      const src = (state.approvalBasePaths || []).slice(0, 3).join(' | ') || '(none)';
+      const more = (state.approvalBasePaths || []).length > 3 ? ' ...' : '';
+      const loaded = Object.keys(state.requests || {}).length;
+      const errors = Array.isArray(state.lastApprovalErrors) ? state.lastApprovalErrors.length : 0;
+      el.textContent = `Queue sources for ${year}: ${src}${more} • Loaded: ${loaded} • Errors: ${errors} (check console)`;
+    }
+
+    async function loadRequests() {
+      state.requestMetaById = {};
+      state.lastApprovalErrors = [];
+      const refs = getExpenseApprovalRefs();
+      const rowsByPath = {};
       for (let i = 0; i < refs.length; i++) {
-        const source = refs[i].key;
+        const { basePath, ref } = refs[i];
         try {
-          const snap = await refs[i].ref.once('value');
-          const val = snap.val();
-          if (!val || typeof val !== 'object' || Array.isArray(val)) continue;
-          Object.entries(val).forEach(([id, row]) => {
-            if (!id) return;
-            if (!merged[id]) {
-              merged[id] = row;
-              state.requestMetaById[id] = { source, year: String(state.year) };
-              return;
-            }
-            const existingTs = Number(merged[id]?.requestedAt || merged[id]?.createdAt || 0);
-            const incomingTs = Number(row?.requestedAt || row?.createdAt || 0);
-            if (incomingTs > existingTs) {
-              merged[id] = row;
-              state.requestMetaById[id] = { source, year: String(state.year) };
-            }
-          });
-        } catch (_) {}
-      }
-
-      if (!Object.keys(merged).length) {
-        const allYearRefs = getExpenseApprovalRootRefs();
-        for (let i = 0; i < allYearRefs.length; i++) {
-          const source = allYearRefs[i].key;
-          try {
-            const rootSnap = await allYearRefs[i].ref.once('value');
-            const rootVal = rootSnap.val();
-            if (!rootVal || typeof rootVal !== 'object' || Array.isArray(rootVal)) continue;
-            Object.entries(rootVal).forEach(([yearKey, yearNode]) => {
-              if (!yearNode || typeof yearNode !== 'object' || Array.isArray(yearNode)) return;
-              Object.entries(yearNode).forEach(([id, row]) => {
-                if (!id) return;
-                if (!merged[id]) {
-                  merged[id] = row;
-                  state.requestMetaById[id] = { source, year: String(yearKey || row?.year || state.year) };
-                  return;
-                }
-                const existingTs = Number(merged[id]?.requestedAt || merged[id]?.createdAt || 0);
-                const incomingTs = Number(row?.requestedAt || row?.createdAt || 0);
-                if (incomingTs > existingTs) {
-                  merged[id] = row;
-                  state.requestMetaById[id] = { source, year: String(yearKey || row?.year || state.year) };
-                }
-              });
-            });
-          } catch (_) {}
+          const snap = await ref.once('value');
+          rowsByPath[basePath] = snap.val() || {};
+        } catch (err) {
+          state.lastApprovalErrors.push({ basePath, message: err?.message || String(err) });
+          console.warn('[ExpenseApprovalQueue] read failed:', basePath, err);
         }
       }
-
-      state.requests = merged;
-      const sourceValues = Object.values(state.requestMetaById).map((v) => v?.source).filter(Boolean);
-      if (sourceValues.includes('root')) state.expenseApprovalsUseRoot = true;
-      if (sourceValues.includes('socrates')) state.expenseApprovalsUseSchoolsSocrates = true;
+      mergeApprovalRows(rowsByPath, state.year);
+      renderApprovalDebug();
     }
 
     function expenseApprovalRef(id) {
       const meta = id ? state.requestMetaById?.[id] : null;
-      const targetYear = String(meta?.year || state.year);
-      const path = `expenseApprovals/${targetYear}${id ? '/' + id : ''}`;
-      const source = meta?.source || '';
-      if (source === 'root') return rootRef(path);
-      if (source === 'socrates') return schoolsSocratesRef(path);
-      if (state.expenseApprovalsUseRoot) return rootRef(path);
-      if (state.expenseApprovalsUseSchoolsSocrates) return schoolsSocratesRef(path);
-      return schoolRef(path);
-    }
-
-    function getExpenseApprovalRefs() {
-      const path = `expenseApprovals/${state.year}`;
-      const sid = state.school?.id || inferSchool()?.id;
-      const isSocrates = isSocratesLegacy(sid);
-      if (isSocrates) {
-        return [
-          { key: 'root', ref: rootRef(path) },
-          { key: 'socrates', ref: schoolsSocratesRef(path) },
-          { key: 'school', ref: schoolRef(path) },
-        ];
-      }
-      return [
-        { key: 'school', ref: schoolRef(path) },
-        { key: 'root', ref: rootRef(path) },
-      ];
-    }
-
-    function getExpenseApprovalRootRefs() {
-      const path = 'expenseApprovals';
-      const sid = state.school?.id || inferSchool()?.id;
-      const isSocrates = isSocratesLegacy(sid);
-      if (isSocrates) {
-        return [
-          { key: 'root', ref: rootRef(path) },
-          { key: 'socrates', ref: schoolsSocratesRef(path) },
-          { key: 'school', ref: schoolRef(path) },
-        ];
-      }
-      return [
-        { key: 'school', ref: schoolRef(path) },
-        { key: 'root', ref: rootRef(path) },
-      ];
+      const p = normalizePath(meta?.path || '');
+      if (!p) throw new Error(`Approval metadata missing for ${id}`);
+      return db.ref(p);
     }
 
     async function loadModuleRecordedCounts() {
@@ -588,10 +585,9 @@
         const p = getModuleExpensePath(m, y);
         if (!p) return;
         try {
-          const isPreform = m.key === 'preform_one';
-          let snap = isPreform ? await rootRef(p).once('value') : await schoolRef(p).once('value');
-          if (!isPreform && useRoot && !snap.exists()) snap = await rootRef(p).once('value');
-          if (!isPreform && useRoot && !snap.exists()) snap = await schoolsSocratesRef(p).once('value');
+          let snap = await schoolRef(p).once('value');
+          if (useRoot && !snap.exists()) snap = await rootRef(p).once('value');
+          if (useRoot && !snap.exists()) snap = await schoolsSocratesRef(p).once('value');
           const val = snap.val();
           const count = Array.isArray(val) ? val.filter(Boolean).length : (val ? Object.keys(val).length : 0);
           state.recordedByModule[m.key] = count;
@@ -609,10 +605,9 @@
         const p = getModuleExpensePath(m, y);
         if (!p) return;
         try {
-          const isPreform = m.key === 'preform_one';
-          let snap = isPreform ? await rootRef(p).once('value') : await schoolRef(p).once('value');
-          if (!isPreform && useRoot && !snap.exists()) snap = await rootRef(p).once('value');
-          if (!isPreform && useRoot && !snap.exists()) snap = await schoolsSocratesRef(p).once('value');
+          let snap = await schoolRef(p).once('value');
+          if (useRoot && !snap.exists()) snap = await rootRef(p).once('value');
+          if (useRoot && !snap.exists()) snap = await schoolsSocratesRef(p).once('value');
           const val = snap.val();
           const entries = Array.isArray(val) ? val.filter(Boolean) : (val ? Object.entries(val).map(([id, row]) => ({ id, ...row })) : []);
           state.moduleExpenses[m.key] = entries;
@@ -638,18 +633,20 @@
         return;
       }
       const writer = db.ref(targetPath).push();
+      const approver = currentApprover();
       await writer.set({
         ...(row.targetPayload || {}),
         approvedAt: firebase.database.ServerValue.TIMESTAMP,
-        approvedBy: currentApprover(),
-        approvalRequestId: id,
+        approvedBy: approver,
+        approvalId: id,
         approvalSource: 'academic_expense_approval',
       });
       await reqRef.update({
         status: 'approved',
         approvedAt: firebase.database.ServerValue.TIMESTAMP,
-        approvedBy: currentApprover(),
-        finalRecordPath: `${targetPath}/${writer.key}`,
+        approvedBy: approver,
+        recordedKey: writer.key,
+        recordedPath: `${targetPath}/${writer.key}`,
       });
       await refreshAll();
     }
@@ -767,41 +764,31 @@
       state.approvalUnsubscribe = [];
 
       const refs = getExpenseApprovalRefs();
+      state.lastApprovalErrors = [];
       const snapshots = {};
       const applyMerged = () => {
-        const merged = {};
-        state.requestMetaById = {};
-        refs.forEach(({ key }) => {
-          const data = snapshots[key];
-          if (!data || typeof data !== 'object' || Array.isArray(data)) return;
-          Object.entries(data).forEach(([id, row]) => {
-            if (!id) return;
-            if (!merged[id]) {
-              merged[id] = row;
-              state.requestMetaById[id] = { source: key, year: String(state.year) };
-              return;
-            }
-            const existingTs = Number(merged[id]?.requestedAt || merged[id]?.createdAt || 0);
-            const incomingTs = Number(row?.requestedAt || row?.createdAt || 0);
-            if (incomingTs > existingTs) {
-              merged[id] = row;
-              state.requestMetaById[id] = { source: key, year: String(state.year) };
-            }
-          });
-        });
-        state.requests = merged;
+        mergeApprovalRows(snapshots, state.year);
+        renderApprovalDebug();
         buildCards();
         renderTable();
       };
 
-      refs.forEach(({ key, ref }) => {
+      refs.forEach(({ basePath, ref }) => {
         const handler = (snap) => {
-          snapshots[key] = snap.val() || {};
+          snapshots[basePath] = snap.val() || {};
           applyMerged();
         };
-        ref.on('value', handler);
+        const errorHandler = (err) => {
+          state.lastApprovalErrors.push({ basePath, message: err?.message || String(err) });
+          console.warn('[ExpenseApprovalQueue] realtime read failed:', basePath, err);
+          renderApprovalDebug();
+        };
+        ref.on('value', handler, errorHandler);
         state.approvalUnsubscribe.push(() => {
-          try { ref.off('value', handler); } catch (_) {}
+          try {
+            ref.off('value', handler);
+            ref.off('value', errorHandler);
+          } catch (_) {}
         });
       });
     }
