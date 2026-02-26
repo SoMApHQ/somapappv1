@@ -113,14 +113,14 @@
           <tbody id="rows"></tbody>
         </table>
       </div>
-      <div id="empty" class="empty" style="display:none;">No records for this filter.</div>
+      <div id="empty" class="empty" style="display:none;">No records for this filter. Submit an expense from Finance, Remedial, or Transport first—they will appear here for approval.</div>
       <div id="approvalDebug" class="small" style="margin:8px 0 4px 0;padding:8px;background:#1e293b;border-radius:8px;border:1px solid var(--line);"></div>
       <div id="recordedSection" style="display:none;">
         <div class="section-title" id="recordedSectionTitle">Recorded expenses</div>
         <div style="overflow:auto;">
           <table>
             <thead>
-              <tr>
+              <tr id="recordedTableHeader">
                 <th>Date</th>
                 <th>Category</th>
                 <th>Description</th>
@@ -430,11 +430,29 @@
     function renderRecordedExpenses() {
       const section = document.getElementById('recordedSection');
       const title = document.getElementById('recordedSectionTitle');
+      const headerRow = document.getElementById('recordedTableHeader');
       const tbody = document.getElementById('recordedRows');
       const empty = document.getElementById('recordedEmpty');
       if (!section || !tbody) return;
+      section.style.display = '';
       if (state.moduleFilter === 'all') {
-        section.style.display = 'none';
+        const allExpenses = [];
+        MODULES.forEach((m) => {
+          (state.moduleExpenses?.[m.key] || []).forEach((r) => allExpenses.push({ ...r, _module: m.label }));
+        });
+        if (title) title.textContent = 'Recorded expenses – All Modules (Finance, Remedial, Transport)';
+        if (headerRow) headerRow.innerHTML = '<th>Date</th><th>Module</th><th>Category</th><th>Description</th><th>Amount</th><th>Recorded By</th>';
+        if (allExpenses.length === 0) {
+          tbody.innerHTML = '';
+          if (empty) empty.style.display = '';
+          return;
+        }
+        if (empty) empty.style.display = 'none';
+        const sorted = [...allExpenses].sort((a, b) => (Number(b.timestamp || b.approvedAt || 0) - Number(a.timestamp || a.approvedAt || 0)));
+        tbody.innerHTML = sorted.map((r) => {
+          const { dateStr, category, desc, amount, by } = normalizeExpenseRow(r, '');
+          return `<tr><td>${dateStr}</td><td>${r._module || '-'}</td><td>${category}</td><td>${desc}</td><td>${fmt(amount)}</td><td>${by}</td></tr>`;
+        }).join('');
         return;
       }
       const mod = MODULES.find((m) => m.key === state.moduleFilter);
@@ -442,8 +460,8 @@
         section.style.display = 'none';
         return;
       }
+      if (headerRow) headerRow.innerHTML = '<th>Date</th><th>Category</th><th>Description</th><th>Amount</th><th>Recorded By</th>';
       const expenses = state.moduleExpenses?.[state.moduleFilter] || [];
-      section.style.display = '';
       if (title) title.textContent = `Recorded expenses – ${mod.label}`;
       if (expenses.length === 0) {
         tbody.innerHTML = '';
@@ -451,11 +469,7 @@
         return;
       }
       if (empty) empty.style.display = 'none';
-      const sorted = [...expenses].sort((a, b) => {
-        const ta = Number(a.timestamp || a.approvedAt || a.createdAt || 0);
-        const tb = Number(b.timestamp || b.approvedAt || b.createdAt || 0);
-        return tb - ta;
-      });
+      const sorted = [...expenses].sort((a, b) => (Number(b.timestamp || b.approvedAt || 0) - Number(a.timestamp || a.approvedAt || 0)));
       tbody.innerHTML = sorted.map((r) => {
         const { dateStr, category, desc, amount, by } = normalizeExpenseRow(r, state.moduleFilter);
         return `<tr><td>${dateStr}</td><td>${category}</td><td>${desc}</td><td>${fmt(amount)}</td><td>${by}</td></tr>`;
@@ -519,14 +533,14 @@
       const schoolLegacyPath = schoolPath(`expenseApprovals/${y}`);
       const canonicalPath = window.SOMAP?.P ? window.SOMAP.P(`years/${y}/expenseApprovals`) : `years/${y}/expenseApprovals`;
       const raw = [
+        `years/${y}/expenseApprovals`,
+        `schools/socrates-school/years/${y}/expenseApprovals`,
         canonicalPath,
         schoolYearPath,
         schoolLegacyPath,
-        `years/${y}/expenseApprovals`,
         `expenseApprovals/${y}`,
         `schools/${sid}/years/${y}/expenseApprovals`,
         `schools/${sid}/expenseApprovals/${y}`,
-        `schools/socrates-school/years/${y}/expenseApprovals`,
         `schools/socrates-school/expenseApprovals/${y}`,
       ];
       sidVariants.forEach((v) => {
@@ -577,11 +591,14 @@
       if (!el) return;
       const year = String(state.year || '');
       const paths = state.approvalBasePaths || [];
-      const canonical = paths[0] || '(none)';
+      const primaryPath = paths[0] || '(none)';
       const loaded = Object.keys(state.requests || {}).length;
       const errors = Array.isArray(state.lastApprovalErrors) ? state.lastApprovalErrors : [];
       const errCount = errors.length;
-      let html = `Year: ${year} | Primary path: <code style="font-size:11px;background:#1e293b;padding:2px 6px;border-radius:4px;">${canonical}</code> | Loaded: <b>${loaded}</b> requests`;
+      let html = `Year: ${year} | Reading from: <code style="font-size:11px;background:#1e293b;padding:2px 6px;border-radius:4px;">${primaryPath}</code> | Loaded: <b>${loaded}</b> requests`;
+      if (loaded === 0 && errCount === 0) {
+        html += '<br><small style="color:var(--muted);">If you submitted expenses but see 0: check Firebase Console → Realtime Database → Rules. Add read for <code>years/$year/expenseApprovals</code>. See rtdb/expense_approvals.rules.json</small>';
+      }
       if (errCount > 0) {
         html += ` | <span style="color:var(--bad);">Errors: ${errCount}</span>`;
         errors.forEach((e, i) => {
@@ -601,7 +618,17 @@
         const { basePath, ref } = refs[i];
         try {
           const snap = await ref.once('value');
-          rowsByPath[basePath] = snap.val() || {};
+          const val = snap.val();
+          let data = {};
+          if (Array.isArray(val)) {
+            val.forEach((row, idx) => { if (row && typeof row === 'object') data['_' + idx] = row; });
+          } else if (val && typeof val === 'object' && !Array.isArray(val)) {
+            data = val;
+          }
+          if (Object.keys(data).length > 0) {
+            console.log('[ExpenseApprovalQueue] found', Object.keys(data).length, 'at', basePath);
+          }
+          rowsByPath[basePath] = data;
         } catch (err) {
           state.lastApprovalErrors.push({ basePath, message: err?.message || String(err) });
           console.warn('[ExpenseApprovalQueue] read failed:', basePath, err);
