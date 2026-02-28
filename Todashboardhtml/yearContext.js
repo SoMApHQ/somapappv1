@@ -7,9 +7,8 @@
   const ATTACHED_FLAG = 'somapYearAttached';
 
   function clampYearRange(start, end) {
-    const current = new Date().getFullYear();
-    const min = Number.isInteger(start) ? start : current - 1;
-    const max = Number.isInteger(end) ? end : current + 7;
+    const min = Number.isInteger(start) ? start : 2024;
+    const max = Number.isInteger(end) ? end : 2042;
     return [Math.min(min, max), Math.max(min, max)];
   }
 
@@ -39,7 +38,7 @@
 
   function getSelectedYear() {
     const stored = localStorage.getItem(STORAGE_KEY);
-    const MIN_YEAR = 2025;
+    const MIN_YEAR = 2024;
     const currentYear = new Date().getFullYear();
     if (stored) {
       const yearNum = Number(stored);
@@ -64,9 +63,9 @@
 
   function setSelectedYear(year, options = {}) {
     if (!year) return getSelectedYear();
-    const MIN_YEAR = 2025;
+    const MIN_YEAR = 2024;
     let normalized = String(year);
-    // Ensure year is at least 2025
+    // Ensure year is at least 2024
     if (Number(normalized) < MIN_YEAR) {
       normalized = String(MIN_YEAR);
     }
