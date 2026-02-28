@@ -15,7 +15,9 @@
     filtered: [],
     selected: new Set(),
     activeKey: '',
-    rendering: false
+    rendering: false,
+    selfMode: false,
+    selfWorkerId: ''
   };
 
   const el = {};
@@ -32,7 +34,9 @@
       return;
     }
 
+    resolveMode();
     initYear();
+    applyModeUi();
     await refreshSchoolBrand();
     await loadWorkersForYear(state.year);
 
@@ -114,6 +118,17 @@
     });
   }
 
+  function resolveMode(){
+    const query = new URLSearchParams(window.location.search || '');
+    const scope = String(query.get('scope') || '').toLowerCase();
+    const mode = String(query.get('mode') || '').toLowerCase();
+    const workerFromQuery = String(query.get('worker') || '').trim();
+    const workerFromStorage = String(localStorage.getItem('workerId') || sessionStorage.getItem('workerId') || '').trim();
+
+    state.selfMode = (scope === 'self' || mode === 'self');
+    state.selfWorkerId = workerFromQuery || workerFromStorage;
+  }
+
   function initYear(){
     if (window.somapYearContext && el.yearSelect) {
       window.somapYearContext.attachYearDropdown(el.yearSelect);
@@ -125,6 +140,14 @@
 
     state.year = preferred;
     if (el.yearSelect) el.yearSelect.value = preferred;
+  }
+
+  function applyModeUi(){
+    if (!state.selfMode) return;
+    if (el.downloadSelectedPdf) el.downloadSelectedPdf.style.display = 'none';
+    if (el.downloadAllPdf) el.downloadAllPdf.style.display = 'none';
+    if (el.selectAllWorkers) el.selectAllWorkers.disabled = true;
+    if (el.searchBox) el.searchBox.placeholder = 'Your ID card';
   }
 
   async function refreshSchoolBrand(){
@@ -225,8 +248,13 @@
       workers.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
       state.workers = workers;
 
+      if (state.selfMode) {
+        const selfWorker = resolveSelfWorker(workers);
+        state.workers = selfWorker ? [selfWorker] : [];
+      }
+
       const query = (el.searchBox?.value || '').trim().toLowerCase();
-      state.filtered = workers.filter((w) => filterMatch(w, query));
+      state.filtered = state.workers.filter((w) => filterMatch(w, query));
 
       const stillExists = state.workers.some((w) => w.key === state.activeKey);
       if (!stillExists) {
@@ -259,6 +287,28 @@
     if (!query) return true;
     return [worker.name, worker.staffId, worker.role, worker.department]
       .some((value) => String(value || '').toLowerCase().includes(query));
+  }
+
+  function resolveSelfWorker(workers){
+    if (!workers.length) return null;
+    const wid = String(state.selfWorkerId || '').toLowerCase();
+    const fullName = String(localStorage.getItem('fullNameUpper') || localStorage.getItem('somap_workerName') || '').toLowerCase();
+    const phone = String(localStorage.getItem('somap_workerPhone') || '').toLowerCase();
+
+    let worker = null;
+    if (wid) {
+      worker = workers.find((w) => String(w.key).toLowerCase() === wid || String(w.staffId).toLowerCase() === wid);
+      if (worker) return worker;
+    }
+    if (fullName) {
+      worker = workers.find((w) => String(w.name).toLowerCase().includes(fullName));
+      if (worker) return worker;
+    }
+    if (phone) {
+      worker = workers.find((w) => String(w.phone).toLowerCase().includes(phone));
+      if (worker) return worker;
+    }
+    return null;
   }
 
   function renderList(query){
