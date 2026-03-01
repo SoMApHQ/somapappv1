@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Transport Maintenance · Review Desk</title>
-    <link rel="stylesheet" href="../css/transport.css" />
+    <link rel="stylesheet" href="./css/transport.css" />
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
@@ -24,7 +24,7 @@
   </head>
   <body>
     <div id="contextBar" class="bar"></div>
-    <main style="padding:1.5rem; max-width:1100px; margin:0 auto;">
+    <main style="padding:1.5rem; max-width:1300px; margin:0 auto;">
       <section class="card">
         <div class="flex space center">
           <div>
@@ -40,12 +40,12 @@
         <table class="table mt-2">
           <thead>
             <tr>
-              <th>Vehicle</th>
-              <th>Part / Cost</th>
+              <th>Vehicle / Driver</th>
+              <th>Part / Soko / Costs</th>
               <th>Odo</th>
               <th>Flags</th>
               <th>Notes</th>
-              <th></th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="maintBody"></tbody>
@@ -55,9 +55,10 @@
     </main>
     <div id="toast" class="toast hidden"></div>
 
-    <script src="../modules/transport_roles.js"></script>
-    <script src="../modules/transport_helpers.js"></script>
-    <script src="../modules/transport_context.js"></script>
+    <script src="./modules/transport_roles.js"></script>
+    <script src="./modules/transport_helpers.js"></script>
+    <script src="./modules/transport_context.js"></script>
+    <script src="./modules/maintenance.js"></script>
     <script>
       const toast = document.getElementById("toast");
       const maintBody = document.getElementById("maintBody");
@@ -66,6 +67,7 @@
 
       const state = {
         user: null,
+        userProfile: null,
         role: null,
         context: TransportContext.getContext(),
         requests: [],
@@ -80,33 +82,47 @@
       }
 
       function canReview() {
+        const normalized = String(state.role || "").toLowerCase();
+        if (normalized === "accountant" || normalized === "mhasibu") return true;
         return TransportRoles.isAdmin(state.role);
       }
 
       document.querySelectorAll("button[data-tab]").forEach((btn) => {
         btn.addEventListener("click", () => {
-          document.querySelectorAll("button[data-tab]").forEach((b) =>
-            b.classList.add("secondary")
-          );
+          document.querySelectorAll("button[data-tab]").forEach((b) => b.classList.add("secondary"));
           btn.classList.remove("secondary");
           state.currentTab = btn.dataset.tab;
           renderTable();
         });
       });
 
-      function flagChips(req) {
-        const chips = [];
-        if (req.repeatPart) chips.push('<span class="chip warn">Repeat Part</span>');
-        if (req.highCost) chips.push('<span class="chip bad">High Cost</span>');
-        return chips.join(" ") || '<span class="chip ok">OK</span>';
+      function priceBlock(req) {
+        const quoted = Number(req.estCost || 0);
+        const soko = Number(req.sokoPrice || 0);
+        const labour = Number(req.fundiLabourCost || 0);
+        const deltaPct = Number(req.priceDeltaPct || 0);
+        const direction = req.priceDirection || "NA";
+        const tone = direction === "ABOVE_SOKO" ? "bad" : direction === "BELOW_SOKO" ? "warn" : "ok";
+        const diffLine = soko > 0
+          ? `<span class="chip ${tone}">${deltaPct > 0 ? "+" : ""}${deltaPct.toFixed(1)}%</span>`
+          : '<span class="chip warn">No soko price</span>';
+        return `
+          <small class="muted">Quoted spare: ${TransportMaintenance.fmtMoney(quoted)}</small><br/>
+          <small class="muted">Soko spare: ${TransportMaintenance.fmtMoney(soko, req.sokoCurrency || "TZS")} ${diffLine}</small><br/>
+          <small class="muted">Labour: ${TransportMaintenance.fmtMoney(labour)} | Total: ${TransportMaintenance.fmtMoney(quoted + labour)}</small>
+        `;
       }
 
       function actionButtons(req) {
-        if (!canReview() || req.status !== "PENDING") return "";
+        const invoiceBtn = req.status === "APPROVED"
+          ? `<button class="btn secondary" data-invoice="${req.id}">Invoice</button>`
+          : "";
+        if (!canReview() || req.status !== "PENDING") return invoiceBtn;
         return `
           <div class="table-actions">
             <button class="btn" data-approve="${req.id}">Approve</button>
             <button class="btn danger" data-reject="${req.id}">Reject</button>
+            ${invoiceBtn}
           </div>
         `;
       }
@@ -114,54 +130,71 @@
       async function approveRequest(reqId) {
         const request = state.requests.find((r) => r.id === reqId);
         if (!request) return;
-        const ledgerBase = firebase.database().ref(
-          TransportHelpers.paths.maintLedger(request.vehicleId)
-        );
+
+        const reviewerName =
+          state.userProfile?.name ||
+          state.userProfile?.profile?.fullName ||
+          state.user?.email ||
+          "Accountant";
+
+        const ledgerBase = firebase.database().ref(TransportHelpers.paths.maintLedger(request.vehicleId));
         const entriesRef = ledgerBase.child("entries").push();
-        const monthKey = `${request.year || state.context.year}-${String(
-          request.month || state.context.month
-        ).padStart(2, "0")}`;
+        const monthKey = `${request.year || state.context.year}-${String(request.month || state.context.month).padStart(2, "0")}`;
+
         try {
           await entriesRef.set({
             requestId: request.id,
+            vehicleId: request.vehicleId,
             part: request.part,
             estCost: Number(request.estCost || 0),
+            fundiLabourCost: Number(request.fundiLabourCost || 0),
+            totalCost: Number(request.estCost || 0) + Number(request.fundiLabourCost || 0),
             odoKm: Number(request.odoKm || 0),
             notes: request.notes || "",
+            sokoItemId: request.sokoItemId || "",
+            sokoShopName: request.sokoShopName || "",
+            sokoPhone: request.sokoPhone || "",
+            sokoLipaNumber: request.sokoLipaNumber || "",
             approvedBy: state.user.uid,
+            approvedByName: reviewerName,
             approvedAt: Date.now(),
           });
-          await ledgerBase
-            .child(`monthlyTotals/${monthKey}`)
-            .transaction((current) => {
-              const existing = current || { cost: 0 };
-              return {
-                cost: Number(existing.cost || 0) + Number(request.estCost || 0),
-                updatedAt: Date.now(),
-              };
-            });
+
+          await ledgerBase.child(`monthlyTotals/${monthKey}`).transaction((current) => {
+            const existing = current || { cost: 0 };
+            return {
+              cost: Number(existing.cost || 0) + Number(request.estCost || 0) + Number(request.fundiLabourCost || 0),
+              updatedAt: Date.now(),
+            };
+          });
+
           if (request.part) {
-            await ledgerBase
-              .child(`partsHistory/${TransportHelpers.slug(request.part)}`)
-              .transaction((current) => {
-                const history = current || [];
-                history.push({
-                  reqId,
-                  ts: Date.now(),
-                  cost: Number(request.estCost || 0),
-                });
-                return history.slice(-20);
+            await ledgerBase.child(`partsHistory/${TransportMaintenance.slug(request.part)}`).transaction((current) => {
+              const history = current || [];
+              history.push({
+                reqId,
+                ts: Date.now(),
+                cost: Number(request.estCost || 0),
               });
-          }
-          await firebase
-            .database()
-            .ref(TransportHelpers.paths.maintRequest(reqId))
-            .update({
-              status: "APPROVED",
-              reviewedBy: state.user.uid,
-              reviewedAt: Date.now(),
+              return history.slice(-30);
             });
-          showToast("Maintenance approved");
+          }
+
+          const invoice = TransportMaintenance.buildInvoiceObject(
+            { id: reqId, ...request },
+            { uid: state.user.uid, name: reviewerName }
+          );
+          await firebase.database().ref(`maintenance_invoices/${reqId}`).set(invoice);
+
+          await firebase.database().ref(TransportHelpers.paths.maintRequest(reqId)).update({
+            status: "APPROVED",
+            reviewedBy: state.user.uid,
+            reviewedByName: reviewerName,
+            reviewedAt: Date.now(),
+            invoiceNo: invoice.invoiceNo,
+          });
+
+          showToast("Maintenance approved and invoice generated");
         } catch (err) {
           console.error(err);
           showToast("Failed to approve maintenance", "bad");
@@ -172,20 +205,25 @@
         const reason = prompt("Rejection reason?");
         if (reason === null) return;
         try {
-          await firebase
-            .database()
-            .ref(TransportHelpers.paths.maintRequest(reqId))
-            .update({
-              status: "REJECTED",
-              reviewedBy: state.user.uid,
-              reviewedAt: Date.now(),
-              rejectReason: reason,
-            });
+          await firebase.database().ref(TransportHelpers.paths.maintRequest(reqId)).update({
+            status: "REJECTED",
+            reviewedBy: state.user.uid,
+            reviewedAt: Date.now(),
+            rejectReason: reason,
+          });
           showToast("Maintenance rejected");
         } catch (err) {
           console.error(err);
           showToast("Failed to reject maintenance", "bad");
         }
+      }
+
+      async function printInvoice(reqId) {
+        const request = state.requests.find((r) => r.id === reqId);
+        if (!request) return;
+        const snap = await firebase.database().ref(`maintenance_invoices/${reqId}`).get();
+        const invoice = snap.val() || TransportMaintenance.buildInvoiceObject({ id: reqId, ...request }, {});
+        TransportMaintenance.openPrintableInvoice(invoice);
       }
 
       function renderTable() {
@@ -198,22 +236,25 @@
         }
         emptyState.classList.add("hidden");
 
-        maintBody.innerHTML = list
-          .map(
-            (req) => `
-            <tr>
-              <td>${req.vehicleId || "—"}</td>
-              <td>${req.part || "—"}<br/><small class="muted">${TransportHelpers.fmtTZS(
-                req.estCost || 0
-              )}</small></td>
-              <td>${req.odoKm || "—"}</td>
-              <td>${flagChips(req)}</td>
-              <td>${req.notes || "—"}</td>
-              <td>${actionButtons(req)}</td>
-            </tr>
-          `
-          )
-          .join("");
+        maintBody.innerHTML = list.map((req) => `
+          <tr>
+            <td>
+              <strong>${req.vehiclePlate || req.vehicleId || "-"}</strong><br/>
+              <small class="muted">${req.vehicleModel || "-"}</small><br/>
+              <small class="muted">${req.driverName || "-"}</small>
+            </td>
+            <td>
+              <strong>${req.part || "-"}</strong><br/>
+              <small class="muted">${req.sokoShopName || "No shop"}</small><br/>
+              <small class="muted">${req.sokoPhone || "-"}</small><br/>
+              ${priceBlock(req)}
+            </td>
+            <td>${req.odoKm || "-"}</td>
+            <td>${TransportMaintenance.flagBadges(req)}</td>
+            <td>${req.notes || "-"}</td>
+            <td>${actionButtons(req)}</td>
+          </tr>
+        `).join("");
 
         maintBody.querySelectorAll("button[data-approve]").forEach((btn) => {
           btn.addEventListener("click", () => approveRequest(btn.dataset.approve));
@@ -221,65 +262,63 @@
         maintBody.querySelectorAll("button[data-reject]").forEach((btn) => {
           btn.addEventListener("click", () => rejectRequest(btn.dataset.reject));
         });
+        maintBody.querySelectorAll("button[data-invoice]").forEach((btn) => {
+          btn.addEventListener("click", () => printInvoice(btn.dataset.invoice));
+        });
       }
 
       function subscribeRequests() {
-        firebase
-          .database()
-          .ref("maintenance_requests")
-          .on(
-            "value",
-            (snapshot) => {
-              const items = [];
-              snapshot.forEach((child) => {
-                const value = child.val() || {};
-                if (value.school && value.school !== state.context.school) return;
-                items.push({ id: child.key, ...value });
-              });
-              state.requests = items;
-              renderTable();
-            },
-            (err) => {
-              console.error(err);
-              showToast("Failed to load maintenance requests", "bad");
-            }
-          );
+        firebase.database().ref("maintenance_requests").on(
+          "value",
+          (snapshot) => {
+            const items = [];
+            snapshot.forEach((child) => {
+              const value = child.val() || {};
+              if (value.school && value.school !== state.context.school) return;
+              if (Number(value.year || 0) && Number(value.year) !== Number(state.context.year)) return;
+              items.push({ id: child.key, ...value });
+            });
+            state.requests = items;
+            renderTable();
+          },
+          (err) => {
+            console.error(err);
+            showToast("Failed to load maintenance requests", "bad");
+          }
+        );
       }
 
       function ensureAuth() {
-        firebase.auth().onAuthStateChanged((user) => {
+        firebase.auth().onAuthStateChanged(async (user) => {
           if (!user) {
             showToast("Sign in first", "bad");
             return;
           }
           state.user = user;
-          firebase
-            .database()
-            .ref(`users/${user.uid}/role`)
-            .get()
-            .then((snapshot) => {
-          state.role = TransportRoles.normalize(snapshot.val()) || "guest";
-          if (!canReview()) {
-            document.body.innerHTML =
-              '<div class="alert red" style="margin:2rem;">No permission to review maintenance.</div>';
-            return;
+          try {
+            const [roleSnap, userSnap] = await Promise.all([
+              firebase.database().ref(`users/${user.uid}/role`).get(),
+              firebase.database().ref(`users/${user.uid}`).get(),
+            ]);
+            state.role = TransportRoles.normalize(roleSnap.val() || userSnap.val()?.role || "");
+            state.userProfile = userSnap.val() || {};
+            if (!canReview()) {
+              document.body.innerHTML =
+                '<div class="alert red" style="margin:2rem;">No permission to review maintenance.</div>';
+              return;
+            }
+            subscribeRequests();
+          } catch (err) {
+            console.error(err);
+            showToast("Failed to verify user", "bad");
           }
-              subscribeRequests();
-            })
-            .catch((err) => {
-              console.error(err);
-              showToast("Failed to verify user", "bad");
-            });
         });
       }
 
-      TransportContext.attachContextSelectors(
-        document.getElementById("contextBar"),
-        (ctx) => {
-          state.context = ctx;
-          renderTable();
-        }
-      );
+      TransportContext.attachContextSelectors(document.getElementById("contextBar"), (ctx) => {
+        state.context = ctx;
+        renderTable();
+      });
       ensureAuth();
     </script>
   </body>
