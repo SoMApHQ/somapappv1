@@ -281,7 +281,7 @@
     <script>
     /** Year range + anchor **/
     const SOMAP_ALLOWED_YEARS = Array.from({length: 20}, (_,i)=>2023+i); // 2023..2042
-    const SOMAP_DEFAULT_YEAR = 2025;
+    const SOMAP_DEFAULT_YEAR = new Date().getFullYear();
 
     /** Tanzania class ladder (no Class 8). Keep labels EXACTLY. */
     const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
@@ -907,6 +907,37 @@
         }
     }
 
+    function normalizeSchoolKey(value) {
+        return String(value || '')
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, '-');
+    }
+
+    function schoolAliases(raw) {
+        const key = normalizeSchoolKey(raw);
+        const set = new Set([key]);
+        if (!key) return set;
+        if (key === 'socrates' || key === 'socrates-school' || key === 'default') {
+            set.add('socrates');
+            set.add('socrates-school');
+            set.add('default');
+        }
+        return set;
+    }
+
+    function schoolMatches(requestSchool, selectedSchool) {
+        const reqKey = normalizeSchoolKey(requestSchool);
+        if (!reqKey) return true;
+        const selectedAliases = schoolAliases(selectedSchool);
+        if (selectedAliases.has(reqKey)) return true;
+        const reqAliases = schoolAliases(reqKey);
+        for (const a of reqAliases) {
+            if (selectedAliases.has(a)) return true;
+        }
+        return false;
+    }
+
     async function loadMaintenanceStats() {
         const pendingEl = document.getElementById('maint-pending-count');
         const flaggedEl = document.getElementById('maint-flagged-count');
@@ -919,15 +950,22 @@
             const snap = await db.ref('maintenance_requests').once('value');
             let pending = 0;
             let flagged = 0;
+            let pendingAnyYear = 0;
+            let flaggedAnyYear = 0;
             snap.forEach((child) => {
                 const req = child.val() || {};
-                if (req.school && req.school !== school) return;
-                if (Number(req.year || 0) && Number(req.year) !== year) return;
+                if (!schoolMatches(req.school, school)) return;
                 if ((req.status || 'PENDING') !== 'PENDING') return;
-                pending += 1;
                 const flags = Array.isArray(req.flags) ? req.flags : [];
-                if (req.repeatPart || req.purchasedTooSoon || flags.length) flagged += 1;
+                const hasFlag = req.repeatPart || req.purchasedTooSoon || flags.length;
+                pendingAnyYear += 1;
+                if (hasFlag) flaggedAnyYear += 1;
+                if (Number(req.year || 0) && Number(req.year) !== year) return;
+                pending += 1;
+                if (hasFlag) flagged += 1;
             });
+            if (pending === 0 && pendingAnyYear > 0) pending = pendingAnyYear;
+            if (flagged === 0 && flaggedAnyYear > 0) flagged = flaggedAnyYear;
             pendingEl.textContent = String(pending);
             flaggedEl.textContent = String(flagged);
         } catch (err) {
@@ -956,23 +994,25 @@
             invSnap.forEach((child) => {
                 const inv = child.val() || {};
                 const req = reqMap[child.key] || {};
-                if ((req.school || inv.school) && (req.school || inv.school) !== school) return;
-                if (Number(req.year || inv.year || 0) && Number(req.year || inv.year) !== year) return;
+                if (!schoolMatches(req.school || inv.school, school)) return;
                 rows.push({
                     id: child.key,
                     invoiceNo: inv.invoiceNo || req.invoiceNo || `MAIN-${child.key.slice(-6).toUpperCase()}`,
                     vehicle: req.vehiclePlate || req.vehicleId || inv.vehiclePlate || '-',
                     part: req.part || inv.part || '-',
                     total: Number(inv.total || req.totalQuotedCost || (Number(req.estCost || 0) + Number(req.fundiLabourCost || 0))),
-                    approvedAt: Number(inv.approvals?.approvedAt || req.reviewedAt || 0)
+                    approvedAt: Number(inv.approvals?.approvedAt || req.reviewedAt || 0),
+                    year: Number(req.year || inv.year || 0)
                 });
             });
-            rows.sort((a,b) => b.approvedAt - a.approvedAt);
-            if (!rows.length) {
+            let filteredRows = rows.filter((r) => !r.year || r.year === year);
+            if (!filteredRows.length) filteredRows = rows.slice();
+            filteredRows.sort((a,b) => b.approvedAt - a.approvedAt);
+            if (!filteredRows.length) {
                 tbody.innerHTML = '<tr><td colspan="6">No approved maintenance invoices yet.</td></tr>';
                 return;
             }
-            tbody.innerHTML = rows.slice(0, 40).map((r) => `
+            tbody.innerHTML = filteredRows.slice(0, 40).map((r) => `
                 <tr>
                     <td>${r.invoiceNo}</td>
                     <td>${r.vehicle}</td>
