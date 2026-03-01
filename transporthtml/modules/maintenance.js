@@ -156,17 +156,33 @@
         const catId = clean(row.catId);
         const itemModel = clean(row.vehicleModel).toLowerCase();
         const title = clean(row.title).toLowerCase();
+        const combined = `${title} ${itemModel}`;
         const isVehicleByCat = catId && vehicleCategoryIds.has(catId);
         const isVehicleByShopCat = [...shopCategoryKeys].some((id) => vehicleCategoryIds.has(id));
+        const vehicleKeywords = [
+          "shock",
+          "absorber",
+          "rack",
+          "battery",
+          "brake",
+          "tyre",
+          "tire",
+          "filter",
+          "clutch",
+          "cluch",
+          "oil",
+          "bearing",
+          "hiace",
+          "vitz",
+          "bus",
+          "gear",
+          "pad",
+          "pedal",
+          "fluid",
+          "spare",
+        ];
         const isVehicleByContent =
-          !!itemModel ||
-          title.includes("shock") ||
-          title.includes("rack") ||
-          title.includes("battery") ||
-          title.includes("brake") ||
-          title.includes("tyre") ||
-          title.includes("tire") ||
-          title.includes("filter");
+          vehicleKeywords.some((k) => combined.includes(k));
         if (!isVehicleByCat && !isVehicleByShopCat && !isVehicleByContent) return;
         const phoneRaw = clean(shop.whatsappPhone || (shop.phones || [])[0] || "");
         const phoneDigits = normalizePhoneDigits(phoneRaw);
@@ -493,28 +509,124 @@ ${invoiceBodyHtml(invoice)}
   }
 
   async function downloadInvoicePdf(invoice) {
-    const html2pdf = await ensureHtml2Pdf();
-    const wrapper = document.createElement("div");
-    wrapper.style.position = "fixed";
-    wrapper.style.left = "-99999px";
-    wrapper.style.top = "0";
-    wrapper.innerHTML = `<style>${invoiceStyles()}</style>${invoiceBodyHtml(invoice)}`;
-    document.body.appendChild(wrapper);
-    const node = wrapper.querySelector(".inv-root") || wrapper;
-    try {
-      await html2pdf()
-        .set({
-          margin: 8,
-          filename: `${invoice.invoiceNo || "maintenance-invoice"}.pdf`,
-          image: { type: "jpeg", quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true },
-          jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-        })
-        .from(node)
-        .save();
-    } finally {
-      wrapper.remove();
-    }
+    await ensureHtml2Pdf();
+    const jsPdfNS = window.jspdf || window.jsPDF;
+    const JsPdfCtor = jsPdfNS?.jsPDF || jsPdfNS;
+    if (!JsPdfCtor) throw new Error("PDF engine unavailable");
+
+    const doc = new JsPdfCtor({ unit: "mm", format: "a4", orientation: "portrait" });
+    const pageW = doc.internal.pageSize.getWidth();
+    const margin = 12;
+    let y = 12;
+
+    const line = () => {
+      doc.setDrawColor(15, 118, 110);
+      doc.setLineWidth(0.4);
+      doc.line(margin, y, pageW - margin, y);
+      y += 4;
+    };
+
+    const text = (value, size = 11, bold = false, color = [17, 24, 39]) => {
+      doc.setFont("helvetica", bold ? "bold" : "normal");
+      doc.setFontSize(size);
+      doc.setTextColor(color[0], color[1], color[2]);
+      const lines = doc.splitTextToSize(String(value || ""), pageW - margin * 2);
+      doc.text(lines, margin, y);
+      y += lines.length * (size * 0.38 + 1.4);
+    };
+
+    const row = (leftLabel, leftVal, rightLabel, rightVal) => {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.setTextColor(31, 41, 55);
+      doc.text(`${leftLabel}:`, margin, y);
+      doc.text(`${rightLabel}:`, margin + 95, y);
+      doc.setFont("helvetica", "normal");
+      doc.text(String(leftVal || "-"), margin + 26, y);
+      doc.text(String(rightVal || "-"), margin + 121, y);
+      y += 6;
+    };
+
+    const approvedDate = invoice.approvals?.approvedAt
+      ? new Date(invoice.approvals.approvedAt).toLocaleString()
+      : "-";
+    const schoolName = schoolDisplay(invoice);
+    const schoolAddr = schoolAddress(invoice);
+    const total = Number(invoice.total || 0);
+    const spare = Number(invoice.spareCost || 0);
+    const labour = Number(invoice.fundiLabourCost || 0);
+
+    doc.setFillColor(15, 118, 110);
+    doc.rect(0, 0, pageW, 28, "F");
+    doc.setTextColor(240, 253, 250);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    doc.text("APPROVED MAINTENANCE INVOICE", margin, 11);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    doc.text(schoolName, margin, 17);
+    doc.text(schoolAddr, margin, 22);
+
+    y = 36;
+    row("Invoice #", invoice.invoiceNo || "-", "Approved Date", approvedDate);
+    row("Vehicle", invoice.vehiclePlate || invoice.vehicleId || "-", "Model", invoice.vehicleModel || "-");
+    row("Driver", invoice.driverName || "-", "Fundi", invoice.fundiName || "-");
+    line();
+
+    text("This is an invoice requesting you to do the following approved maintenance work.", 11, true, [120, 53, 15]);
+    text(`1. Purchase and replace spare part: ${invoice.part || "Spare part"}.`, 10);
+    text("2. Perform required vehicle maintenance and labour tasks for the stated vehicle.", 10);
+    text("3. Use seller contact and payment details below for procurement.", 10);
+    line();
+
+    doc.setFillColor(236, 254, 255);
+    doc.rect(margin, y, pageW - margin * 2, 8, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(17, 24, 39);
+    doc.text("APPROVED WORK ITEM", margin + 2, y + 5.2);
+    doc.text("AMOUNT", pageW - margin - 34, y + 5.2);
+    y += 8;
+    doc.setFont("helvetica", "normal");
+    doc.rect(margin, y, pageW - margin * 2, 8);
+    doc.text(invoice.part || "Spare part", margin + 2, y + 5.2);
+    doc.text(fmtMoney(spare), pageW - margin - 34, y + 5.2);
+    y += 8;
+    doc.rect(margin, y, pageW - margin * 2, 8);
+    doc.text("Fundi Labour", margin + 2, y + 5.2);
+    doc.text(fmtMoney(labour), pageW - margin - 34, y + 5.2);
+    y += 8;
+    doc.setFillColor(240, 253, 250);
+    doc.rect(margin, y, pageW - margin * 2, 8, "F");
+    doc.rect(margin, y, pageW - margin * 2, 8);
+    doc.setFont("helvetica", "bold");
+    doc.text("Total Approved Amount", margin + 2, y + 5.2);
+    doc.text(fmtMoney(total), pageW - margin - 34, y + 5.2);
+    y += 12;
+
+    text("Seller / Shop Contact & Payment Details", 11, true);
+    row("Shop Name", invoice.soko?.shopName || "-", "Seller Name", invoice.soko?.ownerName || "-");
+    row("Phone", invoice.soko?.phone || "-", "WhatsApp", invoice.soko?.whatsapp || "-");
+    row("Payment (Lipa Number)", invoice.soko?.lipaNumber || "-", "Spare ID", invoice.soko?.itemId || "-");
+    line();
+
+    y += 8;
+    doc.setDrawColor(31, 41, 55);
+    doc.line(margin, y, margin + 52, y);
+    doc.line(margin + 68, y, margin + 120, y);
+    doc.line(margin + 136, y, margin + 188, y);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    doc.setTextColor(31, 41, 55);
+    doc.text("Driver Signature", margin, y + 4.8);
+    doc.text("Accountant Signature", margin + 68, y + 4.8);
+    doc.text("Headteacher Signature", margin + 136, y + 4.8);
+
+    doc.setFontSize(9);
+    doc.setTextColor(75, 85, 99);
+    doc.text("Generated by SoMAp Transport Maintenance System.", margin, 287);
+
+    doc.save(`${invoice.invoiceNo || "maintenance-invoice"}.pdf`);
   }
 
   function flagBadges(request) {
