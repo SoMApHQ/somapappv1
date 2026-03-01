@@ -329,6 +329,7 @@
     </script>
 
     <script src="shared/finance_math.js"></script>
+    <script src="transporthtml/modules/maintenance.js"></script>
 </head>
 <body>
     <div class="flex h-screen overflow-hidden">
@@ -449,6 +450,27 @@
                         <p class="mb-2">Open the maintenance desk and approve/reject invoices.</p>
                         <button id="open-maint-desk-btn" class="btn">Open Maintenance Desk</button>
                     </div>
+                </div>
+                <div class="card mt-4">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-lg font-semibold">Approved Maintenance Invoices</h3>
+                        <small class="text-gray-600">Download PDF directly</small>
+                    </div>
+                    <table class="table w-full text-sm">
+                        <thead>
+                            <tr>
+                                <th>Invoice #</th>
+                                <th>Vehicle</th>
+                                <th>Part</th>
+                                <th>Total</th>
+                                <th>Approved</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="maint-invoice-table">
+                            <tr><td colspan="6">Loading...</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </section>
             <!-- Recent Payments -->
@@ -679,7 +701,8 @@
             loadExpensesList(),
             loadDebtors(),
             loadGraphs(),
-            loadMaintenanceStats()
+            loadMaintenanceStats(),
+            loadMaintenanceInvoices()
         ]);
     }
 
@@ -913,6 +936,57 @@
             flaggedEl.textContent = '0';
         }
     }
+
+    async function loadMaintenanceInvoices() {
+        const tbody = document.getElementById('maint-invoice-table');
+        if (!tbody) return;
+        const year = Number(getSelectedYear() || SOMAP_DEFAULT_YEAR);
+        const school = getCurrentSchoolId();
+        tbody.innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+        try {
+            const [reqSnap, invSnap] = await Promise.all([
+                db.ref('maintenance_requests').once('value'),
+                db.ref('maintenance_invoices').once('value')
+            ]);
+            const reqMap = {};
+            reqSnap.forEach((child) => {
+                reqMap[child.key] = child.val() || {};
+            });
+            const rows = [];
+            invSnap.forEach((child) => {
+                const inv = child.val() || {};
+                const req = reqMap[child.key] || {};
+                if ((req.school || inv.school) && (req.school || inv.school) !== school) return;
+                if (Number(req.year || inv.year || 0) && Number(req.year || inv.year) !== year) return;
+                rows.push({
+                    id: child.key,
+                    invoiceNo: inv.invoiceNo || req.invoiceNo || `MAIN-${child.key.slice(-6).toUpperCase()}`,
+                    vehicle: req.vehiclePlate || req.vehicleId || inv.vehiclePlate || '-',
+                    part: req.part || inv.part || '-',
+                    total: Number(inv.total || req.totalQuotedCost || (Number(req.estCost || 0) + Number(req.fundiLabourCost || 0))),
+                    approvedAt: Number(inv.approvals?.approvedAt || req.reviewedAt || 0)
+                });
+            });
+            rows.sort((a,b) => b.approvedAt - a.approvedAt);
+            if (!rows.length) {
+                tbody.innerHTML = '<tr><td colspan="6">No approved maintenance invoices yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = rows.slice(0, 40).map((r) => `
+                <tr>
+                    <td>${r.invoiceNo}</td>
+                    <td>${r.vehicle}</td>
+                    <td>${r.part}</td>
+                    <td>${formatTsh(r.total)}</td>
+                    <td>${r.approvedAt ? new Date(r.approvedAt).toLocaleDateString() : '-'}</td>
+                    <td><button class="btn btn-small" data-maint-pdf="${r.id}">Download PDF</button></td>
+                </tr>
+            `).join('');
+        } catch (err) {
+            console.error('Failed to load maintenance invoices', err);
+            tbody.innerHTML = '<tr><td colspan="6">Error loading invoices.</td></tr>';
+        }
+    }
     // Load Audit Log (placeholder, can be made dynamic from payments and expenses)
     function loadAuditLog() {
         // For now, placeholder
@@ -927,6 +1001,31 @@
             openPopup(`transporthtml/transportmaintenance.html?school=${encodeURIComponent(school)}&year=${encodeURIComponent(year)}`);
         });
     }
+
+    document.addEventListener('click', async (event) => {
+        const btn = event.target.closest('[data-maint-pdf]');
+        if (!btn) return;
+        const reqId = btn.getAttribute('data-maint-pdf');
+        if (!reqId) return;
+        try {
+            const [invSnap, reqSnap] = await Promise.all([
+                db.ref(`maintenance_invoices/${reqId}`).once('value'),
+                db.ref(`maintenance_requests/${reqId}`).once('value')
+            ]);
+            const req = reqSnap.val() || {};
+            const invoice = invSnap.val() || (window.TransportMaintenance
+                ? window.TransportMaintenance.buildInvoiceObject({ id: reqId, ...req }, {})
+                : null);
+            if (!invoice || !window.TransportMaintenance) {
+                Swal.fire('Error', 'Invoice engine not available.', 'error');
+                return;
+            }
+            await window.TransportMaintenance.downloadInvoicePdf(invoice);
+        } catch (err) {
+            console.error(err);
+            Swal.fire('Error', 'Failed to download invoice PDF.', 'error');
+        }
+    });
     </script>
     <script>
     (function initYearSelector(){

@@ -370,6 +370,50 @@
     setTimeout(() => win.print(), 400);
   }
 
+  function ensureHtml2Pdf() {
+    if (window.html2pdf) return Promise.resolve(window.html2pdf);
+    return new Promise((resolve, reject) => {
+      const existing = document.querySelector('script[data-lib="html2pdf"]');
+      if (existing) {
+        existing.addEventListener("load", () => resolve(window.html2pdf));
+        existing.addEventListener("error", reject);
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
+      script.async = true;
+      script.dataset.lib = "html2pdf";
+      script.onload = () => resolve(window.html2pdf);
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+  }
+
+  async function downloadInvoicePdf(invoice) {
+    const html2pdf = await ensureHtml2Pdf();
+    const wrapper = document.createElement("div");
+    wrapper.style.position = "fixed";
+    wrapper.style.left = "-99999px";
+    wrapper.style.top = "0";
+    wrapper.innerHTML = invoiceHtml(invoice);
+    document.body.appendChild(wrapper);
+    const node = wrapper.firstElementChild || wrapper;
+    try {
+      await html2pdf()
+        .set({
+          margin: 8,
+          filename: `${invoice.invoiceNo || "maintenance-invoice"}.pdf`,
+          image: { type: "jpeg", quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true },
+          jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+        })
+        .from(node)
+        .save();
+    } finally {
+      wrapper.remove();
+    }
+  }
+
   function flagBadges(request) {
     const flags = Array.isArray(request.flags) ? request.flags : [];
     if (!flags.length) return '<span class="chip ok">OK</span>';
@@ -394,6 +438,7 @@
     buildFlags,
     buildInvoiceObject,
     openPrintableInvoice,
+    downloadInvoicePdf,
     flagBadges,
     fmtMoney,
     slug,
