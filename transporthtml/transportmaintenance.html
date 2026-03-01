@@ -247,6 +247,7 @@
         profile: null,
         role: "",
         mode: new URLSearchParams(window.location.search).get("mode") || "",
+        driverHint: { uid: "", name: "", vehicle: "" },
         context: TransportContext.getContext(),
         currentTab: "PENDING",
         requests: [],
@@ -278,6 +279,21 @@
         if (r.includes("driver") || r === "dereva") return true;
         if (state.mode !== "driver") return false;
         return !r;
+      }
+
+      function hydrateDriverHintFromQueryAndStorage() {
+        const params = new URLSearchParams(window.location.search);
+        const storedUid = localStorage.getItem("somap_driver_uid") || "";
+        const storedName = localStorage.getItem("somap_driver_name") || "";
+        const storedVehicle = localStorage.getItem("somap_vehicleId") || "";
+        state.driverHint = {
+          uid: String(params.get("driverUid") || params.get("uid") || storedUid || "").trim(),
+          name: String(params.get("driverName") || params.get("driver") || params.get("name") || storedName || "").trim(),
+          vehicle: String(params.get("vehicle") || storedVehicle || "").trim(),
+        };
+        if (state.driverHint.uid) localStorage.setItem("somap_driver_uid", state.driverHint.uid);
+        if (state.driverHint.name) localStorage.setItem("somap_driver_name", state.driverHint.name);
+        if (state.driverHint.vehicle) localStorage.setItem("somap_vehicleId", state.driverHint.vehicle);
       }
 
       function canReview() {
@@ -370,6 +386,9 @@
         if (state.user?.uid) {
           const snap = await firebase.database().ref(TransportHelpers.paths.deviceVehicle(state.user.uid)).get();
           const assigned = String(snap.val() || localStorage.getItem("somap_vehicleId") || "").trim();
+          if (assigned && state.vehicles.some((v) => v.id === assigned)) refs.vehicle.value = assigned;
+        } else {
+          const assigned = String(state.driverHint.vehicle || localStorage.getItem("somap_vehicleId") || "").trim();
           if (assigned && state.vehicles.some((v) => v.id === assigned)) refs.vehicle.value = assigned;
         }
         renderSokoList();
@@ -581,8 +600,8 @@
             vehicleId: vehicle.id,
             vehiclePlate: vehicle.plate,
             vehicleModel: vehicle.makeModel,
-            driverUid: state.user.uid,
-            driverName: state.profile?.name || state.profile?.profile?.fullName || "",
+            driverUid: (state.user && state.user.uid) || state.driverHint.uid || "driver-local",
+            driverName: state.profile?.name || state.profile?.profile?.fullName || state.driverHint.name || "",
             part: partName,
             partSlug: TransportMaintenance.slug(partName),
             estCost: Number(refs.cost.value || 0),
@@ -656,6 +675,14 @@
       async function ensureAuth() {
         firebase.auth().onAuthStateChanged(async (user) => {
           if (!user) {
+            if (state.driverHint.uid || state.driverHint.name || state.mode === "driver") {
+              state.user = { uid: state.driverHint.uid || "driver-local" };
+              state.profile = { role: "driver", name: state.driverHint.name || "Dereva" };
+              state.role = "driver";
+              await loadReferences();
+              subscribeRequests();
+              return;
+            }
             showToast("Sign in first", "bad");
             refs.form.classList.add("hidden");
             return;
@@ -684,6 +711,7 @@
         }
       });
 
+      hydrateDriverHintFromQueryAndStorage();
       ensureAuth();
     </script>
   </body>
