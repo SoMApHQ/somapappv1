@@ -342,70 +342,125 @@
     };
   }
 
-  function invoiceHtml(invoice) {
+  function invoiceStyles() {
+    return `
+    .inv-root { font-family: Arial, sans-serif; color: #111827; padding: 20px; }
+    .inv-card { border: 2px solid #0f766e; border-radius: 14px; overflow: hidden; }
+    .inv-head { display:flex; justify-content:space-between; align-items:center; gap:14px; padding:16px; background: linear-gradient(135deg, #0f766e, #115e59); color:#f0fdfa; }
+    .inv-logo { height:60px; object-fit:contain; background:#fff; padding:4px 8px; border-radius:8px; }
+    .inv-title { font-size: 22px; font-weight: 800; margin:0; }
+    .inv-sub { font-size:12px; opacity:0.95; margin-top:2px; }
+    .inv-meta { background:#f8fafc; border-top:1px solid #d1d5db; border-bottom:1px solid #d1d5db; padding:10px 16px; font-size:12px; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px 12px; }
+    .inv-section { padding: 14px 16px; }
+    .inv-note { background:#fffbeb; border:1px solid #f59e0b; color:#78350f; border-radius:10px; padding:10px 12px; font-size:13px; margin-bottom:10px; }
+    .inv-list { margin:0; padding-left: 18px; font-size:13px; line-height:1.5; }
+    .inv-table { width:100%; border-collapse:collapse; margin-top:10px; font-size:13px; }
+    .inv-table th, .inv-table td { border:1px solid #d1d5db; padding:8px; text-align:left; }
+    .inv-table th { background:#ecfeff; }
+    .inv-total { font-weight:800; font-size:14px; background:#f0fdfa; }
+    .inv-sign { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:22px; }
+    .inv-sign-box { border-top:1px solid #111827; min-height:46px; font-size:12px; padding-top:6px; }
+    .inv-foot { margin-top:8px; font-size:11px; color:#4b5563; }
+    `;
+  }
+
+  function schoolDisplay(invoice) {
+    const key = String(invoice.school || "").toLowerCase();
+    if (key.includes("socrates")) {
+      return "Socrates School, Arusha";
+    }
+    return invoice.school || "-";
+  }
+
+  function schoolAddress(invoice) {
+    const key = String(invoice.school || "").toLowerCase();
+    if (key.includes("socrates")) {
+      return "P.O. Box 14256, Arusha, Tanzania";
+    }
+    return "Arusha, Tanzania";
+  }
+
+  function invoiceBodyHtml(invoice) {
     const approvedDate = invoice.approvals?.approvedAt
       ? new Date(invoice.approvals.approvedAt).toLocaleString()
       : "-";
+    return `
+      <div class="inv-root">
+        <div class="inv-card">
+          <div class="inv-head">
+            <div>
+              <h1 class="inv-title">Approved Maintenance Invoice</h1>
+              <div class="inv-sub">${schoolDisplay(invoice)}</div>
+              <div class="inv-sub">${schoolAddress(invoice)}</div>
+            </div>
+            <img src="${invoice.logoPath}" class="inv-logo" alt="SoMAp Logo" />
+          </div>
+
+          <div class="inv-meta">
+            <div><strong>Invoice #:</strong> ${invoice.invoiceNo || "-"}</div>
+            <div><strong>Approved Date:</strong> ${approvedDate}</div>
+            <div><strong>Vehicle:</strong> ${invoice.vehiclePlate || invoice.vehicleId || "-"}</div>
+            <div><strong>Model:</strong> ${invoice.vehicleModel || "-"}</div>
+            <div><strong>Driver:</strong> ${invoice.driverName || "-"}</div>
+            <div><strong>Fundi:</strong> ${invoice.fundiName || "-"}</div>
+          </div>
+
+          <div class="inv-section">
+            <div class="inv-note">
+              This is an invoice requesting you to do the following approved maintenance work.
+            </div>
+            <ol class="inv-list">
+              <li>Purchase and replace spare part: <strong>${invoice.part || "Spare part"}</strong>.</li>
+              <li>Perform required vehicle maintenance and labour tasks for the stated vehicle.</li>
+              <li>Use seller contact and payment details below for procurement.</li>
+            </ol>
+
+            <table class="inv-table">
+              <thead><tr><th>Approved Work Item</th><th>Amount</th></tr></thead>
+              <tbody>
+                <tr><td>${invoice.part || "Spare part"}</td><td>${fmtMoney(invoice.spareCost)}</td></tr>
+                <tr><td>Fundi Labour</td><td>${fmtMoney(invoice.fundiLabourCost)}</td></tr>
+                <tr class="inv-total"><td>Total Approved Amount</td><td>${fmtMoney(invoice.total)}</td></tr>
+              </tbody>
+            </table>
+
+            <table class="inv-table">
+              <thead><tr><th colspan="2">Seller / Shop Contact & Payment Details</th></tr></thead>
+              <tbody>
+                <tr><td>Shop Name</td><td>${invoice.soko.shopName || "-"}</td></tr>
+                <tr><td>Seller Name</td><td>${invoice.soko.ownerName || "-"}</td></tr>
+                <tr><td>Phone</td><td>${invoice.soko.phone || "-"}</td></tr>
+                <tr><td>WhatsApp</td><td>${invoice.soko.whatsapp || "-"}</td></tr>
+                <tr><td>Payment (Lipa Number)</td><td>${invoice.soko.lipaNumber || "-"}</td></tr>
+              </tbody>
+            </table>
+
+            <div class="inv-sign">
+              <div class="inv-sign-box">Driver Signature</div>
+              <div class="inv-sign-box">Accountant Signature</div>
+              <div class="inv-sign-box">Headteacher Signature</div>
+            </div>
+
+            <div class="inv-foot">
+              Generated by SoMAp Transport Maintenance System.
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function invoiceHtml(invoice) {
     return `
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <title>${invoice.invoiceNo}</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 24px; color: #111; }
-    .head { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; }
-    .logo { height:56px; object-fit:contain; }
-    .title { font-size: 20px; font-weight: 700; }
-    .muted { color:#555; font-size:12px; }
-    table { width:100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size:13px; }
-    .tot { font-weight: 700; font-size: 14px; }
-    .sign { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-top:28px; }
-    .box { border-top:1px solid #333; padding-top:6px; font-size:12px; min-height:42px; }
-  </style>
+  <style>${invoiceStyles()}</style>
 </head>
 <body>
-  <div class="head">
-    <div>
-      <div class="title">Maintenance Invoice</div>
-      <div class="muted">Invoice: ${invoice.invoiceNo}</div>
-      <div class="muted">Approved: ${approvedDate}</div>
-    </div>
-    <img src="${invoice.logoPath}" class="logo" alt="SoMAp" />
-  </div>
-
-  <table>
-    <tr><th>School</th><td>${invoice.school || "-"}</td><th>Year</th><td>${invoice.year || "-"}</td></tr>
-    <tr><th>Vehicle</th><td>${invoice.vehiclePlate || invoice.vehicleId || "-"}</td><th>Model</th><td>${invoice.vehicleModel || "-"}</td></tr>
-    <tr><th>Driver</th><td>${invoice.driverName || "-"}</td><th>Fundi</th><td>${invoice.fundiName || "-"}</td></tr>
-  </table>
-
-  <table>
-    <thead><tr><th>Item</th><th>Amount</th></tr></thead>
-    <tbody>
-      <tr><td>${invoice.part || "Spare part"}</td><td>${fmtMoney(invoice.spareCost)}</td></tr>
-      <tr><td>Labour charge</td><td>${fmtMoney(invoice.fundiLabourCost)}</td></tr>
-      <tr class="tot"><td>Total</td><td>${fmtMoney(invoice.total)}</td></tr>
-    </tbody>
-  </table>
-
-  <table>
-    <thead><tr><th colspan="2">Soko Contact & Payment</th></tr></thead>
-    <tbody>
-      <tr><td>Shop</td><td>${invoice.soko.shopName || "-"}</td></tr>
-      <tr><td>Owner</td><td>${invoice.soko.ownerName || "-"}</td></tr>
-      <tr><td>Phone</td><td>${invoice.soko.phone || "-"}</td></tr>
-      <tr><td>WhatsApp</td><td>${invoice.soko.whatsapp || "-"}</td></tr>
-      <tr><td>Lipa Number</td><td>${invoice.soko.lipaNumber || "-"}</td></tr>
-    </tbody>
-  </table>
-
-  <div class="sign">
-    <div class="box">Driver Signature</div>
-    <div class="box">Accountant Signature</div>
-    <div class="box">Headteacher Signature</div>
-  </div>
+${invoiceBodyHtml(invoice)}
 </body>
 </html>`;
   }
@@ -443,9 +498,9 @@
     wrapper.style.position = "fixed";
     wrapper.style.left = "-99999px";
     wrapper.style.top = "0";
-    wrapper.innerHTML = invoiceHtml(invoice);
+    wrapper.innerHTML = `<style>${invoiceStyles()}</style>${invoiceBodyHtml(invoice)}`;
     document.body.appendChild(wrapper);
-    const node = wrapper.firstElementChild || wrapper;
+    const node = wrapper.querySelector(".inv-root") || wrapper;
     try {
       await html2pdf()
         .set({
