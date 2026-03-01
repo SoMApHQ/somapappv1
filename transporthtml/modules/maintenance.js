@@ -13,6 +13,17 @@
     return firebase.database();
   }
 
+  async function ensureReadAuth() {
+    try {
+      if (!firebase.auth || typeof firebase.auth !== "function") return;
+      const auth = firebase.auth();
+      if (auth.currentUser) return;
+      await auth.signInAnonymously();
+    } catch (_err) {
+      // Keep going; some projects allow public reads without auth.
+    }
+  }
+
   function clean(value) {
     return String(value || "").trim();
   }
@@ -106,21 +117,57 @@
   }
 
   async function listSokoVehicleItems() {
-    const [shopsSnap, itemsSnap] = await Promise.all([
+    await ensureReadAuth();
+    const [shopsSnap, itemsSnap, catsSnap] = await Promise.all([
       db().ref("marketinghub/public/shops").get(),
       db().ref("marketinghub/public/items").get(),
+      db().ref("marketinghub/public/categories").get(),
     ]);
 
     const shops = shopsSnap.val() || {};
     const itemsBySeller = itemsSnap.val() || {};
+    const categories = catsSnap.val() || {};
+    const vehicleCategoryIds = new Set(["vehicle_spares", "car_spares", "car-spares"]);
+    Object.entries(categories).forEach(([id, cat]) => {
+      const nameSw = clean(cat?.nameSw).toLowerCase();
+      const nameEn = clean(cat?.nameEn).toLowerCase();
+      const icon = clean(cat?.icon).toLowerCase();
+      const bag = `${id} ${nameSw} ${nameEn} ${icon}`;
+      if (
+        bag.includes("vehicle") ||
+        bag.includes("magari") ||
+        bag.includes("spare") ||
+        bag.includes("car-spares") ||
+        bag.includes("vifaa vya magari")
+      ) {
+        vehicleCategoryIds.add(id);
+      }
+    });
     const rows = [];
 
     Object.entries(itemsBySeller).forEach(([sellerId, sellerItems]) => {
       const shop = shops[sellerId] || {};
+      const shopCategoryKeys = new Set(
+        Object.keys(shop?.categories || {}).filter((key) => shop?.categories?.[key])
+      );
       Object.entries(sellerItems || {}).forEach(([itemId, item]) => {
         const row = item || {};
         if (row.status === "inactive") return;
-        if (row.catId !== "vehicle_spares") return;
+        const catId = clean(row.catId);
+        const itemModel = clean(row.vehicleModel).toLowerCase();
+        const title = clean(row.title).toLowerCase();
+        const isVehicleByCat = catId && vehicleCategoryIds.has(catId);
+        const isVehicleByShopCat = [...shopCategoryKeys].some((id) => vehicleCategoryIds.has(id));
+        const isVehicleByContent =
+          !!itemModel ||
+          title.includes("shock") ||
+          title.includes("rack") ||
+          title.includes("battery") ||
+          title.includes("brake") ||
+          title.includes("tyre") ||
+          title.includes("tire") ||
+          title.includes("filter");
+        if (!isVehicleByCat && !isVehicleByShopCat && !isVehicleByContent) return;
         const phoneRaw = clean(shop.whatsappPhone || (shop.phones || [])[0] || "");
         const phoneDigits = normalizePhoneDigits(phoneRaw);
         rows.push({
@@ -135,6 +182,7 @@
           currency: clean(row.currency || "TZS"),
           unit: clean(row.unit || "pcs"),
           notes: clean(row.notes),
+          catId,
           shopName: clean(shop.shopName || "Unknown shop"),
           ownerName: clean(shop.ownerName),
           country: clean(shop.country),
