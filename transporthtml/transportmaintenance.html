@@ -80,11 +80,43 @@
         margin: 0;
       }
       .sub {
-        color: #94a3b8;
+        color: #cbd5e1;
         font-size: 0.9rem;
       }
       .table th, .table td {
         vertical-align: top;
+        color: #e2e8f0;
+      }
+      .glass label {
+        color: #e2e8f0;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+      }
+      .glass input,
+      .glass select,
+      .glass textarea {
+        color: #0f172a;
+        background: rgba(248, 250, 252, 0.96);
+        border: 1px solid #94a3b8;
+      }
+      .glass input::placeholder,
+      .glass textarea::placeholder {
+        color: #64748b;
+      }
+      .glass .muted {
+        color: #cbd5e1;
+      }
+      #contextBar,
+      #contextBar h1,
+      #contextBar small,
+      #contextBar label {
+        color: #e2e8f0 !important;
+      }
+      #contextBar select,
+      #contextBar .btn {
+        color: #0f172a !important;
+        background: rgba(248, 250, 252, 0.96) !important;
+        border-color: #94a3b8 !important;
       }
     </style>
     <script>
@@ -134,8 +166,11 @@
             <select id="vehicleSelect" required></select>
           </div>
           <div>
-            <label>Part / Issue</label>
-            <input id="partInput" required placeholder="e.g. SHOCK ABSORBER" />
+            <label>Spare Part (From Soko)</label>
+            <select id="partSelect" required>
+              <option value="">Select spare part</option>
+            </select>
+            <small class="sub">Pick only parts from SoMAp vehicle spare market.</small>
           </div>
           <div>
             <label>Search Soko Item</label>
@@ -146,7 +181,7 @@
             <input id="sokoPriceInput" readonly />
           </div>
           <div style="grid-column: span 2;">
-            <label>Soko items (scroll list)</label>
+            <label>Soko Spare Items (Scroll & Select)</label>
             <div id="sokoList" class="soko-list"></div>
             <input id="sokoItemKey" type="hidden" />
             <small id="sokoMeta" class="sub"></small>
@@ -164,7 +199,7 @@
             <input id="fundiNameInput" placeholder="Mechanic name" />
           </div>
           <div>
-            <label>Odometer</label>
+            <label>Current Km Reading (Odometer)</label>
             <input id="odoInput" type="number" min="0" />
           </div>
           <div style="grid-column: span 2;">
@@ -216,7 +251,7 @@
         composeCard: document.getElementById("composeCard"),
         form: document.getElementById("maintForm"),
         vehicle: document.getElementById("vehicleSelect"),
-        part: document.getElementById("partInput"),
+        part: document.getElementById("partSelect"),
         sokoSearch: document.getElementById("sokoSearchInput"),
         sokoList: document.getElementById("sokoList"),
         sokoItemKey: document.getElementById("sokoItemKey"),
@@ -302,12 +337,63 @@
         return TransportRoles.isAdmin(state.role);
       }
 
+      function applyTodayContext() {
+        const parts = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Africa/Nairobi",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).format(new Date()).split("-");
+        const y = Number(parts[0]) || state.context.year;
+        const m = Number(parts[1]) || state.context.month;
+        const d = Number(parts[2]) || state.context.day;
+        state.context = TransportContext.setContext({ year: y, month: m, day: d });
+      }
+
+      function stripDateParamsFromUrl() {
+        const params = new URLSearchParams(window.location.search);
+        if (!params.has("month") && !params.has("day")) return;
+        params.delete("month");
+        params.delete("day");
+        const next = `${window.location.pathname}?${params.toString()}`;
+        window.history.replaceState({}, "", next);
+      }
+
+      function applyRoleUi() {
+        const isDriverOnly = isDriver() && !canReview();
+        if (!isDriverOnly) return;
+        state.currentTab = "PENDING";
+        document.querySelectorAll('button[data-tab="APPROVED"], button[data-tab="REJECTED"]').forEach((btn) => {
+          btn.style.display = "none";
+        });
+        const stApprovedCard = stats.approved && stats.approved.closest(".stat-card");
+        const stRejectedCard = stats.rejected && stats.rejected.closest(".stat-card");
+        if (stApprovedCard) stApprovedCard.style.display = "none";
+        if (stRejectedCard) stRejectedCard.style.display = "none";
+      }
+
       function selectedVehicle() {
         return state.vehicles.find((v) => v.id === refs.vehicle.value) || null;
       }
 
       function selectedSokoItem() {
         return state.sokoItems.find((x) => `${x.sellerId}::${x.itemId}` === refs.sokoItemKey.value) || null;
+      }
+
+      function renderPartDropdown() {
+        if (!refs.part) return;
+        if (!state.sokoFiltered.length) {
+          refs.part.innerHTML = '<option value="">No spare available for selected vehicle</option>';
+          return;
+        }
+        refs.part.innerHTML =
+          '<option value="">Select spare part</option>' +
+          state.sokoFiltered.map((item) => {
+            const key = `${item.sellerId}::${item.itemId}`;
+            const label = `${item.title} - ${item.vehicleModel || "Any model"} - ${TransportMaintenance.fmtMoney(item.price, item.currency)} - ${item.shopName}`;
+            const selected = key === refs.sokoItemKey.value ? "selected" : "";
+            return `<option value="${key}" ${selected}>${label}</option>`;
+          }).join("");
       }
 
       function computeStats() {
@@ -336,6 +422,7 @@
         });
         if (!state.sokoFiltered.length) {
           refs.sokoList.innerHTML = `<div class="soko-row">No matching soko spare. Add item in <a href="../marketing/index.html" target="_blank">soko</a>.</div>`;
+          renderPartDropdown();
           return;
         }
         refs.sokoList.innerHTML = state.sokoFiltered.map((item) => {
@@ -351,6 +438,7 @@
         refs.sokoList.querySelectorAll(".soko-row[data-key]").forEach((el) => {
           el.addEventListener("click", () => chooseSokoByKey(el.dataset.key));
         });
+        renderPartDropdown();
       }
 
       function chooseSokoByKey(key) {
@@ -362,7 +450,7 @@
           renderSokoList();
           return;
         }
-        refs.part.value = refs.part.value.trim() || item.title;
+        refs.part.value = key;
         refs.sokoPrice.value = TransportMaintenance.fmtMoney(item.price, item.currency || "TZS");
         refs.cost.value = refs.cost.value || String(Number(item.price || 0));
         refs.sokoMeta.textContent = `Shop: ${item.shopName} | Phone: ${item.phoneRaw || "-"} | WhatsApp: ${item.whatsappUrl || "-"} | Lipa: ${item.lipaNumber || "-"}`;
@@ -423,7 +511,8 @@
       }
 
       function visibleRequests() {
-        const byTab = state.requests.filter((r) => (r.status || "PENDING") === state.currentTab);
+        const effectiveTab = (isDriver() && !canReview()) ? "PENDING" : state.currentTab;
+        const byTab = state.requests.filter((r) => (r.status || "PENDING") === effectiveTab);
         if (canReview()) return byTab;
         if (isDriver()) return byTab.filter((r) => r.driverUid === state.user?.uid);
         return [];
@@ -576,17 +665,17 @@
         clearBoxes();
         const vehicle = selectedVehicle();
         if (!vehicle) return showBox(refs.formError, "Select a vehicle first.");
-        const partName = refs.part.value.trim();
-        if (!partName) return showBox(refs.formError, "Part / issue is required.");
+        if (!refs.part.value) return showBox(refs.formError, "Select spare part from soko.");
 
         let item = selectedSokoItem();
-        if (!item) {
-          const best = TransportMaintenance.findBestSokoMatch(state.sokoItems, partName, vehicle.makeModel);
-          item = best ? best.item : null;
+        if (!item && refs.part.value) {
+          chooseSokoByKey(refs.part.value);
+          item = selectedSokoItem();
         }
         if (!item) {
           return showBox(refs.marketError, "This spare is not in SoMAp soko. Add it in soko first.");
         }
+        const partName = String(item.title || "").trim();
 
         try {
           const guard = await TransportMaintenance.buildPurchaseGuard(vehicle.id, partName);
@@ -657,11 +746,15 @@
 
       refs.vehicle.addEventListener("change", () => {
         refs.sokoItemKey.value = "";
+        refs.part.value = "";
         refs.sokoMeta.textContent = "";
         refs.sokoPrice.value = "";
         renderSokoList();
       });
       refs.sokoSearch.addEventListener("input", () => renderSokoList());
+      refs.part.addEventListener("change", () => {
+        if (refs.part.value) chooseSokoByKey(refs.part.value);
+      });
 
       document.querySelectorAll("button[data-tab]").forEach((btn) => {
         btn.addEventListener("click", () => {
@@ -679,6 +772,7 @@
               state.user = { uid: state.driverHint.uid || "driver-local" };
               state.profile = { role: "driver", name: state.driverHint.name || "Dereva" };
               state.role = "driver";
+              applyRoleUi();
               await loadReferences();
               subscribeRequests();
               return;
@@ -699,6 +793,7 @@
             return;
           }
           if (!isDriver() && !canReview()) refs.composeCard.classList.add("hidden");
+          applyRoleUi();
           await loadReferences();
           subscribeRequests();
         });
@@ -712,6 +807,8 @@
       });
 
       hydrateDriverHintFromQueryAndStorage();
+      applyTodayContext();
+      stripDateParamsFromUrl();
       ensureAuth();
     </script>
   </body>
