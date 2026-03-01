@@ -453,6 +453,27 @@
                 </div>
                 <div class="card mt-4">
                     <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-lg font-semibold">Pending Maintenance Review</h3>
+                        <small class="text-gray-600">Accountant approval desk</small>
+                    </div>
+                    <table class="table w-full text-sm">
+                        <thead>
+                            <tr>
+                                <th>Driver / Vehicle</th>
+                                <th>Part / Soko</th>
+                                <th>Costs</th>
+                                <th>Flags</th>
+                                <th>Notes</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="maint-pending-table">
+                            <tr><td colspan="6">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="card mt-4">
+                    <div class="flex items-center justify-between mb-2">
                         <h3 class="text-lg font-semibold">Approved Maintenance Invoices</h3>
                         <small class="text-gray-600">Download PDF directly</small>
                     </div>
@@ -634,6 +655,7 @@
     firebase.initializeApp(firebaseConfig);
     const auth = firebase.auth();
     const db = firebase.database();
+    const currentAccountant = { uid: '', name: 'Accountant' };
     const yearManager = window.somapYearContext || null;
     const getSelectedYear = () => {
         if (yearManager && typeof yearManager.getSelectedYear === 'function') {
@@ -658,6 +680,8 @@
                 window.location.href = 'index.html';
                 return;
             }
+            currentAccountant.uid = user.uid;
+            currentAccountant.name = userData.name || userData.fullName || user.displayName || user.email || 'Accountant';
             refreshFinanceScreens();
             loadAuditLog();
             if (!hasBoundYearListener && yearManager && typeof yearManager.onYearChanged === 'function') {
@@ -702,6 +726,7 @@
             loadDebtors(),
             loadGraphs(),
             loadMaintenanceStats(),
+            loadMaintenancePendingTable(),
             loadMaintenanceInvoices()
         ]);
     }
@@ -1027,6 +1052,139 @@
             tbody.innerHTML = '<tr><td colspan="6">Error loading invoices.</td></tr>';
         }
     }
+
+    function maintFlagText(req) {
+        const chips = [];
+        if (req.repeatPart) chips.push('Repeat Part');
+        if (req.purchasedTooSoon) chips.push('Recent Purchase');
+        if (Array.isArray(req.flags) && req.flags.includes('PRICE_VARIANCE')) chips.push('Price Variance');
+        return chips.length ? chips.join(' | ') : 'OK';
+    }
+
+    async function loadMaintenancePendingTable() {
+        const tbody = document.getElementById('maint-pending-table');
+        if (!tbody) return;
+        const year = Number(getSelectedYear() || SOMAP_DEFAULT_YEAR);
+        const school = getCurrentSchoolId();
+        tbody.innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+        try {
+            const snap = await db.ref('maintenance_requests').once('value');
+            const rows = [];
+            const fallbackRows = [];
+            snap.forEach((child) => {
+                const req = child.val() || {};
+                if (!schoolMatches(req.school, school)) return;
+                if ((req.status || 'PENDING') !== 'PENDING') return;
+                const row = { id: child.key, ...req };
+                fallbackRows.push(row);
+                if (Number(req.year || 0) && Number(req.year) !== year) return;
+                rows.push(row);
+            });
+            const renderRows = rows.length ? rows : fallbackRows;
+            if (!renderRows.length) {
+                tbody.innerHTML = '<tr><td colspan="6">No pending maintenance requests.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = renderRows.slice(0, 50).map((r) => `
+                <tr>
+                    <td>
+                        <strong>${r.driverName || '-'}</strong><br/>
+                        <small>${r.vehiclePlate || r.vehicleId || '-'}</small>
+                    </td>
+                    <td>
+                        <strong>${r.part || '-'}</strong><br/>
+                        <small>${r.sokoShopName || '-'} · ${r.sokoPhone || '-'}</small>
+                    </td>
+                    <td>
+                        Spare: ${formatTsh(r.estCost || 0)}<br/>
+                        Labour: ${formatTsh(r.fundiLabourCost || 0)}<br/>
+                        Total: ${formatTsh((Number(r.estCost || 0) + Number(r.fundiLabourCost || 0)))}
+                    </td>
+                    <td>${maintFlagText(r)}</td>
+                    <td>${r.notes || '-'}</td>
+                    <td>
+                        <button class="btn btn-small" data-maint-view="${r.id}">View</button>
+                        <button class="btn btn-small" data-maint-approve="${r.id}">Approve</button>
+                        <button class="btn btn-small" style="background:#dc2626;color:#fff;" data-maint-reject="${r.id}">Reject</button>
+                    </td>
+                </tr>
+            `).join('');
+        } catch (err) {
+            console.error('Failed to load pending maintenance table', err);
+            tbody.innerHTML = '<tr><td colspan="6">Error loading pending requests.</td></tr>';
+        }
+    }
+
+    async function approveMaintenanceFromMhasibu(reqId) {
+        const reqSnap = await db.ref(`maintenance_requests/${reqId}`).once('value');
+        const req = reqSnap.val() || null;
+        if (!req) throw new Error('Request not found');
+        const vehicleId = req.vehicleId || '';
+        if (!vehicleId) throw new Error('Vehicle missing on request');
+        const monthKey = `${req.year || getSelectedYear()}-${String(req.month || 1).padStart(2, '0')}`;
+        const ledgerBase = db.ref(`maintenance_ledger/${vehicleId}`);
+        const entryRef = ledgerBase.child('entries').push();
+        await entryRef.set({
+            requestId: reqId,
+            vehicleId,
+            part: req.part || '',
+            estCost: Number(req.estCost || 0),
+            fundiLabourCost: Number(req.fundiLabourCost || 0),
+            totalCost: Number(req.estCost || 0) + Number(req.fundiLabourCost || 0),
+            odoKm: Number(req.odoKm || 0),
+            notes: req.notes || '',
+            sokoItemId: req.sokoItemId || '',
+            sokoShopName: req.sokoShopName || '',
+            sokoPhone: req.sokoPhone || '',
+            sokoLipaNumber: req.sokoLipaNumber || '',
+            approvedBy: currentAccountant.uid || (auth.currentUser && auth.currentUser.uid) || '',
+            approvedByName: currentAccountant.name || 'Accountant',
+            approvedAt: Date.now(),
+        });
+        await ledgerBase.child(`monthlyTotals/${monthKey}`).transaction((current) => {
+            const c = current || { cost: 0 };
+            return {
+                cost: Number(c.cost || 0) + Number(req.estCost || 0) + Number(req.fundiLabourCost || 0),
+                updatedAt: Date.now(),
+            };
+        });
+        if (req.part && window.TransportMaintenance) {
+            const slug = window.TransportMaintenance.slug(req.part);
+            await ledgerBase.child(`partsHistory/${slug}`).transaction((current) => {
+                const h = current || [];
+                h.push({ reqId, ts: Date.now(), cost: Number(req.estCost || 0) });
+                return h.slice(-30);
+            });
+        }
+        const invoice = window.TransportMaintenance
+            ? window.TransportMaintenance.buildInvoiceObject({ id: reqId, ...req }, {
+                uid: currentAccountant.uid || (auth.currentUser && auth.currentUser.uid) || '',
+                name: currentAccountant.name || 'Accountant'
+              })
+            : null;
+        if (invoice) {
+            await db.ref(`maintenance_invoices/${reqId}`).set(invoice);
+        }
+        await db.ref(`maintenance_requests/${reqId}`).update({
+            status: 'APPROVED',
+            reviewedBy: currentAccountant.uid || (auth.currentUser && auth.currentUser.uid) || '',
+            reviewedByName: currentAccountant.name || 'Accountant',
+            reviewedAt: Date.now(),
+            invoiceNo: invoice ? invoice.invoiceNo : '',
+        });
+    }
+
+    async function rejectMaintenanceFromMhasibu(reqId) {
+        const reason = window.prompt('Rejection reason?');
+        if (reason === null) return;
+        await db.ref(`maintenance_requests/${reqId}`).update({
+            status: 'REJECTED',
+            reviewedBy: currentAccountant.uid || (auth.currentUser && auth.currentUser.uid) || '',
+            reviewedByName: currentAccountant.name || 'Accountant',
+            reviewedAt: Date.now(),
+            rejectReason: reason || '',
+        });
+    }
     // Load Audit Log (placeholder, can be made dynamic from payments and expenses)
     function loadAuditLog() {
         // For now, placeholder
@@ -1043,6 +1201,59 @@
     }
 
     document.addEventListener('click', async (event) => {
+        const viewBtn = event.target.closest('[data-maint-view]');
+        if (viewBtn) {
+            const reqId = viewBtn.getAttribute('data-maint-view');
+            const snap = await db.ref(`maintenance_requests/${reqId}`).once('value');
+            const r = snap.val() || {};
+            const details = [
+                `Driver: ${r.driverName || '-'}`,
+                `Vehicle: ${r.vehiclePlate || r.vehicleId || '-'}`,
+                `Part: ${r.part || '-'}`,
+                `Shop: ${r.sokoShopName || '-'}`,
+                `Seller Contact: ${r.sokoPhone || '-'}`,
+                `WhatsApp: ${r.sokoWhatsapp || '-'}`,
+                `Payment (Lipa): ${r.sokoLipaNumber || '-'}`,
+                `Spare Cost: ${formatTsh(r.estCost || 0)}`,
+                `Labour Cost: ${formatTsh(r.fundiLabourCost || 0)}`,
+                `Total: ${formatTsh((Number(r.estCost || 0) + Number(r.fundiLabourCost || 0)))}`,
+                `Flags: ${maintFlagText(r)}`,
+                `Notes: ${r.notes || '-'}`,
+            ].join('<br/>');
+            Swal.fire({ title: 'Maintenance Request Details', html: details, width: 760 });
+            return;
+        }
+
+        const approveBtn = event.target.closest('[data-maint-approve]');
+        if (approveBtn) {
+            const reqId = approveBtn.getAttribute('data-maint-approve');
+            if (!reqId) return;
+            try {
+                await approveMaintenanceFromMhasibu(reqId);
+                Swal.fire('Approved', 'Request approved and invoice generated.', 'success');
+                await refreshFinanceScreens();
+            } catch (err) {
+                console.error(err);
+                Swal.fire('Error', err.message || 'Failed to approve request.', 'error');
+            }
+            return;
+        }
+
+        const rejectBtn = event.target.closest('[data-maint-reject]');
+        if (rejectBtn) {
+            const reqId = rejectBtn.getAttribute('data-maint-reject');
+            if (!reqId) return;
+            try {
+                await rejectMaintenanceFromMhasibu(reqId);
+                Swal.fire('Rejected', 'Request rejected.', 'success');
+                await refreshFinanceScreens();
+            } catch (err) {
+                console.error(err);
+                Swal.fire('Error', err.message || 'Failed to reject request.', 'error');
+            }
+            return;
+        }
+
         const btn = event.target.closest('[data-maint-pdf]');
         if (!btn) return;
         const reqId = btn.getAttribute('data-maint-pdf');
