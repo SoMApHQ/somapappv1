@@ -1,4 +1,4 @@
-﻿// marketing/marketing.js
+// marketing/marketing.js
 // MarketingHub: multi-soko marketplace (React CDN + Firebase RTDB, no build step).
 
 const STYLE_URL = new URL("./marketing.css", import.meta.url).href;
@@ -160,6 +160,32 @@ function getCoverPhoto(shop) {
   return (shop?.photos || [])[0] || shop?.profilePhotoUrl || "";
 }
 
+/** Optimize image URL for display: Cloudinary gets crop/quality transforms; others pass through. */
+function optimizeImageUrl(url, opts = {}) {
+  if (!url || typeof url !== "string") return "";
+  const { w = 600, h = 400, c = "fill", q = "auto", f = "auto" } = opts;
+  const match = url.match(/^(https?:\/\/res\.cloudinary\.com\/[^/]+\/image\/upload\/)(.+)$/);
+  if (!match) return url;
+  const [, base, rest] = match;
+  const transform = `w_${w},h_${h},c_${c},q_${q},f_${f}`;
+  return `${base}${transform}/${rest}`;
+}
+
+/** Product thumbnail: square, crisp. */
+function productThumbUrl(url) {
+  return optimizeImageUrl(url, { w: 480, h: 480, c: "fill", q: "auto", f: "auto" });
+}
+
+/** Shop cover: wide, attractive. */
+function shopCoverUrl(url) {
+  return optimizeImageUrl(url, { w: 600, h: 320, c: "fill", q: "auto", f: "auto" });
+}
+
+/** Avatar: small square. */
+function avatarUrl(url) {
+  return optimizeImageUrl(url, { w: 96, h: 96, c: "fill", q: "auto", f: "auto" });
+}
+
 function MarketingCard({ onClick }) {
   return React.createElement(
     "div",
@@ -229,62 +255,68 @@ function ShopCard({ shop, items, onOpen }) {
   const cover = getCoverPhoto(shop);
   const avatar = shop.profilePhotoUrl || cover;
   const contact = shop.whatsappPhone || (shop.phones || [])[0] || "";
+  const coverSrc = cover ? shopCoverUrl(cover) : "";
+  const avatarSrc = avatar ? avatarUrl(avatar) : "";
   return React.createElement(
     "div",
     { className: "mh-shop-card" },
-    React.createElement(
-      "div",
-      { className: "mh-shop-head" },
-      React.createElement(
-        "div",
-        { className: "mh-shop-id" },
-        avatar
-          ? React.createElement("img", { className: "mh-avatar", src: avatar, alt: shop.shopName || "Shop" })
-          : React.createElement("div", { className: "mh-avatar placeholder" }, (shop.shopName || "Soko").slice(0, 2).toUpperCase()),
-        React.createElement(
-          "div",
-          null,
-          React.createElement("h3", null, shop.shopName || "Shop"),
-          React.createElement(
-            "p",
-            { className: "mh-muted" },
-            [shop.country, shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
-          ),
-          React.createElement(
-            "p",
-            { className: "mh-muted" },
-            contact ? `Mawasiliano: ${contact}` : "Mawasiliano hayajawekwa"
-          )
-        )
-      ),
-      shop.verifiedStatus === "verified" ? React.createElement("span", { className: "mh-badge" }, "Verified") : null
-      ),
-    cover
+    coverSrc
       ? React.createElement(
           "div",
           { className: "mh-shop-cover" },
-          React.createElement("img", { src: cover, alt: `${shop.shopName || "Shop"} cover` })
+          React.createElement("img", { src: coverSrc, alt: `${shop.shopName || "Shop"} cover`, loading: "lazy" })
         )
-      : null,
+      : React.createElement("div", { className: "mh-shop-cover mh-shop-cover-placeholder" }, React.createElement("span", { className: "mh-cover-icon" }, "🏪")),
     React.createElement(
       "div",
-      { className: "mh-shop-items" },
-      sampleItems.map((item) =>
+      { className: "mh-shop-card-body" },
+      React.createElement(
+        "div",
+        { className: "mh-shop-head" },
         React.createElement(
           "div",
-          { key: item.id, className: "mh-chip" },
-          `${item.title} @ ${formatCurrency(item.price, item.currency || "TZS")}`
+          { className: "mh-shop-id" },
+          avatarSrc
+            ? React.createElement("img", { className: "mh-avatar", src: avatarSrc, alt: shop.shopName || "Shop", loading: "lazy" })
+            : React.createElement("div", { className: "mh-avatar placeholder" }, (shop.shopName || "Soko").slice(0, 2).toUpperCase()),
+          React.createElement(
+            "div",
+            { className: "mh-shop-info" },
+            React.createElement("h3", { className: "mh-shop-name" }, shop.shopName || "Shop"),
+            React.createElement(
+              "p",
+              { className: "mh-muted mh-location" },
+              [shop.country, shop.region, shop.city, shop.area].filter(Boolean).join(" - ")
+            ),
+            React.createElement(
+              "p",
+              { className: "mh-muted mh-contact" },
+              contact ? `Mawasiliano: ${contact}` : "Mawasiliano hayajawekwa"
+            )
+          )
+        ),
+        shop.verifiedStatus === "verified" ? React.createElement("span", { className: "mh-badge" }, "Verified") : null
+      ),
+      React.createElement(
+        "div",
+        { className: "mh-shop-items" },
+        sampleItems.map((item) =>
+          React.createElement(
+            "div",
+            { key: item.id, className: "mh-chip" },
+            `${item.title} @ ${formatCurrency(item.price, item.currency || "TZS")}`
+          )
         )
+      ),
+      React.createElement(
+        "div",
+        { className: "mh-shop-actions" },
+        wa ? React.createElement("a", { className: "mh-btn secondary", href: wa, target: "_blank" }, "WhatsApp") : null,
+        shop.phones?.[0]
+          ? React.createElement("a", { className: "mh-btn secondary", href: `tel:${shop.phones[0]}` }, "Call")
+          : null,
+        React.createElement("button", { className: "mh-btn", onClick: onOpen }, "Open shop")
       )
-    ),
-    React.createElement(
-      "div",
-      { className: "mh-shop-actions" },
-      wa ? React.createElement("a", { className: "mh-btn secondary", href: wa, target: "_blank" }, "WhatsApp") : null,
-      shop.phones?.[0]
-        ? React.createElement("a", { className: "mh-btn secondary", href: `tel:${shop.phones[0]}` }, "Call")
-        : null,
-      React.createElement("button", { className: "mh-btn", onClick: onOpen }, "Open shop")
     )
   );
 }
@@ -339,21 +371,28 @@ function ItemsGrid({ items, shop, buyerPhone }) {
       const wa = itemWhatsAppLink(itemShop, item, buyerPhone);
       const call = itemShop?.phones?.[0] ? `tel:${itemShop.phones[0]}` : null;
       const photo = item.photoUrl || getCoverPhoto(itemShop);
+      const photoSrc = photo ? productThumbUrl(photo) : "";
       return React.createElement(
         "div",
         { key: item.id, className: "mh-item-card" },
-        photo ? React.createElement("img", { className: "mh-item-photo", src: photo, alt: item.title || "Item" }) : null,
+        photoSrc
+          ? React.createElement(
+              "div",
+              { className: "mh-item-photo-wrap" },
+              React.createElement("img", { className: "mh-item-photo", src: photoSrc, alt: item.title || "Item", loading: "lazy" })
+            )
+          : React.createElement("div", { className: "mh-item-photo-wrap mh-item-photo-placeholder" }, React.createElement("span", { className: "mh-item-icon" }, "📦")),
         React.createElement(
           "div",
           { className: "mh-item-body" },
           React.createElement(
             "div",
             { className: "mh-item-top" },
-            React.createElement("strong", null, item.title || "Bidhaa"),
-            React.createElement("span", { className: "mh-tag" }, formatCurrency(item.price, item.currency || "TZS"))
+            React.createElement("strong", { className: "mh-item-title" }, item.title || "Bidhaa"),
+            React.createElement("span", { className: "mh-tag mh-price" }, formatCurrency(item.price, item.currency || "TZS"))
           ),
-          item.vehicleModel ? React.createElement("p", { className: "mh-muted" }, item.vehicleModel) : null,
-          item.notes ? React.createElement("p", { className: "mh-muted" }, item.notes) : null,
+          item.vehicleModel ? React.createElement("p", { className: "mh-muted mh-item-model" }, item.vehicleModel) : null,
+          item.notes ? React.createElement("p", { className: "mh-muted mh-item-notes" }, item.notes) : null,
           React.createElement(
             "div",
             { className: "mh-item-actions" },
@@ -1454,8 +1493,8 @@ function MarketingHubAppShell() {
             "div",
             { className: "mh-shop-id" },
             avatar
-              ? React.createElement("img", { className: "mh-avatar", src: avatar, alt: shop.shopName || "Shop" })
-              : React.createElement("div", { className: "mh-avatar placeholder" }, (shop.shopName || "Shop").slice(0, 2).toUpperCase()),
+              ? React.createElement("img", { className: "mh-avatar mh-avatar-lg", src: avatarUrl(avatar), alt: shop.shopName || "Shop", loading: "lazy" })
+              : React.createElement("div", { className: "mh-avatar mh-avatar-lg placeholder" }, (shop.shopName || "Shop").slice(0, 2).toUpperCase()),
             React.createElement(
               "div",
               null,
@@ -1499,8 +1538,14 @@ function MarketingHubAppShell() {
               React.createElement("div", { className: "mh-section-title" }, "Shop gallery"),
               React.createElement(
                 "div",
-                { className: "mh-drop-grid" },
-                gallery.map((url, idx) => React.createElement("div", { key: url + idx, className: "mh-drop-thumb" }, React.createElement("img", { src: url, alt: `shop-photo-${idx}` })))
+                { className: "mh-gallery-grid" },
+                gallery.map((url, idx) =>
+                  React.createElement(
+                    "div",
+                    { key: url + idx, className: "mh-gallery-thumb" },
+                    React.createElement("img", { src: shopCoverUrl(url), alt: `shop-photo-${idx}`, loading: "lazy" })
+                  )
+                )
               )
             )
           : null,
