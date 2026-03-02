@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -119,6 +119,7 @@
         <button id="downloadPdf" class="px-3 py-1 bg-red-600 text-white rounded"><i class="fa fa-file-pdf mr-1"></i> Main PDF</button>
         <button id="downloadDebtNowCsv" class="px-3 py-1 bg-amber-600 text-white rounded"><i class="fa fa-file-excel mr-1"></i> Debt (current) CSV</button>
         <button id="downloadDebtNowPdf" class="px-3 py-1 bg-amber-700 text-white rounded"><i class="fa fa-file-pdf mr-1"></i> Debt (current) PDF</button>
+        <button id="downloadDebtLettersBulk" class="px-3 py-1 bg-rose-600 text-white rounded" title="Download debt letters for students with debt (4-6 per A4)"><i class="fa fa-file-pdf mr-1"></i> Debt Letters (Bulk)</button>
         <button id="downloadBreakdownCsv" class="px-3 py-1 bg-teal-600 text-white rounded"><i class="fa fa-file-excel mr-1"></i> Breakdown CSV</button>
         <button id="downloadBreakdownPdf" class="px-3 py-1 bg-teal-700 text-white rounded"><i class="fa fa-file-pdf mr-1"></i> Breakdown PDF</button>
       </div>
@@ -463,6 +464,7 @@
   const downloadDebtNowPdfBtn = document.getElementById('downloadDebtNowPdf');
   const downloadBreakdownCsvBtn = document.getElementById('downloadBreakdownCsv');
   const downloadBreakdownPdfBtn = document.getElementById('downloadBreakdownPdf');
+  const downloadDebtLettersBulkBtn = document.getElementById('downloadDebtLettersBulk');
   const reloadBtn = document.getElementById('reloadBtn');
 
   let cachedStudents = {};
@@ -2652,6 +2654,246 @@ function buildFinanceStudents(
     doc.save(filename);
   }
 
+  // ===== Debt Letter PDFs (single + bulk) =====
+  function buildDebtLetterData(studentId) {
+    const s = cachedStudents[studentId];
+    if (!s) return null;
+    let fin = computeStudentFinancials(s);
+    if (s.isGraduated) fin = { feePerYear: 0, paidAmount: 0, balance: 0, periodDebtLabel: '-', periodDebtValue: 0, scheduleItems: [] };
+    const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
+    const targetYearNum = Number(financeYear);
+    const admission = s.admissionNumber || studentId;
+    let carryForwardPrev = 0;
+    if (Number.isFinite(targetYearNum) && targetYearNum - 1 >= CARRY_FORWARD_START_YEAR) {
+      try {
+        const safeId = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(studentId)) : String(studentId).replace(/"/g, '\\"');
+        const rowEl = document.querySelector(`#financeTable tbody tr[data-student-id="${safeId}"]`);
+        if (rowEl?.dataset?.carryForward) carryForwardPrev = Number(rowEl.dataset.carryForward) || 0;
+      } catch (_) {}
+      if (carryForwardPrev <= 0) {
+        const key = `${targetYearNum}::${admission}`;
+        carryForwardPrev = Number(window.__financeCarryForwardVisual?.[key]?.carry || 0);
+      }
+    }
+    const dbCarry = Math.max(0, Number(s.carryAmount || 0));
+    const baseFeeRaw = s.baseFee != null ? Number(s.baseFee) : Number(s.feePerYear || 0) - dbCarry;
+    const baseFee = Math.max(0, Number.isFinite(baseFeeRaw) ? baseFeeRaw : 0);
+    const effectiveCarry = Math.max(dbCarry, carryForwardPrev);
+    const totalDue = baseFee + effectiveCarry;
+    const paidTotal = Math.max(0, Number(fin.paidAmount || 0));
+    const balanceDisplay = Math.max(0, totalDue - paidTotal);
+    const carryNotYetMerged = Math.max(0, carryForwardPrev - Math.max(0, Number(s.carryAmount || 0)));
+    const debtWithCarry = Math.max(0, Number(fin.periodDebtValue || 0) + carryNotYetMerged);
+    const scheduleItems = fin.scheduleItems || [];
+    const paymentEntries = Object.entries(s.payments || {}).filter(([, p]) => p).sort((a, b) => (a[1]?.timestamp || 0) - (b[1]?.timestamp || 0));
+    let currentInstallmentLabel = '-';
+    if (scheduleItems.length) {
+      const now = Date.now();
+      for (let i = 0; i < scheduleItems.length; i++) {
+        if (now <= (scheduleItems[i].toTS || 0)) {
+          currentInstallmentLabel = scheduleItems[i].label || `Mku.${i + 1}`;
+          break;
+        }
+        if (i === scheduleItems.length - 1) currentInstallmentLabel = scheduleItems[scheduleItems.length - 1]?.label || `Mku.${scheduleItems.length}`;
+      }
+    }
+    return {
+      fullName, admission, classLevel: s.classLevel || '', baseFee, totalDue, paymentPlan: s.paymentPlan || '',
+      periodDebtLabel: fin.periodDebtLabel || '-', debtWithCarry, paidTotal, balanceDisplay,
+      scheduleItems, paymentEntries, currentInstallmentLabel, year: financeYear
+    };
+  }
+
+  function generateDebtLetterPDF(studentId) {
+    const data = buildDebtLetterData(studentId);
+    if (!data) return alert('Student not found');
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const margin = 14;
+    let y = 18;
+    const checkPageBreak = (needY) => {
+      if (y + needY > pageH - 25) { doc.addPage(); y = 20; }
+    };
+
+    doc.setFontSize(18);
+    doc.setFont(undefined, 'bold');
+    doc.setTextColor(67, 56, 202);
+    doc.text('SoMAp', pageW / 2, y, { align: 'center' });
+    y += 6;
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.setTextColor(0, 0, 0);
+    doc.text('School Management Platform', pageW / 2, y, { align: 'center' });
+    y += 10;
+
+    doc.setDrawColor(67, 56, 202);
+    doc.setLineWidth(0.5);
+    doc.line(margin, y, pageW - margin, y);
+    y += 8;
+
+    doc.setFontSize(12);
+    doc.setFont(undefined, 'bold');
+    doc.text('Barua ya Deni la Shule', margin, y);
+    y += 8;
+
+    doc.setFontSize(10);
+    doc.setFont(undefined, 'normal');
+    doc.text(`Ngugu mzazi wa ${data.fullName},`, margin, y);
+    y += 6;
+    doc.text(`Jina: ${data.fullName}`, margin, y);
+    y += 5;
+    doc.text(`Nambari ya Usajili: ${data.admission}`, margin, y);
+    y += 5;
+    doc.text(`Darasa: ${data.classLevel}`, margin, y);
+    y += 5;
+    doc.text(`Ada (msingi): TZS ${fmt(data.baseFee)}`, margin, y);
+    y += 5;
+    doc.text(`Jumla Inayotakiwa (pamoja na carry): TZS ${fmt(data.totalDue)}`, margin, y);
+    y += 5;
+    doc.text(`Mpango wa Malipo: ${data.paymentPlan}`, margin, y);
+    y += 5;
+    doc.text(`Deni hadi: ${data.periodDebtLabel} - TZS ${fmt(data.debtWithCarry)}`, margin, y);
+    y += 5;
+    doc.text(`Imelipwa: TZS ${fmt(data.paidTotal)}`, margin, y);
+    y += 5;
+    doc.text(`Salio (pamoja na carry): TZS ${fmt(data.balanceDisplay)}`, margin, y);
+    y += 8;
+
+    doc.text(`Hadi sahivi umelipa kiasi cha TZS ${fmt(data.paidTotal)}, na jumla mwaka huu wa ${data.year} unatakiwa ulipe TZS ${fmt(data.totalDue)}. Na bado hujalipa kiasi cha TZS ${fmt(data.balanceDisplay)} kwa mwaka huu. Ila kwa hadi leo, tuko mkupuo wa ${data.currentInstallmentLabel}.`, margin, y, { maxWidth: pageW - 2 * margin });
+    y += 10;
+
+    if (data.paymentEntries.length) {
+      checkPageBreak(30);
+      doc.setFont(undefined, 'bold');
+      doc.text('Orodha ya Malipo:', margin, y);
+      y += 5;
+      doc.setFont(undefined, 'normal');
+      const ledgerRows = data.paymentEntries.map(([, p]) => [
+        new Date(p.timestamp || 0).toLocaleDateString(),
+        fmt(p.amount || 0),
+        (p.method || '') + (p.note ? ' — ' + (p.note || '').slice(0, 20) : '')
+      ]);
+      doc.autoTable({
+        head: [['Tarehe', 'Kiasi', 'Njia / Maelezo']],
+        body: ledgerRows,
+        startY: y,
+        margin: { left: margin },
+        styles: { fontSize: 7 },
+        headStyles: { fillColor: [100, 100, 100] }
+      });
+      y = doc.lastAutoTable.finalY + 6;
+    }
+
+    if (data.scheduleItems.length) {
+      checkPageBreak(40);
+      doc.setFont(undefined, 'bold');
+      doc.text('Muhtasari wa Malipo (Dirisha la Malipo):', margin, y);
+      y += 6;
+      doc.setFont(undefined, 'normal');
+      const tableData = data.scheduleItems.map(it => [
+        it.label || '-',
+        fmt(it.amount || 0),
+        fmt(it.paidAllocated || 0),
+        fmt(Math.max(0, (it.amount || 0) - (it.paidAllocated || 0))),
+        it.status || '-',
+        `${new Date(it.fromTS || 0).toLocaleDateString()} - ${new Date(it.toTS || 0).toLocaleDateString()}`
+      ]);
+      doc.autoTable({
+        head: [['Kipindi', 'Inatarajiwa', 'Imelipwa', 'Inabaki', 'Hali', 'Kipindi cha Tarehe']],
+        body: tableData,
+        startY: y,
+        margin: { left: margin },
+        styles: { fontSize: 7 },
+        headStyles: { fillColor: [67, 56, 202] }
+      });
+      y = doc.lastAutoTable.finalY + 8;
+    }
+
+    if (data.debtWithCarry === 0) {
+      doc.setFont(undefined, 'normal');
+      doc.setTextColor(34, 197, 94);
+      doc.text(`Lakini kwa kuangalia wewe hadi mkupuo wa leo, debt till inaonyesha hadi leo tarehe ${data.periodDebtLabel} (0) — hudaiwi chochote. Mwanao anaweza kuendelea kusoma.`, margin, y, { maxWidth: pageW - 2 * margin });
+      y += 10;
+    } else {
+      doc.setFont(undefined, 'bold');
+      doc.setTextColor(185, 28, 28);
+      doc.text(`MWANAO HATURUHUSIWA KUWEPO SHULENI HADI ULIPE HILI DENI.`, margin, y, { maxWidth: pageW - 2 * margin });
+      y += 6;
+      doc.setFont(undefined, 'normal');
+      doc.setTextColor(0, 0, 0);
+      doc.text(`Deni linaloendelea: TZS ${fmt(data.debtWithCarry)}. Tarehe ya mwisho: ${data.periodDebtLabel}. Tafadhali lipa ili mwanao aweze kurudi shuleni.`, margin, y, { maxWidth: pageW - 2 * margin });
+      y += 12;
+    }
+
+    y += 6;
+    doc.setFont(undefined, 'normal');
+    doc.text('_________________________', margin, y);
+    doc.text('Mwalimu Mkuu', margin, y + 4);
+    doc.text('_________________________', pageW - margin - 45, y);
+    doc.text('Mhasibu', pageW - margin - 45, y + 4);
+
+    const filename = `debt_letter_${data.admission}_${data.year}.pdf`;
+    doc.save(filename);
+  }
+
+  function downloadBulkDebtLettersPDF() {
+    const filterClass = classFilter?.value || '';
+    const debtorStudents = [];
+    Object.entries(cachedStudents || {}).forEach(([id, s]) => {
+      if (s.isGraduated) return;
+      if (filterClass && s.classLevel !== filterClass) return;
+      const fin = computeStudentFinancials(s);
+      if (Number(fin.periodDebtValue || 0) > 0) debtorStudents.push(id);
+    });
+    if (!debtorStudents.length) return alert('Hakuna wanafunzi wenye deni kwa darasa linalochaguliwa.');
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const margin = 10;
+    const LETTERS_PER_PAGE = 4;
+    const letterH = (pageH - 2 * margin) / LETTERS_PER_PAGE;
+
+    debtorStudents.forEach((studentId, idx) => {
+      const pageIdx = Math.floor(idx / LETTERS_PER_PAGE);
+      if (pageIdx > 0 && idx % LETTERS_PER_PAGE === 0) doc.addPage();
+      const data = buildDebtLetterData(studentId);
+      if (!data) return;
+      const baseY = margin + (idx % LETTERS_PER_PAGE) * letterH;
+      let y = baseY + 4;
+
+      doc.setFontSize(9);
+      doc.setFont(undefined, 'bold');
+      doc.setTextColor(67, 56, 202);
+      doc.text('SoMAp — Barua ya Deni', margin, y);
+      y += 4;
+      doc.setFontSize(7);
+      doc.setFont(undefined, 'normal');
+      doc.setTextColor(0, 0, 0);
+      doc.text(`Ngugu mzazi wa ${data.fullName} (${data.admission})`, margin, y);
+      y += 4;
+      doc.text(`Darasa: ${data.classLevel} | Jumla: TZS ${fmt(data.totalDue)} | Imelipwa: TZS ${fmt(data.paidTotal)} | Salio: TZS ${fmt(data.balanceDisplay)}`, margin, y);
+      y += 4;
+      doc.text(`Deni hadi ${data.periodDebtLabel}: TZS ${fmt(data.debtWithCarry)}`, margin, y);
+      y += 4;
+      if (data.debtWithCarry > 0) {
+        doc.setFont(undefined, 'bold');
+        doc.setTextColor(185, 28, 28);
+        doc.text('MWANAO HATURUHUSIWA KUWEPO SHULENI HADI ULIPE HILI DENI.', margin, y);
+        doc.setFont(undefined, 'normal');
+        doc.setTextColor(0, 0, 0);
+      }
+      y += 4;
+      doc.setDrawColor(200, 200, 200);
+      doc.line(margin, baseY + letterH - 2, pageW - margin, baseY + letterH - 2);
+    });
+
+    const classSuffix = filterClass ? `_${filterClass.replace(/\s+/g, '_')}` : '';
+    doc.save(`debt_letters_bulk_${financeYear}${classSuffix}_${Date.now()}.pdf`);
+  }
+
   // ===== Payments & modals (unchanged) =====
   function populateStudentSelect() {
     studentSelect.innerHTML = '<option value="">-- Select student --</option>';
@@ -2893,6 +3135,12 @@ function buildFinanceStudents(
       });
       html += `</tbody></table></div>`;
     }
+    html += `
+      <hr class="my-3"/>
+      <button class="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700" data-action="download-debt-letter" data-id="${id}">
+        <i class="fa fa-file-pdf mr-1"></i> Download Debt Letter (PDF)
+      </button>
+    `;
     detailsContent.innerHTML = html;
     if (hasFinanceAdminAccess()) {
       const editBtn = detailsContent.querySelector('[data-action="edit-fee-year"]');
@@ -2906,6 +3154,8 @@ function buildFinanceStudents(
       const paymentId = btn.getAttribute('data-payment-id');
       btn.addEventListener('click', () => handleLedgerDelete(id, paymentId));
     });
+    const debtLetterBtn = detailsContent.querySelector('[data-action="download-debt-letter"]');
+    if (debtLetterBtn) debtLetterBtn.addEventListener('click', () => generateDebtLetterPDF(id));
     detailsModal.style.display = 'block';
   }
   function closeDetailsModalFn() { detailsModal.style.display = 'none'; detailsContent.innerHTML = ''; }
@@ -3022,7 +3272,7 @@ function buildFinanceStudents(
     
     // Hide filters & bulk exports that could reveal other students
     ['classFilter','showOnlyDebtors','downloadDebtNowCsv','downloadDebtNowPdf',
-     'downloadBreakdownCsv','downloadBreakdownPdf'].forEach(id=>{
+     'downloadDebtLettersBulk','downloadBreakdownCsv','downloadBreakdownPdf'].forEach(id=>{
       const el = document.getElementById(id); 
       if (el) el.style.display = 'none';
     });
@@ -3259,6 +3509,7 @@ function buildFinanceStudents(
   downloadDebtNowPdfBtn.addEventListener('click', downloadPDF_DebtNow);
   downloadBreakdownCsvBtn.addEventListener('click', downloadCSV_Breakdown);
   downloadBreakdownPdfBtn.addEventListener('click', downloadPDF_Breakdown);
+  if (downloadDebtLettersBulkBtn) downloadDebtLettersBulkBtn.addEventListener('click', downloadBulkDebtLettersPDF);
   reloadBtn.addEventListener('click', async () => { await refreshFinanceData(financeYear); });
 
   if (yearContext) {
