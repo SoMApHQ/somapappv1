@@ -2655,6 +2655,41 @@ function buildFinanceStudents(
   }
 
   // ===== Debt Letter PDFs (single + bulk) =====
+  async function resolveDebtLetterLogo() {
+    const fallbacks = ['images/somap-logo.png.jpg', 'images/socrates_logo.png', 'logos/somap-logo.png'];
+    try {
+      const logoSnap = await schoolRef('profile/logoUrl').once('value');
+      const logoUrl = logoSnap.val();
+      if (logoUrl) {
+        const img = await fetch(logoUrl).then((r) => r.blob());
+        return await new Promise((res, rej) => {
+          const reader = new FileReader();
+          reader.onload = () => res(reader.result);
+          reader.onerror = rej;
+          reader.readAsDataURL(img);
+        });
+      }
+    } catch (_) {}
+    for (const p of fallbacks) {
+      try {
+        const img = await fetch(p).then((r) => r.blob());
+        const dataUrl = await new Promise((res, rej) => {
+          const reader = new FileReader();
+          reader.onload = () => res(reader.result);
+          reader.onerror = rej;
+          reader.readAsDataURL(img);
+        });
+        if (dataUrl) return dataUrl;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  function getSchoolNameForLetter() {
+    const school = window.SOMAP && SOMAP.getSchool ? SOMAP.getSchool() : null;
+    return school?.name || school?.code || school?.id || 'School';
+  }
+
   function buildDebtLetterData(studentId) {
     const s = cachedStudents[studentId];
     if (!s) return null;
@@ -2704,9 +2739,11 @@ function buildFinanceStudents(
     };
   }
 
-  function generateDebtLetterPDF(studentId) {
+  async function generateDebtLetterPDF(studentId) {
     const data = buildDebtLetterData(studentId);
     if (!data) return alert('Student not found');
+    const schoolName = getSchoolNameForLetter();
+    const logoDataUrl = await resolveDebtLetterLogo();
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
     const pageW = doc.internal.pageSize.getWidth();
@@ -2717,16 +2754,20 @@ function buildFinanceStudents(
       if (y + needY > pageH - 25) { doc.addPage(); y = 20; }
     };
 
-    doc.setFontSize(18);
+    if (logoDataUrl) {
+      try {
+        doc.addImage(logoDataUrl, 'PNG', margin, y - 2, 20, 20);
+      } catch (_) {}
+    }
+    doc.setFontSize(14);
     doc.setFont(undefined, 'bold');
     doc.setTextColor(67, 56, 202);
-    doc.text('SoMAp', pageW / 2, y, { align: 'center' });
-    y += 6;
-    doc.setFontSize(10);
+    doc.text(schoolName, logoDataUrl ? margin + 24 : pageW / 2, y + 6, { align: logoDataUrl ? 'left' : 'center' });
+    doc.setFontSize(9);
     doc.setFont(undefined, 'normal');
     doc.setTextColor(0, 0, 0);
-    doc.text('School Management Platform', pageW / 2, y, { align: 'center' });
-    y += 10;
+    doc.text('School Management Platform', logoDataUrl ? margin + 24 : pageW / 2, y + 11, { align: logoDataUrl ? 'left' : 'center' });
+    y += 20;
 
     doc.setDrawColor(67, 56, 202);
     doc.setLineWidth(0.5);
@@ -2838,7 +2879,7 @@ function buildFinanceStudents(
     doc.save(filename);
   }
 
-  function downloadBulkDebtLettersPDF() {
+  async function downloadBulkDebtLettersPDF() {
     const filterClass = classFilter?.value || '';
     const debtorStudents = [];
     Object.entries(cachedStudents || {}).forEach(([id, s]) => {
@@ -2848,6 +2889,8 @@ function buildFinanceStudents(
       if (Number(fin.periodDebtValue || 0) > 0) debtorStudents.push(id);
     });
     if (!debtorStudents.length) return alert('Hakuna wanafunzi wenye deni kwa darasa linalochaguliwa.');
+    const schoolName = getSchoolNameForLetter();
+    const logoDataUrl = await resolveDebtLetterLogo();
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
     const pageW = doc.internal.pageSize.getWidth();
@@ -2862,30 +2905,43 @@ function buildFinanceStudents(
       const data = buildDebtLetterData(studentId);
       if (!data) return;
       const baseY = margin + (idx % LETTERS_PER_PAGE) * letterH;
-      let y = baseY + 4;
+      let y = baseY + 3;
 
-      doc.setFontSize(9);
+      if (logoDataUrl) {
+        try {
+          doc.addImage(logoDataUrl, 'PNG', margin, baseY, 10, 10);
+        } catch (_) {}
+      }
+      doc.setFontSize(8);
       doc.setFont(undefined, 'bold');
       doc.setTextColor(67, 56, 202);
-      doc.text('SoMAp — Barua ya Deni', margin, y);
+      doc.text(`${schoolName} — Barua ya Deni la Shule`, logoDataUrl ? margin + 13 : margin, y);
       y += 4;
-      doc.setFontSize(7);
+      doc.setFontSize(6);
       doc.setFont(undefined, 'normal');
       doc.setTextColor(0, 0, 0);
-      doc.text(`Ngugu mzazi wa ${data.fullName} (${data.admission})`, margin, y);
-      y += 4;
-      doc.text(`Darasa: ${data.classLevel} | Jumla: TZS ${fmt(data.totalDue)} | Imelipwa: TZS ${fmt(data.paidTotal)} | Salio: TZS ${fmt(data.balanceDisplay)}`, margin, y);
-      y += 4;
-      doc.text(`Deni hadi ${data.periodDebtLabel}: TZS ${fmt(data.debtWithCarry)}`, margin, y);
-      y += 4;
+      doc.text(`Ngugu mzazi wa ${data.fullName},`, margin, y);
+      y += 3.5;
+      doc.text(`Jina: ${data.fullName} | Nambari ya Usajili: ${data.admission} | Darasa: ${data.classLevel}`, margin, y);
+      y += 3.5;
+      doc.text(`Jumla inayotakiwa mwaka ${data.year}: TZS ${fmt(data.totalDue)} | Imelipwa: TZS ${fmt(data.paidTotal)} | Salio: TZS ${fmt(data.balanceDisplay)}`, margin, y);
+      y += 3.5;
+      doc.text(`Mpango wa malipo: ${data.paymentPlan}. Hadi sahivi umelipa kiasi cha TZS ${fmt(data.paidTotal)}, na bado hujalipa TZS ${fmt(data.balanceDisplay)}.`, margin, y);
+      y += 3.5;
+      doc.text(`Deni hadi tarehe ${data.periodDebtLabel}: TZS ${fmt(data.debtWithCarry)}`, margin, y);
+      y += 3.5;
       if (data.debtWithCarry > 0) {
         doc.setFont(undefined, 'bold');
         doc.setTextColor(185, 28, 28);
-        doc.text('MWANAO HATURUHUSIWA KUWEPO SHULENI HADI ULIPE HILI DENI.', margin, y);
+        doc.text(`MWANAO HATURUHUSIWA KUWEPO SHULENI HADI ULIPE HILI DENI. Tafadhali lipa ili mwanao aweze kurudi shuleni.`, margin, y, { maxWidth: pageW - 2 * margin });
         doc.setFont(undefined, 'normal');
         doc.setTextColor(0, 0, 0);
+        y += 4;
       }
-      y += 4;
+      doc.setFontSize(5);
+      doc.text('_________________________  Mwalimu Mkuu', margin, y);
+      doc.text('_________________________  Mhasibu', pageW - margin - 42, y);
+      y += 2;
       doc.setDrawColor(200, 200, 200);
       doc.line(margin, baseY + letterH - 2, pageW - margin, baseY + letterH - 2);
     });
@@ -3155,7 +3211,7 @@ function buildFinanceStudents(
       btn.addEventListener('click', () => handleLedgerDelete(id, paymentId));
     });
     const debtLetterBtn = detailsContent.querySelector('[data-action="download-debt-letter"]');
-    if (debtLetterBtn) debtLetterBtn.addEventListener('click', () => generateDebtLetterPDF(id));
+    if (debtLetterBtn) debtLetterBtn.addEventListener('click', async () => { await generateDebtLetterPDF(id); });
     detailsModal.style.display = 'block';
   }
   function closeDetailsModalFn() { detailsModal.style.display = 'none'; detailsContent.innerHTML = ''; }
