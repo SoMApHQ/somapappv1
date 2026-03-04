@@ -1111,51 +1111,228 @@
             Swal.fire('PDF engine missing', 'jsPDF failed to load. Check internet and reload page.', 'error');
             return;
         }
+        const loadImageData = (url) => new Promise((resolve) => {
+            try {
+                const img = new Image();
+                img.onload = () => {
+                    try {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = img.naturalWidth || img.width || 300;
+                        canvas.height = img.naturalHeight || img.height || 300;
+                        const ctx = canvas.getContext('2d');
+                        if (!ctx) return resolve(null);
+                        ctx.drawImage(img, 0, 0);
+                        resolve(canvas.toDataURL('image/png'));
+                    } catch (_err) {
+                        resolve(null);
+                    }
+                };
+                img.onerror = () => resolve(null);
+                img.src = `${url}?v=${Date.now()}`;
+            } catch (_err) {
+                resolve(null);
+            }
+        });
+
         const doc = new jsPdf({ unit: 'pt', format: 'a4' });
         const pageWidth = doc.internal.pageSize.getWidth();
-        const margin = 40;
-        let y = 44;
-        const lineGap = 16;
-        const writeLine = (text, opts = {}) => {
-            const size = opts.size || 10;
-            const style = opts.style || 'normal';
-            doc.setFont('helvetica', style);
-            doc.setFontSize(size);
-            const maxWidth = pageWidth - (margin * 2);
-            const lines = doc.splitTextToSize(String(text || ''), maxWidth);
-            lines.forEach((ln) => {
-                if (y > 790) {
-                    doc.addPage();
-                    y = 44;
-                }
-                doc.text(ln, margin, y);
-                y += lineGap;
-            });
+        const pageHeight = doc.internal.pageSize.getHeight();
+        const margin = 32;
+        const contentWidth = pageWidth - (margin * 2);
+        const colors = {
+            brand1: [6, 95, 70],
+            brand2: [3, 105, 161],
+            text: [15, 23, 42],
+            muted: [71, 85, 105],
+            border: [203, 213, 225],
+            headerText: [248, 250, 252]
+        };
+        const logoData = await loadImageData('images/somap-logo.png.jpg');
+        const title = `${invoice.schoolName || 'Socrates School'} - DAILY FOOD INVOICE`;
+        const dateLabel = `Date: ${invoice.date || '-'} | Year: ${invoice.year || '-'} | Day: ${invoice.dayKey || '-'}`;
+        const headcountLabel = `Students Breakfast: ${invoice.headcount?.studentBreakfast || 0} | Workers Breakfast: ${invoice.headcount?.workerBreakfast || 0} | Lunch Total: ${invoice.headcount?.lunchCombined || 0}`;
+        let y = margin;
+
+        const ensureSpace = (neededHeight) => {
+            if ((y + neededHeight) <= (pageHeight - margin)) return;
+            doc.addPage();
+            y = margin;
         };
 
-        writeLine(`${invoice.schoolName || 'Socrates School'} - DAILY FOOD INVOICE`, { size: 14, style: 'bold' });
-        writeLine(`Date: ${invoice.date || '-'} | Year: ${invoice.year || '-'} | Day: ${invoice.dayKey || '-'}`);
-        writeLine(`Students Breakfast: ${invoice.headcount?.studentBreakfast || 0} | Workers Breakfast: ${invoice.headcount?.workerBreakfast || 0} | Lunch Total: ${invoice.headcount?.lunchCombined || 0}`);
-        writeLine(' ');
-        writeLine('ITEMS', { style: 'bold' });
-        (invoice.lines || []).forEach((line, idx) => {
-            writeLine(`${idx + 1}. ${line.name || '-'} | Qty: ${line.requiredQty || 0} ${line.unit || ''} | Stock: ${line.onHand || 0} | Balance: ${line.balanceAfterIssue || 0} | Unit: ${formatTsh(line.unitPrice || 0)} | Total: ${formatTsh(line.total || 0)} | Supplier: ${line.shopName || '-'} ${line.shopPhone ? `(${line.shopPhone})` : ''}`);
-        });
-        writeLine(' ');
-        writeLine(`TOTAL AMOUNT: ${formatTsh(invoice.totalAmount || 0)}`, { style: 'bold' });
-        writeLine(' ');
-        writeLine('STOCK ALERTS', { style: 'bold' });
+        const drawHeader = (continuation = false) => {
+            const h = continuation ? 58 : 102;
+            doc.setFillColor(colors.brand1[0], colors.brand1[1], colors.brand1[2]);
+            doc.roundedRect(margin, y, contentWidth, h, 10, 10, 'F');
+            doc.setFillColor(colors.brand2[0], colors.brand2[1], colors.brand2[2]);
+            doc.roundedRect(margin + (contentWidth * 0.52), y, contentWidth * 0.48, h, 10, 10, 'F');
+
+            doc.setTextColor(colors.headerText[0], colors.headerText[1], colors.headerText[2]);
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(15);
+            doc.text(continuation ? 'DAILY FOOD INVOICE (CONT.)' : title, margin + 14, y + 24);
+
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(10);
+            doc.text(dateLabel, margin + 14, y + 42);
+            if (!continuation) doc.text(headcountLabel, margin + 14, y + 58);
+
+            const logoBoxSize = continuation ? 32 : 62;
+            const boxX = margin + contentWidth - logoBoxSize - 12;
+            const boxY = y + (continuation ? 12 : 20);
+            doc.setFillColor(255, 255, 255);
+            doc.roundedRect(boxX, boxY, logoBoxSize, logoBoxSize, 7, 7, 'F');
+            if (logoData) {
+                doc.addImage(logoData, 'PNG', boxX + 4, boxY + 4, logoBoxSize - 8, logoBoxSize - 8);
+            } else {
+                doc.setTextColor(colors.brand1[0], colors.brand1[1], colors.brand1[2]);
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(9);
+                doc.text('SoMAp', boxX + 8, boxY + (logoBoxSize / 2) + 3);
+            }
+            y += h + 16;
+        };
+
+        const paragraph = [
+            'Ankara hii ya chakula inaonesha kwa usahihi mahitaji ya jikoni kwa siku husika.',
+            'Takwimu za wanafunzi na wafanyakazi zinatumika kupanga kiasi cha kiamsha kinywa na chakula cha mchana.',
+            'Kwenye jedwali, kila bidhaa inaoneshwa pamoja na kiasi kilichotumika, stoo kabla ya matumizi, na salio baada ya matumizi.',
+            'Bei kwa kila kipimo na jumla ya gharama husaidia mhasibu kufuatilia matumizi halisi ya fedha za chakula.',
+            'Sehemu ya tahadhari ya stoo inawezesha shule kubaini mapema bidhaa zinazokaribia kuisha ili kuepuka upungufu.',
+            'Mwisho wa taarifa hii unaunganisha uwajibikaji wa jikoni, uhasibu, na usimamizi wa shule kwa picha moja iliyo wazi.'
+        ].join(' ');
+
+        const drawInfoParagraph = () => {
+            doc.setDrawColor(colors.border[0], colors.border[1], colors.border[2]);
+            doc.setFillColor(248, 250, 252);
+            const pHeight = 74;
+            ensureSpace(pHeight + 4);
+            doc.roundedRect(margin, y, contentWidth, pHeight, 8, 8, 'FD');
+            doc.setTextColor(colors.text[0], colors.text[1], colors.text[2]);
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(9.5);
+            const lines = doc.splitTextToSize(paragraph, contentWidth - 20);
+            doc.text(lines, margin + 10, y + 16);
+            y += pHeight + 14;
+        };
+
+        const colWidths = [82, 54, 66, 70, 80, 80, 91];
+        const columns = ['Item', 'Qty', 'Stock', 'Balance', 'Unit Price', 'Total', 'Supplier'];
+        const rowLineHeight = 11;
+
+        const drawTableHeader = () => {
+            doc.setFillColor(colors.brand2[0], colors.brand2[1], colors.brand2[2]);
+            doc.rect(margin, y, contentWidth, 24, 'F');
+            doc.setTextColor(colors.headerText[0], colors.headerText[1], colors.headerText[2]);
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(9);
+            let cx = margin;
+            columns.forEach((label, i) => {
+                doc.text(label, cx + 6, y + 15);
+                cx += colWidths[i];
+            });
+            y += 24;
+        };
+
+        const drawRow = (cells, striped = false) => {
+            const splitCells = cells.map((cell, i) => doc.splitTextToSize(String(cell || ''), colWidths[i] - 8));
+            const maxLines = Math.max(1, ...splitCells.map((arr) => arr.length));
+            const rowHeight = (maxLines * rowLineHeight) + 8;
+            ensureSpace(rowHeight + 2);
+            if ((y + rowHeight + 2) > (pageHeight - margin)) {
+                doc.addPage();
+                y = margin;
+                drawHeader(true);
+                drawTableHeader();
+            }
+            if (striped) {
+                doc.setFillColor(248, 250, 252);
+                doc.rect(margin, y, contentWidth, rowHeight, 'F');
+            }
+            doc.setDrawColor(colors.border[0], colors.border[1], colors.border[2]);
+            doc.rect(margin, y, contentWidth, rowHeight);
+
+            doc.setFont('helvetica', 'normal');
+            doc.setTextColor(colors.text[0], colors.text[1], colors.text[2]);
+            doc.setFontSize(9);
+            let cx = margin;
+            splitCells.forEach((arr, i) => {
+                doc.text(arr, cx + 4, y + 12);
+                cx += colWidths[i];
+            });
+            y += rowHeight;
+        };
+
+        drawHeader(false);
+        drawInfoParagraph();
+
+        doc.setTextColor(colors.text[0], colors.text[1], colors.text[2]);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.text('ITEMS', margin, y);
+        y += 10;
+
+        drawTableHeader();
+        const lines = Array.isArray(invoice.lines) ? invoice.lines : [];
+        if (!lines.length) {
+            drawRow(['No invoice lines', '-', '-', '-', '-', '-', '-'], false);
+        } else {
+            lines.forEach((line, idx) => {
+                const supplierLabel = `${line.shopName || '-'}${line.shopPhone ? `\n${line.shopPhone}` : ''}`;
+                drawRow([
+                    `${idx + 1}. ${line.name || '-'}`,
+                    `${line.requiredQty || 0} ${line.unit || ''}`,
+                    `${line.onHand || 0} ${line.unit || ''}`,
+                    `${line.balanceAfterIssue || 0} ${line.unit || ''}`,
+                    formatTsh(line.unitPrice || 0),
+                    formatTsh(line.total || 0),
+                    supplierLabel
+                ], idx % 2 === 1);
+            });
+        }
+
+        y += 12;
+        ensureSpace(138);
+        doc.setFillColor(236, 253, 245);
+        doc.setDrawColor(110, 231, 183);
+        doc.roundedRect(margin, y, contentWidth, 34, 8, 8, 'FD');
+        doc.setTextColor(6, 95, 70);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(12);
+        doc.text(`TOTAL AMOUNT: ${formatTsh(invoice.totalAmount || 0)}`, margin + 12, y + 21);
+        y += 46;
+
+        doc.setTextColor(colors.text[0], colors.text[1], colors.text[2]);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.text('STOCK ALERTS', margin, y);
+        y += 14;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9.5);
         if ((invoice.missingLines || []).length) {
             (invoice.missingLines || []).forEach((line) => {
                 const shortage = Number((Number(line.requiredQty || 0) - Number(line.onHand || 0)).toFixed(2));
-                writeLine(`- ${line.name || '-'} shortage: ${shortage} ${line.unit || ''}`);
+                const text = `- ${line.name || '-'} shortage: ${shortage} ${line.unit || ''}`;
+                const wrapped = doc.splitTextToSize(text, contentWidth - 6);
+                ensureSpace((wrapped.length * 12) + 2);
+                doc.text(wrapped, margin + 4, y);
+                y += (wrapped.length * 12);
             });
         } else {
-            writeLine('No shortage items.');
+            doc.text('No shortage items.', margin + 4, y);
+            y += 14;
         }
-        writeLine(' ');
-        writeLine('Assistant Headteacher Signature: ______________________');
-        writeLine('Accountant Signature: ______________________');
+
+        y += 16;
+        ensureSpace(56);
+        doc.setDrawColor(148, 163, 184);
+        const lineWidth = (contentWidth / 2) - 26;
+        doc.line(margin, y + 18, margin + lineWidth, y + 18);
+        doc.line(margin + lineWidth + 52, y + 18, margin + (lineWidth * 2) + 52, y + 18);
+        doc.setTextColor(colors.muted[0], colors.muted[1], colors.muted[2]);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.text('Assistant Headteacher Signature', margin, y + 32);
+        doc.text('Accountant Signature', margin + lineWidth + 52, y + 32);
         doc.save(`food-invoice-${invoice.date || todayYmdLocal()}.pdf`);
     }
 
