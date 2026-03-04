@@ -806,6 +806,39 @@
         return input && input.value ? input.value : todayYmdLocal();
     }
 
+    function normalizeDateCandidates(rawValue) {
+        const raw = String(rawValue || '').trim();
+        const out = new Set();
+        if (!raw) {
+            out.add(todayYmdLocal());
+            return Array.from(out);
+        }
+        if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+            out.add(raw);
+            return Array.from(out);
+        }
+        const m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+        if (!m) {
+            out.add(todayYmdLocal());
+            return Array.from(out);
+        }
+        const a = Number(m[1]); // could be day or month
+        const b = Number(m[2]); // could be month or day
+        const y = Number(m[3]);
+        const isoFrom = (year, month, day) => {
+            if (!year || month < 1 || month > 12 || day < 1 || day > 31) return '';
+            return `${String(year)}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        };
+        // Day-first
+        const dmy = isoFrom(y, b, a);
+        // Month-first
+        const mdy = isoFrom(y, a, b);
+        if (dmy) out.add(dmy);
+        if (mdy) out.add(mdy);
+        if (!out.size) out.add(todayYmdLocal());
+        return Array.from(out);
+    }
+
     async function readFirstExisting(paths = []) {
         for (const path of paths) {
             if (!path) continue;
@@ -824,6 +857,20 @@
             set.add('default');
         }
         return Array.from(set).filter(Boolean);
+    }
+
+    async function getAllSchoolIds() {
+        try {
+            const snap = await db.ref('schools').once('value');
+            const raw = snap.val() || {};
+            return Object.keys(raw || {});
+        } catch (_err) {
+            return [];
+        }
+    }
+
+    function uniqueList(values = []) {
+        return Array.from(new Set((values || []).filter(Boolean)));
     }
 
     function downloadFoodInvoiceFodt(invoice) {
@@ -867,7 +914,8 @@
     }
 
     async function loadFoodInvoice() {
-        const dateKey = getFoodInvoiceDate();
+        const dateRaw = getFoodInvoiceDate();
+        const dateCandidates = normalizeDateCandidates(dateRaw);
         const year = getSelectedYear();
         const statusEl = document.getElementById('food-invoice-status');
         const totalEl = document.getElementById('food-invoice-total');
@@ -881,66 +929,86 @@
         try {
             const school = getCurrentSchoolId();
             const aliases = schoolAliasList(school);
-            const invoicePaths = aliases.map(s => `schools/${s}/years/${year}/foodInvoices/${dateKey}`);
-            invoicePaths.push(`years/${year}/foodInvoices/${dateKey}`);
-            let { snap } = await readFirstExisting(invoicePaths);
+            const allSchools = await getAllSchoolIds();
+            const schoolCandidates = uniqueList([...aliases, ...allSchools]);
+            let snap = null;
+            let matchedDate = '';
+
+            // 1) Try invoice nodes across selected aliases + discovered schools + legacy path.
+            for (const dk of dateCandidates) {
+                const invoicePaths = schoolCandidates.map(s => `schools/${s}/years/${year}/foodInvoices/${dk}`);
+                invoicePaths.push(`years/${year}/foodInvoices/${dk}`);
+                const found = await readFirstExisting(invoicePaths);
+                if (found.snap && found.snap.exists()) {
+                    snap = found.snap;
+                    matchedDate = dk;
+                    break;
+                }
+            }
 
             // Fallback: if invoice node is missing, build from cook daily report for that date.
             if (!snap || !snap.exists()) {
-                const cookPaths = aliases.map(s => `schools/${s}/years/${year}/workerRoles/cook/daily/${dateKey}`);
-                cookPaths.push(`years/${year}/workerRoles/cook/daily/${dateKey}`);
-                const cookRead = await readFirstExisting(cookPaths);
-                const cookRoot = cookRead.snap && cookRead.snap.exists() ? (cookRead.snap.val() || {}) : {};
-                const firstCookReport = Object.values(cookRoot)[0] || null;
-                if (firstCookReport && Array.isArray(firstCookReport.expected?.items) && firstCookReport.expected.items.length) {
-                    const invPaths = aliases.map(s => `schools/${s}/years/${year}/workers_inventory/items`);
-                    invPaths.push(`years/${year}/workers_inventory/items`);
-                    const invRead = await readFirstExisting(invPaths);
-                    const invMap = invRead.snap && invRead.snap.exists() ? (invRead.snap.val() || {}) : {};
-                    const lines = (firstCookReport.expected.items || []).map(item => {
-                        const stock = invMap[item.itemId] || {};
-                        const requiredQty = Number(item.expectedQty || 0);
-                        const onHand = Number(stock.onHand || stock.qty || 0);
-                        const unitPrice = Number(stock.unitPrice || stock.unitCost || stock.market?.price || 0);
-                        return {
-                            itemId: item.itemId,
-                            name: item.name || stock.name || item.itemId,
-                            unit: item.unit || stock.unit || '',
-                            requiredQty,
-                            onHand,
-                            balanceAfterIssue: Number((onHand - requiredQty).toFixed(2)),
-                            unitPrice,
-                            total: Number((requiredQty * unitPrice).toFixed(2)),
-                            shopName: stock.market?.shopName || '',
-                            shopPhone: stock.market?.shopPhone || ''
+                for (const dk of dateCandidates) {
+                    const cookPaths = schoolCandidates.map(s => `schools/${s}/years/${year}/workerRoles/cook/daily/${dk}`);
+                    cookPaths.push(`years/${year}/workerRoles/cook/daily/${dk}`);
+                    const cookRead = await readFirstExisting(cookPaths);
+                    const cookRoot = cookRead.snap && cookRead.snap.exists() ? (cookRead.snap.val() || {}) : {};
+                    const firstCookReport = Object.values(cookRoot)[0] || null;
+                    if (firstCookReport && Array.isArray(firstCookReport.expected?.items) && firstCookReport.expected.items.length) {
+                        const invPaths = schoolCandidates.map(s => `schools/${s}/years/${year}/workers_inventory/items`);
+                        invPaths.push(`years/${year}/workers_inventory/items`);
+                        const invRead = await readFirstExisting(invPaths);
+                        const invMap = invRead.snap && invRead.snap.exists() ? (invRead.snap.val() || {}) : {};
+                        const lines = (firstCookReport.expected.items || []).map(item => {
+                            const stock = invMap[item.itemId] || {};
+                            const requiredQty = Number(item.expectedQty || 0);
+                            const onHand = Number(stock.onHand || stock.qty || 0);
+                            const unitPrice = Number(stock.unitPrice || stock.unitCost || stock.market?.price || 0);
+                            return {
+                                itemId: item.itemId,
+                                name: item.name || stock.name || item.itemId,
+                                unit: item.unit || stock.unit || '',
+                                requiredQty,
+                                onHand,
+                                balanceAfterIssue: Number((onHand - requiredQty).toFixed(2)),
+                                unitPrice,
+                                total: Number((requiredQty * unitPrice).toFixed(2)),
+                                shopName: stock.market?.shopName || '',
+                                shopPhone: stock.market?.shopPhone || ''
+                            };
+                        });
+                        const missingLines = lines.filter(line => Number(line.requiredQty || 0) > Number(line.onHand || 0));
+                        const builtInvoice = {
+                            schoolName: school,
+                            year: String(year),
+                            date: dk,
+                            dayKey: firstCookReport.dayKey || '',
+                            status: missingLines.length ? 'needs-restock' : 'ready',
+                            headcount: firstCookReport.headcount || {},
+                            lines,
+                            missingLines,
+                            totalAmount: Number(lines.reduce((sum, line) => sum + Number(line.total || 0), 0).toFixed(2)),
+                            rebuiltFromCookReport: true,
+                            createdAt: Date.now()
                         };
-                    });
-                    const missingLines = lines.filter(line => Number(line.requiredQty || 0) > Number(line.onHand || 0));
-                    const builtInvoice = {
-                        schoolName: school,
-                        year: String(year),
-                        date: dateKey,
-                        dayKey: firstCookReport.dayKey || '',
-                        status: missingLines.length ? 'needs-restock' : 'ready',
-                        headcount: firstCookReport.headcount || {},
-                        lines,
-                        missingLines,
-                        totalAmount: Number(lines.reduce((sum, line) => sum + Number(line.total || 0), 0).toFixed(2)),
-                        rebuiltFromCookReport: true,
-                        createdAt: Date.now()
-                    };
-                    // Persist for future direct reads (use primary alias path).
-                    const preferredSchool = aliases[0] || school;
-                    await db.ref(`schools/${preferredSchool}/years/${year}/foodInvoices/${dateKey}`).set(builtInvoice);
-                    snap = { exists: () => true, val: () => builtInvoice };
+                        const preferredSchool = aliases[0] || school;
+                        await db.ref(`schools/${preferredSchool}/years/${year}/foodInvoices/${dk}`).set(builtInvoice);
+                        snap = { exists: () => true, val: () => builtInvoice };
+                        matchedDate = dk;
+                        break;
+                    }
                 }
             }
             const invoice = snap && snap.exists() ? snap.val() : null;
             latestFoodInvoice = invoice;
             if (!invoice) {
                 statusEl.textContent = 'No invoice';
-                tbody.innerHTML = '<tr><td colspan="7">No food invoice saved for selected date.</td></tr>';
+                tbody.innerHTML = `<tr><td colspan="7">No food invoice saved for selected date (${dateCandidates.join(' / ')}).</td></tr>`;
                 return;
+            }
+            const currentDateInput = document.getElementById('food-invoice-date');
+            if (currentDateInput && matchedDate && currentDateInput.value !== matchedDate) {
+                currentDateInput.value = matchedDate;
             }
             statusEl.textContent = String(invoice.status || 'ready').toUpperCase();
             totalEl.textContent = formatTsh(invoice.totalAmount || 0);
