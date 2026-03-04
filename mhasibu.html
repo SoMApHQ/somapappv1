@@ -806,6 +806,26 @@
         return input && input.value ? input.value : todayYmdLocal();
     }
 
+    async function readFirstExisting(paths = []) {
+        for (const path of paths) {
+            if (!path) continue;
+            const snap = await db.ref(path).once('value');
+            if (snap.exists()) return { snap, path };
+        }
+        return { snap: null, path: '' };
+    }
+
+    function schoolAliasList(school) {
+        const key = String(school || '').toLowerCase();
+        const set = new Set([key]);
+        if (['socrates', 'socrates-school', 'default'].includes(key)) {
+            set.add('socrates');
+            set.add('socrates-school');
+            set.add('default');
+        }
+        return Array.from(set).filter(Boolean);
+    }
+
     function downloadFoodInvoiceFodt(invoice) {
         if (!invoice) {
             Swal.fire('No invoice', 'Load food invoice first.', 'warning');
@@ -860,12 +880,62 @@
         tbody.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
         try {
             const school = getCurrentSchoolId();
-            const path = `schools/${school}/years/${year}/foodInvoices/${dateKey}`;
-            let snap = await db.ref(path).once('value');
-            if (!snap.exists() && ['socrates-school', 'default', 'socrates'].includes(school)) {
-                snap = await db.ref(`years/${year}/foodInvoices/${dateKey}`).once('value');
+            const aliases = schoolAliasList(school);
+            const invoicePaths = aliases.map(s => `schools/${s}/years/${year}/foodInvoices/${dateKey}`);
+            invoicePaths.push(`years/${year}/foodInvoices/${dateKey}`);
+            let { snap } = await readFirstExisting(invoicePaths);
+
+            // Fallback: if invoice node is missing, build from cook daily report for that date.
+            if (!snap || !snap.exists()) {
+                const cookPaths = aliases.map(s => `schools/${s}/years/${year}/workerRoles/cook/daily/${dateKey}`);
+                cookPaths.push(`years/${year}/workerRoles/cook/daily/${dateKey}`);
+                const cookRead = await readFirstExisting(cookPaths);
+                const cookRoot = cookRead.snap && cookRead.snap.exists() ? (cookRead.snap.val() || {}) : {};
+                const firstCookReport = Object.values(cookRoot)[0] || null;
+                if (firstCookReport && Array.isArray(firstCookReport.expected?.items) && firstCookReport.expected.items.length) {
+                    const invPaths = aliases.map(s => `schools/${s}/years/${year}/workers_inventory/items`);
+                    invPaths.push(`years/${year}/workers_inventory/items`);
+                    const invRead = await readFirstExisting(invPaths);
+                    const invMap = invRead.snap && invRead.snap.exists() ? (invRead.snap.val() || {}) : {};
+                    const lines = (firstCookReport.expected.items || []).map(item => {
+                        const stock = invMap[item.itemId] || {};
+                        const requiredQty = Number(item.expectedQty || 0);
+                        const onHand = Number(stock.onHand || stock.qty || 0);
+                        const unitPrice = Number(stock.unitPrice || stock.unitCost || stock.market?.price || 0);
+                        return {
+                            itemId: item.itemId,
+                            name: item.name || stock.name || item.itemId,
+                            unit: item.unit || stock.unit || '',
+                            requiredQty,
+                            onHand,
+                            balanceAfterIssue: Number((onHand - requiredQty).toFixed(2)),
+                            unitPrice,
+                            total: Number((requiredQty * unitPrice).toFixed(2)),
+                            shopName: stock.market?.shopName || '',
+                            shopPhone: stock.market?.shopPhone || ''
+                        };
+                    });
+                    const missingLines = lines.filter(line => Number(line.requiredQty || 0) > Number(line.onHand || 0));
+                    const builtInvoice = {
+                        schoolName: school,
+                        year: String(year),
+                        date: dateKey,
+                        dayKey: firstCookReport.dayKey || '',
+                        status: missingLines.length ? 'needs-restock' : 'ready',
+                        headcount: firstCookReport.headcount || {},
+                        lines,
+                        missingLines,
+                        totalAmount: Number(lines.reduce((sum, line) => sum + Number(line.total || 0), 0).toFixed(2)),
+                        rebuiltFromCookReport: true,
+                        createdAt: Date.now()
+                    };
+                    // Persist for future direct reads (use primary alias path).
+                    const preferredSchool = aliases[0] || school;
+                    await db.ref(`schools/${preferredSchool}/years/${year}/foodInvoices/${dateKey}`).set(builtInvoice);
+                    snap = { exists: () => true, val: () => builtInvoice };
+                }
             }
-            const invoice = snap.exists() ? snap.val() : null;
+            const invoice = snap && snap.exists() ? snap.val() : null;
             latestFoodInvoice = invoice;
             if (!invoice) {
                 statusEl.textContent = 'No invoice';

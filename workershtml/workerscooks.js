@@ -414,6 +414,14 @@ function App() {
     });
   }, [selectedDayPlan, studentBreakfastPax, workersBreakfastPax, lunchPax, logicRules, inventoryItems]);
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      upsertDraftInvoice().catch(err => console.warn('Draft invoice sync failed', err));
+    }, 600);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportDate, selectedDayKey, selectedDayPlan, expectedList, studentBreakfastPax, workersBreakfastPax, lunchPax, currentYear]);
+
   async function loadBootstrap() {
     try {
       setRegisterLoading(true);
@@ -1230,7 +1238,7 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     });
   }
 
-  async function buildAndSaveFoodInvoice(cookPayload) {
+  function buildFoodInvoiceObject(cookPayload = {}, { markDraft = false } = {}) {
     const lines = expectedList.map(item => {
       const inv = inventoryItems.find(it => it.id === item.itemId) || {};
       const requiredQty = Number(item.expectedQty || 0);
@@ -1254,7 +1262,6 @@ function buildRegisterStats(studentMap, attendanceByClass) {
       };
     });
     const missingLines = lines.filter(line => line.requiredQty > line.onHand);
-    await pushFoodAlerts(missingLines);
 
     const invoice = {
       schoolId: workerSession.schoolId,
@@ -1270,10 +1277,33 @@ function buildRegisterStats(studentMap, attendanceByClass) {
       lines,
       totalAmount: Number(lines.reduce((sum, line) => sum + Number(line.total || 0), 0).toFixed(2)),
       missingLines,
-      note: selectedDayPlan.note || ''
+      note: selectedDayPlan.note || '',
+      draft: !!markDraft
     };
+    return invoice;
+  }
+
+  async function buildAndSaveFoodInvoice(cookPayload) {
+    const invoice = buildFoodInvoiceObject(cookPayload, { markDraft: false });
+    await pushFoodAlerts(invoice.missingLines || []);
     await schoolRef(`years/${currentYear}/foodInvoices/${reportDate}`).set(invoice);
     return invoice;
+  }
+
+  async function upsertDraftInvoice() {
+    if (selectedDayKey === 'sunday') return;
+    const hasMenu = (selectedDayPlan.studentBreakfast || []).length || (selectedDayPlan.workerBreakfast || []).length || (selectedDayPlan.lunch || []).length;
+    if (!hasMenu || !expectedList.length) return;
+    const draftPayload = {
+      headcount: {
+        studentBreakfast: studentBreakfastPax,
+        workerBreakfast: workersBreakfastPax,
+        lunchCombined: lunchPax
+      }
+    };
+    const invoice = buildFoodInvoiceObject(draftPayload, { markDraft: true });
+    await schoolRef(`years/${currentYear}/foodInvoices/${reportDate}`).update(invoice);
+    setFoodInvoice(invoice);
   }
 
   function downloadFoodInvoiceFodt(invoice = foodInvoice) {
