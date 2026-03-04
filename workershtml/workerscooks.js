@@ -64,6 +64,36 @@ const CLASS_ORDER = [
   'Class 7'
 ];
 
+const WEEKDAYS = [
+  { key: 'monday', label: 'Monday' },
+  { key: 'tuesday', label: 'Tuesday' },
+  { key: 'wednesday', label: 'Wednesday' },
+  { key: 'thursday', label: 'Thursday' },
+  { key: 'friday', label: 'Friday' },
+  { key: 'saturday', label: 'Saturday' },
+  { key: 'sunday', label: 'Sunday' }
+];
+
+function dayKeyFromDate(dateStr) {
+  if (!dateStr) return 'monday';
+  const d = new Date(`${dateStr}T00:00:00`);
+  const idx = d.getDay(); // 0=Sun
+  const map = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  return map[idx] || 'monday';
+}
+
+function mkEmptyDayPlan() {
+  return { studentBreakfast: [], workerBreakfast: [], lunch: [], note: '', updatedAt: 0 };
+}
+
+function schoolNameLabel() {
+  return school?.name || school?.id || 'Socrates School';
+}
+
+function formatTzs(value) {
+  return `TZS ${Math.round(Number(value) || 0).toLocaleString()}`;
+}
+
 function shiftClass(baseClass, deltaYears) {
   const normalized = normalizeClassName(baseClass);
   const idx = CLASS_ORDER.findIndex(c => c.toLowerCase() === normalized.toLowerCase());
@@ -237,6 +267,7 @@ function App() {
 
   const [inventoryItems, setInventoryItems] = useState([]);
   const [logicRules, setLogicRules] = useState({});
+  const [marketCatalog, setMarketCatalog] = useState({ categories: [], shops: [], itemsBySeller: {} });
 
   const [headcountLocked, setHeadcountLocked] = useState(false);
   const [menuSelections, setMenuSelections] = useState({ breakfast: [], lunch: [] });
@@ -252,8 +283,12 @@ function App() {
   const [fatalError, setFatalError] = useState('');
   const [storeOpen, setStoreOpen] = useState(true);
   const [logicOpen, setLogicOpen] = useState(false);
-  const [newItem, setNewItem] = useState({ name: '', unit: '', onHand: '' });
+  const [newItem, setNewItem] = useState({ name: '', unit: '', onHand: '', unitPrice: '', marketCatId: '', marketSellerId: '', marketItemId: '' });
   const [newRule, setNewRule] = useState({ itemId: '', perChild: '', unit: '', perMeal: 'both', rounding: 'round' });
+  const [weekPlan, setWeekPlan] = useState({});
+  const [savingPlan, setSavingPlan] = useState(false);
+  const [workerPresence, setWorkerPresence] = useState({ totalWorkers: 0, present: 0, pending: 0, absent: 0, malePresent: 0, femalePresent: 0 });
+  const [foodInvoice, setFoodInvoice] = useState(null);
 
   const [kitchenItems, setKitchenItems] = useState([]);
   const [kitchenDaily, setKitchenDaily] = useState({});
@@ -291,6 +326,12 @@ function App() {
   }, [reportDate, students]);
 
   useEffect(() => {
+    if (!reportDate || !workerSession.workerId) return;
+    loadWorkerPresence(reportDate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reportDate, workerSession.workerId, currentYear]);
+
+  useEffect(() => {
     const yearSelect = document.getElementById('yearSelect');
     if (window.somapYearContext && yearSelect) {
       somapYearContext.attachYearDropdown(yearSelect);
@@ -322,53 +363,185 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentYear]);
 
+  const selectedDayKey = useMemo(() => dayKeyFromDate(reportDate), [reportDate]);
+  const selectedDayPlan = useMemo(() => weekPlan[selectedDayKey] || mkEmptyDayPlan(), [weekPlan, selectedDayKey]);
+  const saturdayStudentPax = (registerStats?.perClass?.['Class 4']?.present?.total || 0) + (registerStats?.perClass?.['Class 7']?.present?.total || 0);
+  const studentBreakfastPax = selectedDayKey === 'sunday' ? 0 : (selectedDayKey === 'saturday' ? saturdayStudentPax : autoPax);
+  const workersBreakfastPax = selectedDayKey === 'sunday' ? 0 : Number(workerPresence.present || 0);
+  const lunchPax = selectedDayKey === 'sunday' ? 0 : studentBreakfastPax + workersBreakfastPax;
+
   useEffect(() => {
-    computeCookProjection({ breakfastPax: autoPax, lunchPax: autoPax })
+    computeCookProjection({ breakfastPax: studentBreakfastPax + workersBreakfastPax, lunchPax })
       .then(setExpectedPolicy)
       .catch(err => console.error(err));
-  }, [autoPax]);
+  }, [studentBreakfastPax, workersBreakfastPax, lunchPax]);
 
   useEffect(() => {
     const rules = logicRules || {};
-    const breakfastList = computeExpectedList({
-      pax: autoPax,
-      selections: menuSelections.breakfast,
+    const studentBreakfastList = computeExpectedList({
+      pax: studentBreakfastPax,
+      selections: selectedDayPlan.studentBreakfast || [],
+      rules,
+      meal: 'breakfast',
+      inventoryItems
+    });
+    const workerBreakfastList = computeExpectedList({
+      pax: workersBreakfastPax,
+      selections: selectedDayPlan.workerBreakfast || [],
       rules,
       meal: 'breakfast',
       inventoryItems
     });
     const lunchList = computeExpectedList({
-      pax: autoPax,
-      selections: menuSelections.lunch,
+      pax: lunchPax,
+      selections: selectedDayPlan.lunch || [],
       rules,
       meal: 'lunch',
       inventoryItems
     });
-    setExpectedList(aggregateExpected([...breakfastList, ...lunchList]));
-  }, [autoPax, menuSelections, logicRules, inventoryItems]);
+    const allExpected = aggregateExpected([...studentBreakfastList, ...workerBreakfastList, ...lunchList]);
+    setExpectedList(allExpected);
+
+    const breakfastUnion = Array.from(new Set([...(selectedDayPlan.studentBreakfast || []), ...(selectedDayPlan.workerBreakfast || [])]));
+    setMenuSelections({ breakfast: breakfastUnion, lunch: selectedDayPlan.lunch || [] });
+    setMenuText({
+      breakfast: breakfastUnion
+        .map(id => inventoryItems.find(it => it.id === id)?.name || id)
+        .join(', '),
+      lunch: (selectedDayPlan.lunch || [])
+        .map(id => inventoryItems.find(it => it.id === id)?.name || id)
+        .join(', ')
+    });
+  }, [selectedDayPlan, studentBreakfastPax, workersBreakfastPax, lunchPax, logicRules, inventoryItems]);
 
   async function loadBootstrap() {
     try {
       setRegisterLoading(true);
       await ensureKitchenSeeded({ schoolId: workerSession.schoolId, yearLike: currentYear });
 
-      const [studentsMap, items, rules, kItems] = await Promise.all([
+      const [studentsMap, items, rules, kItems, marketData, weeklyPlan] = await Promise.all([
         loadStudents(workerSession.schoolId, currentYear),
         fetchInventoryItems(workerSession.schoolId),
         loadLogicRules(workerSession.schoolId),
-        listKitchenItems({ schoolId: workerSession.schoolId, yearLike: currentYear })
+        listKitchenItems({ schoolId: workerSession.schoolId, yearLike: currentYear }),
+        loadMarketCatalog(),
+        loadWeekPlan()
       ]);
       setStudents(studentsMap);
       setInventoryItems(items);
       setLogicRules(rules);
       setKitchenItems(kItems);
+      setMarketCatalog(marketData);
+      setWeekPlan(weeklyPlan);
       
       await loadRegister(reportDate, studentsMap);
+      await loadWorkerPresence(reportDate);
     } catch (err) {
       console.error(err);
       setFatalError(err.message || 'Hitilafu ya kuanzisha ukurasa.');
     } finally {
       setRegisterLoading(false);
+    }
+  }
+
+  async function loadWeekPlan() {
+    const ref = schoolRef(`years/${currentYear}/kitchen_timetable/weekly`);
+    const snap = await ref.once('value').catch(() => null);
+    const raw = snap?.val() || {};
+    const plan = {};
+    WEEKDAYS.forEach(({ key }) => {
+      plan[key] = {
+        ...mkEmptyDayPlan(),
+        ...(raw[key] || {})
+      };
+    });
+    return plan;
+  }
+
+  async function saveDayPlan(dayKey, patch) {
+    const next = {
+      ...mkEmptyDayPlan(),
+      ...(weekPlan[dayKey] || {}),
+      ...(patch || {}),
+      updatedAt: Date.now(),
+      updatedBy: workerSession.workerId || ''
+    };
+    setSavingPlan(true);
+    try {
+      await schoolRef(`years/${currentYear}/kitchen_timetable/weekly/${dayKey}`).set(next);
+      setWeekPlan(prev => ({ ...prev, [dayKey]: next }));
+      toast(`Ratiba ya ${dayKey} imehifadhiwa.`, 'success');
+    } catch (err) {
+      console.error(err);
+      toast(err.message || 'Imeshindikana kuhifadhi ratiba.', 'error');
+    } finally {
+      setSavingPlan(false);
+    }
+  }
+
+  async function loadWorkerPresence(dateKey) {
+    if (!dateKey) return;
+    try {
+      const ymdCompact = String(dateKey).replace(/-/g, '');
+      const monthKey = `${String(currentYear)}${String(dateKey).slice(5, 7)}`;
+      const [workersSnap, attendanceSnap] = await Promise.all([
+        schoolRef(`years/${currentYear}/workers`).once('value'),
+        schoolRef(`years/${currentYear}/workerAttendance`).once('value')
+      ]);
+      const workers = workersSnap.val() || {};
+      const attendance = attendanceSnap.val() || {};
+      let totalWorkers = 0;
+      let present = 0;
+      let pending = 0;
+      let absent = 0;
+      let malePresent = 0;
+      let femalePresent = 0;
+
+      Object.entries(workers).forEach(([workerId, worker]) => {
+        const profile = worker?.profile || {};
+        const status = String(profile.status || worker.status || 'active').toLowerCase();
+        if (status && status !== 'active' && status !== 'hai') return;
+        totalWorkers += 1;
+        const record = attendance?.[workerId]?.[monthKey]?.[ymdCompact] || null;
+        const inStatus = String(record?.checkInStatus || '').toLowerCase();
+        const approvedLegacy = record?.approved === true;
+        const isApproved = inStatus === 'approved' || approvedLegacy;
+        const isPending = !!record?.checkInTs && !isApproved && inStatus !== 'rejected';
+        if (isApproved) {
+          present += 1;
+          const g = String(profile.gender || profile.sex || '').toLowerCase();
+          if (g.startsWith('m')) malePresent += 1;
+          else if (g.startsWith('f')) femalePresent += 1;
+        } else if (isPending) {
+          pending += 1;
+        } else {
+          absent += 1;
+        }
+      });
+      setWorkerPresence({ totalWorkers, present, pending, absent, malePresent, femalePresent });
+    } catch (err) {
+      console.error('Failed to load worker presence', err);
+      setWorkerPresence({ totalWorkers: 0, present: 0, pending: 0, absent: 0, malePresent: 0, femalePresent: 0 });
+    }
+  }
+
+  async function loadMarketCatalog() {
+    try {
+      const [catSnap, shopSnap, itemsSnap] = await Promise.all([
+        db.ref('marketinghub/public/categories').once('value'),
+        db.ref('marketinghub/public/shops').once('value'),
+        db.ref('marketinghub/public/items').once('value')
+      ]);
+      const categories = Object.entries(catSnap.val() || {}).map(([id, v]) => ({ id, ...(v || {}) }));
+      const shops = Object.entries(shopSnap.val() || {}).map(([id, v]) => ({ id, ...(v || {}) }));
+      const itemsBySeller = {};
+      Object.entries(itemsSnap.val() || {}).forEach(([sellerId, items]) => {
+        itemsBySeller[sellerId] = Object.entries(items || {}).map(([id, item]) => ({ id, sellerId, ...(item || {}) }));
+      });
+      return { categories, shops, itemsBySeller };
+    } catch (err) {
+      console.warn('Failed to load market data', err);
+      return { categories: [], shops: [], itemsBySeller: {} };
     }
   }
 
@@ -534,7 +707,11 @@ function buildRegisterStats(studentMap, attendanceByClass) {
       setKitchenYesterday(prevSnap?.val() || {});
 
       const ref = schoolRef(`years/${currentYear}/workerRoles/cook/daily/${dateKey}/${workerSession.workerId}`);
-      const snap = await ref.once('value');
+      const [snap, invoiceSnap] = await Promise.all([
+        ref.once('value'),
+        schoolRef(`years/${currentYear}/foodInvoices/${dateKey}`).once('value')
+      ]);
+      setFoodInvoice(invoiceSnap.exists() ? invoiceSnap.val() : null);
       if (snap.exists()) {
         const data = snap.val();
         setExistingReport(data);
@@ -614,6 +791,11 @@ function buildRegisterStats(studentMap, attendanceByClass) {
         h('p', { className: 'mini-card__label' }, 'Logic Food'),
         h('p', { className: 'mini-card__value' }, `${Object.keys(logicRules || {}).length} kanuni`),
         h('p', { className: 'mini-card__hint' }, 'Ongeza au hakiki kanuni za matumizi')
+      ]),
+      h('div', { className: 'mini-card', onClick: () => scrollToSection('menu-section') }, [
+        h('p', { className: 'mini-card__label' }, 'Workers Today'),
+        h('p', { className: 'mini-card__value' }, `${workerPresence.present}/${workerPresence.totalWorkers}`),
+        h('p', { className: 'mini-card__hint' }, 'Approved, kutoka Headteacher')
       ])
     ]);
   }
@@ -657,6 +839,17 @@ function buildRegisterStats(studentMap, attendanceByClass) {
   }, [expectedPolicy]);
 
   function renderStorePanel() {
+    const catOptions = marketCatalog.categories || [];
+    const shopsInCat = (marketCatalog.shops || []).filter(shop => {
+      if (!newItem.marketCatId) return true;
+      const cats = shop.categories || {};
+      return !!cats[newItem.marketCatId];
+    });
+    const marketItems = newItem.marketSellerId
+      ? (marketCatalog.itemsBySeller?.[newItem.marketSellerId] || []).filter(it => !newItem.marketCatId || it.catId === newItem.marketCatId)
+      : [];
+    const selectedMarketItem = marketItems.find(it => it.id === newItem.marketItemId);
+    const selectedShop = shopsInCat.find(shop => shop.id === newItem.marketSellerId);
     return h('section', { className: `workers-card mini-panel${storeOpen ? ' open' : ''}`, id: 'store-panel' }, [
       h('header', { className: 'workers-card__header mini-panel__header' }, [
         h('h3', null, 'Stoo - Bidhaa'),
@@ -667,6 +860,60 @@ function buildRegisterStats(studentMap, attendanceByClass) {
       ]),
       !storeOpen ? null : h('div', { className: 'mini-panel__body' }, [
         h('div', { className: 'mini-form' }, [
+          h('label', null, [
+            'Soko (MarketingHub)',
+            h('select', {
+              value: newItem.marketCatId,
+              onChange: e => setNewItem({
+                ...newItem,
+                marketCatId: e.target.value,
+                marketSellerId: '',
+                marketItemId: '',
+                name: '',
+                unit: '',
+                unitPrice: ''
+              })
+            }, [
+              h('option', { value: '' }, '-- Chagua soko --'),
+              ...catOptions.map(cat => h('option', { key: cat.id, value: cat.id }, `${cat.icon || 'SOKO'} - ${cat.nameSw || cat.nameEn || cat.id}`))
+            ])
+          ]),
+          h('label', null, [
+            'Shop / Muuzaji',
+            h('select', {
+              value: newItem.marketSellerId,
+              onChange: e => setNewItem({
+                ...newItem,
+                marketSellerId: e.target.value,
+                marketItemId: '',
+                name: '',
+                unit: '',
+                unitPrice: ''
+              })
+            }, [
+              h('option', { value: '' }, '-- Chagua shop --'),
+              ...shopsInCat.map(shop => h('option', { key: shop.id, value: shop.id }, `${shop.shopName || 'Shop'} (${shop.phones?.[0] || shop.whatsappPhone || '-'})`))
+            ])
+          ]),
+          h('label', null, [
+            'Bidhaa kutoka shop',
+            h('select', {
+              value: newItem.marketItemId,
+              onChange: e => {
+                const item = marketItems.find(it => it.id === e.target.value) || {};
+                setNewItem({
+                  ...newItem,
+                  marketItemId: e.target.value,
+                  name: item.title || '',
+                  unit: item.unit || '',
+                  unitPrice: item.price || ''
+                });
+              }
+            }, [
+              h('option', { value: '' }, '-- Chagua item --'),
+              ...marketItems.map(item => h('option', { key: item.id, value: item.id }, `${item.title || item.id} @ ${formatTzs(item.price || 0)} / ${item.unit || 'pcs'}`))
+            ])
+          ]),
           h('label', null, [
             'Jina la bidhaa',
             h('input', { value: newItem.name, onChange: e => setNewItem({ ...newItem, name: e.target.value }) })
@@ -679,6 +926,11 @@ function buildRegisterStats(studentMap, attendanceByClass) {
             'Kiasi kilichopo',
             h('input', { type: 'number', value: newItem.onHand, onChange: e => setNewItem({ ...newItem, onHand: e.target.value }) })
           ]),
+          h('label', null, [
+            'Bei kwa kipimo (TZS)',
+            h('input', { type: 'number', min: 0, step: '1', value: newItem.unitPrice, onChange: e => setNewItem({ ...newItem, unitPrice: e.target.value }) })
+          ]),
+          selectedMarketItem ? h('p', { className: 'workers-card__subtitle' }, `Chanzo: ${selectedShop?.shopName || '-'} · Simu: ${selectedShop?.phones?.[0] || selectedShop?.whatsappPhone || '-'} · Bei: ${formatTzs(selectedMarketItem.price || 0)}`) : null,
           h('button', { className: 'workers-btn primary', onClick: addStoreItem }, 'Ongeza stoo')
         ]),
         h('div', { className: 'mini-list' },
@@ -686,7 +938,7 @@ function buildRegisterStats(studentMap, attendanceByClass) {
             ? inventoryItems.map(item =>
                 h('div', { key: item.id, className: 'mini-list__item' }, [
                   h('strong', null, item.name),
-                  h('span', { className: 'mini-list__meta' }, `${item.onHand} ${item.unit || ''}`)
+                  h('span', { className: 'mini-list__meta' }, `${item.onHand} ${item.unit || ''} · ${formatTzs(item.unitPrice || 0)} · ${item.market?.shopName || 'No shop'}`)
                 ])
               )
             : h('p', { className: 'workers-card__subtitle' }, 'Hakuna bidhaa stoo.')
@@ -757,12 +1009,117 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     ]);
   }
 
-  async function handleSave() {
-    const breakfast = autoPax;
-    const lunch = autoPax;
+  function renderMealChecklist(dayKey, field, title, pax, hint = '') {
+    const dayPlan = weekPlan[dayKey] || mkEmptyDayPlan();
+    const selected = dayPlan[field] || [];
+    return h('div', { className: 'time-meal-box' }, [
+      h('div', { className: 'time-meal-header' }, [
+        h('strong', null, title),
+        h('span', { className: 'workers-chip' }, `${pax} pax`)
+      ]),
+      hint ? h('p', { className: 'workers-card__subtitle' }, hint) : null,
+      h('div', { className: 'store-checklist compact' },
+        inventoryItems.length === 0
+          ? h('p', { className: 'workers-card__subtitle' }, 'Hakuna bidhaa stoo.')
+          : inventoryItems.map(item => {
+              const available = Number(item.onHand || 0) > 0;
+              return h('label', { key: `${dayKey}-${field}-${item.id}`, className: 'store-checklist__item' }, [
+                h('input', {
+                  type: 'checkbox',
+                  disabled: !available,
+                  checked: selected.includes(item.id),
+                  onChange: e => updateDayPlanSelection(dayKey, field, item.id, e.target.checked)
+                }),
+                h('span', null, `${item.name} (${item.onHand} ${item.unit || ''}) ${!available ? '- imeisha' : ''}`)
+              ]);
+            })
+      )
+    ]);
+  }
 
-    if (!autoPax || autoPax <= 0) {
-      toast('Hakuna waliopo kwa tarehe hii. Pakia Daily Register kwanza.', 'warning');
+  function renderTimetablePlanner() {
+    return h('section', { className: 'workers-card', id: 'weekly-timetable' }, [
+      h('header', { className: 'workers-card__header' }, [
+        h('div', null, [
+          h('h2', null, 'Weekly Food Timetable'),
+          h('p', { className: 'workers-card__subtitle' }, 'Ratiba hubaki kila wiki mpaka ubadilishe. Jumamosi: workers + Class 4 & 7. Jumapili: hakuna chakula.')
+        ])
+      ]),
+      h('div', { className: 'workers-card__content timetable-grid' }, WEEKDAYS.map(({ key, label }) => {
+        const isSelected = key === selectedDayKey;
+        const dayPlan = weekPlan[key] || mkEmptyDayPlan();
+        const studentPax = key === 'sunday' ? 0 : (key === 'saturday' ? saturdayStudentPax : autoPax);
+        const workersPax = key === 'sunday' ? 0 : workerPresence.present;
+        const lunchAll = key === 'sunday' ? 0 : studentPax + workersPax;
+        return h('article', { key, className: `timetable-day${isSelected ? ' active' : ''}` }, [
+          h('div', { className: 'timetable-day__title' }, `${label}${isSelected ? ' (Leo)' : ''}`),
+          renderMealChecklist(key, 'studentBreakfast', 'Breakfast - Students', studentPax, key === 'saturday' ? 'Only Class 4 & 7 on Saturday.' : ''),
+          renderMealChecklist(key, 'workerBreakfast', 'Breakfast - Workers', workersPax, 'Tea + accompaniment according to stock.'),
+          renderMealChecklist(key, 'lunch', 'Lunch - Wote', lunchAll),
+          h('label', null, [
+            'Maelezo ya siku',
+            h('input', {
+              value: dayPlan.note || '',
+              placeholder: 'mf. Tea + andazi',
+              onChange: e => setWeekPlan(prev => ({ ...prev, [key]: { ...dayPlan, note: e.target.value } }))
+            })
+          ]),
+          h('button', {
+            className: 'workers-btn',
+            disabled: savingPlan,
+            onClick: () => saveDayPlan(key, { note: (weekPlan[key]?.note || '').trim() })
+          }, savingPlan ? 'Saving...' : `Hifadhi ${label}`)
+        ]);
+      }))
+    ]);
+  }
+
+  function renderInvoicePanel() {
+    return h('section', { className: 'workers-card', id: 'food-invoice-section' }, [
+      h('header', { className: 'workers-card__header' }, [
+        h('div', null, [
+          h('h2', null, 'Food Invoice ya Leo'),
+          h('p', { className: 'workers-card__subtitle' }, 'Invoice hii ndiyo mhasibu atatumia kutoa bidhaa stoo na kufanya manunuzi sokoni.')
+        ]),
+        h('div', { className: 'workers-card__actions' }, [
+          h('button', { className: 'workers-btn secondary', onClick: () => downloadFoodInvoiceFodt(foodInvoice) }, 'Download ODF (.fodt)')
+        ])
+      ]),
+      !foodInvoice
+        ? h('p', { className: 'workers-card__subtitle' }, 'Hakuna invoice bado. Bonyeza "Hifadhi Ripoti" kwanza.')
+        : h('div', { className: 'workers-card__content' }, [
+            h('div', { className: 'register-summary' }, [
+              h('span', null, `Status: ${foodInvoice.status}`),
+              h('span', null, `Total: ${formatTzs(foodInvoice.totalAmount)}`),
+              h('span', null, `Missing Items: ${(foodInvoice.missingLines || []).length}`)
+            ]),
+            h('div', { className: 'expected-list' }, (foodInvoice.lines || []).map(line =>
+              h('div', { key: `inv-${line.itemId}`, className: 'expected-chip' }, `${line.name}: ${line.requiredQty} ${line.unit || ''} · ${formatTzs(line.total)} · ${line.shopName || 'No shop'}`)
+            ))
+          ])
+    ]);
+  }
+
+  async function handleSave() {
+    const breakfast = studentBreakfastPax + workersBreakfastPax;
+    const lunch = lunchPax;
+
+    if (selectedDayKey === 'sunday') {
+      toast('Jumapili hakuna huduma ya chakula. Hakuna invoice itatengenezwa.', 'warning');
+      return;
+    }
+
+    if (!breakfast && !lunch) {
+      toast('Hakuna waliopo kwa tarehe hii. Pakia Daily Register na mahudhurio ya wafanyakazi kwanza.', 'warning');
+      return;
+    }
+
+    if (!(selectedDayPlan.studentBreakfast || []).length && !(selectedDayPlan.workerBreakfast || []).length) {
+      toast('Chagua menu ya breakfast kwenye timetable ya leo.', 'warning');
+      return;
+    }
+    if (!(selectedDayPlan.lunch || []).length) {
+      toast('Chagua menu ya lunch kwenye timetable ya leo.', 'warning');
       return;
     }
 
@@ -779,7 +1136,14 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     setSaving(true);
     try {
       const payload = {
-        headcount: { breakfast, lunch },
+        dayKey: selectedDayKey,
+        headcount: {
+          breakfast,
+          lunch,
+          studentBreakfast: studentBreakfastPax,
+          workerBreakfast: workersBreakfastPax,
+          lunchCombined: lunchPax
+        },
         menuIds: menuSelections,
         menuText,
         issued: { sugar_kg: safeNumber(issued.sugar_kg), oil_l: safeNumber(issued.oil_l) },
@@ -800,8 +1164,11 @@ function buildRegisterStats(studentMap, attendanceByClass) {
         workerId: workerSession.workerId
       };
       await schoolRef(`years/${currentYear}/workerRoles/cook/daily/${reportDate}/${workerSession.workerId}`).set(payload);
+
+      const invoice = await buildAndSaveFoodInvoice(payload);
       setExistingReport(payload);
       setReportStatus(payload.status);
+      setFoodInvoice(invoice);
       setHeadcountLocked(true);
       toast('Ripoti imehifadhiwa.', 'success');
     } catch (err) {
@@ -819,33 +1186,184 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     return 'ok';
   }
 
+  function getDayPlanValue(dayKey, field) {
+    return (weekPlan[dayKey] && weekPlan[dayKey][field]) || [];
+  }
+
+  function updateDayPlanSelection(dayKey, field, itemId, checked) {
+    const current = new Set(getDayPlanValue(dayKey, field));
+    if (checked) current.add(itemId);
+    else current.delete(itemId);
+    saveDayPlan(dayKey, { [field]: Array.from(current) });
+  }
+
+  async function pushFoodAlerts(missingLines = []) {
+    if (!missingLines.length) return;
+    const alertRef = schoolRef(`years/${currentYear}/foodAlerts/${reportDate}`).push();
+    await alertRef.set({
+      date: reportDate,
+      dayKey: selectedDayKey,
+      status: 'open',
+      schoolId: workerSession.schoolId,
+      schoolName: schoolNameLabel(),
+      requestedBy: workerSession.workerId || '',
+      items: missingLines.map(line => ({
+        itemId: line.itemId,
+        name: line.name,
+        requiredQty: line.requiredQty,
+        onHand: line.onHand,
+        unit: line.unit || '',
+        shortageQty: Number((line.requiredQty - line.onHand).toFixed(2)),
+        shopName: line.shopName || '',
+        shopPhone: line.shopPhone || '',
+        unitPrice: line.unitPrice || 0
+      })),
+      createdAt: Date.now()
+    });
+  }
+
+  async function buildAndSaveFoodInvoice(cookPayload) {
+    const lines = expectedList.map(item => {
+      const inv = inventoryItems.find(it => it.id === item.itemId) || {};
+      const requiredQty = Number(item.expectedQty || 0);
+      const onHand = Number(inv.onHand || 0);
+      const unitPrice = Number(inv.unitPrice || inv.market?.price || 0);
+      const total = Number((requiredQty * unitPrice).toFixed(2));
+      const after = Number((onHand - requiredQty).toFixed(2));
+      return {
+        itemId: item.itemId,
+        name: item.name,
+        unit: item.unit || inv.unit || '',
+        requiredQty,
+        onHand,
+        balanceAfterIssue: after,
+        unitPrice,
+        total,
+        marketCatId: inv.market?.catId || '',
+        shopName: inv.market?.shopName || '',
+        shopPhone: inv.market?.shopPhone || '',
+        sellerId: inv.market?.sellerId || ''
+      };
+    });
+    const missingLines = lines.filter(line => line.requiredQty > line.onHand);
+    await pushFoodAlerts(missingLines);
+
+    const invoice = {
+      schoolId: workerSession.schoolId,
+      schoolName: schoolNameLabel(),
+      year: String(currentYear),
+      date: reportDate,
+      dayKey: selectedDayKey,
+      createdAt: Date.now(),
+      generatedBy: workerSession.workerId || '',
+      status: missingLines.length ? 'needs-restock' : 'ready',
+      headcount: cookPayload.headcount,
+      timetable: selectedDayPlan,
+      lines,
+      totalAmount: Number(lines.reduce((sum, line) => sum + Number(line.total || 0), 0).toFixed(2)),
+      missingLines,
+      note: selectedDayPlan.note || ''
+    };
+    await schoolRef(`years/${currentYear}/foodInvoices/${reportDate}`).set(invoice);
+    return invoice;
+  }
+
+  function downloadFoodInvoiceFodt(invoice = foodInvoice) {
+    if (!invoice) {
+      toast('Hakuna invoice ya kupakua kwa tarehe hii.', 'warning');
+      return;
+    }
+    const linesXml = (invoice.lines || []).map((line, idx) => `
+      <text:p text:style-name="Standard">${idx + 1}. ${line.name} | Qty: ${line.requiredQty} ${line.unit || ''} | Unit: ${formatTzs(line.unitPrice)} | Total: ${formatTzs(line.total)} | Shop: ${line.shopName || '-'} (${line.shopPhone || '-'})</text:p>
+    `).join('');
+    const missingXml = (invoice.missingLines || []).length
+      ? (invoice.missingLines || []).map(line => `<text:p text:style-name="Standard">- ${line.name}: upungufu ${Number((line.requiredQty - line.onHand).toFixed(2))} ${line.unit || ''}</text:p>`).join('')
+      : `<text:p text:style-name="Standard">Hakuna upungufu wa bidhaa.</text:p>`;
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.2">
+  <office:body>
+    <office:text>
+      <text:h text:style-name="Heading_20_1" text:outline-level="1">SOCRATES SCHOOL - DAILY FOOD INVOICE</text:h>
+      <text:p text:style-name="Standard">Generated by SoMAP | Date: ${invoice.date} | Year: ${invoice.year}</text:p>
+      <text:p text:style-name="Standard">Day: ${invoice.dayKey} | Students Breakfast: ${invoice.headcount?.studentBreakfast || 0} | Workers Breakfast: ${invoice.headcount?.workerBreakfast || 0} | Lunch Total: ${invoice.headcount?.lunchCombined || 0}</text:p>
+      <text:p text:style-name="Standard">------------------------------------------------------------</text:p>
+      ${linesXml}
+      <text:p text:style-name="Standard">------------------------------------------------------------</text:p>
+      <text:p text:style-name="Standard">TOTAL: ${formatTzs(invoice.totalAmount)}</text:p>
+      <text:h text:style-name="Heading_20_2" text:outline-level="2">Stock Alerts</text:h>
+      ${missingXml}
+      <text:p text:style-name="Standard">Assistant Headteacher Signature: ______________________</text:p>
+      <text:p text:style-name="Standard">Accountant Signature: ______________________</text:p>
+    </office:text>
+  </office:body>
+</office:document>`;
+    const blob = new Blob([xml], { type: 'application/vnd.oasis.opendocument.text-flat-xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `food-invoice-${invoice.date}.fodt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   async function addStoreItem() {
-    if (!newItem.name) {
+    const resolvedMarketItem = newItem.marketSellerId && newItem.marketItemId
+      ? (marketCatalog.itemsBySeller?.[newItem.marketSellerId] || []).find(it => it.id === newItem.marketItemId)
+      : null;
+    const resolvedShop = newItem.marketSellerId
+      ? (marketCatalog.shops || []).find(s => s.id === newItem.marketSellerId)
+      : null;
+    const resolvedName = (newItem.name || resolvedMarketItem?.title || '').trim();
+    const resolvedUnit = (newItem.unit || resolvedMarketItem?.unit || '').trim();
+    const resolvedPrice = safeNumber(newItem.unitPrice || resolvedMarketItem?.price || 0);
+    if (!resolvedName) {
       toast('Weka jina la bidhaa.', 'warning');
       return;
     }
     try {
-      const canonical = normalizeItemName(newItem.name);
+      const canonical = normalizeItemName(resolvedName);
       const existing = inventoryItems.find(item => normalizeItemName(item.name) === canonical);
       const qty = safeNumber(newItem.onHand);
       if (existing && existing.id) {
         const updatedOnHand = safeNumber(existing.onHand) + qty;
         await schoolRef(`${inventoryPath()}/${existing.id}`).update({
           onHand: updatedOnHand,
-          unit: newItem.unit || existing.unit || ''
+          unit: resolvedUnit || existing.unit || '',
+          unitPrice: resolvedPrice || safeNumber(existing.unitPrice),
+          totalValue: Number((updatedOnHand * (resolvedPrice || safeNumber(existing.unitPrice))).toFixed(2)),
+          market: {
+            catId: newItem.marketCatId || existing.market?.catId || '',
+            sellerId: newItem.marketSellerId || existing.market?.sellerId || '',
+            itemId: newItem.marketItemId || existing.market?.itemId || '',
+            shopName: resolvedShop?.shopName || existing.market?.shopName || '',
+            shopPhone: resolvedShop?.phones?.[0] || resolvedShop?.whatsappPhone || existing.market?.shopPhone || '',
+            price: resolvedPrice || safeNumber(existing.market?.price)
+          }
         });
         toast('Imesasishwa stoo.', 'success');
       } else {
         const ref = schoolRef(inventoryPath()).push();
         await ref.set({
-          name: newItem.name,
-          unit: newItem.unit || '',
+          name: resolvedName,
+          unit: resolvedUnit || '',
           onHand: qty,
+          unitPrice: resolvedPrice,
+          totalValue: Number((qty * resolvedPrice).toFixed(2)),
+          market: {
+            catId: newItem.marketCatId || '',
+            sellerId: newItem.marketSellerId || '',
+            itemId: newItem.marketItemId || '',
+            shopName: resolvedShop?.shopName || '',
+            shopPhone: resolvedShop?.phones?.[0] || resolvedShop?.whatsappPhone || '',
+            price: resolvedPrice
+          },
           createdAt: Date.now()
         });
         toast('Imeongezwa stoo.', 'success');
       }
-      setNewItem({ name: '', unit: '', onHand: '' });
+      setNewItem({ name: '', unit: '', onHand: '', unitPrice: '', marketCatId: '', marketSellerId: '', marketItemId: '' });
       const items = await fetchInventoryItems(workerSession.schoolId);
       setInventoryItems(items);
     } catch (err) {
@@ -1077,6 +1595,7 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     renderStorePanel(),
     renderLogicPanel(),
     renderKitchenMasterPanel(),
+    renderTimetablePlanner(),
 
     h('section', { className: 'workers-card' }, [
       h('header', { className: 'workers-card__header' }, [
@@ -1108,7 +1627,9 @@ function buildRegisterStats(studentMap, attendanceByClass) {
               h('div', { className: 'register-summary' }, [
                 h('span', null, `Waliosajiliwa ${registerStats.totals.registered.total}`),
                 h('span', null, `Waliopo ${registerStats.totals.present.total}`),
-                h('span', null, `Walikosa ${registerStats.totals.absent.total}`)
+                h('span', null, `Walikosa ${registerStats.totals.absent.total}`),
+                h('span', null, `Workers Present (Approved) ${workerPresence.present}/${workerPresence.totalWorkers}`),
+                h('span', null, `Workers Pending ${workerPresence.pending}`)
               ]),
               renderRegisterTable()
             ])
@@ -1117,26 +1638,36 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     h('section', { className: 'workers-card', id: 'menu-section' }, [
       h('header', { className: 'workers-card__header' }, [
         h('h2', null, 'Mlo wa Leo'),
-        h('p', { className: 'workers-card__subtitle' }, 'Waliohudhuria na menyu hutokana na rejesta na stoo.')
+        h('p', { className: 'workers-card__subtitle' }, `Waliohudhuria na menyu hutokana na rejesta, attendance ya workers, na timetable ya ${selectedDayKey}.`)
       ]),
       h('div', { className: 'workers-card__content' }, [
         h('div', { className: 'workers-grid' }, [
           h('label', null, [
-            'Waliohudhuria Breakfast',
+            'Breakfast Students',
             h('input', {
               type: 'number',
               min: 0,
-              value: autoPax,
+              value: studentBreakfastPax,
               readOnly: true,
               disabled: true
             })
           ]),
           h('label', null, [
-            'Waliohudhuria Lunch',
+            'Breakfast Workers',
             h('input', {
               type: 'number',
               min: 0,
-              value: autoPax,
+              value: workersBreakfastPax,
+              readOnly: true,
+              disabled: true
+            })
+          ]),
+          h('label', null, [
+            'Lunch Total (Workers + Students)',
+            h('input', {
+              type: 'number',
+              min: 0,
+              value: lunchPax,
               readOnly: true,
               disabled: true
             })
@@ -1177,6 +1708,7 @@ function buildRegisterStats(studentMap, attendanceByClass) {
         ]),
 
         renderKitchenDailyCheck(),
+        renderInvoicePanel(),
 
         h('div', { className: 'workers-card__actions' }, [
           h('button', {
@@ -1197,11 +1729,11 @@ function buildRegisterStats(studentMap, attendanceByClass) {
           rows: 3,
           placeholder: mealKey === 'breakfast' ? 'Uji, chai...' : 'Wali, maharage...',
           value: textValue,
-          onChange: e => setMenuText({ ...menuText, [mealKey]: e.target.value })
+          readOnly: true
         })
       ]),
       h('div', { className: 'store-checklist' }, [
-        h('div', { className: 'store-checklist__title' }, 'Chagua kutoka stoo'),
+        h('div', { className: 'store-checklist__title' }, 'Imetoka kwenye timetable'),
         inventoryItems.length === 0
           ? h('p', { className: 'workers-card__subtitle' }, 'Hakuna bidhaa stoo.')
           : inventoryItems.map(item =>
@@ -1209,7 +1741,7 @@ function buildRegisterStats(studentMap, attendanceByClass) {
                 h('input', {
                   type: 'checkbox',
                   checked: menuSelections[mealKey].includes(item.id),
-                  onChange: () => toggleSelection(mealKey, item.id)
+                  disabled: true
                 }),
                 h('span', null, `${item.name}${item.onHand ? ` (${item.onHand} ${item.unit || ''})` : ''}`)
               ])

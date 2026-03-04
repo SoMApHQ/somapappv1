@@ -20,6 +20,9 @@ function normalizeItems(raw = {}) {
     name: item.name || item.title || item.sku || 'Kitu',
     unit: item.unit || item.measure || '',
     onHand: Number(item.onHand || item.qty || 0),
+    unitPrice: Number(item.unitPrice || item.unitCost || item.market?.price || 0),
+    totalValue: Number(item.totalValue || 0),
+    market: item.market || {},
     category: item.category || '',
     sku: item.sku || ''
   })).sort((a, b) => a.name.localeCompare(b.name));

@@ -369,6 +369,14 @@
                       <span class="sidebar-tooltip">Receipts</span>
                       <span class="sidebar-expanded hidden ml-3 text-sm font-medium">Receipts</span>
                     </button>
+                    <button class="sidebar-icon flex items-center justify-center w-10 h-10 rounded-lg text-white mx-auto"
+                            data-module="food-invoices"
+                            onclick="document.getElementById('food-invoices')?.scrollIntoView({behavior:'smooth',block:'start'})"
+                            style="background: linear-gradient(135deg, #14b8a6, #16a34a); color:#fff; font-weight:800; box-shadow:0 10px 24px -10px rgba(20,184,166,.7);">
+                      <i class="fas fa-utensils text-xl"></i>
+                      <span class="sidebar-tooltip">Food Invoices</span>
+                      <span class="sidebar-expanded hidden ml-3 text-sm font-medium">Food Invoices</span>
+                    </button>
                     <button class="sidebar-icon flex items-center justify-center w-10 h-10 rounded-lg text-white mx-auto" data-module="config" onclick="openPopup('Tofinancehtml/paymentedits.html')">
                         <i class="fas fa-gear text-xl"></i>
                         <span class="sidebar-tooltip">Config</span>
@@ -495,6 +503,52 @@
                         </thead>
                         <tbody id="maint-invoice-table">
                             <tr><td colspan="6">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            <section id="food-invoices" class="module-section fade-in">
+                <h2 class="text-2xl font-semibold mb-4">Food Invoices (Cooks Timetable)</h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div class="card">
+                        <h3 class="text-lg font-semibold mb-2">Invoice Status</h3>
+                        <p id="food-invoice-status" class="text-2xl font-bold">-</p>
+                        <small class="text-gray-600">Ready / Needs Restock from cooks dashboard.</small>
+                    </div>
+                    <div class="card">
+                        <h3 class="text-lg font-semibold mb-2">Total Amount</h3>
+                        <p id="food-invoice-total" class="text-2xl font-bold">TSh 0</p>
+                        <small class="text-gray-600">Expected food cost for selected date.</small>
+                    </div>
+                    <div class="card">
+                        <h3 class="text-lg font-semibold mb-2">Missing Items</h3>
+                        <p id="food-invoice-missing" class="text-2xl font-bold">0</p>
+                        <small class="text-gray-600">Items below required stock.</small>
+                    </div>
+                </div>
+                <div class="card mt-4">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-lg font-semibold">Daily Food Invoice Lines</h3>
+                        <div class="flex gap-2">
+                            <input id="food-invoice-date" type="date" class="border rounded px-2 py-1 text-sm" />
+                            <button id="food-invoice-refresh" class="btn btn-small">Load</button>
+                            <button id="food-invoice-download" class="btn btn-small">Download ODF</button>
+                        </div>
+                    </div>
+                    <table class="table w-full text-sm">
+                        <thead>
+                            <tr>
+                                <th>Item</th>
+                                <th>Qty</th>
+                                <th>Stock Before</th>
+                                <th>Balance After</th>
+                                <th>Unit Price</th>
+                                <th>Total</th>
+                                <th>Supplier</th>
+                            </tr>
+                        </thead>
+                        <tbody id="food-invoice-table">
+                            <tr><td colspan="7">Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -672,6 +726,7 @@
     let outstandingChart = null;
     let expenseChart = null;
     let hasBoundYearListener = false;
+    let latestFoodInvoice = null;
     auth.onAuthStateChanged(user => {
         if (!user) {
             window.location.href = 'index.html';
@@ -732,11 +787,112 @@
             loadGraphs(),
             loadMaintenanceStats(),
             loadMaintenancePendingTable(),
-            loadMaintenanceInvoices()
+            loadMaintenanceInvoices(),
+            loadFoodInvoice()
         ]);
     }
 
     const formatTsh = (value) => `TSh ${Math.round(Number(value) || 0).toLocaleString()}`;
+    const todayYmdLocal = () => {
+        const d = new Date();
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+    };
+
+    function getFoodInvoiceDate() {
+        const input = document.getElementById('food-invoice-date');
+        return input && input.value ? input.value : todayYmdLocal();
+    }
+
+    function downloadFoodInvoiceFodt(invoice) {
+        if (!invoice) {
+            Swal.fire('No invoice', 'Load food invoice first.', 'warning');
+            return;
+        }
+        const linesXml = (invoice.lines || []).map((line, idx) => `
+          <text:p text:style-name="Standard">${idx + 1}. ${line.name} | Qty: ${line.requiredQty} ${line.unit || ''} | Unit: ${formatTsh(line.unitPrice)} | Total: ${formatTsh(line.total)} | Shop: ${line.shopName || '-'} (${line.shopPhone || '-'})</text:p>
+        `).join('');
+        const missingXml = (invoice.missingLines || []).length
+          ? (invoice.missingLines || []).map(line => `<text:p text:style-name="Standard">- ${line.name}: shortage ${Number((line.requiredQty - line.onHand).toFixed(2))} ${line.unit || ''}</text:p>`).join('')
+          : `<text:p text:style-name="Standard">No shortage items.</text:p>`;
+        const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.2">
+  <office:body>
+    <office:text>
+      <text:h text:style-name="Heading_20_1" text:outline-level="1">${invoice.schoolName || 'Socrates School'} - DAILY FOOD INVOICE</text:h>
+      <text:p text:style-name="Standard">Date: ${invoice.date} | Year: ${invoice.year}</text:p>
+      <text:p text:style-name="Standard">Day: ${invoice.dayKey} | Students Breakfast: ${invoice.headcount?.studentBreakfast || 0} | Workers Breakfast: ${invoice.headcount?.workerBreakfast || 0} | Lunch Total: ${invoice.headcount?.lunchCombined || 0}</text:p>
+      <text:p text:style-name="Standard">------------------------------------------------------------</text:p>
+      ${linesXml}
+      <text:p text:style-name="Standard">------------------------------------------------------------</text:p>
+      <text:p text:style-name="Standard">TOTAL: ${formatTsh(invoice.totalAmount || 0)}</text:p>
+      <text:h text:style-name="Heading_20_2" text:outline-level="2">Stock Alerts</text:h>
+      ${missingXml}
+      <text:p text:style-name="Standard">Assistant Headteacher Signature: ______________________</text:p>
+      <text:p text:style-name="Standard">Accountant Signature: ______________________</text:p>
+    </office:text>
+  </office:body>
+</office:document>`;
+        const blob = new Blob([xml], { type: 'application/vnd.oasis.opendocument.text-flat-xml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `food-invoice-${invoice.date || todayYmdLocal()}.fodt`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    }
+
+    async function loadFoodInvoice() {
+        const dateKey = getFoodInvoiceDate();
+        const year = getSelectedYear();
+        const statusEl = document.getElementById('food-invoice-status');
+        const totalEl = document.getElementById('food-invoice-total');
+        const missingEl = document.getElementById('food-invoice-missing');
+        const tbody = document.getElementById('food-invoice-table');
+        if (!statusEl || !totalEl || !missingEl || !tbody) return;
+        statusEl.textContent = 'Loading...';
+        totalEl.textContent = formatTsh(0);
+        missingEl.textContent = '0';
+        tbody.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
+        try {
+            const school = getCurrentSchoolId();
+            const path = `schools/${school}/years/${year}/foodInvoices/${dateKey}`;
+            let snap = await db.ref(path).once('value');
+            if (!snap.exists() && ['socrates-school', 'default', 'socrates'].includes(school)) {
+                snap = await db.ref(`years/${year}/foodInvoices/${dateKey}`).once('value');
+            }
+            const invoice = snap.exists() ? snap.val() : null;
+            latestFoodInvoice = invoice;
+            if (!invoice) {
+                statusEl.textContent = 'No invoice';
+                tbody.innerHTML = '<tr><td colspan="7">No food invoice saved for selected date.</td></tr>';
+                return;
+            }
+            statusEl.textContent = String(invoice.status || 'ready').toUpperCase();
+            totalEl.textContent = formatTsh(invoice.totalAmount || 0);
+            missingEl.textContent = String((invoice.missingLines || []).length);
+            const lines = invoice.lines || [];
+            tbody.innerHTML = lines.length ? lines.map((line) => `
+                <tr>
+                    <td>${line.name || '-'}</td>
+                    <td>${line.requiredQty || 0} ${line.unit || ''}</td>
+                    <td>${line.onHand || 0} ${line.unit || ''}</td>
+                    <td>${line.balanceAfterIssue || 0} ${line.unit || ''}</td>
+                    <td>${formatTsh(line.unitPrice || 0)}</td>
+                    <td>${formatTsh(line.total || 0)}</td>
+                    <td>${line.shopName || '-'}<br/><small>${line.shopPhone || '-'}</small></td>
+                </tr>
+            `).join('') : '<tr><td colspan="7">No invoice lines.</td></tr>';
+        } catch (err) {
+            console.error('Failed to load food invoice', err);
+            statusEl.textContent = 'Error';
+            tbody.innerHTML = '<tr><td colspan="7">Error loading food invoice.</td></tr>';
+        }
+    }
 
     async function loadFinanceData() {
         if (!window.SomapFinance) return;
@@ -1203,6 +1359,18 @@
             const year = getSelectedYear();
             openPopup(`transporthtml/transportmaintenance.html?school=${encodeURIComponent(school)}&year=${encodeURIComponent(year)}`);
         });
+    }
+    const foodDateInput = document.getElementById('food-invoice-date');
+    if (foodDateInput && !foodDateInput.value) {
+        foodDateInput.value = todayYmdLocal();
+    }
+    const foodRefreshBtn = document.getElementById('food-invoice-refresh');
+    if (foodRefreshBtn) {
+        foodRefreshBtn.addEventListener('click', () => loadFoodInvoice());
+    }
+    const foodDownloadBtn = document.getElementById('food-invoice-download');
+    if (foodDownloadBtn) {
+        foodDownloadBtn.addEventListener('click', () => downloadFoodInvoiceFodt(latestFoodInvoice));
     }
 
     document.addEventListener('click', async (event) => {
