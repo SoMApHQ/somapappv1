@@ -840,13 +840,21 @@ function buildRegisterStats(studentMap, attendanceByClass) {
 
   function renderStorePanel() {
     const catOptions = marketCatalog.categories || [];
+    const selectedCatId = String(newItem.marketCatId || '');
+    const sellerIdsWithCatItems = new Set(
+      Object.entries(marketCatalog.itemsBySeller || {})
+        .filter(([, items]) => (items || []).some(it => !selectedCatId || String(it.catId || '') === selectedCatId))
+        .map(([sellerId]) => sellerId)
+    );
     const shopsInCat = (marketCatalog.shops || []).filter(shop => {
-      if (!newItem.marketCatId) return true;
+      if (!selectedCatId) return true;
       const cats = shop.categories || {};
-      return !!cats[newItem.marketCatId];
+      const declaredInCat = !!cats[selectedCatId];
+      const hasItemsInCat = sellerIdsWithCatItems.has(String(shop.id));
+      return declaredInCat || hasItemsInCat;
     });
     const marketItems = newItem.marketSellerId
-      ? (marketCatalog.itemsBySeller?.[newItem.marketSellerId] || []).filter(it => !newItem.marketCatId || it.catId === newItem.marketCatId)
+      ? (marketCatalog.itemsBySeller?.[newItem.marketSellerId] || []).filter(it => !selectedCatId || String(it.catId || '') === selectedCatId)
       : [];
     const selectedMarketItem = marketItems.find(it => it.id === newItem.marketItemId);
     const selectedShop = shopsInCat.find(shop => shop.id === newItem.marketSellerId);
