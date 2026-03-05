@@ -101,6 +101,56 @@
     </div>
   </div>
 
+  <!-- Edit Joining Form Modal -->
+  <div id="editJoiningFormModal" class="modal" aria-hidden="true">
+    <div class="modal-content" style="max-width: 560px;">
+      <span id="closeEditJoiningModal" class="close" title="Close">&times;</span>
+      <h2 class="text-xl font-semibold text-indigo-600 mb-4">Edit Joining Form Payment</h2>
+      <p class="text-sm text-gray-500 mb-4" id="editJoiningStudentName">—</p>
+      <form id="editJoiningForm" class="space-y-4">
+        <input type="hidden" id="editJoiningStudentKey" />
+        <div>
+          <label for="editJoiningAmount" class="block text-sm text-gray-600">Amount (TSh) *</label>
+          <input type="number" id="editJoiningAmount" required class="border p-2 rounded w-full" placeholder="7000"/>
+        </div>
+        <div>
+          <label for="editJoiningReceivedBy" class="block text-sm text-gray-600">Received By *</label>
+          <input type="text" id="editJoiningReceivedBy" required class="border p-2 rounded w-full" placeholder="e.g., Bursar name"/>
+        </div>
+        <div>
+          <label for="editJoiningReference" class="block text-sm text-gray-600">Reference Code</label>
+          <input type="text" id="editJoiningReference" class="border p-2 rounded w-full" placeholder="e.g., MPESA-1234"/>
+        </div>
+        <div>
+          <label for="editJoiningMethod" class="block text-sm text-gray-600">Payment Method</label>
+          <select id="editJoiningMethod" class="border p-2 rounded w-full">
+            <option value="">Select method</option>
+            <option value="cash">Cash</option>
+            <option value="mpesa">M-Pesa</option>
+            <option value="bank">Bank</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <div>
+          <label for="editJoiningReason" class="block text-sm text-gray-600">Reason for different amount (if not 7,000)</label>
+          <textarea id="editJoiningReason" class="border p-2 rounded w-full h-20" placeholder="e.g., Partial payment, refund, correction..."></textarea>
+        </div>
+        <div>
+          <label for="editJoiningConfirmedBy" class="block text-sm text-gray-600">Who can confirm this is true?</label>
+          <input type="text" id="editJoiningConfirmedBy" class="border p-2 rounded w-full" placeholder="e.g., Name of person who can verify"/>
+        </div>
+        <div id="editJoiningCorrectionsHistory" class="text-xs text-gray-500 border rounded p-2 bg-gray-50 hidden">
+          <strong>Correction history:</strong>
+          <ul id="editJoiningCorrectionsList" class="mt-1 list-disc list-inside"></ul>
+        </div>
+        <div class="flex gap-2">
+          <button type="submit" id="saveEditJoiningBtn" class="flex-1 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">Save Changes</button>
+          <button type="button" id="cancelEditJoiningBtn" class="flex-1 py-2 bg-gray-300 text-gray-800 rounded-lg hover:bg-gray-400">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- Registration Modal -->
   <div id="registrationModal" class="modal" aria-hidden="true">
     <div class="modal-content">
@@ -1295,7 +1345,8 @@
     let girlsCount = 0;
     let totalJoiningFees = 0;
     const classCounts = new Map();
-    const receiverStats = new Map();
+    const receiverStats = new Map();      // Only PENDING (not yet approved in office)
+    const approvedInOfficeStats = new Map();  // Approved - money received in office
 
     enriched.forEach(({ stu, displayClass, finance, planLabel }, index) => {
       totalPupils += 1;
@@ -1307,12 +1358,23 @@
       const joinAmount = Number(joining.amount || 0);
       if (Number.isFinite(joinAmount)) totalJoiningFees += joinAmount;
       const receiverName = (joining.receivedBy || 'Unknown').trim() || 'Unknown';
-      if (!receiverStats.has(receiverName)) {
-        receiverStats.set(receiverName, { count: 0, amount: 0 });
+      const isApproved = !!(joining.approvedInOffice || joining.approvedBy);
+      if (isApproved) {
+        const officeKey = (joining.approvedBy || 'Office').trim();
+        if (!approvedInOfficeStats.has(officeKey)) {
+          approvedInOfficeStats.set(officeKey, { count: 0, amount: 0 });
+        }
+        const stat = approvedInOfficeStats.get(officeKey);
+        stat.count += 1;
+        stat.amount += joinAmount;
+      } else {
+        if (!receiverStats.has(receiverName)) {
+          receiverStats.set(receiverName, { count: 0, amount: 0 });
+        }
+        const stat = receiverStats.get(receiverName);
+        stat.count += 1;
+        stat.amount += joinAmount;
       }
-      const stat = receiverStats.get(receiverName);
-      stat.count += 1;
-      stat.amount += joinAmount;
 
       const classLabel = displayClass === 'GRADUATED' ? `Graduated (${currentYear})` : displayClass;
       const classKey = classLabel || 'N/A';
@@ -1393,7 +1455,7 @@
       const receiverEntries = Array.from(receiverStats.entries());
       receiverEntries.sort((a, b) => b[1].amount - a[1].amount || b[1].count - a[1].count);
       const [name, info] = receiverEntries[0];
-      topReceiverText = `${name} — ${info.count} pupils, TSh ${currencyFormatter.format(info.amount)}`;
+      topReceiverText = `${name} — ${info.count} pupils, TSh ${currencyFormatter.format(info.amount)} (pending collection)`;
     }
 
     const summaryBody = [
@@ -1429,13 +1491,35 @@
       ]);
 
       doc.autoTable({
-        head: [['Received By', 'Pupils', 'Amount (TZS)']],
+        head: [['Received By Pupils (Pending Collection)', 'Pupils', 'Amount (TZS)']],
         body: receiverBody,
         startY: finalY,
         styles: { fontSize: 9 },
         headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255] }
       });
 
+      finalY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 10 : finalY + 10;
+    }
+
+    if (approvedInOfficeStats.size > 0) {
+      if (finalY + 30 > doc.internal.pageSize.getHeight()) {
+        doc.addPage();
+        finalY = 20;
+      }
+      const approvedEntries = Array.from(approvedInOfficeStats.entries());
+      approvedEntries.sort((a, b) => b[1].amount - a[1].amount);
+      const approvedBody = approvedEntries.map(([name, info]) => [
+        name,
+        String(info.count),
+        `TSh ${currencyFormatter.format(info.amount)}`
+      ]);
+      doc.autoTable({
+        head: [['Received in Office (Approved)', 'Pupils', 'Amount (TZS)']],
+        body: approvedBody,
+        startY: finalY,
+        styles: { fontSize: 9 },
+        headStyles: { fillColor: [59, 130, 246], textColor: [255, 255, 255] }
+      });
       finalY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 10 : finalY + 10;
     }
 
@@ -1524,12 +1608,21 @@
       const planDisplay = planLabel || (finance.planId ? finance.planId : 'Class default');
       const joiningPayment = stu.joiningFormPayment || {};
       const joiningAmount = joiningPayment.amount != null ? `TSh ${currencyFormatter.format(Number(joiningPayment.amount || 0))}` : '';
+      const isApproved = !!(joiningPayment.approvedInOffice || joiningPayment.approvedBy);
+      const isConfirmed = !!(joiningPayment.confirmedBy || joiningPayment.confirmedAt);
       const joiningInfoHtml = joiningAmount ? `
         <div class="mt-1 text-xs text-slate-600">
           Joining fee: ${escapeHtml(joiningAmount)}
           ${joiningPayment.reference ? ` â€¢ Ref: ${escapeHtml(joiningPayment.reference)}` : ''}
           ${joiningPayment.receivedBy ? ` â€¢ Received by: ${escapeHtml(joiningPayment.receivedBy)}` : ''}
+          ${isApproved ? ' <span class="text-emerald-600 font-medium">&#10003; Approved in office</span>' : isConfirmed ? ' <span class="text-amber-600">&#10003; Confirmed by staff</span>' : ''}
         </div>
+        ${joiningAmount && !isApproved ? `
+        <div class="mt-1 flex flex-wrap gap-1">
+          ${!isConfirmed ? `<button class="btn confirm-joining-btn bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded text-xs" data-key="${stu.key}">Confirm</button>` : ''}
+          ${isConfirmed ? `<button class="btn approve-joining-btn bg-blue-100 text-blue-800 px-2 py-0.5 rounded text-xs" data-key="${stu.key}">Approve in Office</button>` : ''}
+        </div>
+        ` : ''}
       ` : '';
       div.innerHTML = `
         <div class="flex justify-between items-start">
@@ -1541,9 +1634,10 @@
             Plan: ${escapeHtml(planDisplay)}
             ${joiningInfoHtml}
           </div>
-          <div class="flex gap-2">
-            <button class="btn edit-btn bg-yellow-100 text-yellow-800 px-3 py-1 rounded" data-key="${stu.key}">Edit</button>
-            <button class="btn delete-btn bg-red-100 text-red-800 px-3 py-1 rounded" data-key="${stu.key}">Delete</button>
+          <div class="flex flex-wrap gap-2">
+            <button class="btn edit-btn bg-yellow-100 text-yellow-800 px-3 py-1 rounded text-sm" data-key="${stu.key}">Edit</button>
+            ${joiningAmount ? `<button class="btn edit-joining-btn bg-sky-100 text-sky-800 px-3 py-1 rounded text-sm" data-key="${stu.key}">Edit Joining Form</button>` : ''}
+            <button class="btn delete-btn bg-red-100 text-red-800 px-3 py-1 rounded text-sm" data-key="${stu.key}">Delete</button>
             ${shiftButtonHtml}
           </div>
         </div>
@@ -1583,6 +1677,18 @@
         doShiftKey(key);
       }
     }));
+    document.querySelectorAll('.edit-joining-btn').forEach(btn => btn.addEventListener('click', (e) => {
+      const key = e.currentTarget.getAttribute('data-key');
+      if (key) openEditJoiningFormModal(key);
+    }));
+    document.querySelectorAll('.confirm-joining-btn').forEach(btn => btn.addEventListener('click', (e) => {
+      const key = e.currentTarget.getAttribute('data-key');
+      if (key) doConfirmJoining(key);
+    }));
+    document.querySelectorAll('.approve-joining-btn').forEach(btn => btn.addEventListener('click', (e) => {
+      const key = e.currentTarget.getAttribute('data-key');
+      if (key) doApproveJoining(key);
+    }));
   }
 
   // Search input
@@ -1618,6 +1724,147 @@
       clearForm();
       modal.style.display = 'none';
     });
+  }
+
+  // ---- Edit Joining Form modal ----
+  const editJoiningModal = document.getElementById('editJoiningFormModal');
+  const editJoiningForm = document.getElementById('editJoiningForm');
+  const closeEditJoiningBtn = document.getElementById('closeEditJoiningModal');
+  const cancelEditJoiningBtn = document.getElementById('cancelEditJoiningBtn');
+
+  function openEditJoiningFormModal(studentKey) {
+    const student = cachedStudents.find(s => s.key === studentKey);
+    if (!student) return alert('Student not found.');
+    const joining = student.joiningFormPayment || {};
+    document.getElementById('editJoiningStudentKey').value = studentKey;
+    document.getElementById('editJoiningStudentName').textContent =
+      `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim() || 'Unnamed Student';
+    document.getElementById('editJoiningAmount').value = joining.amount ?? 7000;
+    document.getElementById('editJoiningReceivedBy').value = joining.receivedBy || '';
+    document.getElementById('editJoiningReference').value = joining.reference || '';
+    document.getElementById('editJoiningMethod').value = joining.method || '';
+    document.getElementById('editJoiningReason').value = joining.reasonForDifferentAmount || '';
+    document.getElementById('editJoiningConfirmedBy').value = joining.confirmedByPerson || '';
+    const histEl = document.getElementById('editJoiningCorrectionsHistory');
+    const listEl = document.getElementById('editJoiningCorrectionsList');
+    if (histEl && listEl) {
+      const corrections = joining.corrections || [];
+      if (corrections.length) {
+        histEl.classList.remove('hidden');
+        listEl.innerHTML = corrections.map((c, i) => {
+          const prev = c.previous || {};
+          const n = c.new || {};
+          const date = c.at ? new Date(c.at).toLocaleString() : '';
+          return `<li>${i + 1}. ${date}: ${prev.receivedBy || '?'} / TSh ${prev.amount || 0} → ${n.receivedBy || '?'} / TSh ${n.amount || 0}${n.reasonForDifferentAmount ? ' (' + escapeHtml(n.reasonForDifferentAmount) + ')' : ''}</li>`;
+        }).join('');
+      } else {
+        histEl.classList.add('hidden');
+        listEl.innerHTML = '';
+      }
+    }
+    if (editJoiningModal) editJoiningModal.style.display = 'block';
+  }
+
+  function closeEditJoiningFormModal() {
+    if (editJoiningModal) editJoiningModal.style.display = 'none';
+  }
+
+  if (closeEditJoiningBtn) closeEditJoiningBtn.addEventListener('click', closeEditJoiningFormModal);
+  if (cancelEditJoiningBtn) cancelEditJoiningBtn.addEventListener('click', closeEditJoiningFormModal);
+  if (editJoiningModal) {
+    editJoiningModal.addEventListener('click', (e) => { if (e.target === editJoiningModal) closeEditJoiningFormModal(); });
+  }
+
+  if (editJoiningForm) {
+    editJoiningForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const key = document.getElementById('editJoiningStudentKey').value;
+      if (!key || !restrictAction('Edit Joining Form')) return;
+      const amount = Number(document.getElementById('editJoiningAmount').value || 0);
+      const receivedBy = String(document.getElementById('editJoiningReceivedBy').value || '').trim();
+      const reference = String(document.getElementById('editJoiningReference').value || '').trim();
+      const method = String(document.getElementById('editJoiningMethod').value || '').trim();
+      const reasonForDifferentAmount = String(document.getElementById('editJoiningReason').value || '').trim();
+      const confirmedByPerson = String(document.getElementById('editJoiningConfirmedBy').value || '').trim();
+      if (!receivedBy) {
+        alert('Received By is required.');
+        return;
+      }
+      try {
+        const snap = await schoolRef('students/' + key).once('value');
+        const student = snap.val() || {};
+        const existing = student.joiningFormPayment || {};
+        const corrections = Array.isArray(existing.corrections) ? existing.corrections.slice() : [];
+        corrections.push({
+          at: new Date().toISOString(),
+          previous: { amount: existing.amount, receivedBy: existing.receivedBy },
+          new: { amount, receivedBy, reference, method, reasonForDifferentAmount, confirmedByPerson }
+        });
+        const updated = {
+          ...existing,
+          amount,
+          receivedBy,
+          reference: reference || existing.reference,
+          method: method || existing.method,
+          paidAt: existing.paidAt,
+          reasonForDifferentAmount: reasonForDifferentAmount || undefined,
+          confirmedByPerson: confirmedByPerson || undefined,
+          corrections
+        };
+        await schoolRef('students/' + key).update({
+          joiningFormPayment: updated,
+          updatedAt: firebase.database.ServerValue.TIMESTAMP
+        });
+        alert('Joining form payment updated. Changes will appear in the PDF report.');
+        closeEditJoiningFormModal();
+        queueRender();
+      } catch (err) {
+        console.error('Edit joining form error', err);
+        alert('Error saving: ' + (err.message || err));
+      }
+    });
+  }
+
+  async function doConfirmJoining(key) {
+    const confirmedBy = prompt('Enter your name (staff confirming receipt):');
+    if (!confirmedBy || !confirmedBy.trim()) return;
+    try {
+      const snap = await schoolRef('students/' + key).once('value');
+      const student = snap.val() || {};
+      const existing = student.joiningFormPayment || {};
+      await schoolRef('students/' + key).update({
+        joiningFormPayment: { ...existing, confirmedBy: confirmedBy.trim(), confirmedAt: firebase.database.ServerValue.TIMESTAMP },
+        updatedAt: firebase.database.ServerValue.TIMESTAMP
+      });
+      alert('Confirmed. Accountant can now approve when money is received in office.');
+      queueRender();
+    } catch (err) {
+      console.error('Confirm joining error', err);
+      alert('Error: ' + (err.message || err));
+    }
+  }
+
+  async function doApproveJoining(key) {
+    if (!restrictAction('Approve Joining Form')) return;
+    const approvedBy = prompt('Enter your name (accountant approving receipt in office):');
+    if (!approvedBy || !approvedBy.trim()) return;
+    const officeContact = prompt('Office contact (optional, for records):');
+    try {
+      const snap = await schoolRef('students/' + key).once('value');
+      const student = snap.val() || {};
+      const existing = student.joiningFormPayment || {};
+      const updates = { ...existing, approvedBy: approvedBy.trim(), approvedAt: firebase.database.ServerValue.TIMESTAMP, approvedInOffice: true };
+      if ((officeContact || '').trim()) updates.officeContact = officeContact.trim();
+      await schoolRef('students/' + key).update({
+        joiningFormPayment: updates,
+        updatedAt: firebase.database.ServerValue.TIMESTAMP
+      });
+      alert('Approved. This payment will no longer appear in the "Received By Pupils" section of the PDF.');
+      queueRender();
+    } catch (err) {
+      console.error('Approve joining error', err);
+      alert('Error: ' + (err.message || err));
+    }
   }
 
   // Helper: Set innerHTML to link only if URL exists
