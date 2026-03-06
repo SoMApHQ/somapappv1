@@ -793,6 +793,10 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     if (!confirm(`Una uhakika unataka kufuta "${item.name}"?`)) return;
     try {
       await schoolRef(`${inventoryPath()}/${item.id}`).remove();
+      const isSocrates = ['socrates-school', 'default', 'socrates'].includes(school?.id);
+      if (isSocrates) {
+        await db.ref(`inventory/items/${item.id}`).remove();
+      }
       toast('Bidhaa imefutwa.', 'success');
       const items = await fetchInventoryItems(workerSession.schoolId);
       setInventoryItems(items);
