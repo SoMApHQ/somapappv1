@@ -23,6 +23,7 @@ if (!school || !school.id) {
 const schoolRef = (subPath) => db.ref(SOMAP.P(subPath));
 const getYear = () => window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
 const SOMAP_DEFAULT_YEAR = 2025;
+const STORE_ADMIN_PASSWORD = 'REHEMam!';
 
 async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
   const scopedSnap = await schoolRef(scopedSubPath).once('value');
@@ -284,6 +285,7 @@ function App() {
   const [storeOpen, setStoreOpen] = useState(true);
   const [logicOpen, setLogicOpen] = useState(false);
   const [newItem, setNewItem] = useState({ name: '', unit: '', onHand: '', unitPrice: '', marketCatId: '', marketSellerId: '', marketItemId: '' });
+  const [editingStoreItem, setEditingStoreItem] = useState(null);
   const [newRule, setNewRule] = useState({ itemId: '', perChild: '', unit: '', perMeal: 'both', rounding: 'round' });
   const [weekPlan, setWeekPlan] = useState({});
   const [savingPlan, setSavingPlan] = useState(false);
@@ -779,6 +781,48 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     return `years/${currentYear}/workers_inventory/items`;
   }
 
+  function promptStorePassword(actionLabel) {
+    const pwd = window.prompt(`Ingiza nenosiri kwa ${actionLabel}:`);
+    if (pwd === STORE_ADMIN_PASSWORD) return true;
+    toast('Nenosiri si sahihi.', 'error');
+    return false;
+  }
+
+  async function deleteStoreItem(item) {
+    if (!promptStorePassword('kufuta bidhaa')) return;
+    if (!confirm(`Una uhakika unataka kufuta "${item.name}"?`)) return;
+    try {
+      await schoolRef(`${inventoryPath()}/${item.id}`).remove();
+      toast('Bidhaa imefutwa.', 'success');
+      const items = await fetchInventoryItems(workerSession.schoolId);
+      setInventoryItems(items);
+    } catch (err) {
+      console.error(err);
+      toast(err.message || 'Imeshindikana kufuta bidhaa.', 'error');
+    }
+  }
+
+  function startEditStoreItem(item) {
+    if (!promptStorePassword('kuhariri bidhaa')) return;
+    setEditingStoreItem(item);
+    setNewItem({
+      name: item.name,
+      unit: item.unit || '',
+      onHand: String(item.onHand ?? ''),
+      unitPrice: String(item.unitPrice ?? ''),
+      marketCatId: item.market?.catId || '',
+      marketSellerId: item.market?.sellerId || '',
+      marketItemId: item.market?.itemId || ''
+    });
+    setStoreOpen(true);
+    scrollToSection('store-panel');
+  }
+
+  function cancelEditStoreItem() {
+    setEditingStoreItem(null);
+    setNewItem({ name: '', unit: '', onHand: '', unitPrice: '', marketCatId: '', marketSellerId: '', marketItemId: '' });
+  }
+
   function logicPath() {
     return `years/${currentYear}/kitchen_logic/rules`;
   }
@@ -947,14 +991,33 @@ function buildRegisterStats(studentMap, attendanceByClass) {
             h('input', { type: 'number', min: 0, step: '1', value: newItem.unitPrice, onChange: e => setNewItem({ ...newItem, unitPrice: e.target.value }) })
           ]),
           selectedMarketItem ? h('p', { className: 'workers-card__subtitle' }, `Chanzo: ${selectedShop?.shopName || '-'} · Simu: ${selectedShop?.phones?.[0] || selectedShop?.whatsappPhone || '-'} · Bei: ${formatTzs(selectedMarketItem.price || 0)}`) : null,
-          h('button', { className: 'workers-btn primary', onClick: addStoreItem }, 'Ongeza stoo')
+          editingStoreItem ? h('div', { className: 'workers-card__actions', style: { marginTop: '8px' } }, [
+            h('button', { className: 'workers-btn primary', onClick: addStoreItem }, 'Sasisha bidhaa'),
+            h('button', { className: 'workers-btn secondary', onClick: cancelEditStoreItem }, 'Ghairi')
+          ]) : h('button', { className: 'workers-btn primary', onClick: addStoreItem }, 'Ongeza stoo')
         ]),
         h('div', { className: 'mini-list' },
           inventoryItems.length
             ? inventoryItems.map(item =>
                 h('div', { key: item.id, className: 'mini-list__item' }, [
-                  h('strong', null, item.name),
-                  h('span', { className: 'mini-list__meta' }, `${item.onHand} ${item.unit || ''} · ${formatTzs(item.unitPrice || 0)} · ${item.market?.shopName || 'No shop'}`)
+                  h('div', { className: 'mini-list__item-main' }, [
+                    h('strong', null, item.name),
+                    h('span', { className: 'mini-list__meta' }, `${item.onHand} ${item.unit || ''} · ${formatTzs(item.unitPrice || 0)} · ${item.market?.shopName || 'No shop'}`)
+                  ]),
+                  h('div', { className: 'mini-list__item-actions' }, [
+                    h('button', {
+                      type: 'button',
+                      className: 'workers-btn small',
+                      title: 'Hariri',
+                      onClick: () => startEditStoreItem(item)
+                    }, '✏️'),
+                    h('button', {
+                      type: 'button',
+                      className: 'workers-btn small danger',
+                      title: 'Futa',
+                      onClick: () => deleteStoreItem(item)
+                    }, '🗑')
+                  ])
                 ])
               )
             : h('p', { className: 'workers-card__subtitle' }, 'Hakuna bidhaa stoo.')
@@ -1361,47 +1424,68 @@ function buildRegisterStats(studentMap, attendanceByClass) {
       return;
     }
     try {
-      const canonical = normalizeItemName(resolvedName);
-      const existing = inventoryItems.find(item => normalizeItemName(item.name) === canonical);
-      const qty = safeNumber(newItem.onHand);
-      if (existing && existing.id) {
-        const updatedOnHand = safeNumber(existing.onHand) + qty;
-        await schoolRef(`${inventoryPath()}/${existing.id}`).update({
-          onHand: updatedOnHand,
-          unit: resolvedUnit || existing.unit || '',
-          unitPrice: resolvedPrice || safeNumber(existing.unitPrice),
-          totalValue: Number((updatedOnHand * (resolvedPrice || safeNumber(existing.unitPrice))).toFixed(2)),
-          market: {
-            catId: newItem.marketCatId || existing.market?.catId || '',
-            sellerId: newItem.marketSellerId || existing.market?.sellerId || '',
-            itemId: newItem.marketItemId || existing.market?.itemId || '',
-            shopName: resolvedShop?.shopName || existing.market?.shopName || '',
-            shopPhone: resolvedShop?.phones?.[0] || resolvedShop?.whatsappPhone || existing.market?.shopPhone || '',
-            price: resolvedPrice || safeNumber(existing.market?.price)
-          }
-        });
-        toast('Imesasishwa stoo.', 'success');
-      } else {
-        const ref = schoolRef(inventoryPath()).push();
-        await ref.set({
+      if (editingStoreItem && editingStoreItem.id) {
+        const qty = safeNumber(newItem.onHand);
+        await schoolRef(`${inventoryPath()}/${editingStoreItem.id}`).update({
           name: resolvedName,
           unit: resolvedUnit || '',
           onHand: qty,
           unitPrice: resolvedPrice,
           totalValue: Number((qty * resolvedPrice).toFixed(2)),
           market: {
-            catId: newItem.marketCatId || '',
-            sellerId: newItem.marketSellerId || '',
-            itemId: newItem.marketItemId || '',
-            shopName: resolvedShop?.shopName || '',
-            shopPhone: resolvedShop?.phones?.[0] || resolvedShop?.whatsappPhone || '',
+            catId: newItem.marketCatId || editingStoreItem.market?.catId || '',
+            sellerId: newItem.marketSellerId || editingStoreItem.market?.sellerId || '',
+            itemId: newItem.marketItemId || editingStoreItem.market?.itemId || '',
+            shopName: resolvedShop?.shopName || editingStoreItem.market?.shopName || '',
+            shopPhone: resolvedShop?.phones?.[0] || resolvedShop?.whatsappPhone || editingStoreItem.market?.shopPhone || '',
             price: resolvedPrice
-          },
-          createdAt: Date.now()
+          }
         });
-        toast('Imeongezwa stoo.', 'success');
+        toast('Bidhaa imesasishwa.', 'success');
+        cancelEditStoreItem();
+      } else {
+        const canonical = normalizeItemName(resolvedName);
+        const existing = inventoryItems.find(item => normalizeItemName(item.name) === canonical);
+        const qty = safeNumber(newItem.onHand);
+        if (existing && existing.id) {
+          const updatedOnHand = safeNumber(existing.onHand) + qty;
+          await schoolRef(`${inventoryPath()}/${existing.id}`).update({
+            onHand: updatedOnHand,
+            unit: resolvedUnit || existing.unit || '',
+            unitPrice: resolvedPrice || safeNumber(existing.unitPrice),
+            totalValue: Number((updatedOnHand * (resolvedPrice || safeNumber(existing.unitPrice))).toFixed(2)),
+            market: {
+              catId: newItem.marketCatId || existing.market?.catId || '',
+              sellerId: newItem.marketSellerId || existing.market?.sellerId || '',
+              itemId: newItem.marketItemId || existing.market?.itemId || '',
+              shopName: resolvedShop?.shopName || existing.market?.shopName || '',
+              shopPhone: resolvedShop?.phones?.[0] || resolvedShop?.whatsappPhone || existing.market?.shopPhone || '',
+              price: resolvedPrice || safeNumber(existing.market?.price)
+            }
+          });
+          toast('Imesasishwa stoo.', 'success');
+        } else {
+          const ref = schoolRef(inventoryPath()).push();
+          await ref.set({
+            name: resolvedName,
+            unit: resolvedUnit || '',
+            onHand: qty,
+            unitPrice: resolvedPrice,
+            totalValue: Number((qty * resolvedPrice).toFixed(2)),
+            market: {
+              catId: newItem.marketCatId || '',
+              sellerId: newItem.marketSellerId || '',
+              itemId: newItem.marketItemId || '',
+              shopName: resolvedShop?.shopName || '',
+              shopPhone: resolvedShop?.phones?.[0] || resolvedShop?.whatsappPhone || '',
+              price: resolvedPrice
+            },
+            createdAt: Date.now()
+          });
+          toast('Imeongezwa stoo.', 'success');
+        }
+        setNewItem({ name: '', unit: '', onHand: '', unitPrice: '', marketCatId: '', marketSellerId: '', marketItemId: '' });
       }
-      setNewItem({ name: '', unit: '', onHand: '', unitPrice: '', marketCatId: '', marketSellerId: '', marketItemId: '' });
       const items = await fetchInventoryItems(workerSession.schoolId);
       setInventoryItems(items);
     } catch (err) {
