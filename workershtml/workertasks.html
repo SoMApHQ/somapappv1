@@ -651,6 +651,7 @@
           <option value="Management Teacher">Management Teacher</option>
           <option value="Academic Teacher">Academic Teacher</option>
           <option value="Assistant Headteacher">Assistant Headteacher</option>
+          <option value="Class Teacher">Class Teacher</option>
           <option value="Teacher">Teacher</option>
         </select>
       </div>
@@ -1086,6 +1087,141 @@
           .join(' ');
       }
 
+      function normalizeClassLabel(value = '') {
+        const compact = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!compact) return '';
+        if (compact === 'baby') return 'babyclass';
+        if (compact === 'middle') return 'middleclass';
+        if (compact === 'preunit' || compact === 'preunitclass') return 'preunitclass';
+        if (compact.startsWith('class1')) return 'class1';
+        if (compact.startsWith('class2')) return 'class2';
+        if (compact.startsWith('class3')) return 'class3';
+        if (compact.startsWith('class4')) return 'class4';
+        if (compact.startsWith('class5')) return 'class5';
+        if (compact.startsWith('class6')) return 'class6';
+        if (compact.startsWith('class7')) return 'class7';
+        return compact;
+      }
+
+      function toMs(value) {
+        if (value === null || value === undefined || value === '') return null;
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          return value > 1e12 ? value : value * 1000;
+        }
+        const parsed = Date.parse(value);
+        return Number.isNaN(parsed) ? null : parsed;
+      }
+
+      function getRegistrationMs(student = {}) {
+        return (
+          toMs(student.registrationDate) ||
+          toMs(student.registrationTimestamp) ||
+          toMs(student.createdAt) ||
+          toMs(student.created_at) ||
+          toMs(student.enrolledAt) ||
+          toMs(student.regDate) ||
+          toMs(student.regTimestamp) ||
+          toMs(student.dateRegistered) ||
+          toMs(student.dateOfRegistration) ||
+          null
+        );
+      }
+
+      function getRegistrationYear(student = {}) {
+        const ms = getRegistrationMs(student);
+        if (!ms) return null;
+        const y = new Date(ms).getFullYear();
+        return Number.isFinite(y) ? y : null;
+      }
+
+      function looksDeletedStudent(student = {}) {
+        const status = String(student.status || '').trim().toLowerCase();
+        return Boolean(
+          student.deleted === true ||
+          student.isDeleted === true ||
+          student.archived === true ||
+          student.isArchived === true ||
+          student.removed === true ||
+          student.isRemoved === true ||
+          student.active === false ||
+          status === 'deleted' ||
+          status === 'archived' ||
+          status === 'removed' ||
+          status === 'shifted'
+        );
+      }
+
+      function isCompleteStudentRecord(student = {}) {
+        if (!student || typeof student !== 'object') return false;
+        if (looksDeletedStudent(student)) return false;
+        const admission = String(student.admissionNumber || '').trim().toLowerCase();
+        const first = String(student.firstName || '').trim().toLowerCase();
+        const last = String(student.lastName || '').trim().toLowerCase();
+        if (!admission || admission === 'n/a' || admission === 'na') return false;
+        if (!first || first === 'n/a' || first === 'na') return false;
+        if (!last || last === 'n/a' || last === 'na') return false;
+        const schoolId = String(student.schoolId || '').trim();
+        if (schoolId && schoolId !== school.id) return false;
+        return true;
+      }
+
+      function shiftClassForYear(baseClass, deltaYears) {
+        const classOrder = ['babyclass', 'middleclass', 'preunitclass', 'class1', 'class2', 'class3', 'class4', 'class5', 'class6', 'class7'];
+        const from = normalizeClassLabel(baseClass);
+        const index = classOrder.indexOf(from);
+        if (index < 0) return from;
+        const target = index + Number(deltaYears || 0);
+        if (target < 0 || target >= classOrder.length) return 'graduated';
+        return classOrder[target];
+      }
+
+      function resolveClassForYear(studentId, student, enrollmentsByYear, selectedYear) {
+        const override = enrollmentsByYear?.[studentId] || null;
+        const overridden = override && (override.className || override.classLevel || override.class);
+        if (overridden) return normalizeClassLabel(overridden);
+        const fallback = student.classLevel || student.className || student.class || '';
+        const regYear = getRegistrationYear(student);
+        if (!regYear) return normalizeClassLabel(fallback);
+        return shiftClassForYear(fallback, Number(selectedYear) - regYear);
+      }
+
+      async function loadTeacherStudentCount() {
+        const totalStudentsEl = document.getElementById('totalStudents');
+        if (!totalStudentsEl) return;
+        const selectedClasses = (teacherConfig?.classes || []).map((item) => normalizeClassLabel(item)).filter(Boolean);
+        if (!selectedClasses.length) {
+          totalStudentsEl.textContent = '0';
+          return;
+        }
+        totalStudentsEl.textContent = '...';
+        try {
+          const [studentsSnap, enrollmentsSnap] = await Promise.all([
+            scopedOrSocratesLegacy('students', 'students'),
+            scopedOrSocratesLegacy(`years/${currentYear}/enrollments`, `enrollments/${currentYear}`)
+          ]);
+          const students = studentsSnap.val() || {};
+          const enrollments = enrollmentsSnap.val() || {};
+          const selectedYear = Number(currentYear);
+          const baseYear = 2025;
+          const classSet = new Set(selectedClasses);
+          let total = 0;
+          Object.entries(students).forEach(([studentId, student]) => {
+            if (!isCompleteStudentRecord(student)) return;
+            const regYear = getRegistrationYear(student);
+            if (!regYear || regYear < baseYear || regYear > selectedYear) return;
+            const resolvedClass = resolveClassForYear(studentId, student, enrollments, selectedYear);
+            if (resolvedClass === 'graduated') return;
+            if (classSet.has(resolvedClass)) {
+              total += 1;
+            }
+          });
+          totalStudentsEl.textContent = String(total);
+        } catch (error) {
+          console.warn('Failed to load total students for teacher classes', error);
+          totalStudentsEl.textContent = '0';
+        }
+      }
+
       function updateSchoolDisplay() {
         const nameEl = document.getElementById('schoolNameDisplay');
         if (nameEl) nameEl.textContent = school.name || school.id || 'School';
@@ -1198,10 +1334,23 @@
 
       if (openSetupFormBtn) {
         openSetupFormBtn.addEventListener('click', () => {
+          populateSetupFormFromConfig();
           mainDashboard?.classList.add('hidden');
           setupSection?.classList.remove('hidden');
           toggleSetupReminder(false);
         });
+      }
+
+      function populateSetupFormFromConfig() {
+        if (!teacherTypeSelect || !classSubjectMappings) return;
+        teacherTypeSelect.value = teacherConfig?.teacherType || '';
+        classSubjectMap = [];
+        classSubjectMappings.innerHTML = '';
+        const mappings = teacherConfig?.classSubjectMappings || [];
+        mappings.forEach((mapping) => {
+          addClassMapping(mapping.class, mapping.subjects || []);
+        });
+        if (!mappings.length) addClassMapping();
       }
 
       function applyRoleVisibility(typeLabel) {
@@ -1253,11 +1402,10 @@
         if (!teacherConfig) return;
         document.getElementById('totalClasses').textContent = String(teacherConfig.classes?.length || 0);
         document.getElementById('totalSubjects').textContent = String(teacherConfig.subjects?.length || 0);
-        const avgStudentsPerClass = 30;
-        document.getElementById('totalStudents').textContent = String((teacherConfig.classes?.length || 0) * avgStudentsPerClass);
+        loadTeacherStudentCount();
         applyRoleVisibility(teacherConfig.teacherType);
         loadWorkerIdsStats();
-        toggleSetupReminder(!(teacherConfig?.setupCompleted));
+        toggleSetupReminder(true);
         setupSection?.classList.add('hidden');
         mainDashboard?.classList.remove('hidden');
         loadTodayTasks();
@@ -1482,16 +1630,10 @@
             loadDashboard();
           } else if ((configSnap.exists() && !configSnap.val().setupCompleted) || fallbackConfig) {
             teacherConfig = configSnap.exists() ? configSnap.val() : fallbackConfig;
-            teacherTypeSelect.value = teacherConfig.teacherType || '';
             if (teacherConfig.teacherType) {
               localStorage.setItem('somap_role', teacherConfig.teacherType);
             }
-            classSubjectMap = [];
-            classSubjectMappings.innerHTML = '';
-            (teacherConfig.classSubjectMappings || []).forEach((mapping) => {
-              addClassMapping(mapping.class, mapping.subjects || []);
-            });
-            if (!classSubjectMap.length) addClassMapping();
+            populateSetupFormFromConfig();
             setupSection?.classList.remove('hidden');
             mainDashboard?.classList.add('hidden');
             toggleSetupReminder(false);
