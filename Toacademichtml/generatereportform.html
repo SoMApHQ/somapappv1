@@ -467,6 +467,35 @@
     const PLACEHOLDER_PHOTO = 'https://via.placeholder.com/160x210.png?text=Passport';
 
     const EXAM_KEYS = { 'Monthly':'monthly', 'Midterm 1':'midterm1', 'Midterm 2':'midterm2', 'End Term':'endterm', 'Annual':'annual' };
+    const EXAM_REGISTRY_KEY = 'somap_custom_exam_registry_v1';
+    function slugifyExamKey(label) {
+      return String(label || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-') || 'custom-exam';
+    }
+    function getStoredExamRegistry() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(EXAM_REGISTRY_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        return [];
+      }
+    }
+    function getExamKeyFromLabel(label) {
+      const direct = EXAM_KEYS[label];
+      if (direct) return direct;
+      const found = getStoredExamRegistry().find(item => item.label === label);
+      return found?.key || slugifyExamKey(label);
+    }
+    function getAllExamOptions() {
+      const builtIn = Object.keys(EXAM_KEYS).map(label => ({ label, key: EXAM_KEYS[label], builtIn: true }));
+      const custom = getStoredExamRegistry().filter(item => item && item.label && item.key).map(item => ({ ...item, builtIn: false }));
+      const seen = new Set();
+      return [...builtIn, ...custom].filter(item => {
+        const key = `${item.label}::${item.key}`.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
     const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const MONTH_LABELS = { Jan:'January', Feb:'February', Mar:'March', Apr:'April', May:'May', Jun:'June', Jul:'July', Aug:'August', Sep:'September', Oct:'October', Nov:'November', Dec:'December' };
     const MONTH_NUMERIC = Object.fromEntries(MONTHS.map((m, idx) => [m, String(idx + 1).padStart(2, '0')]));
@@ -704,6 +733,7 @@
       
       // Use the stored label if available, otherwise reverse lookup or default
       state.examType = ss.getItem('examTypeLabel') || Object.keys(EXAM_KEYS).find(k => EXAM_KEYS[k] === state.examKey) || 'Monthly';
+      state.examKey = getExamKeyFromLabel(state.examType);
       
       if (state.examKey === 'annual') {
         state.month = 'All';
@@ -786,6 +816,7 @@
       ss.setItem('year', String(state.year));
       ss.setItem('month', state.monthRaw || state.month);
       ss.setItem('examKey', state.examKey);
+      ss.setItem('examTypeLabel', state.examType);
       ss.setItem('schoolBranch', state.branch);
     }
 
@@ -822,7 +853,12 @@
       classSel.disabled = true;
 
       // Exam + Month
-      const examSel = document.getElementById('examType'); examSel.value = state.examType;
+      const examSel = document.getElementById('examType');
+      const examOptions = getAllExamOptions();
+      examSel.innerHTML = examOptions.map(item => `<option value="${String(item.label).replace(/"/g, '&quot;')}">${item.builtIn ? item.label : `${item.label} (Custom)`}</option>`).join('');
+      examSel.value = examOptions.some(item => item.label === state.examType) ? state.examType : (examOptions[0]?.label || 'Monthly');
+      state.examType = examSel.value;
+      state.examKey = getExamKeyFromLabel(state.examType);
       populateMonthOptions();
       document.getElementById('studentSelect').innerHTML = '<option value="">No records</option>';
 
@@ -873,7 +909,7 @@
         persistToSession(); loadAllData();
       });
       document.getElementById('examType').addEventListener('change', e => {
-        state.examType = e.target.value; state.examKey = EXAM_KEYS[state.examType]; populateMonthOptions();
+        state.examType = e.target.value; state.examKey = getExamKeyFromLabel(state.examType); populateMonthOptions();
         persistToSession(); loadAllData();
       });
       document.getElementById('monthSelect').addEventListener('change', e => {
