@@ -395,6 +395,94 @@
       }
       return Array.from(set).filter(Boolean);
     }
+    const ATTEND_PRESENT_CODES = new Set(['P','PRESENT','PR','1','TRUE','YES','Y']);
+    const ATTEND_ABSENT_CODES = new Set(['A','ABSENT','0','FALSE','NO','N']);
+    function canonicalMonthKey(mon){
+      const raw = String(mon || '').trim();
+      if (!raw) return null;
+      const direct = MONTH_LABELS[raw] || MONTH_LABELS[raw.replace(/^0+/, '')];
+      if (direct) return direct;
+      const parts = raw.split(/[-_/]/);
+      if (parts.length >= 2) {
+        const tail = String(parts[parts.length - 1] || '').trim();
+        return MONTH_LABELS[tail] || MONTH_LABELS[tail.replace(/^0+/, '')] || null;
+      }
+      return null;
+    }
+    function monthNumeric(mon){
+      const key = canonicalMonthKey(mon);
+      if (!key) return null;
+      const idx = MONTH_KEYS.indexOf(key);
+      return idx >= 0 ? String(idx + 1).padStart(2, '0') : null;
+    }
+    function normalizeAttendanceMap(val){
+      const out = {};
+      Object.keys(val || {}).forEach(adm => {
+        const a = val[adm] || {};
+        const present = Number(a.present || a.daysPresent || 0);
+        const absent = Number(a.absent || a.daysAbsent || 0);
+        const days = Number(a.days || (present + absent));
+        out[adm] = { present, absent, days };
+      });
+      return out;
+    }
+    function interpretAttendanceEntry(entry){
+      if (!entry) return null;
+      const norm = (v) => {
+        if (v === null || v === undefined) return null;
+        const str = String(v).trim();
+        return str ? str.toUpperCase() : null;
+      };
+      const daily = norm(entry.daily || entry.status || entry.attendance || entry.value);
+      if (daily) {
+        if (ATTEND_PRESENT_CODES.has(daily)) return { present: 1, absent: 0, days: 1 };
+        if (ATTEND_ABSENT_CODES.has(daily)) return { present: 0, absent: 1, days: 1 };
+      }
+      const am = norm(entry.am);
+      const pm = norm(entry.pm);
+      if (am || pm) {
+        const tokens = [am, pm].filter(Boolean);
+        const presentCount = tokens.filter(t => ATTEND_PRESENT_CODES.has(t)).length;
+        const absentCount = tokens.filter(t => ATTEND_ABSENT_CODES.has(t)).length;
+        if (!presentCount && !absentCount) return null;
+        if (presentCount >= absentCount) return { present: 1, absent: 0, days: 1 };
+        return { present: 0, absent: 1, days: 1 };
+      }
+      const generic = norm(entry.present);
+      if (generic) {
+        if (ATTEND_PRESENT_CODES.has(generic)) return { present: 1, absent: 0, days: 1 };
+        if (ATTEND_ABSENT_CODES.has(generic)) return { present: 0, absent: 1, days: 1 };
+      }
+      return null;
+    }
+    function aggregateClassFirstAttendance(val){
+      const out = {};
+      Object.keys(val || {}).forEach(dayKey => {
+        const dayEntries = val[dayKey] || {};
+        Object.keys(dayEntries || {}).forEach(ref => {
+          const entry = dayEntries[ref] || {};
+          const snap = entry.snap || entry.student || {};
+          const adm = String(
+            entry.adm ||
+            entry.admissionNo ||
+            entry.admNo ||
+            snap.admissionNo ||
+            snap.adm ||
+            snap.admNo ||
+            entry.studentId ||
+            ''
+          ).trim();
+          if (!adm) return;
+          const counts = interpretAttendanceEntry(entry);
+          if (!counts) return;
+          out[adm] = out[adm] || { present: 0, absent: 0, days: 0 };
+          out[adm].present += counts.present || 0;
+          out[adm].absent += counts.absent || 0;
+          out[adm].days += counts.days || 0;
+        });
+      });
+      return out;
+    }
 
     const SomapSub = () => window.SomapSubjects || {};
 
@@ -745,18 +833,27 @@
     /* ---------- Attendance + fees + scores fetchers ---------- */
     async function fetchAttendance(year, month, className){
       if(!getDB()) return {};
-      const refPath = `attendance/${year}/${month}/${className}`;
       try{
-        const found = await readFirstExisting([refPath]);
-        const out = {};
-        if(found?.snap && found.snap.exists && found.snap.exists()){
-          const val = found.snap.val();
-          Object.keys(val).forEach(adm=>{
-            const a = val[adm] || {};
-            out[adm] = { present: Number(a.present || a.daysPresent || 0), absent: Number(a.absent || a.daysAbsent || 0), days: Number(a.days || (Number(a.present||0)+Number(a.absent||0))) };
-          });
+        const monthVars = monthVariants(month);
+        const directCandidates = [];
+        monthVars.forEach(mv => {
+          directCandidates.push(`attendance/${year}/${mv}/${className}`);
+          directCandidates.push(`attendance/${year}/${className}/${mv}`);
+        });
+        const directFound = await readFirstExisting(directCandidates);
+        if (directFound?.snap && directFound.snap.exists && directFound.snap.exists()) {
+          return normalizeAttendanceMap(directFound.snap.val());
         }
-        return out;
+
+        // Fallback to class-first daily register path: attendance/{class}/{YYYY-MM}/{date}/{studentId}
+        const mm = monthNumeric(month);
+        if (mm) {
+          const classFirstFound = await readFirstExisting([`attendance/${className}/${year}-${mm}`]);
+          if (classFirstFound?.snap && classFirstFound.snap.exists && classFirstFound.snap.exists()) {
+            return aggregateClassFirstAttendance(classFirstFound.snap.val());
+          }
+        }
+        return {};
       }catch(e){ console.warn('fetchAttendance', e && e.message); return {}; }
     }
 

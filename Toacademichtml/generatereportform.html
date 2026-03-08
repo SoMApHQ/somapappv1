@@ -705,6 +705,7 @@
     const state = {
       className: '', classKey: '', stream: '', year: new Date().getFullYear(), month: 'Sep', monthRaw: preferredMonthStorage('Sep'), examType: 'Monthly', examKey: 'monthly', branch: 'School',
       rawStudents: {}, students: [], filtered: [], selectedAdm: null, subjects: [], teachers: new Map(),
+      teacherByClassSubject: new Map(), teacherBySubject: new Map(),
       logoDataUrl: null,
       // Parent mode parameters
       parentMode: false, parentAdm: null, parentName: '', parentPhone: ''
@@ -900,7 +901,7 @@
         state.subjects = subjectListForClass(state.className, state.year);
         document.getElementById('previewYear').textContent = state.year;
         document.getElementById('previewYearBadge').textContent = String(state.year);
-        persistToSession(); loadAllData();
+        persistToSession(); loadTeachers().then(loadAllData);
       });
       document.getElementById('classSelect').addEventListener('change', e => {
         state.classKey = e.target.value;
@@ -925,7 +926,7 @@
         persistToSession(); updatePreview();
       });
       document.getElementById('applyFilters').addEventListener('click', applyFilters);
-      document.getElementById('refreshBtn').addEventListener('click', loadAllData);
+      document.getElementById('refreshBtn').addEventListener('click', () => loadTeachers().then(loadAllData));
       document.getElementById('downloadPreviewPdf').addEventListener('click', () => {
         if (!state.selectedAdm) return Swal.fire('Select student', 'Choose a student first.', 'info');
         generateSinglePdf(state.selectedAdm);
@@ -964,16 +965,71 @@
     /* -------------------------- LOADERS -------------------------- */
     async function loadTeachers(){
       try {
-        // Try a reasonably generic location; fall back silently if absent
-        const snap = await getSnapScopedOrLegacy('teachers');
-        const teachers = snap.val() || {};
         state.teachers = new Map();
-        Object.entries(teachers).forEach(([id, value]) => {
-          const subject = (value.subject || '').trim().toUpperCase();
-          state.teachers.set(subject, { id, name: (value.name || id || '').toString().trim() || 'Teacher' });
+        state.teacherByClassSubject = new Map();
+        state.teacherBySubject = new Map();
+
+        // 1) Build workerId -> full name lookup
+        const workerNameById = new Map();
+        const workerSnap = await getSnapScopedOrLegacy(`years/${state.year}/workers`);
+        const workers = workerSnap?.val?.() || {};
+        Object.entries(workers).forEach(([workerId, raw]) => {
+          const profile = raw?.profile || raw || {};
+          const fullName =
+            profile.fullNameUpper ||
+            profile.fullName ||
+            [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ').trim() ||
+            '';
+          const normalized = String(fullName || '').trim();
+          if (normalized) workerNameById.set(workerId, normalized);
+        });
+
+        // 2) Use teacher setup mappings: years/{year}/teachers_config/{workerId}
+        const configSnap = await getSnapScopedOrLegacy(`years/${state.year}/teachers_config`);
+        const configs = configSnap?.val?.() || {};
+        Object.entries(configs).forEach(([workerId, cfg]) => {
+          const fallbackName = String(cfg?.name || cfg?.teacherName || cfg?.fullName || '').trim();
+          const teacherName = workerNameById.get(workerId) || fallbackName || 'Teacher';
+          const mappings = Array.isArray(cfg?.classSubjectMappings) ? cfg.classSubjectMappings : [];
+
+          mappings.forEach((mapping) => {
+            const classCanon = SomapSub().canonClass ? SomapSub().canonClass(mapping?.class || '') : String(mapping?.class || '').trim();
+            const subjects = Array.isArray(mapping?.subjects) ? mapping.subjects : [];
+            subjects.forEach((subjectRaw) => {
+              const subjectCanon = canonicalSubjectName(subjectRaw || '');
+              if (!subjectCanon) return;
+              const subjectUpper = String(subjectCanon).trim().toUpperCase();
+              if (!subjectUpper) return;
+              if (classCanon) {
+                const classSubjectKey = `${classCanon.toUpperCase()}::${subjectUpper}`;
+                if (!state.teacherByClassSubject.has(classSubjectKey)) {
+                  state.teacherByClassSubject.set(classSubjectKey, teacherName);
+                }
+              }
+              if (!state.teacherBySubject.has(subjectUpper)) {
+                state.teacherBySubject.set(subjectUpper, teacherName);
+              }
+            });
+          });
+        });
+
+        // 3) Legacy fallback: generic `teachers` path with { subject, name }
+        const legacySnap = await getSnapScopedOrLegacy('teachers');
+        const legacyTeachers = legacySnap?.val?.() || {};
+        Object.entries(legacyTeachers).forEach(([id, value]) => {
+          const subject = canonicalSubjectName(value?.subject || '');
+          const subjectUpper = String(subject || '').trim().toUpperCase();
+          const name = String(value?.name || id || '').trim() || 'Teacher';
+          if (!subjectUpper) return;
+          if (!state.teacherBySubject.has(subjectUpper)) {
+            state.teacherBySubject.set(subjectUpper, name);
+          }
+          state.teachers.set(subjectUpper, { id, name });
         });
       } catch (e) {
         state.teachers = new Map();
+        state.teacherByClassSubject = new Map();
+        state.teacherBySubject = new Map();
       }
     }
 
@@ -1721,8 +1777,14 @@
       return 'Immediate academic support required. Schedule remedial sessions.';
     }
 
-    function getTeacherName(subject){
-      const entry = state.teachers.get(String(subject||'').trim().toUpperCase());
+    function getTeacherName(subject, className){
+      const subjectCanon = canonicalSubjectName(subject || '');
+      const subjectUpper = String(subjectCanon || '').trim().toUpperCase();
+      const classCanon = SomapSub().canonClass ? SomapSub().canonClass(className || state.className || '') : String(className || state.className || '').trim();
+      const classSubjectKey = `${String(classCanon || '').toUpperCase()}::${subjectUpper}`;
+      if (state.teacherByClassSubject.has(classSubjectKey)) return state.teacherByClassSubject.get(classSubjectKey);
+      if (state.teacherBySubject.has(subjectUpper)) return state.teacherBySubject.get(subjectUpper);
+      const entry = state.teachers.get(subjectUpper);
       return (entry && entry.name) || 'Teacher';
       }
 
@@ -1753,7 +1815,7 @@
           const rec = stu.subjectStats.subjectMap[subject];
           if (rec){
             rec.position = stu.subjectPositions[subject];
-            rec.teacher = getTeacherName(subject);
+            rec.teacher = getTeacherName(subject, state.className);
           }
         });
       });
@@ -1860,7 +1922,7 @@
         return;
       }
       table.innerHTML = state.filtered.map(s => {
-        const attendance = `${s.attendancePercent.toFixed(1)}% (${s.presents}/${s.attendanceDays})`;
+        const attendance = `${s.attendancePercent.toFixed(1)}% (${s.presents}/${s.absents})`;
         const pillClass = s.avg >= 70 ? 'good' : s.avg >= 50 ? 'medium' : 'low';
         return `
           <tr class="${s.adm === state.selectedAdm ? 'bg-slate-800/30' : ''}">
@@ -1927,7 +1989,7 @@
       document.getElementById('previewPosition').textContent = posLabel;
       document.getElementById('previewClassSize').textContent = cohortSize;
       document.getElementById('previewAttendance').textContent = `${s.attendancePercent.toFixed(1)}%`;
-      document.getElementById('previewAttendanceRaw').textContent = `${s.presents} / ${s.attendanceDays}`;
+      document.getElementById('previewAttendanceRaw').textContent = `${s.presents} / ${s.absents}`;
       document.getElementById('previewFee').textContent = `Total: TSh ${formatCurrency(s.totalFee)}`;
       document.getElementById('previewFeeBreakdown').textContent = `TSh ${formatCurrency(s.paid)} / TSh ${formatCurrency(s.balance)}`;
       document.getElementById('previewComment').textContent = s.comment;
@@ -2128,7 +2190,7 @@ function toNormalizedRows(subjects){
       const cohortSize = state.students.length || state.filtered.length || 0;
       const posLabel = (s.overallPosition && s.overallPosition !== '-') ? s.overallPosition : '-';
       doc.text(`Overall position: ${posLabel} / ${cohortSize}`, 120, contentStartY + 12);
-      doc.text(`Attendance: ${s.attendancePercent.toFixed(1)}% (${s.presents}/${s.attendanceDays})`, 120, contentStartY + 18);
+      doc.text(`Attendance: ${s.attendancePercent.toFixed(1)}% (${s.presents}/${s.absents})`, 120, contentStartY + 18);
       doc.text(`Fees: Due TSh ${formatCurrency(s.totalFee)} | Paid TSh ${formatCurrency(s.paid)} | Balance TSh ${formatCurrency(s.balance)}`, 120, contentStartY + 24);
 
       doc.autoTable({
