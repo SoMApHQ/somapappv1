@@ -311,31 +311,6 @@
               <strong id="previewAttendanceRaw">0 / 0</strong>
             </div>
           </div>
-          <div class="info-chip">
-            <span>Fee summary</span>
-            <strong id="previewFee">Total: TSh 0</strong>
-            <span class="mt-1">Paid / Balance</span>
-            <strong id="previewFeeBreakdown">TSh 0 / TSh 0</strong>
-            <span class="mt-1">Debt status</span>
-            <strong id="previewDebtStatus">OK</strong>
-            <span class="mt-1">Plan</span>
-            <strong id="previewPlanName">-</strong>
-            <span class="mt-1" id="previewDebtHint">No overdue debt.</span>
-          </div>
-          <div class="overflow-x-auto">
-            <table class="preview-table report-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Fee window</th>
-                  <th>Expected</th>
-                  <th>Due by</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody id="previewFeeSchedule"></tbody>
-            </table>
-          </div>
           <div class="chips-grid" id="previewHighlights"></div>
           <div class="overflow-x-auto">
             <table class="preview-table report-table">
@@ -365,6 +340,31 @@
           <div class="info-chip">
             <span>Teacher remarks</span>
             <p id="previewComment" class="text-sm font-medium text-slate-700 leading-relaxed">Select a student to view comments and printable card.</p>
+          </div>
+          <div class="info-chip">
+            <span>Fee summary</span>
+            <strong id="previewFee">Total: TSh 0</strong>
+            <span class="mt-1">Paid / Balance</span>
+            <strong id="previewFeeBreakdown">TSh 0 / TSh 0</strong>
+            <span class="mt-1">Debt status</span>
+            <strong id="previewDebtStatus">OK</strong>
+            <span class="mt-1">Plan</span>
+            <strong id="previewPlanName">-</strong>
+            <span class="mt-1" id="previewDebtHint">No overdue debt.</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="preview-table report-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Fee window</th>
+                  <th>Expected</th>
+                  <th>Due by</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="previewFeeSchedule"></tbody>
+            </table>
           </div>
           <div class="chips-grid">
             <div class="chip"><i class="fas fa-pen"></i> Class teacher signature __________________</div>
@@ -1301,6 +1301,8 @@
       const balance = Number(s.balance || Math.max(0, feeDue - feePaid) || 0);
       const photoCandidate = s.photoUrl || s.passport || s.passportPhotoUrl || s.avatar || s.avatarUrl || s.imageUrl || s.image || '';
       return {
+        id: String(s.id || s.studentId || admKey),
+        admissionNo: String(s.admissionNumber || s.admNo || s.admissionNo || admKey),
         adm: String(admKey), name, firstName: s.firstName||'', middleName: s.middleName||'', lastName: s.lastName||'',
         class: sClass, stream: sStream, gender: s.gender||'', dob: s.dob||'-',
         parentName: s.parentName || s.parent || '-', parentContact: s.parentContact || s.parentPhone || s.guardianPhone || '-',
@@ -1503,6 +1505,47 @@
       if (!payments || typeof payments !== 'object') return 0;
       return Object.values(payments).reduce((sum, p) => sum + toNum(p?.amount || p?.paid || p?.value || 0), 0);
     }
+    function extractFeeAmount(raw){
+      if (raw === null || raw === undefined) return 0;
+      if (typeof raw === 'number') return Math.max(0, raw);
+      if (typeof raw === 'string') return Math.max(0, toNum(raw.replace(/[^\d.-]/g, '')));
+      if (typeof raw !== 'object') return 0;
+      return Math.max(0, toNum(
+        raw.feePerYear ??
+        raw.fee ??
+        raw.amount ??
+        raw.total ??
+        raw.required ??
+        raw.expected ??
+        raw.baseFee ??
+        0
+      ));
+    }
+    function pickByAnyKey(bucket, keys){
+      if (!bucket || typeof bucket !== 'object') return null;
+      for (const key of (keys || [])) {
+        if (!key) continue;
+        if (Object.prototype.hasOwnProperty.call(bucket, key)) return bucket[key];
+      }
+      return null;
+    }
+    function extractPaymentsFromLedgerBucket(bucket){
+      if (!bucket || typeof bucket !== 'object') return {};
+      if (bucket.payments && typeof bucket.payments === 'object') return bucket.payments;
+      if (bucket.entries && typeof bucket.entries === 'object') return bucket.entries;
+      if (bucket.records && typeof bucket.records === 'object') return bucket.records;
+      const direct = {};
+      Object.entries(bucket).forEach(([k, v]) => {
+        if (v && typeof v === 'object' && (
+          Object.prototype.hasOwnProperty.call(v, 'amount') ||
+          Object.prototype.hasOwnProperty.call(v, 'paid') ||
+          Object.prototype.hasOwnProperty.call(v, 'value')
+        )) {
+          direct[k] = v;
+        }
+      });
+      return direct;
+    }
     function toWindowTs(pair, year){
       if (!Array.isArray(pair) || pair.length < 2) return 0;
       const m = Number(pair[0]); const d = Number(pair[1]);
@@ -1518,6 +1561,16 @@
       const d = new Date(n);
       if (Number.isNaN(d.getTime())) return '-';
       return d.toLocaleDateString('en-GB');
+    }
+    function feeWindowStatus(schedule, paidAmount, idx){
+      const rows = Array.isArray(schedule) ? schedule : [];
+      const now = Date.now();
+      let cumulative = 0;
+      for (let i = 0; i <= idx; i++) cumulative += Math.max(0, toNum(rows[i]?.amount || 0));
+      if (paidAmount >= cumulative - 0.5) return { label: 'Paid', cls: 'text-emerald-600' };
+      const dueTs = Number(rows[idx]?.toTs || 0);
+      if (dueTs && dueTs < now) return { label: 'Overdue', cls: 'text-red-600' };
+      return { label: 'Pending', cls: 'text-slate-600' };
     }
     function normalizeScheduleItems(rawItems, totalDue, year){
       const rows = Array.isArray(rawItems) ? rawItems.slice() : [];
@@ -1645,12 +1698,26 @@
           financeSnap,
           annualSnap,
           financialsSnap,
-          classFeesSnap
+          classFeesSnap,
+          feesStructureSnap,
+          studentFeesSnap,
+          overridesSnap,
+          ledgersSnap,
+          carrySnap,
+          studentPlansSnap,
+          plansSnap
         ] = await Promise.all([
           getSnapScopedOrLegacy(`/finance/${year}/students`),
           getSnapScopedOrLegacy(`/financeAnnual/${year}/students`),
           getSnapScopedOrLegacy(`/financials/${year}/students`),
-          getSnapScopedOrLegacy(`/fees/${year}/${className}`)
+          getSnapScopedOrLegacy(`/fees/${year}/${className}`),
+          getSnapScopedOrLegacy(`/feesStructure/${year}`),
+          getSnapScopedOrLegacy(`/studentFees/${year}`),
+          getSnapScopedOrLegacy(`/studentOverrides/${year}`),
+          getSnapScopedOrLegacy(`/financeLedgers/${year}`),
+          getSnapScopedOrLegacy(`/financeCarryForward/${year}`),
+          getSnapScopedOrLegacy(`/finance/${year}/studentPlans`),
+          getSnapScopedOrLegacy(`/finance/${year}/plans`)
         ]);
 
         const mergedByKey = {
@@ -1666,6 +1733,15 @@
         });
 
         const missingViaCore = [];
+        const classFeesByAdm = classFeesSnap?.val?.() || {};
+        const feeStructureByClass = feesStructureSnap?.val?.() || {};
+        const studentFeesById = studentFeesSnap?.val?.() || {};
+        const overridesById = overridesSnap?.val?.() || {};
+        const ledgersById = ledgersSnap?.val?.() || {};
+        const carryById = carrySnap?.val?.() || {};
+        const studentPlansById = studentPlansSnap?.val?.() || {};
+        const plansById = plansSnap?.val?.() || {};
+
         (students || []).forEach(stu => {
           const adm = normalizeAdm(stu?.adm || stu?.admissionNo || '');
           if (!adm) return;
@@ -1675,21 +1751,63 @@
             if (mergedByKey[key]) { raw = mergedByKey[key]; break; }
           }
           if (!raw && byAdmission[adm]) raw = byAdmission[adm];
-          const classFee = classFeesSnap?.val?.()?.[adm] || {};
+          const classFeeRow = classFeesByAdm?.[adm] || {};
+          const overrideRow = pickByAnyKey(overridesById, candidateKeys) || {};
+          const studentFeeRow = pickByAnyKey(studentFeesById, candidateKeys) || {};
+          const ledgerRow = pickByAnyKey(ledgersById, candidateKeys) || {};
+          const carryRow = pickByAnyKey(carryById, candidateKeys) || {};
+          const studentPlanRow = pickByAnyKey(studentPlansById, candidateKeys) || {};
+          const classFeeConfig = feeStructureByClass?.[normalizeDisplayClass(stu?.class || className || '')] || feeStructureByClass?.[className] || {};
+
           const base = buildFinanceEntryFromRaw(raw || {}, year);
-          const fallbackRequired = Math.max(0, toNum(classFee?.required || classFee?.expected || classFee?.total || stu?.totalFee || 0));
-          const fallbackPaid = Math.max(0, toNum(classFee?.paid || classFee?.paidAmount || stu?.paid || 0));
-          const required = base.required > 0 ? base.required : fallbackRequired;
-          const paid = base.paid > 0 ? base.paid : fallbackPaid;
+          const classFeeAmount = extractFeeAmount(classFeeConfig);
+          const studentFeeAmount = extractFeeAmount(studentFeeRow);
+          const overrideFeeAmount = extractFeeAmount(overrideRow);
+          const carryAmount = Math.max(0, toNum(carryRow?.amount ?? carryRow?.balance ?? carryRow?.carry ?? 0));
+          const fallbackRequired = Math.max(0, toNum(classFeeRow?.required || classFeeRow?.expected || classFeeRow?.total || 0));
+          const fallbackPaid = Math.max(0, toNum(classFeeRow?.paid || classFeeRow?.paidAmount || 0));
+          const ledgerPaid = Math.max(0, sumPayments(extractPaymentsFromLedgerBucket(ledgerRow)));
+          const derivedRequired = Math.max(0, (studentFeeAmount || overrideFeeAmount || classFeeAmount || fallbackRequired || toNum(stu?.totalFee || 0)) + carryAmount);
+          const required = base.required > 0 ? base.required : derivedRequired;
+          const paid = base.paid > 0 ? base.paid : Math.max(ledgerPaid, fallbackPaid, toNum(stu?.paid || 0));
           const balance = base.balance > 0 || required > 0 ? Math.max(0, (base.balance > 0 ? base.balance : (required - paid))) : 0;
+          const planId = String(
+            (typeof studentPlanRow === 'string' ? studentPlanRow : (studentPlanRow?.planId || studentPlanRow?.id || ''))
+          ).trim();
+          const planName = String(
+            base.planName && base.planName !== 'Not set'
+              ? base.planName
+              : (
+                studentPlanRow?.planName ||
+                studentPlanRow?.name ||
+                overrideRow?.planName ||
+                overrideRow?.paymentPlan ||
+                plansById?.[planId]?.name ||
+                ''
+              )
+          ).trim() || 'Not set';
+          const planSchedule = Array.isArray(plansById?.[planId]?.schedule) ? plansById[planId].schedule : [];
+          const schedule = (base.schedule && base.schedule.length)
+            ? base.schedule
+            : normalizeScheduleItems(planSchedule, required, year);
+          const debtMeta = financeStatusFromSchedule(schedule, paid, balance);
+
           out[adm] = {
             ...base,
             required,
             paid,
-            balance
+            balance,
+            carry: base.carry > 0 ? base.carry : carryAmount,
+            planName,
+            schedule,
+            debtStatus: debtMeta.status,
+            debtTone: debtMeta.tone,
+            debtHint: debtMeta.hint,
+            debtNow: debtMeta.debtNow,
+            nextDueLabel: debtMeta.nextDueLabel
           };
           if ((!raw || (required <= 0 && paid <= 0 && balance <= 0)) && window.SOMAP_FINANCE?.loadStudentYearSummary) {
-            missingViaCore.push({ adm, stu, classFee });
+            missingViaCore.push({ adm, stu, classFee: classFeeRow });
           }
         });
         if (missingViaCore.length && window.SOMAP_FINANCE?.loadStudentYearSummary) {
@@ -2257,16 +2375,16 @@
       document.getElementById('previewDebtStatus').style.color = s.debtTone === 'danger' ? '#b91c1c' : '#166534';
       document.getElementById('previewPlanName').textContent = s.feePlanName || 'Not set';
       document.getElementById('previewDebtHint').textContent = s.debtHint || 'No overdue debt.';
-      const scheduleRows = (s.feeSchedule || []).slice(0, 8).map((item, idx) => {
+      const previewSchedule = (s.feeSchedule || []).slice(0, 8);
+      const scheduleRows = previewSchedule.map((item, idx) => {
         const dueLabel = formatDateTs(item.toTs);
-        const tone = (s.debtTone === 'danger' && item.toTs && item.toTs <= Date.now()) ? 'Overdue' : 'Pending';
-        const toneCls = tone === 'Overdue' ? 'text-red-600' : 'text-slate-600';
+        const tone = feeWindowStatus(previewSchedule, s.paid, idx);
         return `<tr>
           <td>${idx + 1}</td>
           <td>${escapeHtml(item.label || `Window ${idx + 1}`)}</td>
           <td class="num">TSh ${formatCurrency(item.amount || 0)}</td>
           <td>${dueLabel}</td>
-          <td class="${toneCls}">${tone}</td>
+          <td class="${tone.cls}">${tone.label}</td>
         </tr>`;
       });
       document.getElementById('previewFeeSchedule').innerHTML = scheduleRows.length
@@ -2481,16 +2599,21 @@ function toNormalizedRows(subjects){
       doc.text(`Plan: ${s.feePlanName || 'Not set'} | Debt: ${s.debtStatus || 'OK'}${s.debtNow > 0 ? ` (TSh ${formatCurrency(s.debtNow)})` : ''}`, 120, contentStartY + 30);
       doc.text(`${s.debtHint || 'No overdue debt.'}`, 120, contentStartY + 36);
 
-      const feeScheduleRows = (s.feeSchedule || []).slice(0, 6).map((item, idx) => ([
-        idx + 1,
-        item.label || `Window ${idx + 1}`,
-        `TSh ${formatCurrency(item.amount || 0)}`,
-        formatDateTs(item.toTs)
-      ]));
+      const pdfSchedule = (s.feeSchedule || []).slice(0, 6);
+      const feeScheduleRows = pdfSchedule.map((item, idx) => {
+        const status = feeWindowStatus(pdfSchedule, s.paid, idx);
+        return [
+          idx + 1,
+          item.label || `Window ${idx + 1}`,
+          `TSh ${formatCurrency(item.amount || 0)}`,
+          formatDateTs(item.toTs),
+          status.label
+        ];
+      });
       if (feeScheduleRows.length) {
         doc.autoTable({
           startY: contentStartY + 42,
-          head: [["#", "Fee Window", "Expected", "Due By"]],
+          head: [["#", "Fee Window", "Expected", "Due By", "Status"]],
           body: feeScheduleRows,
           styles: { fontSize: 8.8, textColor: [15, 23, 42], cellPadding: 1.8 },
           headStyles: { fillColor: [15, 118, 110], textColor: 255, fontSize: 9 },
