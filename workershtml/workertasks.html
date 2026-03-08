@@ -901,25 +901,30 @@
     }
 
     const SUBJECTS_BY_CLASS = {
-      'Baby Class': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
-      'Baby': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
-      'Middle Class': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
-      'Middle': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
-      'Preunit Class': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
-      'Preunit': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
-      'Pre-Unit': ['Arithmetic','Communication','Relation','CRN','Healthcare','Arts'],
-      'Class 1': ['Writing Skills','Arithmetic','Developing Sports & Arts','Health.AREC','Kusoma','Listening'],
-      'Class 1 AB': ['Writing Skills','Arithmetic','Developing Sports & Arts','Health.AREC','Kusoma','Listening'],
-      'Class 2': ['Writing Skills','Arithmetic','Developing Sports & Arts','Health.AREC','Kusoma','Listening'],
-      'Class 2 AB': ['Writing Skills','Arithmetic','Developing Sports & Arts','Health.AREC','Kusoma','Listening'],
-      'Class 3': ['Math','English','Kiswahili','Science','Geography','Arts','History','French'],
-      'Class 4': ['Math','English','Kiswahili','Science','Geography','Arts','History','French'],
-      'Class 5': ['Math','English','Kiswahili','Science','Geography','Arts','History','French'],
-      'Class 6': ['Math','English','Kiswahili','Science','Social Studies','Civics & Morals'],
-      'Class 7': ['Math','English','Kiswahili','Science','Social Studies','Civics & Morals']
+      'Baby Class': ['Arithmetic', 'Communication', 'Relation', 'CRN', 'Health Care', 'Arts'],
+      'Middle Class': ['Arithmetic', 'Communication', 'Relation', 'CRN', 'Health Care', 'Arts'],
+      'Pre-Unit': ['Arithmetic', 'Communication', 'Relation', 'CRN', 'Health Care', 'Arts'],
+      'Class 1': ['Writing Skills', 'Arithmetic', 'Developing Sports & Arts', 'Health Care', 'Kusoma', 'Listening'],
+      'Class 2': ['Writing Skills', 'Arithmetic', 'Developing Sports & Arts', 'Health Care', 'Kusoma', 'Listening'],
+      'Class 3': ['Math', 'English', 'Kiswahili', 'Science', 'Geography', 'Arts', 'History', 'French'],
+      'Class 4': ['Math', 'English', 'Kiswahili', 'Science', 'Geography', 'Arts', 'History', 'French'],
+      'Class 5': ['Math', 'English', 'Kiswahili', 'Science', 'Geography', 'Arts', 'History', 'French'],
+      'Class 6': ['Math', 'English', 'Kiswahili', 'Science', 'Social Studies', 'Civics & Morals'],
+      'Class 7': ['Math', 'English', 'Kiswahili', 'Science', 'Social Studies', 'Civics & Morals']
     };
-
-    const ALL_CLASSES = Object.keys(SUBJECTS_BY_CLASS);
+    const CLASS_DISPLAY_BY_KEY = {
+      babyclass: 'Baby Class',
+      middleclass: 'Middle Class',
+      preunitclass: 'Pre-Unit',
+      class1: 'Class 1',
+      class2: 'Class 2',
+      class3: 'Class 3',
+      class4: 'Class 4',
+      class5: 'Class 5',
+      class6: 'Class 6',
+      class7: 'Class 7'
+    };
+    const ALL_CLASSES = Object.values(CLASS_DISPLAY_BY_KEY);
 
     document.addEventListener('DOMContentLoaded', async () => {
       if (!ensureDeps()) return;
@@ -965,6 +970,7 @@
       let teacherConfig = null;
       let workerProfile = {};
       let classSubjectMap = [];
+      let customSubjectCatalog = {};
       let yearSelectorInitialized = false;
       let yearWatchArmed = false;
 
@@ -1101,6 +1107,57 @@
         if (compact.startsWith('class6')) return 'class6';
         if (compact.startsWith('class7')) return 'class7';
         return compact;
+      }
+
+      function toDisplayClass(value = '') {
+        const key = normalizeClassLabel(value);
+        return CLASS_DISPLAY_BY_KEY[key] || String(value || '').trim();
+      }
+
+      function normalizeSubjectLabel(value = '') {
+        const raw = String(value || '').trim();
+        if (!raw) return '';
+        const compact = raw.toLowerCase().replace(/[\s._-]+/g, '');
+        if (compact === 'healtharec' || compact === 'healthcare') return 'Health Care';
+        return raw;
+      }
+
+      function uniqueSubjects(list = []) {
+        const out = [];
+        const seen = new Set();
+        list.forEach((item) => {
+          const label = normalizeSubjectLabel(item);
+          if (!label) return;
+          const key = label.toLowerCase();
+          if (seen.has(key)) return;
+          seen.add(key);
+          out.push(label);
+        });
+        return out;
+      }
+
+      async function loadCustomSubjectCatalogForYear() {
+        const y = String(currentYear || getYear());
+        customSubjectCatalog = {};
+        try {
+          let snap = await schoolRef(`subjectCatalog/${y}`).once('value');
+          if (!snap.exists() && isSocratesSchool(school?.id)) {
+            snap = await db.ref(`subjectCatalog/${y}`).once('value');
+          }
+          const raw = snap.exists() ? (snap.val() || {}) : {};
+          Object.entries(raw || {}).forEach(([className, bucket]) => {
+            const classDisplay = toDisplayClass(className);
+            const labels = [];
+            if (Array.isArray(bucket)) {
+              bucket.forEach((entry) => labels.push(typeof entry === 'string' ? entry : (entry?.label || entry?.name || '')));
+            } else if (bucket && typeof bucket === 'object') {
+              Object.values(bucket).forEach((entry) => labels.push(typeof entry === 'string' ? entry : (entry?.label || entry?.name || '')));
+            }
+            customSubjectCatalog[classDisplay] = uniqueSubjects(labels);
+          });
+        } catch (err) {
+          console.warn('Failed to load custom subject catalog', err?.message || err);
+        }
       }
 
       function toMs(value) {
@@ -1246,11 +1303,12 @@
       function addClassMapping(existingClass = '', existingSubjects = []) {
         if (!classSubjectMappings) return;
         const cardIndex = classSubjectMap.length;
-        classSubjectMap[cardIndex] = { class: existingClass, subjects: existingSubjects.slice() };
+        const classDisplay = toDisplayClass(existingClass);
+        classSubjectMap[cardIndex] = { class: classDisplay, subjects: existingSubjects.slice() };
         const card = document.createElement('div');
         card.className = 'class-mapping-card';
         card.dataset.index = cardIndex;
-        const options = ALL_CLASSES.map((c) => `<option value="${c}" ${c === existingClass ? 'selected' : ''}>${c}</option>`).join('');
+        const options = ALL_CLASSES.map((c) => `<option value="${c}" ${c === classDisplay ? 'selected' : ''}>${c}</option>`).join('');
         card.innerHTML = `
           <button type="button" class="remove-class-btn" onclick="removeClassMapping(${cardIndex})">??? Remove</button>
           <h4>?? Class & Subjects</h4>
@@ -1273,8 +1331,8 @@
         selectEl.addEventListener('change', (e) => {
           updateSubjectsForClass(cardIndex, e.target.value);
         });
-        if (existingClass) {
-          updateSubjectsForClass(cardIndex, existingClass, existingSubjects);
+        if (classDisplay) {
+          updateSubjectsForClass(cardIndex, classDisplay, existingSubjects);
         }
       }
 
@@ -1289,7 +1347,10 @@
       function updateSubjectsForClass(cardIndex, className, preselected = []) {
         const subjectsGrid = document.getElementById(`subjects-grid-${cardIndex}`);
         if (!subjectsGrid) return;
-        const subjects = SUBJECTS_BY_CLASS[className] || [];
+        const classDisplay = toDisplayClass(className);
+        const baseSubjects = SUBJECTS_BY_CLASS[classDisplay] || [];
+        const dynamicSubjects = customSubjectCatalog[classDisplay] || [];
+        const subjects = uniqueSubjects([...baseSubjects, ...dynamicSubjects, ...(preselected || [])]);
         if (!subjects.length) {
           subjectsGrid.innerHTML = '<p style="color: rgba(255,255,255,0.6); font-size: 0.9rem;">Please select a class first</p>';
           return;
@@ -1305,12 +1366,12 @@
           `;
           subjectsGrid.appendChild(item);
           item.querySelector('input').addEventListener('change', () => {
-            updateClassSubjectMap(cardIndex, subject ? className : '');
+            updateClassSubjectMap(cardIndex, subject ? classDisplay : '');
           });
         });
         if (classSubjectMap[cardIndex]) {
-          classSubjectMap[cardIndex].class = className;
-          updateClassSubjectMap(cardIndex, className);
+          classSubjectMap[cardIndex].class = classDisplay;
+          updateClassSubjectMap(cardIndex, classDisplay);
         }
       }
 
@@ -1513,7 +1574,7 @@
             toast('Please add at least one class with subjects', 'warning');
             return;
           }
-          const allClasses = [...new Set(validMappings.map((m) => m.class))];
+          const allClasses = [...new Set(validMappings.map((m) => toDisplayClass(m.class)))];
           const allSubjects = [...new Set(validMappings.flatMap((m) => m.subjects))];
           const payload = {
             teacherType,
@@ -1539,6 +1600,7 @@
 
       async function setup() {
         currentYear = String(getYear());
+        await loadCustomSubjectCatalogForYear();
         initYearSelector();
         classSubjectMap = [];
         if (classSubjectMappings) classSubjectMappings.innerHTML = '';

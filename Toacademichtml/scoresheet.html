@@ -29,14 +29,14 @@
   <script src="../Todashboardhtml/yearContext.js"></script>
   <script>
     const SOMAP_DEFAULT_YEAR = 2025;
-    const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
+    const CLASS_ORDER = ['Baby Class','Middle Class','Pre-Unit','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
     function normalizeClassNameForEnrollment(name) {
       const s = String(name || '').trim();
       if (!s) return 'Unknown';
       const low = s.toLowerCase();
       if (low.includes('baby')) return 'Baby Class';
       if (low.includes('middle')) return 'Middle Class';
-      if (low.includes('pre') || low.includes('nursery') || low.includes('unit')) return 'Pre Unit Class';
+      if (low.includes('pre') || low.includes('nursery') || low.includes('unit')) return 'Pre-Unit';
       const m = low.match(/class\s*(\d+)/) || low.match(/\b(\d+)\b/);
       if (m) return `Class ${parseInt(m[1], 10)}`;
       return s.replace(/\s+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -257,6 +257,9 @@
 
       <div class="flex items-center gap-2">
         <button id="btnCheckScoresheet" class="px-3 py-2 rounded-lg bg-violet-600 text-white text-sm" onclick="window.location.href='checkscoresheet.html'">Check Scoresheet</button>
+        <button id="btnAddSubject" class="px-3 py-2 rounded-lg bg-amber-600 text-white text-sm flex items-center gap-1" title="Add subject to this class">
+          <i class="fas fa-plus-circle"></i> Add Subject
+        </button>
         <button id="btnFullScreen" class="px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm">Full Screen</button>
         <button id="btnSaveAll" class="px-3 py-2 rounded-lg bg-sky-600 text-white text-sm">Save Scores</button>
         <div class="hidden sm:flex gap-2">
@@ -568,6 +571,7 @@
   const btnExportPDF = document.getElementById('btnExportPDF');
   const btnPrint = document.getElementById('btnPrint');
   const btnSetAllMax = document.getElementById('btnSetAllMax');
+  const btnAddSubject = document.getElementById('btnAddSubject');
   const btnGenerateReports = document.getElementById('btnGenerateReports');
   const btnEmailReports = document.getElementById('btnEmailReports');
   const globalMaxInput = document.getElementById('globalMaxInput');
@@ -970,6 +974,73 @@
       return out;
     }
 
+    async function loadCustomSubjectsForYear(year){
+      const api = SomapSub();
+      if (!api.setCustomSubjectsMap) return {};
+      try {
+        const found = await readFirstExisting([`subjectCatalog/${year}`]);
+        const raw = found?.snap?.exists?.() ? (found.snap.val() || {}) : {};
+        const map = {};
+        Object.entries(raw || {}).forEach(([className, bucket]) => {
+          const labels = [];
+          if (Array.isArray(bucket)) {
+            bucket.forEach((entry) => {
+              const label = typeof entry === 'string' ? entry : (entry?.label || entry?.name || '');
+              if (label) labels.push(label);
+            });
+          } else if (bucket && typeof bucket === 'object') {
+            Object.values(bucket).forEach((entry) => {
+              const label = typeof entry === 'string' ? entry : (entry?.label || entry?.name || '');
+              if (label) labels.push(label);
+            });
+          }
+          if (labels.length) map[className] = labels;
+        });
+        api.setCustomSubjectsMap(map, { year, replace: true });
+        return map;
+      } catch (err) {
+        console.warn('[scoresheet] loadCustomSubjectsForYear failed', err?.message || err);
+        return {};
+      }
+    }
+
+    async function saveCustomSubjectToDb(year, className, subjectLabel){
+      const db = getDB();
+      if (!db) return;
+      const classKey = SomapSub().canonClass ? SomapSub().canonClass(className) : String(className || '').trim();
+      const subjectKey = makeSubjectKey(subjectLabel);
+      if (!classKey || !subjectKey) return;
+      const payload = {
+        label: String(subjectLabel || '').trim(),
+        key: subjectKey,
+        className: classKey,
+        year: Number(year) || Number(new Date().getFullYear()),
+        createdAt: firebase.database.ServerValue.TIMESTAMP
+      };
+      const path = `subjectCatalog/${year}/${classKey}/${subjectKey}`;
+      await db.ref(scopedPath(path)).set(payload);
+      if (isSocrates) {
+        await db.ref(path).set(payload);
+      }
+    }
+
+    function captureCurrentScoresFromInputs(){
+      const snapshot = {};
+      Object.entries(state.rowsByAdm || {}).forEach(([adm, row]) => {
+        snapshot[adm] = snapshot[adm] || {};
+        Object.entries(row.subjectCells || {}).forEach(([subjectKey, cell]) => {
+          const score = Number(cell?.scoreInput?.value ?? 0);
+          const max = Number(cell?.maxInput?.value ?? 100);
+          snapshot[adm][subjectKey] = {
+            score: Number.isFinite(score) ? score : 0,
+            max: Number.isFinite(max) && max > 0 ? max : 100,
+            label: cell?.label || subjectKey
+          };
+        });
+      });
+      return snapshot;
+    }
+
     /* ---------- Save ---------- */
     async function saveAllScores(){
       const db = getDB();
@@ -1073,7 +1144,7 @@
         tr.appendChild(tdAdm);
 
         const tdName = document.createElement('td'); tdName.className='p-2 border sticky-col-3'; tdName.dataset.label = 'Student';
-        tdName.innerHTML = `<div class="font-medium">${escapeHtml(s.name)}</div><div class="text-xs text-slate-500">${escapeHtml(s.class)} ${s.stream? '('+escapeHtml(s.stream)+')':''}</div>`;
+        tdName.innerHTML = `<div class="font-medium">${escapeHtml(s.name)}</div><div class="text-xs text-slate-500">${escapeHtml(s.class)}</div>`;
         tr.appendChild(tdName);
 
         const feeObj = state.fees[s.adm] || { required: s.feeDue || 0, paid: s.feePaid || 0, balance: s.balance || 0 };
@@ -1446,6 +1517,7 @@
 
       currentClass = state.className;
       currentYear = state.year;
+      await loadCustomSubjectsForYear(state.year);
       state.subjectList = getSubjectsForClassAndYear(state.className, state.year);
       console.log('Subject list for', state.className, ':', state.subjectList.map(s => s.label));
 
@@ -1481,6 +1553,39 @@
     btnExportPDF.addEventListener('click', exportPDF);
     btnPrint.addEventListener('click', ()=>window.print());
     btnSetAllMax.addEventListener('click', ()=>{ const v = Number(globalMaxInput.value||100); scoresBody.querySelectorAll('input.max-input').forEach(i=>i.value=v); recomputeAll(); });
+    if (btnAddSubject) {
+      btnAddSubject.addEventListener('click', async () => {
+        if (!state.className || !state.year) {
+          alert('Select class and year first.');
+          return;
+        }
+        const input = prompt(`Add subject for ${state.className} (${state.year})`, '');
+        const rawLabel = String(input || '').trim();
+        if (!rawLabel) return;
+        const canonical = SomapSub().canonSubject ? SomapSub().canonSubject(rawLabel) : rawLabel;
+        const key = makeSubjectKey(canonical);
+        if (!key) return;
+        const exists = (state.subjectList || []).some((s) => s.key === key);
+        if (exists) {
+          alert(`"${canonical}" already exists for ${state.className}.`);
+          return;
+        }
+        const snapshot = captureCurrentScoresFromInputs();
+        if (SomapSub().addCustomSubject) {
+          SomapSub().addCustomSubject(state.className, canonical, state.year);
+        }
+        await saveCustomSubjectToDb(state.year, state.className, canonical);
+        state.subjectList = getSubjectsForClassAndYear(state.className, state.year);
+        const merged = { ...(state.scores || {}) };
+        Object.entries(snapshot).forEach(([adm, rec]) => {
+          merged[adm] = { ...(merged[adm] || {}), ...(rec || {}) };
+        });
+        state.scores = merged;
+        buildTable();
+        recomputeAll();
+        lblStatus.textContent = `Added subject: ${canonical}`;
+      });
+    }
 
     // ✅ NEW: open standalone report-form dashboard instead of generating here
     btnGenerateReports.addEventListener('click', () => {

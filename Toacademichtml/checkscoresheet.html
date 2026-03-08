@@ -224,12 +224,38 @@
       return den>0 ? (num*100)/den : 0;
     }
 
-    /* ---------- STATE ---------- */
-    function getSubjectConfigsForClass(className){
-      const normalizedKey = Object.keys(SUBJECTS_BY_CLASS).find(k => k.toLowerCase() === String(className || '').trim().toLowerCase());
-      const list = SUBJECTS_BY_CLASS[normalizedKey || className] || [];
-      return list.map(sub => ({ key: sanitizeSubjectKey(sub), label: sub }));
+    async function loadCustomSubjectsForYear(year){
+      const api = SomapSub();
+      if (!api.setCustomSubjectsMap) return;
+      try {
+        const y = String(year || state.year || new Date().getFullYear());
+        const db = getDB();
+        if (!db) return;
+        const scopedPath = (SOMAP?.P ? SOMAP.P(`subjectCatalog/${y}`) : `subjectCatalog/${y}`);
+        let snap = await db.ref(scopedPath).once('value');
+        const schoolId = String(SOMAP?.getSchool?.()?.id || '').trim();
+        if ((!snap || !snap.exists()) && schoolId === 'socrates-school') {
+          snap = await db.ref(`subjectCatalog/${y}`).once('value');
+        }
+        const raw = (snap && snap.exists()) ? (snap.val() || {}) : {};
+        const map = {};
+        Object.entries(raw || {}).forEach(([className, bucket]) => {
+          const labels = [];
+          if (Array.isArray(bucket)) {
+            bucket.forEach((entry) => labels.push(typeof entry === 'string' ? entry : (entry?.label || entry?.name || '')));
+          } else if (bucket && typeof bucket === 'object') {
+            Object.values(bucket).forEach((entry) => labels.push(typeof entry === 'string' ? entry : (entry?.label || entry?.name || '')));
+          }
+          const clean = labels.map(x => String(x || '').trim()).filter(Boolean);
+          if (clean.length) map[className] = clean;
+        });
+        api.setCustomSubjectsMap(map, { year: y, replace: true });
+      } catch (err) {
+        console.warn('[checkscoresheet] load custom subjects failed', err?.message || err);
+      }
     }
+
+    /* ---------- STATE ---------- */
 
     const state = {
       students: [], attendance: {}, fees: {}, scores: {}, subjectList: [], subjectConfigs: [],
@@ -255,10 +281,10 @@
       const classMap = {
         'ssbabyclass': 'Baby Class',
         'ssmiddleclass': 'Middle Class',
-        'sspreunit': 'Pre-Unit Class',
-        'ssclass1ab': 'Class 1 AB',
+        'sspreunit': 'Pre-Unit',
+        'ssclass1ab': 'Class 1',
         'ssclass1': 'Class 1',
-        'ssclass2ab': 'Class 2 AB',
+        'ssclass2ab': 'Class 2',
         'ssclass2': 'Class 2',
         'ssclass3': 'Class 3',
         'ssclass4': 'Class 4',
@@ -359,8 +385,10 @@
 
     function normalizeStudentRecord(admKey, s){
       const name = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || s.fullName || ('Student ' + admKey);
-      const sClass = s.class || s.currentClass || s.level || s.className || s.grade || s.classLevel || '';
-      const sStream = s.stream || s.streamName || s.section || '';
+      const rawClass = s.class || s.currentClass || s.level || s.className || s.grade || s.classLevel || '';
+      const sClass = SomapSub().canonClass ? SomapSub().canonClass(rawClass) : rawClass;
+      const embeddedStream = String(rawClass || '').match(/\(([^)]+)\)/)?.[1] || '';
+      const sStream = s.stream || s.streamName || s.section || embeddedStream || '';
       const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || s.required || s.debt || 0);
       let feePaid = Number(s.paid || s.feePaid || s.totalPaid || s.paidAmount || s.credit || 0);
       if (s.payments && typeof s.payments === 'object') {
@@ -526,7 +554,7 @@
         tr.appendChild(tdAdm);
 
         const tdName = document.createElement('td'); tdName.className='p-2 border';
-        tdName.innerHTML = `<div class="font-medium">${escapeHtml(s.name)}</div><div class="text-xs text-slate-500">${escapeHtml(s.class)} ${s.stream? '('+escapeHtml(s.stream)+')':''}</div>`;
+        tdName.innerHTML = `<div class="font-medium">${escapeHtml(s.name)}</div><div class="text-xs text-slate-500">${escapeHtml(s.class)}</div>`;
         tr.appendChild(tdName);
 
         const feeObj = state.fees[s.adm] || { required: s.feeDue || 0, paid: s.feePaid || 0, balance: s.balance || 0 };
@@ -729,6 +757,7 @@
         ss.setItem('examType', state.examType);
       } catch(e) {}
 
+      await loadCustomSubjectsForYear(state.year);
       state.subjectConfigs = getSubjectConfigsForClass(state.className);
       state.subjectList = state.subjectConfigs.map(s => s.key);
 
@@ -831,7 +860,7 @@
           doc.text(`Generated ${new Date().toLocaleString()}`, data.settings.margin.left, doc.internal.pageSize.height - 10);
         }
       });
-      doc.save(title.replace(/[^A-Za-z0-9_\\- ]/g,'_') + '.pdf');
+      doc.save(title.replace(/[^A-Za-z0-9_ -]/g,'_') + '.pdf');
     }
 
     /* ---------- Event Listeners ---------- */
