@@ -475,6 +475,7 @@
     const BUILT_IN_EXAMS = Object.keys(EXAM_KEYS).map(label => ({ label, key: EXAM_KEYS[label], builtIn: true }));
     let customExamRegistryCache = [];
     let examRegistryListenerAttached = false;
+    let examRegistryContextSig = '';
 
     function slugifyExamKey(label) {
       return String(label || '')
@@ -523,6 +524,76 @@
         })
         .slice(0, 60);
     }
+    function examLabelFromKey(rawKey) {
+      const key = String(rawKey || '').trim();
+      if (!key) return '';
+      const builtIn = Object.entries(EXAM_KEYS).find(([, v]) => String(v).toLowerCase() === key.toLowerCase());
+      if (builtIn) return builtIn[0];
+      return key
+        .replace(/[_-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/\b\w/g, m => m.toUpperCase());
+    }
+    function isMonthLikeToken(token) {
+      const t = String(token || '').trim();
+      if (!t) return true;
+      const lower = t.toLowerCase();
+      if (MONTH_KEYS.some(m => m.toLowerCase() === lower)) return true;
+      if (Object.keys(MONTH_LABELS).some(k => String(k).toLowerCase() === lower)) return true;
+      return false;
+    }
+    async function discoverCustomExamsFromData({ year, className } = {}) {
+      const discovered = [];
+      const yearValue = String(year || yearSelect?.value || window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear());
+      const classCandidates = [];
+      const clsRaw = String(className || classSelect?.value || state?.assignedClass || '').trim();
+      if (clsRaw) {
+        classCandidates.push(clsRaw);
+        const digits = clsRaw.match(/(\d+)/)?.[1];
+        if (digits) {
+          if (!classCandidates.includes(digits)) classCandidates.push(digits);
+          const pref = `Class ${digits}`;
+          if (!classCandidates.includes(pref)) classCandidates.push(pref);
+        }
+      }
+      for (const cls of classCandidates) {
+        const scoreRoot = await readFirstExisting([`scores/${yearValue}/${cls}`]);
+        const scoreVal = scoreRoot?.snap?.exists?.() ? (scoreRoot.snap.val() || {}) : {};
+        Object.keys(scoreVal).forEach(key => {
+          if (isMonthLikeToken(key)) return;
+          const examKey = slugifyExamKey(key);
+          if (Object.values(EXAM_KEYS).includes(examKey)) return;
+          discovered.push({
+            label: examLabelFromKey(key),
+            key: examKey,
+            category: 'Recovered',
+            month: '',
+            scope: clsRaw || cls,
+            purpose: 'Recovered from existing scores data',
+            createdAt: Date.now()
+          });
+        });
+
+        const summaryRoot = await readFirstExisting([`summaries/${yearValue}/${cls}`]);
+        const summaryVal = summaryRoot?.snap?.exists?.() ? (summaryRoot.snap.val() || {}) : {};
+        Object.keys(summaryVal).forEach(key => {
+          if (isMonthLikeToken(key)) return;
+          const examKey = slugifyExamKey(key);
+          if (Object.values(EXAM_KEYS).includes(examKey)) return;
+          discovered.push({
+            label: examLabelFromKey(key),
+            key: examKey,
+            category: 'Recovered',
+            month: '',
+            scope: clsRaw || cls,
+            purpose: 'Recovered from existing summary data',
+            createdAt: Date.now()
+          });
+        });
+      }
+      return normalizeExamRegistryItems(discovered);
+    }
     async function persistExamRegistry(items) {
       const clean = normalizeExamRegistryItems(items);
       customExamRegistryCache = clean;
@@ -541,12 +612,17 @@
       } catch (err) {
         remoteItems = [];
       }
-      const merged = normalizeExamRegistryItems([...(remoteItems || []), ...(localItems || [])]);
+      const discovered = await discoverCustomExamsFromData({ year: yearSelect?.value, className: classSelect?.value });
+      const merged = normalizeExamRegistryItems([...(remoteItems || []), ...(localItems || []), ...(discovered || [])]);
       customExamRegistryCache = merged;
       writeLocalExamRegistry(merged);
       const hasLocalOnlyEntries = merged.length > remoteItems.length;
       if (hasLocalOnlyEntries) {
-        try { await persistExamRegistry(merged); } catch (_) {}
+        try {
+          await persistExamRegistry(merged);
+        } catch (err) {
+          console.warn('[academic] exam registry sync failed', err?.message || err);
+        }
       }
       return customExamRegistryCache;
     }
@@ -1205,6 +1281,16 @@
       state.month = selectedMonth;
       state.examKey = getExamKeyFromLabel(selectedExam);
       state.schoolBranch = (schoolBranch && schoolBranch.value) ? schoolBranch.value.trim() : '';
+      const currentExamContextSig = `${state.year}::${state.className}`;
+      if (examRegistryContextSig !== currentExamContextSig) {
+        examRegistryContextSig = currentExamContextSig;
+        try {
+          await loadExamRegistry();
+          populateExamTypeSelect(selectedExam);
+        } catch (err) {
+          console.warn('[academic] exam registry refresh failed', err?.message || err);
+        }
+      }
       
       let inputStream = (streamInput && streamInput.value) ? streamInput.value.trim() : '';
 
