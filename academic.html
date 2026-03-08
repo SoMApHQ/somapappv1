@@ -1245,8 +1245,24 @@
       if (!api.setCustomSubjectsMap) return;
       try {
         const found = await readFirstExisting([`subjectCatalog/${year}`]);
-        const raw = found?.snap?.exists?.() ? (found.snap.val() || {}) : {};
+        let raw = found?.snap?.exists?.() ? (found.snap.val() || {}) : {};
+        if (!Object.keys(raw || {}).length) {
+          try {
+            const legacySnap = await getDB()?.ref(`subjectCatalog/${year}`).get();
+            if (legacySnap && legacySnap.exists && legacySnap.exists()) {
+              raw = legacySnap.val() || {};
+            }
+          } catch (_) {}
+        }
         const map = {};
+        const addLabels = (className, labels) => {
+          const cls = String(className || '').trim();
+          if (!cls) return;
+          const list = Array.isArray(labels) ? labels : [];
+          if (!list.length) return;
+          if (!map[cls]) map[cls] = [];
+          map[cls].push(...list.filter(Boolean).map((v) => String(v).trim()).filter(Boolean));
+        };
         Object.entries(raw || {}).forEach(([className, bucket]) => {
           const labels = [];
           if (Array.isArray(bucket)) {
@@ -1260,7 +1276,30 @@
               if (label) labels.push(label);
             });
           }
-          if (labels.length) map[className] = labels;
+          addLabels(className, labels);
+        });
+        const teacherCfgFound = await readFirstExisting([`years/${year}/teachers_config`, `teachers_config/${year}`]);
+        let teacherCfg = teacherCfgFound?.snap?.exists?.() ? (teacherCfgFound.snap.val() || {}) : {};
+        if (!Object.keys(teacherCfg || {}).length) {
+          try {
+            const legacyCfgSnap = await getDB()?.ref(`years/${year}/teachers_config`).get();
+            if (legacyCfgSnap && legacyCfgSnap.exists && legacyCfgSnap.exists()) {
+              teacherCfg = legacyCfgSnap.val() || {};
+            }
+          } catch (_) {}
+        }
+        Object.values(teacherCfg || {}).forEach((cfg) => {
+          const mappings = Array.isArray(cfg?.classSubjectMappings) ? cfg.classSubjectMappings : [];
+          mappings.forEach((mapping) => {
+            const className =
+              mapping?.class ||
+              mapping?.className ||
+              mapping?.classLevel ||
+              mapping?.grade ||
+              '';
+            const labels = Array.isArray(mapping?.subjects) ? mapping.subjects : [];
+            addLabels(className, labels);
+          });
         });
         api.setCustomSubjectsMap(map, { year, replace: true });
       } catch (err) {
