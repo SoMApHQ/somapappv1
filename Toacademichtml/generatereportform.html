@@ -626,6 +626,21 @@
     function canonicalSubjectName(sub){
       return SomapSub().canonSubject ? SomapSub().canonSubject(sub) : sub;
     }
+    function stripTrailingClassStream(label){
+      const raw = String(label || '').trim();
+      if (!raw) return '';
+      return raw.replace(/\s*\(([^)]+)\)\s*$/, '').trim();
+    }
+    function extractEmbeddedStream(label){
+      const raw = String(label || '').trim();
+      const match = raw.match(/\(([^)]+)\)\s*$/);
+      return match ? String(match[1] || '').trim() : '';
+    }
+    function normalizeDisplayClass(label){
+      const noStream = stripTrailingClassStream(label);
+      const canon = SomapSub().canonClass ? SomapSub().canonClass(noStream) : noStream;
+      return String(canon || noStream || label || '').trim();
+    }
 
     // Monthly attempted-only helpers (reuse existing monthly loader)
     async function getMonthSubjects(studentId, monthName){
@@ -725,8 +740,8 @@
     function hydrateFromSession(){
       const ss = window.sessionStorage;
       const classFromSession = ss.getItem('className') || ss.getItem(PREFS.CLASS_KEY) || 'Class 1';
-      state.classKey = classFromSession;
-      state.className = SomapSub().canonClass ? SomapSub().canonClass(classFromSession) : classFromSession;
+      state.classKey = normalizeDisplayClass(classFromSession);
+      state.className = normalizeDisplayClass(classFromSession);
       state.stream = ss.getItem('stream') || ss.getItem(PREFS.STREAM_KEY) || '';
       state.year = ss.getItem('year') || ss.getItem(PREFS.YEAR_KEY) || new Date().getFullYear();
       const rawMonth = ss.getItem('month') || ss.getItem(PREFS.MONTH_KEY) || '';
@@ -904,8 +919,8 @@
         persistToSession(); loadTeachers().then(loadAllData);
       });
       document.getElementById('classSelect').addEventListener('change', e => {
-        state.classKey = e.target.value;
-        state.className = SomapSub().canonClass ? SomapSub().canonClass(state.classKey) : state.classKey;
+        state.classKey = normalizeDisplayClass(e.target.value);
+        state.className = normalizeDisplayClass(state.classKey);
         state.subjects = subjectListForClass(state.className, state.year);
         persistToSession(); loadAllData();
       });
@@ -993,7 +1008,7 @@
           const mappings = Array.isArray(cfg?.classSubjectMappings) ? cfg.classSubjectMappings : [];
 
           mappings.forEach((mapping) => {
-            const classCanon = SomapSub().canonClass ? SomapSub().canonClass(mapping?.class || '') : String(mapping?.class || '').trim();
+            const classCanon = normalizeDisplayClass(mapping?.class || '');
             const subjects = Array.isArray(mapping?.subjects) ? mapping.subjects : [];
             subjects.forEach((subjectRaw) => {
               const subjectCanon = canonicalSubjectName(subjectRaw || '');
@@ -1006,25 +1021,25 @@
                   state.teacherByClassSubject.set(classSubjectKey, teacherName);
                 }
               }
-              if (!state.teacherBySubject.has(subjectUpper)) {
-                state.teacherBySubject.set(subjectUpper, teacherName);
-              }
             });
           });
         });
 
-        // 3) Legacy fallback: generic `teachers` path with { subject, name }
+        // 3) Legacy fallback: only if legacy row has explicit class info.
         const legacySnap = await getSnapScopedOrLegacy('teachers');
         const legacyTeachers = legacySnap?.val?.() || {};
         Object.entries(legacyTeachers).forEach(([id, value]) => {
           const subject = canonicalSubjectName(value?.subject || '');
           const subjectUpper = String(subject || '').trim().toUpperCase();
           const name = String(value?.name || id || '').trim() || 'Teacher';
+          const legacyClass = normalizeDisplayClass(value?.class || value?.className || value?.classLevel || value?.grade || '');
           if (!subjectUpper) return;
-          if (!state.teacherBySubject.has(subjectUpper)) {
-            state.teacherBySubject.set(subjectUpper, name);
+          if (legacyClass) {
+            const classSubjectKey = `${legacyClass.toUpperCase()}::${subjectUpper}`;
+            if (!state.teacherByClassSubject.has(classSubjectKey)) {
+              state.teacherByClassSubject.set(classSubjectKey, name);
+            }
           }
-          state.teachers.set(subjectUpper, { id, name });
         });
       } catch (e) {
         state.teachers = new Map();
@@ -1068,7 +1083,7 @@
                 let studentClass = student.class || student.currentClass || student.level || student.className || student.grade || student.classLevel || '';
                 
                 if (studentClass) {
-                  studentClass = SomapSub().canonClass ? SomapSub().canonClass(studentClass) : studentClass;
+                  studentClass = normalizeDisplayClass(studentClass);
                 }
                 
                 if (studentClass) {
@@ -1107,7 +1122,8 @@
         }
 
         ensureCacheContext();
-        state.className = SomapSub().canonClass ? SomapSub().canonClass(state.className) : state.className;
+        state.className = normalizeDisplayClass(state.className);
+        state.classKey = normalizeDisplayClass(state.classKey || state.className);
         state.subjects = subjectListForClass(state.className, state.year) || state.subjects || [];
         const dbClass = state.classKey || state.className;
         const [students, attendance, fees, scoresRaw, detailsMap] = await Promise.all([
@@ -1253,11 +1269,10 @@
 
     function normalizeStudentRecord(admKey, s){
       const name = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || s.fullName || ('Student ' + admKey);
-      let sClass = s.class || s.currentClass || s.level || s.className || s.grade || s.classLevel || '';
-      if (sClass && SomapSub().canonClass) {
-        sClass = SomapSub().canonClass(sClass);
-      }
-      const sStream = s.stream || s.streamName || s.section || '';
+      const rawClass = s.class || s.currentClass || s.level || s.className || s.grade || s.classLevel || '';
+      const sClass = normalizeDisplayClass(rawClass);
+      const embeddedStream = extractEmbeddedStream(rawClass);
+      const sStream = s.stream || s.streamName || s.section || embeddedStream || '';
       const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || s.required || s.debt || 0);
       let feePaid = Number(s.paid || s.feePaid || s.totalPaid || s.paidAmount || s.credit || 0);
       if (s.payments && typeof s.payments === 'object') {
@@ -1780,13 +1795,11 @@
     function getTeacherName(subject, className){
       const subjectCanon = canonicalSubjectName(subject || '');
       const subjectUpper = String(subjectCanon || '').trim().toUpperCase();
-      const classCanon = SomapSub().canonClass ? SomapSub().canonClass(className || state.className || '') : String(className || state.className || '').trim();
+      const classCanon = normalizeDisplayClass(className || state.className || '');
       const classSubjectKey = `${String(classCanon || '').toUpperCase()}::${subjectUpper}`;
       if (state.teacherByClassSubject.has(classSubjectKey)) return state.teacherByClassSubject.get(classSubjectKey);
-      if (state.teacherBySubject.has(subjectUpper)) return state.teacherBySubject.get(subjectUpper);
-      const entry = state.teachers.get(subjectUpper);
-      return (entry && entry.name) || 'Teacher';
-      }
+      return 'Teacher';
+    }
 
     function assignPositions(students, subjects){
       // Overall (only learners with attempts)
@@ -1932,7 +1945,7 @@
               <div class="font-semibold text-slate-100">${escapeHtml(s.name)}</div>
               <div class="text-xs text-slate-400">${escapeHtml(s.parentContact || '-')}</div>
             </td>
-            <td class="px-4 py-3">${escapeHtml(s.class || '')}${s.stream ? ' ('+escapeHtml(s.stream)+')' : ''}</td>
+            <td class="px-4 py-3">${escapeHtml(normalizeDisplayClass(s.class || state.className || ''))}</td>
             <td class="px-4 py-3">${s.avg.toFixed(1)}%</td>
             <td class="px-4 py-3"><span class="status-pill ${pillClass}">Grade ${s.grade}</span></td>
             <td class="px-4 py-3">
@@ -2164,14 +2177,20 @@ function toNormalizedRows(subjects){
       doc.setTextColor(226, 232, 240);
       doc.setFontSize(12); doc.text(String(state.branch || 'School'), margin + 25, headerY + 2);
       doc.setFontSize(16); doc.text('Academic Report Card', margin + 25, headerY + 12);
-      doc.setFontSize(10); doc.text(`Year ${state.year}  |  ${state.examType} (${s.monthLabel})  |  ${state.className}${s.stream? ' ('+s.stream+')':''}`, margin + 25, headerY + 20);
+      doc.setFontSize(10); doc.text(`Year: ${state.year}  |  Exam: ${state.examType}  |  Month: ${s.monthLabel}`, margin + 25, headerY + 20);
+      doc.setFontSize(10); doc.text(`Class: ${normalizeDisplayClass(state.className || s.class || '')}`, margin + 25, headerY + 26);
       let photoData = null;
       const pdfPhotoUrl = s.photoUrl || s.passportPhotoUrl;
       if (pdfPhotoUrl){
-        const transformed = transformToJpegIfCloudinary(String(pdfPhotoUrl), 300, 400) || pdfPhotoUrl;
+        const transformed = transformToJpegIfCloudinary(String(pdfPhotoUrl), 600, 800) || pdfPhotoUrl;
         photoData = await loadImageAsDataURL(transformed);
       }
-      if (photoData) doc.addImage(photoData, 'JPEG', 160, headerY - 2, 30, 40);
+      if (photoData) {
+        const fmt = String(photoData).startsWith('data:image/png') ? 'PNG' : 'JPEG';
+        doc.setDrawColor(148, 163, 184);
+        doc.roundedRect(158, headerY - 3, 34, 44, 2, 2);
+        doc.addImage(photoData, fmt, 159, headerY - 2, 32, 42);
+      }
       else { doc.setDrawColor(148, 163, 184); doc.rect(160, headerY - 2, 30, 40); doc.text('Photo', 165, headerY + 18); }
 
       doc.setTextColor(15, 23, 42); doc.setFontSize(11);
@@ -2200,8 +2219,8 @@ function toNormalizedRows(subjects){
           index + 1, entry.subject, entry.dispScore.toFixed(1), formatNumber(entry.dispMax),
           entry.pct.toFixed(1), entry.position || '-', entry.teacher || 'Teacher'
         ]),
-        styles: { fontSize: 9, textColor: [15, 23, 42] },
-        headStyles: { fillColor: [30, 64, 175], textColor: 255, fontSize: 9 },
+        styles: { fontSize: 9.6, textColor: [15, 23, 42], lineWidth: 0.1, cellPadding: 2.2 },
+        headStyles: { fillColor: [30, 64, 175], textColor: 255, fontSize: 9.8 },
         alternateRowStyles: { fillColor: [241, 245, 249] },
         theme: 'grid', margin: { left: margin, right: margin }
       });
@@ -2227,8 +2246,8 @@ function toNormalizedRows(subjects){
         if (parts.length < 2) return url;
         const left = parts[0];
         const right = parts.slice(1).join('/image/upload/');
-        // Basic transform: crop fit to WxH, auto format jpeg, quality 85
-        const transform = `c_fit,w_${Math.max(1,Math.floor(w||300))},h_${Math.max(1,Math.floor(h||400))},f_jpg,q_85`;
+        // Better passport/photo rendering for report cards.
+        const transform = `c_fill,g_auto,w_${Math.max(1,Math.floor(w||600))},h_${Math.max(1,Math.floor(h||800))},f_jpg,q_auto:good,dpr_2`;
         if (right.startsWith('v') || right.startsWith('c_')){
           // Already has something; ensure our transform is prepended
           return `${left}/image/upload/${transform}/${right}`;
