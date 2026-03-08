@@ -471,7 +471,10 @@
       'Annual': 'annual'
     };
     const EXAM_REGISTRY_KEY = 'somap_custom_exam_registry_v1';
+    const EXAM_REGISTRY_PATH = 'academic/customExamRegistry';
     const BUILT_IN_EXAMS = Object.keys(EXAM_KEYS).map(label => ({ label, key: EXAM_KEYS[label], builtIn: true }));
+    let customExamRegistryCache = [];
+    let examRegistryListenerAttached = false;
 
     function slugifyExamKey(label) {
       return String(label || '')
@@ -480,7 +483,7 @@
         .replace(/^-+|-+$/g, '')
         .replace(/-+/g, '-') || 'custom-exam';
     }
-    function getStoredExamRegistry() {
+    function readLocalExamRegistry() {
       try {
         const raw = localStorage.getItem(EXAM_REGISTRY_KEY);
         const parsed = JSON.parse(raw || '[]');
@@ -489,10 +492,78 @@
         return [];
       }
     }
-    function saveExamRegistry(items) {
+    function writeLocalExamRegistry(items) {
       try {
         localStorage.setItem(EXAM_REGISTRY_KEY, JSON.stringify(items || []));
       } catch (e) {}
+    }
+    function normalizeExamRegistryItems(items) {
+      const seen = new Set();
+      return (Array.isArray(items) ? items : [])
+        .map(item => {
+          const label = String(item?.label || '').trim().replace(/\s+/g, ' ');
+          const key = String(item?.key || '').trim() || slugifyExamKey(label);
+          if (!label) return null;
+          return {
+            label,
+            key,
+            category: String(item?.category || '').trim(),
+            month: String(item?.month || '').trim(),
+            scope: String(item?.scope || '').trim(),
+            purpose: String(item?.purpose || '').trim(),
+            createdAt: Number(item?.createdAt) || Date.now()
+          };
+        })
+        .filter(Boolean)
+        .filter(item => {
+          const dedupeKey = `${item.key}::${item.label}`.toLowerCase();
+          if (seen.has(dedupeKey)) return false;
+          seen.add(dedupeKey);
+          return true;
+        })
+        .slice(0, 60);
+    }
+    async function persistExamRegistry(items) {
+      const clean = normalizeExamRegistryItems(items);
+      customExamRegistryCache = clean;
+      writeLocalExamRegistry(clean);
+      const ref = schoolRef(EXAM_REGISTRY_PATH);
+      if (!ref) return clean;
+      await ref.set(clean);
+      return clean;
+    }
+    async function loadExamRegistry() {
+      const localItems = normalizeExamRegistryItems(readLocalExamRegistry());
+      let remoteItems = [];
+      try {
+        const snap = await scopedOrSocratesLegacy(EXAM_REGISTRY_PATH, EXAM_REGISTRY_PATH);
+        remoteItems = normalizeExamRegistryItems(snap?.exists?.() ? snap.val() : []);
+      } catch (err) {
+        remoteItems = [];
+      }
+      const merged = normalizeExamRegistryItems([...(remoteItems || []), ...(localItems || [])]);
+      customExamRegistryCache = merged;
+      writeLocalExamRegistry(merged);
+      const hasLocalOnlyEntries = merged.length > remoteItems.length;
+      if (hasLocalOnlyEntries) {
+        try { await persistExamRegistry(merged); } catch (_) {}
+      }
+      return customExamRegistryCache;
+    }
+    function attachExamRegistryListener() {
+      if (examRegistryListenerAttached) return;
+      const ref = schoolRef(EXAM_REGISTRY_PATH);
+      if (!ref) return;
+      examRegistryListenerAttached = true;
+      ref.on('value', snap => {
+        const selected = examType?.value || '';
+        customExamRegistryCache = normalizeExamRegistryItems(snap?.exists?.() ? snap.val() : []);
+        writeLocalExamRegistry(customExamRegistryCache);
+        populateExamTypeSelect(selected);
+      });
+    }
+    function getStoredExamRegistry() {
+      return customExamRegistryCache.slice();
     }
     function getAllExamOptions() {
       const custom = getStoredExamRegistry()
@@ -524,7 +595,7 @@
       if (!node) return;
       node.classList.toggle('open', Boolean(open));
     }
-    function registerCustomExam({ name, category, month, scope, purpose }) {
+    async function registerCustomExam({ name, category, month, scope, purpose }) {
       const label = String(name || '').trim().replace(/\s+/g, ' ');
       if (!label) throw new Error('Enter an exam name.');
       if (label.length < 3) throw new Error('Exam name is too short.');
@@ -541,7 +612,7 @@
         createdAt: Date.now()
       };
       current.unshift(entry);
-      saveExamRegistry(current.slice(0, 60));
+      await persistExamRegistry(current.slice(0, 60));
       return entry;
     }
 
@@ -1187,7 +1258,7 @@
       }
       const safeEmail = user.email.replace('.', '_');
       const db = getDB();
-      db.ref('users/' + safeEmail).once('value').then(snap => {
+      db.ref('users/' + safeEmail).once('value').then(async snap => {
         const ud = snap.val() || {};
         const allowedRoles = ['teacher', 'admin', 'head', 'academic'];
         if (!allowedRoles.includes(String(ud.role || '').toLowerCase())) {
@@ -1209,6 +1280,8 @@
         }
         // Lock dropdown to assigned class for teachers only; admin/head can select any class
         populateClasses(isTeacherOnly ? state.assignedClass : null);
+        await loadExamRegistry();
+        attachExamRegistryListener();
         populateExamTypeSelect(sessionStorage.getItem('examTypeLabel') || 'Monthly');
         classSelect.value = state.assignedClass || (classSelect.options.length ? classSelect.options[0].value : '');
         
@@ -1405,10 +1478,10 @@
 
     if (btnToggleExamBuilder) btnToggleExamBuilder.addEventListener('click', () => setExamBuilderOpen(true));
     if (btnCloseExamBuilder) btnCloseExamBuilder.addEventListener('click', () => setExamBuilderOpen(false));
-    function handleCustomExamSave(useImmediately) {
+    async function handleCustomExamSave(useImmediately) {
       if (!customExamFeedback) return;
       try {
-        const entry = registerCustomExam({
+        const entry = await registerCustomExam({
           name: customExamName?.value,
           category: customExamCategory?.value,
           month: customExamMonth?.value,
@@ -1433,8 +1506,8 @@
         customExamFeedback.className = 'text-sm text-rose-600';
       }
     }
-    if (btnSaveCustomExam) btnSaveCustomExam.addEventListener('click', () => handleCustomExamSave(false));
-    if (btnUseCustomExam) btnUseCustomExam.addEventListener('click', () => handleCustomExamSave(true));
+    if (btnSaveCustomExam) btnSaveCustomExam.addEventListener('click', () => { handleCustomExamSave(false); });
+    if (btnUseCustomExam) btnUseCustomExam.addEventListener('click', () => { handleCustomExamSave(true); });
 
     // --- SCORESHEET: simple, robust wiring ---
     const scoresheetModal = document.getElementById('scoresheetModal');
