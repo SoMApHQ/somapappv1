@@ -490,22 +490,63 @@
 
     const EXAM_KEYS = { 'Monthly':'monthly', 'Midterm 1':'midterm1', 'Midterm 2':'midterm2', 'End Term':'endterm', 'Annual':'annual' };
     const EXAM_REGISTRY_KEY = 'somap_custom_exam_registry_v1';
+    const EXAM_REGISTRY_PATH = 'academic/customExamRegistry';
+    let customExamRegistryCache = [];
+    function normalizeExamLabel(label) {
+      return String(label || '').replace(/\s*\(custom\)\s*$/i, '').trim().replace(/\s+/g, ' ');
+    }
     function slugifyExamKey(label) {
-      return String(label || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-') || 'custom-exam';
+      return normalizeExamLabel(label).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-') || 'custom-exam';
+    }
+    function normalizeExamRegistryItems(items) {
+      const seen = new Set();
+      return (Array.isArray(items) ? items : [])
+        .map(item => {
+          const label = normalizeExamLabel(item?.label);
+          const key = String(item?.key || '').trim() || slugifyExamKey(label);
+          if (!label) return null;
+          return { label, key };
+        })
+        .filter(Boolean)
+        .filter(item => {
+          const dedupe = `${item.label}::${item.key}`.toLowerCase();
+          if (seen.has(dedupe)) return false;
+          seen.add(dedupe);
+          return true;
+        });
     }
     function getStoredExamRegistry() {
+      return customExamRegistryCache.slice();
+    }
+    function readLocalExamRegistry() {
       try {
         const parsed = JSON.parse(localStorage.getItem(EXAM_REGISTRY_KEY) || '[]');
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (e) {
+        return normalizeExamRegistryItems(Array.isArray(parsed) ? parsed : []);
+      } catch (_) {
         return [];
       }
     }
+    function writeLocalExamRegistry(items) {
+      try { localStorage.setItem(EXAM_REGISTRY_KEY, JSON.stringify(items || [])); } catch (_) {}
+    }
+    async function loadExamRegistry() {
+      const localItems = readLocalExamRegistry();
+      let remoteItems = [];
+      try {
+        const snap = await getSnapScopedOrLegacy(EXAM_REGISTRY_PATH);
+        remoteItems = normalizeExamRegistryItems(snap?.exists?.() ? snap.val() : []);
+      } catch (_) {
+        remoteItems = [];
+      }
+      customExamRegistryCache = normalizeExamRegistryItems([...(remoteItems || []), ...(localItems || [])]);
+      writeLocalExamRegistry(customExamRegistryCache);
+    }
     function getExamKeyFromLabel(label) {
-      const direct = EXAM_KEYS[label];
+      const cleanLabel = normalizeExamLabel(label);
+      const direct = EXAM_KEYS[cleanLabel];
       if (direct) return direct;
-      const found = getStoredExamRegistry().find(item => item.label === label);
-      return found?.key || slugifyExamKey(label);
+      const found = getStoredExamRegistry().find(item => normalizeExamLabel(item?.label).toLowerCase() === cleanLabel.toLowerCase());
+      return found?.key || slugifyExamKey(cleanLabel);
     }
     function getAllExamOptions() {
       const builtIn = Object.keys(EXAM_KEYS).map(label => ({ label, key: EXAM_KEYS[label], builtIn: true }));
@@ -749,10 +790,11 @@
     };
 
     /* -------------------------- INIT -------------------------- */
-    document.addEventListener('DOMContentLoaded', () => {
+    document.addEventListener('DOMContentLoaded', async () => {
       // Check for parent mode URL parameters first
       checkParentMode();
       preloadLogo();
+      await loadExamRegistry();
       hydrateFromSession();
       populateSelectors();
       attachListeners();
@@ -770,7 +812,7 @@
       state.examKey = ss.getItem('examKey') || ss.getItem(PREFS.EXAM_KEY) || 'monthly';
       
       // Use the stored label if available, otherwise reverse lookup or default
-      state.examType = ss.getItem('examTypeLabel') || Object.keys(EXAM_KEYS).find(k => EXAM_KEYS[k] === state.examKey) || 'Monthly';
+      state.examType = normalizeExamLabel(ss.getItem('examTypeLabel') || Object.keys(EXAM_KEYS).find(k => EXAM_KEYS[k] === state.examKey) || 'Monthly');
       state.examKey = getExamKeyFromLabel(state.examType);
       
       if (state.examKey === 'annual') {
@@ -894,7 +936,9 @@
       const examSel = document.getElementById('examType');
       const examOptions = getAllExamOptions();
       examSel.innerHTML = examOptions.map(item => `<option value="${String(item.label).replace(/"/g, '&quot;')}">${item.builtIn ? item.label : `${item.label} (Custom)`}</option>`).join('');
-      examSel.value = examOptions.some(item => item.label === state.examType) ? state.examType : (examOptions[0]?.label || 'Monthly');
+      examSel.value = examOptions.some(item => normalizeExamLabel(item.label) === normalizeExamLabel(state.examType))
+        ? normalizeExamLabel(state.examType)
+        : (examOptions[0]?.label || 'Monthly');
       state.examType = examSel.value;
       state.examKey = getExamKeyFromLabel(state.examType);
       populateMonthOptions();
@@ -2113,35 +2157,60 @@
       if (CACHE.scoresMonthly.has(cacheKey)) return CACHE.scoresMonthly.get(cacheKey);
       let out = {};
       const variants = monthVariants(mon, rawMon);
+      const classCandidates = (() => {
+        const raw = String(className || '').trim();
+        const list = [];
+        if (raw) list.push(raw);
+        const digits = raw.match(/(\d+)/)?.[1];
+        if (digits) {
+          if (!list.includes(digits)) list.push(digits);
+          const pref = `Class ${digits}`;
+          if (!list.includes(pref)) list.push(pref);
+        }
+        return list.length ? list : [className];
+      })();
+      const examCandidates = (() => {
+        const list = [];
+        const primary = String(examKey || '').trim();
+        if (primary) list.push(primary);
+        const fromLabel = getExamKeyFromLabel(state.examType);
+        if (fromLabel && !list.includes(fromLabel)) list.push(fromLabel);
+        const fallback = slugifyExamKey(state.examType);
+        if (fallback && !list.includes(fallback)) list.push(fallback);
+        return list;
+      })();
       const tried = new Set();
       for (const variant of variants.length ? variants : [mon, rawMon]) {
         if (!variant) continue;
-        const base = `/scores/${year}/${className}`;
-        
-        const paths = [
-          `${base}/${examKey}/${variant}`,
-          `${base}/${examKey.toLowerCase()}/${variant}`,
-          `${base}/${examKey.toUpperCase()}/${variant}`
-        ];
-        
-        // Legacy fallback for 'monthly' key specifically
-        if (examKey.toLowerCase() === 'monthly') {
-           paths.push(`${base}/${variant}`);
-        }
+        for (const clsCandidate of classCandidates) {
+          const base = `/scores/${year}/${clsCandidate}`;
+          const paths = [];
+          examCandidates.forEach(candidate => {
+            paths.push(`${base}/${candidate}/${variant}`);
+            paths.push(`${base}/${candidate.toLowerCase()}/${variant}`);
+            paths.push(`${base}/${candidate.toUpperCase()}/${variant}`);
+          });
 
-        for (const path of paths) {
-          if (!path || tried.has(path)) continue;
-          tried.add(path);
-          try {
-            const snap = await getSnapScopedOrLegacy(path);
-            if (snap && snap.exists && snap.exists()) {
-              const normalized = normalizeMonthlyScoreMap(snap.val());
-              if (Object.keys(normalized).length) {
-                out = normalized;
-                break;
+          // Legacy fallback for 'monthly' key specifically
+          if (String(examKey || '').toLowerCase() === 'monthly') {
+             paths.push(`${base}/${variant}`);
+          }
+
+          for (const path of paths) {
+            if (!path || tried.has(path)) continue;
+            tried.add(path);
+            try {
+              const snap = await getSnapScopedOrLegacy(path);
+              if (snap && snap.exists && snap.exists()) {
+                const normalized = normalizeMonthlyScoreMap(snap.val());
+                if (Object.keys(normalized).length) {
+                  out = normalized;
+                  break;
+                }
               }
-            }
-          } catch (err) { /* ignore */ }
+            } catch (err) { /* ignore */ }
+          }
+          if (Object.keys(out).length) break;
         }
         if (Object.keys(out).length) break;
       }
