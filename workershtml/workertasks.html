@@ -1136,6 +1136,38 @@
         return out;
       }
 
+      function sanitizeSubjectKey(value = '') {
+        return String(value || '').trim().replace(/[.#$\[\]/]/g, '_');
+      }
+
+      async function persistSubjectCatalogFromMappings(mappings = []) {
+        const year = String(currentYear || getYear());
+        const updates = {};
+        (mappings || []).forEach((mapping) => {
+          const classDisplay = toDisplayClass(mapping?.class || '');
+          if (!classDisplay) return;
+          const subjects = uniqueSubjects(mapping?.subjects || []);
+          subjects.forEach((subject) => {
+            const key = sanitizeSubjectKey(subject);
+            if (!key) return;
+            const payload = {
+              label: subject,
+              key,
+              className: classDisplay,
+              year: Number(year) || Number(new Date().getFullYear()),
+              source: 'workers_setup',
+              updatedAt: firebase.database.ServerValue.TIMESTAMP
+            };
+            updates[schoolPath(`subjectCatalog/${year}/${classDisplay}/${key}`)] = payload;
+            if (isSocratesSchool(school?.id)) {
+              updates[`subjectCatalog/${year}/${classDisplay}/${key}`] = payload;
+            }
+          });
+        });
+        if (!Object.keys(updates).length) return;
+        await db.ref().update(updates);
+      }
+
       async function loadCustomSubjectCatalogForYear() {
         const y = String(currentYear || getYear());
         customSubjectCatalog = {};
@@ -1586,6 +1618,8 @@
           };
           try {
             await schoolRef(`years/${currentYear}/teachers_config/${currentWorkerId}`).set(payload);
+            await persistSubjectCatalogFromMappings(validMappings);
+            await loadCustomSubjectCatalogForYear();
             teacherConfig = payload;
             localStorage.setItem('somap_role', teacherType);
             toast('Profile saved successfully! Welcome to your dashboard!', 'success');
@@ -1687,6 +1721,12 @@
           if (userAvatar) userAvatar.textContent = initials;
           if (configSnap.exists() && configSnap.val().setupCompleted) {
             teacherConfig = configSnap.val();
+            try {
+              await persistSubjectCatalogFromMappings(teacherConfig.classSubjectMappings || []);
+              await loadCustomSubjectCatalogForYear();
+            } catch (syncErr) {
+              console.warn('Subject catalog sync from teacher config failed', syncErr?.message || syncErr);
+            }
             teacherRole.textContent = teacherConfig.teacherType || inferTeacherTypeFromProfile(workerProfile);
             localStorage.setItem('somap_role', teacherConfig.teacherType || '');
             loadDashboard();
