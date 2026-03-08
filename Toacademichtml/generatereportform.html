@@ -359,8 +359,10 @@
                   <th>#</th>
                   <th>Fee window</th>
                   <th>Expected</th>
-                  <th>Due by</th>
+                  <th>Allocated</th>
+                  <th>Remaining</th>
                   <th>Status</th>
+                  <th>Window</th>
                 </tr>
               </thead>
               <tbody id="previewFeeSchedule"></tbody>
@@ -1215,7 +1217,7 @@
           gender: s.gender || s.Gender || '',
           dob: s.dob || '',
           reportingDate: s.reportingDate || '',
-          photoUrl: s.photoUrl || s.passport || s.avatarUrl || '',
+          photoUrl: s.photoUrl || s.passportPhotoUrl || s.passportPhotoURL || s.passport || s.photoURL || s.avatarUrl || '',
           meta: s
         };
       };
@@ -1299,7 +1301,7 @@
         feePaid = Object.values(s.payments).reduce((sum, p) => sum + Number(p.amount || 0), 0);
       }
       const balance = Number(s.balance || Math.max(0, feeDue - feePaid) || 0);
-      const photoCandidate = s.photoUrl || s.passport || s.passportPhotoUrl || s.avatar || s.avatarUrl || s.imageUrl || s.image || '';
+      const photoCandidate = s.photoUrl || s.passport || s.passportPhotoUrl || s.passportPhotoURL || s.photoURL || s.avatar || s.avatarUrl || s.imageUrl || s.image || '';
       return {
         id: String(s.id || s.studentId || admKey),
         admissionNo: String(s.admissionNumber || s.admNo || s.admissionNo || admKey),
@@ -1337,8 +1339,8 @@
                 if (entry.gender) m.gender = entry.gender;
                 if (entry.dob || entry.dateOfBirth) m.dob = entry.dob || entry.dateOfBirth;
                 if (entry.reporting || entry.reportingDate) m.reportingDate = entry.reporting || entry.reportingDate;
-                if (entry.photoUrl || entry.passport || entry.passportPhotoUrl || entry.photo || entry.imageUrl || entry.avatar || entry.avatarUrl || entry.profilePhoto || entry.image) {
-                  m.photoUrl = entry.photoUrl || entry.passport || entry.passportPhotoUrl || entry.photo || entry.imageUrl || entry.avatar || entry.avatarUrl || entry.profilePhoto || entry.image;
+                if (entry.photoUrl || entry.passport || entry.passportPhotoUrl || entry.passportPhotoURL || entry.photo || entry.photoURL || entry.imageUrl || entry.avatar || entry.avatarUrl || entry.profilePhoto || entry.image) {
+                  m.photoUrl = entry.photoUrl || entry.passport || entry.passportPhotoUrl || entry.passportPhotoURL || entry.photo || entry.photoURL || entry.imageUrl || entry.avatar || entry.avatarUrl || entry.profilePhoto || entry.image;
                 }
               }
             });
@@ -1501,6 +1503,7 @@
 
     function toNum(v){ const n = Number(v); return Number.isFinite(n) ? n : 0; }
     function normalizeAdm(v){ return String(v || '').trim(); }
+    function normalizeFeeKey(v){ return String(v || '').trim().toUpperCase(); }
     function sumPayments(payments){
       if (!payments || typeof payments !== 'object') return 0;
       return Object.values(payments).reduce((sum, p) => sum + toNum(p?.amount || p?.paid || p?.value || 0), 0);
@@ -1573,19 +1576,24 @@
       return { label: 'Pending', cls: 'text-slate-600' };
     }
     function normalizeScheduleItems(rawItems, totalDue, year){
-      const rows = Array.isArray(rawItems) ? rawItems.slice() : [];
+      const rows = Array.isArray(rawItems)
+        ? rawItems.slice()
+        : (rawItems && typeof rawItems === 'object' ? Object.values(rawItems) : []);
       if (!rows.length) return [];
       const normalized = rows.map((row, idx) => {
         const amount = toNum(row?.amount || row?.expected || row?.expectedAmount || row?.value || 0);
         const weight = toNum(row?.weight || row?.ratio || 0);
-        const fromTs = Number(row?.fromTS || row?.fromTs || row?.startTs || row?.start || 0) || toWindowTs(row?.window?.from || row?.from, year);
-        const toTs = Number(row?.toTS || row?.toTs || row?.endTs || row?.end || row?.dueTs || row?.dueDateTs || 0) || toWindowTs(row?.window?.to || row?.to, year);
+        const fromTs = Number(row?.fromTS || row?.fromTs || row?.startTs || row?.start || row?.startDateTs || row?.fromDateTs || 0)
+          || toWindowTs(row?.window?.from || row?.from || row?.startDate || row?.dateFrom, year);
+        const toTs = Number(row?.toTS || row?.toTs || row?.endTs || row?.end || row?.dueTs || row?.dueDateTs || row?.endDateTs || row?.toDateTs || 0)
+          || toWindowTs(row?.window?.to || row?.to || row?.endDate || row?.dateTo || row?.dueBy, year);
         return {
           label: String(row?.label || row?.name || `Window ${idx + 1}`),
           amount,
           weight,
           fromTs,
-          toTs
+          toTs,
+          paidAllocated: toNum(row?.paidAllocated || row?.allocatedPaid || row?.allocated || 0)
         };
       });
       const hasAmount = normalized.some(item => item.amount > 0);
@@ -1605,6 +1613,46 @@
         }
       }
       return normalized;
+    }
+    function buildFeeScheduleViewRows(schedule, paidAmount){
+      const rows = Array.isArray(schedule) ? schedule : [];
+      if (!rows.length) return [];
+      const hasAllocated = rows.some(item => toNum(item?.paidAllocated) > 0);
+      const now = Date.now();
+      let remainingPool = Math.max(0, toNum(paidAmount));
+      return rows.map((item, idx) => {
+        const expected = Math.max(0, toNum(item?.amount));
+        let allocated = 0;
+        if (hasAllocated) {
+          allocated = Math.max(0, Math.min(expected, toNum(item?.paidAllocated)));
+        } else {
+          allocated = Math.max(0, Math.min(expected, remainingPool));
+          remainingPool = Math.max(0, remainingPool - allocated);
+        }
+        const remaining = Math.max(0, expected - allocated);
+        let status = 'Pending';
+        let cls = 'text-slate-600';
+        if (remaining <= 0.5) {
+          status = 'Cleared';
+          cls = 'text-emerald-600';
+        } else if (Number(item?.toTs || 0) && Number(item.toTs) < now) {
+          status = 'Overdue';
+          cls = 'text-red-600';
+        }
+        const fromLabel = formatDateTs(item?.fromTs);
+        const toLabel = formatDateTs(item?.toTs);
+        const windowLabel = (fromLabel !== '-' || toLabel !== '-') ? `${fromLabel} - ${toLabel}` : '-';
+        return {
+          idx: idx + 1,
+          label: item?.label || `Window ${idx + 1}`,
+          expected,
+          allocated,
+          remaining,
+          status,
+          cls,
+          windowLabel
+        };
+      });
     }
     function financeStatusFromSchedule(schedule, paid, balance){
       const now = Date.now();
@@ -1694,6 +1742,7 @@
     async function fetchFees(year, className, students = []){
       try{
         const out = {};
+        const outByNormalized = {};
         const [
           financeSnap,
           annualSnap,
@@ -1730,6 +1779,7 @@
           const adm = normalizeAdm(value?.admissionNumber || value?.admissionNo || key);
           if (!adm) return;
           byAdmission[adm] = Object.assign({}, byAdmission[adm] || {}, value || {});
+          byAdmission[normalizeFeeKey(adm)] = Object.assign({}, byAdmission[normalizeFeeKey(adm)] || {}, value || {});
         });
 
         const missingViaCore = [];
@@ -1751,6 +1801,7 @@
             if (mergedByKey[key]) { raw = mergedByKey[key]; break; }
           }
           if (!raw && byAdmission[adm]) raw = byAdmission[adm];
+          if (!raw && byAdmission[normalizeFeeKey(adm)]) raw = byAdmission[normalizeFeeKey(adm)];
           const classFeeRow = classFeesByAdm?.[adm] || {};
           const overrideRow = pickByAnyKey(overridesById, candidateKeys) || {};
           const studentFeeRow = pickByAnyKey(studentFeesById, candidateKeys) || {};
@@ -1787,12 +1838,13 @@
               )
           ).trim() || 'Not set';
           const planSchedule = Array.isArray(plansById?.[planId]?.schedule) ? plansById[planId].schedule : [];
+          const classInstallments = classFeeConfig?.installments || {};
           const schedule = (base.schedule && base.schedule.length)
             ? base.schedule
-            : normalizeScheduleItems(planSchedule, required, year);
+            : normalizeScheduleItems(planSchedule?.length ? planSchedule : classInstallments, required, year);
           const debtMeta = financeStatusFromSchedule(schedule, paid, balance);
 
-          out[adm] = {
+          const entry = {
             ...base,
             required,
             paid,
@@ -1806,6 +1858,8 @@
             debtNow: debtMeta.debtNow,
             nextDueLabel: debtMeta.nextDueLabel
           };
+          out[adm] = entry;
+          outByNormalized[normalizeFeeKey(adm)] = entry;
           if ((!raw || (required <= 0 && paid <= 0 && balance <= 0)) && window.SOMAP_FINANCE?.loadStudentYearSummary) {
             missingViaCore.push({ adm, stu, classFee: classFeeRow });
           }
@@ -1831,6 +1885,51 @@
               paid: base.paid > 0 ? base.paid : fallbackPaid,
               balance: base.balance > 0 ? base.balance : Math.max(0, (base.required > 0 ? base.required : fallbackRequired) - (base.paid > 0 ? base.paid : fallbackPaid))
             };
+            outByNormalized[normalizeFeeKey(adm)] = out[adm];
+          }));
+        }
+        if ((students || []).length && window.SOMAP_FINANCE?.loadStudentYearSummary) {
+          await Promise.all((students || []).map(async (stu) => {
+            const adm = normalizeAdm(stu?.adm || stu?.admissionNo || '');
+            if (!adm) return;
+            const keys = [normalizeAdm(stu?.id), normalizeAdm(stu?.admissionNo), adm].filter(Boolean);
+            let summary = null;
+            for (const key of keys) {
+              if (!key) continue;
+              try { summary = await window.SOMAP_FINANCE.loadStudentYearSummary(key, year); } catch (_) {}
+              if (summary) break;
+            }
+            if (!summary) return;
+            const existing = out[adm] || outByNormalized[normalizeFeeKey(adm)] || {};
+            const fromSummary = buildFinanceEntryFromRaw(summary, year);
+            const required = fromSummary.required > 0 ? fromSummary.required : Math.max(0, toNum(existing.required || 0));
+            const paid = fromSummary.paid > 0 ? fromSummary.paid : Math.max(0, toNum(existing.paid || 0));
+            const balance = fromSummary.balance > 0 || required > 0
+              ? Math.max(0, fromSummary.balance > 0 ? fromSummary.balance : (required - paid))
+              : Math.max(0, toNum(existing.balance || 0));
+            const schedule = (fromSummary.schedule && fromSummary.schedule.length)
+              ? fromSummary.schedule
+              : (Array.isArray(existing.schedule) ? existing.schedule : []);
+            const planName = (fromSummary.planName && fromSummary.planName !== 'Not set')
+              ? fromSummary.planName
+              : (existing.planName || 'Not set');
+            const debtMeta = financeStatusFromSchedule(schedule, paid, balance);
+            const merged = {
+              ...existing,
+              ...fromSummary,
+              required,
+              paid,
+              balance,
+              schedule,
+              planName,
+              debtStatus: debtMeta.status,
+              debtTone: debtMeta.tone,
+              debtHint: debtMeta.hint,
+              debtNow: debtMeta.debtNow,
+              nextDueLabel: debtMeta.nextDueLabel
+            };
+            out[adm] = merged;
+            outByNormalized[normalizeFeeKey(adm)] = merged;
           }));
         }
         return out;
@@ -2035,7 +2134,7 @@
       state.subjects = subjects;
       const students = [];
       Object.entries(state.rawStudents).forEach(([adm, data]) => {
-        const fee = fees[adm] || {
+        const fee = fees[adm] || fees[normalizeFeeKey(adm)] || fees[String(data.id || '').trim()] || fees[normalizeFeeKey(String(data.id || ''))] || fees[String(data.admissionNo || '').trim()] || fees[normalizeFeeKey(String(data.admissionNo || ''))] || {
           required: data.totalFee || 0,
           paid: data.paid || 0,
           balance: data.balance || Math.max(0,(data.totalFee||0)-(data.paid||0)),
@@ -2348,7 +2447,7 @@
         document.getElementById('previewDebtStatus').style.color = '#166534';
         document.getElementById('previewPlanName').textContent = '-';
         document.getElementById('previewDebtHint').textContent = 'No overdue debt.';
-        document.getElementById('previewFeeSchedule').innerHTML = '<tr><td colspan="5" class="text-center text-slate-400 py-3">No fee schedule</td></tr>';
+        document.getElementById('previewFeeSchedule').innerHTML = '<tr><td colspan="7" class="text-center text-slate-400 py-3">No fee schedule</td></tr>';
         document.getElementById('previewComment').textContent = 'Select a student to view comments and printable card.';
         document.getElementById('previewHighlights').innerHTML = '';
         document.getElementById('previewSummaryList').innerHTML = '<li>No student selected.</li>';
@@ -2375,21 +2474,21 @@
       document.getElementById('previewDebtStatus').style.color = s.debtTone === 'danger' ? '#b91c1c' : '#166534';
       document.getElementById('previewPlanName').textContent = s.feePlanName || 'Not set';
       document.getElementById('previewDebtHint').textContent = s.debtHint || 'No overdue debt.';
-      const previewSchedule = (s.feeSchedule || []).slice(0, 8);
-      const scheduleRows = previewSchedule.map((item, idx) => {
-        const dueLabel = formatDateTs(item.toTs);
-        const tone = feeWindowStatus(previewSchedule, s.paid, idx);
+      const previewSchedule = buildFeeScheduleViewRows((s.feeSchedule || []).slice(0, 8), s.paid);
+      const scheduleRows = previewSchedule.map((item) => {
         return `<tr>
-          <td>${idx + 1}</td>
-          <td>${escapeHtml(item.label || `Window ${idx + 1}`)}</td>
-          <td class="num">TSh ${formatCurrency(item.amount || 0)}</td>
-          <td>${dueLabel}</td>
-          <td class="${tone.cls}">${tone.label}</td>
+          <td>${item.idx}</td>
+          <td>${escapeHtml(item.label || `Window ${item.idx}`)}</td>
+          <td class="num">TSh ${formatCurrency(item.expected || 0)}</td>
+          <td class="num">TSh ${formatCurrency(item.allocated || 0)}</td>
+          <td class="num">TSh ${formatCurrency(item.remaining || 0)}</td>
+          <td class="${item.cls}">${item.status}</td>
+          <td>${item.windowLabel}</td>
         </tr>`;
       });
       document.getElementById('previewFeeSchedule').innerHTML = scheduleRows.length
         ? scheduleRows.join('')
-        : '<tr><td colspan="5" class="text-center text-slate-400 py-3">No fee schedule</td></tr>';
+        : '<tr><td colspan="7" class="text-center text-slate-400 py-3">No fee schedule</td></tr>';
       document.getElementById('previewComment').textContent = s.comment;
 
       const highlights = document.getElementById('previewHighlights');
@@ -2418,7 +2517,7 @@
       document.getElementById('previewGrade').textContent = overallGrade;
 
       // Prefer Cloudinary secure URLs; add transformation to ensure JPEG and reasonable size
-      const photoUrl = (s.photoUrl || s.passportPhotoUrl || '').trim();
+      const photoUrl = (s.photoUrl || s.passportPhotoUrl || s.passportPhotoURL || s.photoURL || '').trim();
       const transformed = transformToJpegIfCloudinary(photoUrl, 140, 180) || photoUrl;
       const imgEl = document.getElementById('previewPhoto');
       imgEl.crossOrigin = 'anonymous';
@@ -2565,7 +2664,7 @@ function toNormalizedRows(subjects){
       doc.setFontSize(10); doc.text(`Year: ${state.year}  |  Exam: ${state.examType}  |  Month: ${s.monthLabel}`, margin + 25, headerY + 20);
       doc.setFontSize(10); doc.text(`Class: ${normalizeDisplayClass(state.className || s.class || '')}`, margin + 25, headerY + 26);
       let photoData = null;
-      const pdfPhotoUrl = s.photoUrl || s.passportPhotoUrl;
+      const pdfPhotoUrl = s.photoUrl || s.passportPhotoUrl || s.passportPhotoURL || s.photoURL;
       if (pdfPhotoUrl){
         const transformed = transformToJpegIfCloudinary(String(pdfPhotoUrl), 600, 800) || pdfPhotoUrl;
         photoData = await loadImageAsDataURL(transformed);
@@ -2595,35 +2694,9 @@ function toNormalizedRows(subjects){
       const posLabel = (s.overallPosition && s.overallPosition !== '-') ? s.overallPosition : '-';
       doc.text(`Overall position: ${posLabel} / ${cohortSize}`, 120, contentStartY + 12);
       doc.text(`Attendance: ${s.attendancePercent.toFixed(1)}% (${s.presents}/${s.absents})`, 120, contentStartY + 18);
-      doc.text(`Fees: Due TSh ${formatCurrency(s.totalFee)} | Paid TSh ${formatCurrency(s.paid)} | Balance TSh ${formatCurrency(s.balance)}`, 120, contentStartY + 24);
-      doc.text(`Plan: ${s.feePlanName || 'Not set'} | Debt: ${s.debtStatus || 'OK'}${s.debtNow > 0 ? ` (TSh ${formatCurrency(s.debtNow)})` : ''}`, 120, contentStartY + 30);
-      doc.text(`${s.debtHint || 'No overdue debt.'}`, 120, contentStartY + 36);
-
-      const pdfSchedule = (s.feeSchedule || []).slice(0, 6);
-      const feeScheduleRows = pdfSchedule.map((item, idx) => {
-        const status = feeWindowStatus(pdfSchedule, s.paid, idx);
-        return [
-          idx + 1,
-          item.label || `Window ${idx + 1}`,
-          `TSh ${formatCurrency(item.amount || 0)}`,
-          formatDateTs(item.toTs),
-          status.label
-        ];
-      });
-      if (feeScheduleRows.length) {
-        doc.autoTable({
-          startY: contentStartY + 42,
-          head: [["#", "Fee Window", "Expected", "Due By", "Status"]],
-          body: feeScheduleRows,
-          styles: { fontSize: 8.8, textColor: [15, 23, 42], cellPadding: 1.8 },
-          headStyles: { fillColor: [15, 118, 110], textColor: 255, fontSize: 9 },
-          alternateRowStyles: { fillColor: [236, 253, 245] },
-          theme: 'grid', margin: { left: margin, right: margin }
-        });
-      }
 
       doc.autoTable({
-        startY: (doc.lastAutoTable?.finalY || (contentStartY + 42)) + 4,
+        startY: contentStartY + 24,
         head: [["#","Subject","Score","Max","%","Pos","Teacher"]],
         body: normalizedSubjects.map((entry, index) => [
           index + 1, entry.subject, entry.dispScore.toFixed(1), formatNumber(entry.dispMax),
@@ -2637,10 +2710,36 @@ function toNormalizedRows(subjects){
       const afterTable = doc.lastAutoTable.finalY + 6;
       doc.setFontSize(10);
       doc.text('Teacher comments:', margin, afterTable);
-      doc.text(doc.splitTextToSize(s.comment || '', 180), margin, afterTable + 6);
+      const commentLines = doc.splitTextToSize(s.comment || '', 180);
+      doc.text(commentLines, margin, afterTable + 6);
+      const afterCommentY = afterTable + 8 + (commentLines.length * 4);
+      doc.text(`Fee Summary: Total TSh ${formatCurrency(s.totalFee)} | Paid TSh ${formatCurrency(s.paid)} | Balance TSh ${formatCurrency(s.balance)}`, margin, afterCommentY);
+      doc.text(`Plan: ${s.feePlanName || 'Not set'} | Debt: ${s.debtStatus || 'OK'}${s.debtNow > 0 ? ` (TSh ${formatCurrency(s.debtNow)})` : ''}`, margin, afterCommentY + 5);
+      doc.text(`${s.debtHint || 'No overdue debt.'}`, margin, afterCommentY + 10);
+      const pdfSchedule = buildFeeScheduleViewRows((s.feeSchedule || []).slice(0, 8), s.paid);
+      if (pdfSchedule.length) {
+        doc.autoTable({
+          startY: afterCommentY + 14,
+          head: [["#", "Fee Window", "Expected", "Allocated", "Remaining", "Status", "Window"]],
+          body: pdfSchedule.map((row) => ([
+            row.idx,
+            row.label,
+            `TSh ${formatCurrency(row.expected)}`,
+            `TSh ${formatCurrency(row.allocated)}`,
+            `TSh ${formatCurrency(row.remaining)}`,
+            row.status,
+            row.windowLabel
+          ])),
+          styles: { fontSize: 8.2, textColor: [15, 23, 42], cellPadding: 1.6 },
+          headStyles: { fillColor: [15, 118, 110], textColor: 255, fontSize: 8.4 },
+          alternateRowStyles: { fillColor: [236, 253, 245] },
+          theme: 'grid', margin: { left: margin, right: margin }
+        });
+      }
+      const afterFeeY = (doc.lastAutoTable?.finalY || (afterCommentY + 14)) + 14;
       doc.setDrawColor(148, 163, 184);
-      doc.line(margin, afterTable + 30, 90, afterTable + 30); doc.text('Class teacher signature', margin, afterTable + 35);
-      doc.line(120, afterTable + 30, 200, afterTable + 30); doc.text('Head of school signature', 120, afterTable + 35);
+      doc.line(margin, afterFeeY, 90, afterFeeY); doc.text('Class teacher signature', margin, afterFeeY + 5);
+      doc.line(120, afterFeeY, 200, afterFeeY); doc.text('Head of school signature', 120, afterFeeY + 5);
       return doc;
     }
 
