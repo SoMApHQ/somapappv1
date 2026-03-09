@@ -615,7 +615,13 @@
     function cleanPath(path) { return String(path || '').replace(/^\/+/, ''); }
     async function getSnapScopedOrLegacy(path) {
       const clean = cleanPath(path);
-      const scopedSnap = await refP(clean).get();
+      let scopedSnap = null;
+      try {
+        const scopedPath = (window.SOMAP && typeof SOMAP.P === 'function') ? SOMAP.P(clean) : clean;
+        scopedSnap = await db.ref(scopedPath).get();
+      } catch (_) {
+        scopedSnap = null;
+      }
       if (scopedSnap && scopedSnap.exists && scopedSnap.exists()) return scopedSnap;
       if (isSocrates) {
         try {
@@ -623,7 +629,7 @@
           if (legacySnap && legacySnap.exists && legacySnap.exists()) return legacySnap;
         } catch (_) {}
       }
-      return scopedSnap;
+      return scopedSnap || { exists: () => false, val: () => null };
     }
     
     const LOGO_PATH = '../images/somap-logo.png.jpg';
@@ -1329,6 +1335,32 @@
       }
     }
 
+    function getCachedRosterStudents(className, year, stream){
+      try {
+        const raw = sessionStorage.getItem('somap_scoresheet_roster');
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        const sameClass = normalizeDisplayClass(parsed?.className || '') === normalizeDisplayClass(className || '');
+        const sameYear = String(parsed?.year || '') === String(year || '');
+        if (!sameClass || !sameYear || !Array.isArray(parsed?.students)) return [];
+        const normalizedStream = String(stream || '').trim().toUpperCase().replace(/[\s-]/g, '');
+        return parsed.students
+          .map((stu) => ({
+            ...stu,
+            adm: String(stu.adm || stu.admissionNo || ''),
+            admissionNo: String(stu.admissionNo || stu.adm || ''),
+            class: normalizeDisplayClass(stu.class || className || ''),
+            stream: stu.stream || ''
+          }))
+          .filter((stu) => {
+            if (!normalizedStream) return true;
+            return String(stu.stream || '').toUpperCase().replace(/[\s-]/g, '').includes(normalizedStream);
+          });
+      } catch (_) {
+        return [];
+      }
+    }
+
     async function loadAllData(){
       try {
         document.getElementById('bulkCount').textContent = '...';
@@ -1344,7 +1376,10 @@
         await loadCustomSubjectsForYear(state.year);
         state.subjects = subjectListForClass(state.className, state.year) || state.subjects || [];
         const dbClass = state.classKey || state.className;
-        const students = await fetchStudents(dbClass, state.stream, state.year);
+        let students = getCachedRosterStudents(dbClass, state.year, state.stream);
+        if (!students.length) {
+          students = await fetchStudents(dbClass, state.stream, state.year);
+        }
         const [attendance, fees, scoresRaw, detailsMap] = await Promise.all([
           fetchAttendance(state.year, state.month, dbClass, state.examKey, state.monthRaw),
           fetchFees(state.year, dbClass, students),
@@ -1368,7 +1403,7 @@
         applyFilters();
       } catch (e) {
         console.error(e);
-        Swal.fire('Load error', 'Could not load class data. Check your internet/Firebase paths.', 'error');
+        Swal.fire('Load error', `Could not load class data. ${e?.message || 'Check your Firebase paths.'}`, 'error');
       }
     }
 
