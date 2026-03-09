@@ -1715,6 +1715,7 @@
         state.classKey = normalizeDisplayClass(state.classKey || state.className);
         console.log('[Report] loadAllData', {
           className: state.className,
+          classKey: state.classKey,
           year: String(state.year),
           examType: state.examType,
           examKey: state.examKey,
@@ -1724,12 +1725,65 @@
         });
         await loadCustomSubjectsForYear(state.year);
         state.subjects = subjectListForClass(state.className, state.year) || state.subjects || [];
-        const dbClass = state.classKey || state.className;
+        let dbClass = state.classKey || state.className;
+        const syncResolvedClass = (resolvedClass) => {
+          const normalizedClass = normalizeDisplayClass(resolvedClass);
+          if (!normalizedClass) return;
+          state.className = normalizedClass;
+          state.classKey = normalizedClass;
+          state.subjects = subjectListForClass(state.className, state.year) || state.subjects || [];
+          const classSel = document.getElementById('classSelect');
+          if (classSel) {
+            classSel.innerHTML = '';
+            const opt = document.createElement('option');
+            opt.value = state.classKey;
+            opt.textContent = state.className;
+            opt.selected = true;
+            classSel.appendChild(opt);
+            classSel.value = state.classKey;
+          }
+          dbClass = state.classKey || state.className;
+          persistToSession();
+        };
+
         let students = getCachedRosterStudents(dbClass, state.year, state.stream);
         console.log('[Report] cached roster count', students.length);
         if (!students.length) {
           students = await fetchStudents(dbClass, state.stream, state.year);
           console.log('[Report] firebase roster count', students.length);
+        }
+        if (!students.length) {
+          students = await fetchStudentsLegacy(dbClass, state.stream, state.year);
+          console.log('[Report] legacy roster count', students.length);
+        }
+        if (!students.length) {
+          const alternatives = Array.from(new Set([
+            dbClass,
+            ...getClassCandidates(dbClass),
+            String(dbClass || '').includes('Class') ? String(dbClass || '').replace('Class', '').trim() : '',
+            String(dbClass || '').replace(/\s+/g, ''),
+            (() => {
+              const match = String(dbClass || '').match(/(\d+)/);
+              return match ? `Class ${match[1]}` : '';
+            })()
+          ].filter(Boolean)));
+          console.log('[Report] trying class alternatives', alternatives);
+
+          for (const alt of alternatives) {
+            if (!alt || String(alt).trim() === String(dbClass).trim()) continue;
+            let altStudents = await fetchStudents(alt, state.stream, state.year);
+            console.log('[Report] alternative firebase roster count', { className: alt, count: altStudents.length });
+            if (!altStudents.length) {
+              altStudents = await fetchStudentsLegacy(alt, state.stream, state.year);
+              console.log('[Report] alternative legacy roster count', { className: alt, count: altStudents.length });
+            }
+            if (altStudents.length) {
+              students = altStudents;
+              syncResolvedClass(alt);
+              console.log('[Report] resolved roster with alternative class', alt, altStudents.length);
+              break;
+            }
+          }
         }
         let [attendance, fees, scoresRaw, detailsMap] = await Promise.all([
           fetchAttendance(state.year, state.month, dbClass, state.examKey, state.monthRaw),
