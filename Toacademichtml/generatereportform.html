@@ -838,17 +838,28 @@
 
     // Attempt/grade helpers (inline; do not import other files)
     function isNumber(n){ return Number.isFinite(n) && !Number.isNaN(n); }
+    function hasRecordedScorePayload(item){
+      if (!item || typeof item !== 'object') return false;
+      return (
+        Object.prototype.hasOwnProperty.call(item, 'score') ||
+        Object.prototype.hasOwnProperty.call(item, 'max') ||
+        Object.prototype.hasOwnProperty.call(item, 'Score') ||
+        Object.prototype.hasOwnProperty.call(item, 'Max')
+      );
+    }
     function attemptedItem(item){
+      if (item && typeof item.attempted === 'boolean') return item.attempted;
       const score = Number(item?.score);
       const max   = Number(item?.max);
-      return isNumber(score) && isNumber(max) && max > 0 && score > 0;
+      if (!isNumber(score) || !isNumber(max) || max <= 0 || score < 0) return false;
+      return hasRecordedScorePayload(item);
     }
     function studentPercentFrom(subjects){
       let s = 0, m = 0, count = 0;
       for (const it of (subjects || [])){
         const score = Number(it?.score);
         const max   = Number(it?.max);
-        if (attemptedItem({score,max})){
+        if (attemptedItem(it)){
           s += score; m += max; count++;
         }
       }
@@ -2352,6 +2363,26 @@
         data: normalized
       };
     }
+    function mergeNormalizedScoreMaps(chunks){
+      const merged = {};
+      (chunks || []).forEach((chunk) => {
+        Object.entries(chunk || {}).forEach(([adm, subjectMap]) => {
+          merged[adm] = merged[adm] || {};
+          Object.entries(subjectMap || {}).forEach(([subjectKey, raw]) => {
+            const prev = merged[adm][subjectKey] || {};
+            const score = Number(raw?.score);
+            const max = Number(raw?.max);
+            merged[adm][subjectKey] = {
+              subject: raw?.subject || prev.subject || subjectKey,
+              score: isNumber(score) ? score : Number(prev.score || 0),
+              max: isNumber(max) && max > 0 ? max : Number(prev.max || 100),
+              date: raw?.date || prev.date || ''
+            };
+          });
+        });
+      });
+      return merged;
+    }
 
     async function collectExamWindowRecords({ year, className, examKey, month, rawMonth }) {
       const key = String(examKey || 'monthly').toLowerCase();
@@ -2362,9 +2393,8 @@
         return [{ ...examRecordMeta(examKey, month, state.examType), data }];
       }
 
-      const records = [];
+      const recordsByWindow = new Map();
       const classCandidates = getClassCandidates(className);
-      const seen = new Set();
       for (const clsCandidate of classCandidates) {
         let root = null;
         try {
@@ -2380,9 +2410,13 @@
           if (topMonth) {
             if (!months.includes(topMonth)) return;
             const dedupe = `monthly::${topMonth}`;
-            if (seen.has(dedupe)) return;
-            seen.add(dedupe);
-            records.push(normalizeExamRecordMap(topVal, examRecordMeta('monthly', topMonth, 'Monthly')));
+            const nextRecord = normalizeExamRecordMap(topVal, examRecordMeta('monthly', topMonth, 'Monthly'));
+            const existing = recordsByWindow.get(dedupe);
+            if (!existing) {
+              recordsByWindow.set(dedupe, nextRecord);
+            } else {
+              existing.data = mergeNormalizedScoreMaps([existing.data, nextRecord.data]);
+            }
             return;
           }
           const normalizedExamKey = slugifyExamKey(topKey);
@@ -2391,13 +2425,17 @@
             const canonicalMonth = resolveMonthKey(monthKey);
             if (!canonicalMonth || !months.includes(canonicalMonth)) return;
             const dedupe = `${normalizedExamKey}::${canonicalMonth}`;
-            if (seen.has(dedupe)) return;
-            seen.add(dedupe);
-            records.push(normalizeExamRecordMap(monthBucket, examRecordMeta(normalizedExamKey, canonicalMonth, examLabelFromKey(topKey))));
+            const nextRecord = normalizeExamRecordMap(monthBucket, examRecordMeta(normalizedExamKey, canonicalMonth, examLabelFromKey(topKey)));
+            const existing = recordsByWindow.get(dedupe);
+            if (!existing) {
+              recordsByWindow.set(dedupe, nextRecord);
+            } else {
+              existing.data = mergeNormalizedScoreMaps([existing.data, nextRecord.data]);
+            }
           });
         });
-        if (records.length) break;
       }
+      const records = Array.from(recordsByWindow.values());
       records.sort((a, b) => {
         const ai = MONTHS.indexOf(a.monthKey);
         const bi = MONTHS.indexOf(b.monthKey);
@@ -2633,7 +2671,7 @@
             if (!found) return;
             const sc = Number(found.score);
             const mx = Number(found.max);
-            if (attemptedItem({ score: sc, max: mx })) {
+            if (isNumber(sc) && isNumber(mx) && mx > 0 && sc >= 0) {
               s += sc; m += mx;
             }
           });
@@ -2733,10 +2771,11 @@
         const rawMax = Number(subEntry.max);
         const max = Number.isFinite(rawMax) ? rawMax : 100;
         const percent = max ? (score / max) * 100 : 0;
-        const record = { subject, score, max, percent };
+        const attempted = hasRecordedScorePayload(subEntry) && isNumber(score) && isNumber(max) && max > 0 && score >= 0;
+        const record = { subject, score, max, percent, attempted };
         stats.subjects.push(record);
         stats.subjectMap[subject] = record;
-        if (attemptedItem({ score, max })) {
+        if (attempted) {
           stats.totalScore += score;
           stats.totalMax += max;
         }
