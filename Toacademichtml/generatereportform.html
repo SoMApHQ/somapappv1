@@ -1809,6 +1809,21 @@
           fetchScores({year: state.year, className: dbClass, examKey: state.examKey, month: state.month, rawMonth: state.monthRaw}),
           fetchStudentDetailsMap()
         ]);
+
+        let summaryData = {};
+        if (!students.length || !Object.keys(scoresRaw || {}).length) {
+          summaryData = await fetchReportSummary(
+            state.year,
+            dbClass,
+            state.examKey,
+            state.month,
+            state.monthRaw
+          );
+          if (Object.keys(summaryData).length) {
+            console.log('[Report] summary fallback', summaryData);
+          }
+        }
+
         if (!students.length) {
           const fallbackStudents = buildFallbackStudentsFromData({
             className: dbClass,
@@ -1821,6 +1836,22 @@
             console.log('[Report] rebuilt roster from score/attendance data', fallbackStudents.length);
             students = fallbackStudents;
             fees = await fetchFees(state.year, dbClass, students);
+          }
+          if (!students.length && Object.keys(summaryData).length) {
+            const summaryStudents = buildStudentsFromSummary(summaryData, dbClass, state.stream);
+            if (summaryStudents.length) {
+              console.log('[Report] rebuilt roster from summary data', summaryStudents.length);
+              students = summaryStudents;
+              fees = await fetchFees(state.year, dbClass, students);
+            }
+          }
+        }
+
+        if (!Object.keys(scoresRaw || {}).length && Object.keys(summaryData).length) {
+          const summaryScores = buildScoresFromSummary(summaryData);
+          if (Object.keys(summaryScores).length) {
+            console.log('[Report] using scores from summary fallback', Object.keys(summaryScores).length);
+            scoresRaw = summaryScores;
           }
         }
         const detailLookup = buildNormalizedValueLookup(detailsMap || {});
@@ -3054,6 +3085,111 @@
         if (!list.includes(noSpace)) list.push(noSpace);
       }
       return list.length ? list : [className];
+    }
+
+    async function fetchReportSummary(year, className, examKey, month, rawMonth) {
+      const classCandidates = getClassCandidates(className);
+      const baseMonths = [
+        String(rawMonth || '').trim(),
+        MONTH_NUMERIC[resolveMonthKey(month) || ''] || '',
+        resolveMonthKey(month) || '',
+        month || ''
+      ];
+      const examMonths = examMonthsForWindow(String(examKey || '').toLowerCase(), month);
+      examMonths.forEach((m) => {
+        baseMonths.push(m, MONTH_NUMERIC[m] || '');
+      });
+      const monthCandidates = Array.from(new Set(baseMonths.filter(Boolean)));
+      for (const cls of classCandidates) {
+        for (const mon of monthCandidates) {
+          const snap = await getSnapScopedOrLegacy(`summaries/${year}/${cls}/${examKey}/${mon}`);
+          if (snap?.exists?.()) {
+            const val = snap.val();
+            if (val && typeof val === 'object' && Object.keys(val).length) {
+              return val;
+            }
+          }
+        }
+      }
+      return {};
+    }
+
+    function buildStudentsFromSummary(summaryData, className, stream) {
+      const students = [];
+      const seen = new Set();
+      const collect = (arr) => {
+        if (!Array.isArray(arr)) return;
+        arr.forEach((entry) => {
+          const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || '');
+          if (!adm || seen.has(adm)) return;
+          seen.add(adm);
+          students.push(normalizeStudentRecord(adm, {
+            adm,
+            id: adm,
+            admissionNo: adm,
+            name: entry?.name || entry?.studentName || '',
+            class: normalizeDisplayClass(className || state.className || ''),
+            stream: stream || ''
+          }));
+        });
+      };
+      collect(summaryData?.top3);
+      collect(summaryData?.bottom3);
+      if (summaryData?.students && Array.isArray(summaryData.students)) {
+        summaryData.students.forEach((entry) => {
+          const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || '');
+          if (!adm || seen.has(adm)) return;
+          seen.add(adm);
+          students.push(normalizeStudentRecord(adm, {
+            ...entry,
+            adm,
+            id: adm,
+            admissionNo: adm,
+            class: normalizeDisplayClass(className || state.className || entry?.class || ''),
+            stream: stream || entry?.stream || ''
+          }));
+        });
+      }
+      students.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+      return students;
+    }
+
+    function buildScoresFromSummary(summaryData) {
+      const scoresMap = {};
+      const collect = (arr) => {
+        if (!Array.isArray(arr)) return;
+        arr.forEach((entry) => {
+          const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || '');
+          if (!adm) return;
+          const avg = Number(entry?.avg);
+          if (!Number.isFinite(avg) || avg < 0) return;
+          scoresMap[adm] = scoresMap[adm] || {};
+          scoresMap[adm]['Overall'] = {
+            subject: 'Overall',
+            score: Math.min(100, Math.max(0, avg)),
+            max: 100,
+            date: ''
+          };
+        });
+      };
+      collect(summaryData?.top3);
+      collect(summaryData?.bottom3);
+      if (summaryData?.students && Array.isArray(summaryData.students)) {
+        summaryData.students.forEach((entry) => {
+          const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || '');
+          if (!adm) return;
+          const avg = Number(entry?.avg ?? entry?.average ?? entry?.pct);
+          if (!Number.isFinite(avg) || avg < 0) return;
+          scoresMap[adm] = scoresMap[adm] || {};
+          scoresMap[adm]['Overall'] = {
+            subject: 'Overall',
+            score: Math.min(100, Math.max(0, avg)),
+            max: 100,
+            date: ''
+          };
+        });
+      }
+      return scoresMap;
     }
 
     function examRecordMeta(examKey, monthKey, fallbackLabel){
