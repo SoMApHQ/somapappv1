@@ -738,6 +738,58 @@
       }
       return Array.from(set).filter(Boolean);
     }
+    function resolveMonthKeyAcademic(input) {
+      const raw = String(input || '').trim();
+      if (!raw) return null;
+      if (MONTH_KEYS.includes(raw)) return raw;
+      const direct = MONTH_LABELS[raw] || MONTH_LABELS[raw.replace(/^0+/, '')];
+      if (direct) return direct;
+      const three = raw.slice(0, 3);
+      const capThree = three.charAt(0).toUpperCase() + three.slice(1).toLowerCase();
+      if (MONTH_KEYS.includes(capThree)) return capThree;
+      if (/^\d{4}-\d{2}$/.test(raw)) {
+        const mm = raw.split('-')[1];
+        return MONTH_LABELS[mm] || MONTH_LABELS[String(Number(mm))] || null;
+      }
+      return null;
+    }
+    const SYNTHETIC_WINDOW_EXAM_KEYS = new Set(['midterm1', 'endterm', 'midterm2', 'annual']);
+    const EXAM_MONTH_PLAN = {
+      monthly:  (selectedMonth) => [resolveMonthKeyAcademic(selectedMonth) || selectedMonth],
+      midterm1: () => ['Jan', 'Feb', 'Mar'],
+      endterm:  () => ['Jan', 'Feb', 'Mar', 'Apr', 'May'],
+      midterm2: () => ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Aug', 'Sep'],
+      annual:   () => ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov']
+    };
+    function examMonthsForWindowAcademic(examKey, selectedMonth) {
+      const key = String(examKey || 'monthly').toLowerCase();
+      const planner = EXAM_MONTH_PLAN[key] || EXAM_MONTH_PLAN.monthly;
+      const months = planner(selectedMonth);
+      const normalized = months
+        .map((m) => resolveMonthKeyAcademic(m) || String(m || '').trim())
+        .filter(Boolean);
+      return Array.from(new Set(normalized));
+    }
+    function mergeScoreMapsAcademic(records) {
+      const merged = {};
+      (records || []).forEach((record) => {
+        Object.entries(record || {}).forEach(([adm, subjects]) => {
+          merged[adm] = merged[adm] || {};
+          Object.entries(subjects || {}).forEach(([sub, o]) => {
+            const canonicalLabel = SomapSub().canonSubject ? SomapSub().canonSubject(sub) : sub;
+            const labelKey = canonicalLabel || sub;
+            const score = Number(o?.score || 0);
+            const max = Number(o?.max || 0);
+            if (!attemptedItem({ score, max })) return;
+            const current = merged[adm][labelKey] || { score: 0, max: 0 };
+            const next = { score: current.score + score, max: current.max + max };
+            merged[adm][labelKey] = next;
+            if (!merged[adm][sub]) merged[adm][sub] = next;
+          });
+        });
+      });
+      return merged;
+    }
 
     function getSubjectList(className, year){
       const api = SomapSub();
@@ -1185,6 +1237,43 @@
         }
       }
 
+      const normalizedExamKey = String(examKey || '').toLowerCase();
+      if (SYNTHETIC_WINDOW_EXAM_KEYS.has(normalizedExamKey)) {
+        const months = examMonthsForWindowAcademic(normalizedExamKey, month);
+        const collected = [];
+        const seen = new Set();
+        for (const clsKey of classCandidates) {
+          const found = await readFirstExisting([`/scores/${year}/${clsKey}`]);
+          const snap = found?.snap || null;
+          if (!(snap && snap.exists && snap.exists())) continue;
+          const root = snap.val() || {};
+          Object.entries(root).forEach(([topKey, topVal]) => {
+            if (!topVal || typeof topVal !== 'object') return;
+            const topMonth = resolveMonthKeyAcademic(topKey);
+            if (topMonth) {
+              if (!months.includes(topMonth)) return;
+              const dedupe = `monthly::${topMonth}`;
+              if (seen.has(dedupe)) return;
+              seen.add(dedupe);
+              collected.push(topVal);
+              return;
+            }
+            const topExamKey = slugifyExamKey(topKey);
+            if (SYNTHETIC_WINDOW_EXAM_KEYS.has(topExamKey)) return;
+            Object.entries(topVal).forEach(([monthKey, monthBucket]) => {
+              const resolvedMonth = resolveMonthKeyAcademic(monthKey);
+              if (!resolvedMonth || !months.includes(resolvedMonth)) return;
+              const dedupe = `${topExamKey}::${resolvedMonth}`;
+              if (seen.has(dedupe)) return;
+              seen.add(dedupe);
+              collected.push(monthBucket);
+            });
+          });
+          if (collected.length) break;
+        }
+        return mergeScoreMapsAcademic(collected);
+      }
+
       const variants = monthVariants(month);
       const paths = [];
 
@@ -1403,9 +1492,7 @@
         rosterCount: state.students.length
       });
 
-      if (newScores && Object.keys(newScores).length) {
-        state.scores = newScores;
-      }
+      state.scores = newScores || {};
 
       updateKPIs();
       drawCharts();
