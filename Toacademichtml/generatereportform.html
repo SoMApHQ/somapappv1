@@ -725,6 +725,8 @@
       if (!key) return '';
       const builtIn = Object.entries(EXAM_KEYS).find(([, v]) => String(v).toLowerCase() === key.toLowerCase());
       if (builtIn) return builtIn[0];
+      const custom = getStoredExamRegistry().find(item => String(item?.key || '').toLowerCase() === key.toLowerCase());
+      if (custom?.label) return custom.label;
       return key
         .replace(/[_-]+/g, ' ')
         .replace(/\s+/g, ' ')
@@ -2395,6 +2397,14 @@
 
       const recordsByWindow = new Map();
       const classCandidates = getClassCandidates(className);
+      const upsertWindowRecord = (dedupe, nextRecord) => {
+        const existing = recordsByWindow.get(dedupe);
+        if (!existing) {
+          recordsByWindow.set(dedupe, nextRecord);
+        } else {
+          existing.data = mergeNormalizedScoreMaps([existing.data, nextRecord.data]);
+        }
+      };
       for (const clsCandidate of classCandidates) {
         let root = null;
         try {
@@ -2416,12 +2426,7 @@
                 ...examRecordMeta('monthly', topMonth, 'Monthly'),
                 data: monthlyDirect
               };
-              const existing = recordsByWindow.get(dedupe);
-              if (!existing) {
-                recordsByWindow.set(dedupe, nextRecord);
-              } else {
-                existing.data = mergeNormalizedScoreMaps([existing.data, nextRecord.data]);
-              }
+              upsertWindowRecord(dedupe, nextRecord);
             }
             Object.entries(topVal).forEach(([nestedExamKey, nestedBucket]) => {
               if (!nestedBucket || typeof nestedBucket !== 'object') return;
@@ -2434,12 +2439,7 @@
                 ...examRecordMeta(nestedExam, topMonth, examLabelFromKey(nestedExamKey)),
                 data: nestedData
               };
-              const existing = recordsByWindow.get(dedupe);
-              if (!existing) {
-                recordsByWindow.set(dedupe, nextRecord);
-              } else {
-                existing.data = mergeNormalizedScoreMaps([existing.data, nextRecord.data]);
-              }
+              upsertWindowRecord(dedupe, nextRecord);
             });
             return;
           }
@@ -2455,14 +2455,29 @@
               ...examRecordMeta(normalizedExamKey, canonicalMonth, examLabelFromKey(topKey)),
               data: monthData
             };
-            const existing = recordsByWindow.get(dedupe);
-            if (!existing) {
-              recordsByWindow.set(dedupe, nextRecord);
-            } else {
-              existing.data = mergeNormalizedScoreMaps([existing.data, nextRecord.data]);
-            }
+            upsertWindowRecord(dedupe, nextRecord);
           });
         });
+      }
+      // Fallback exhaustive scan:
+      // pull all built-in + custom exam keys across all months in the selected synthetic window.
+      const allExamOptions = getAllExamOptions()
+        .map(item => ({ key: String(item?.key || '').trim(), label: String(item?.label || '').trim() }))
+        .filter(item => item.key && !SYNTHETIC_WINDOW_EXAM_KEYS.has(String(item.key).toLowerCase()));
+      for (const clsCandidate of classCandidates) {
+        for (const monthKey of months) {
+          const monthLabel = MONTH_LABELS[monthKey] || monthKey;
+          for (const examOpt of allExamOptions) {
+            const monthData = await getMonthlyScores(year, clsCandidate, monthKey, monthLabel, examOpt.key);
+            if (!monthData || !Object.keys(monthData).length) continue;
+            const dedupe = `${slugifyExamKey(examOpt.key)}::${monthKey}`;
+            const nextRecord = {
+              ...examRecordMeta(examOpt.key, monthKey, examOpt.label || examLabelFromKey(examOpt.key)),
+              data: monthData
+            };
+            upsertWindowRecord(dedupe, nextRecord);
+          }
+        }
       }
       const records = Array.from(recordsByWindow.values());
       records.sort((a, b) => {
@@ -3220,6 +3235,10 @@ function toNormalizedRows(subjects){
           return String(a.examLabel || '').localeCompare(String(b.examLabel || ''));
         });
     }
+    const GRAPH_COLORS = ['#22d3ee','#38bdf8','#60a5fa','#818cf8','#a78bfa','#f472b6','#fb7185','#f59e0b','#34d399','#10b981'];
+    function graphColorAt(index){
+      return GRAPH_COLORS[Math.abs(Number(index || 0)) % GRAPH_COLORS.length];
+    }
     function renderExamPerformancePreview(student){
       const metaEl = document.getElementById('previewExamPerfMeta');
       const barsEl = document.getElementById('previewExamPerfBars');
@@ -3237,16 +3256,17 @@ function toNormalizedRows(subjects){
       }
       const labels = series.map(entry => `${entry.examLabel}${entry.monthLabel ? ` (${entry.monthLabel})` : ''}`);
       metaEl.textContent = `${series.length} exams recorded in ${state.examType}: ${labels.join(', ')}.`;
-      barsEl.innerHTML = series.map((entry) => {
+      barsEl.innerHTML = series.map((entry, idx) => {
         const width = Math.max(4, Math.min(100, Number(entry.pct || 0)));
         const label = `${entry.examLabel} ${entry.monthLabel ? `(${entry.monthLabel})` : ''}`.trim();
+        const color = graphColorAt(idx);
         return `<div class="rounded-md border border-slate-600/60 bg-slate-900/40 px-2 py-2">
           <div class="flex items-center justify-between gap-2 text-xs">
             <span class="text-slate-200">${escapeHtml(label)}</span>
             <span class="text-slate-300">${entry.pct.toFixed(1)}%</span>
           </div>
           <div class="mt-1 h-2 w-full rounded bg-slate-700/60 overflow-hidden">
-            <div class="h-full rounded bg-cyan-300/80" style="width:${width}%"></div>
+            <div class="h-full rounded" style="width:${width}%;background:${color}"></div>
           </div>
           <div class="mt-1 text-[11px] text-slate-400">${entry.attempts} subject entries • ${Number(entry.score || 0).toFixed(1)}/${Number(entry.max || 0).toFixed(0)}</div>
         </div>`;
@@ -3255,11 +3275,12 @@ function toNormalizedRows(subjects){
     function renderExamTrendGraph(history){
       const list = (history || []).slice();
       if (!list.length) return '<div class="text-xs text-slate-500">Hakuna trend ya exam iliyopatikana.</div>';
-      return `<div class="mini-graph">${list.map(item => {
+      return `<div class="mini-graph">${list.map((item, idx) => {
         const height = Math.max(6, Math.min(100, Number(item.pct || 0)));
         const short = `${item.examLabel || 'Exam'} ${(item.monthLabel || '').slice(0, 3)}`.trim();
+        const color = graphColorAt(idx);
         return `<div class="mini-bar-wrap">
-          <div class="mini-bar" style="height:${height}%"></div>
+          <div class="mini-bar" style="height:${height}%;background:${color}"></div>
           <div class="mini-bar-label" title="${escapeHtml(short)}">${escapeHtml(short)}</div>
         </div>`;
       }).join('')}</div>`;
@@ -3400,10 +3421,11 @@ function toNormalizedRows(subjects){
     function renderMiniGraph(history){
       const safe = (history || []).slice(0, 8);
       if (!safe.length) return '<div class="text-xs text-slate-500">Hakuna historia ya kutosha ya kuonyesha mchoro.</div>';
-      return `<div class="mini-graph">${safe.map(item => {
+      return `<div class="mini-graph">${safe.map((item, idx) => {
         const height = Math.max(6, Math.min(100, Number(item.pct || 0)));
+        const color = graphColorAt(idx);
         return `<div class="mini-bar-wrap">
-          <div class="mini-bar" style="height:${height}%"></div>
+          <div class="mini-bar" style="height:${height}%;background:${color}"></div>
           <div class="mini-bar-label">${escapeHtml((item.monthLabel || '').slice(0, 3))}</div>
         </div>`;
       }).join('')}</div>`;
