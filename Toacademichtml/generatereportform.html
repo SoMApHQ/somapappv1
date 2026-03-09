@@ -533,6 +533,11 @@
           <p class="text-xs uppercase tracking-wide text-slate-400">Highlights</p>
           <ul class="text-sm space-y-1" id="previewSummaryList"><li>No student selected.</li></ul>
         </div>
+        <div class="space-y-2" id="previewExamPerfWrap">
+          <p class="text-xs uppercase tracking-wide text-slate-400">Exam performance</p>
+          <p class="text-xs text-slate-400" id="previewExamPerfMeta">No exam history yet.</p>
+          <div id="previewExamPerfBars" class="space-y-2"></div>
+        </div>
         <div class="divider"></div>
         <div class="space-y-2">
           <p class="text-xs uppercase tracking-wide text-slate-400">Bulk queue</p>
@@ -1410,7 +1415,10 @@
             photoUrl: extra.photoUrl || stu.photoUrl
           };
         });
-        computeStudents(attendance, fees, scoresRaw, {}, {});
+        const scoreSync = remapScoreDataToRoster(students, scoresRaw, state.reportWindow?.detailsByAdm || {});
+        state.reportWindow.detailsByAdm = scoreSync.remappedDetails;
+        state.reportWindow.mergedScores = scoreSync.remappedScores;
+        computeStudents(attendance, fees, scoreSync.remappedScores, {}, {});
         applyFilters();
       } catch (e) {
         console.error(e);
@@ -1792,6 +1800,57 @@
     function toNum(v){ const n = Number(v); return Number.isFinite(n) ? n : 0; }
     function normalizeAdm(v){ return String(v || '').trim(); }
     function normalizeFeeKey(v){ return String(v || '').trim().toUpperCase(); }
+    function keyFingerprints(value){
+      const raw = String(value || '').trim();
+      if (!raw) return [];
+      const upper = raw.toUpperCase();
+      const compact = upper.replace(/[\s_-]+/g, '');
+      return Array.from(new Set([raw, upper, compact]));
+    }
+    function buildNormalizedValueLookup(mapObj){
+      const lookup = new Map();
+      Object.entries(mapObj || {}).forEach(([key, value]) => {
+        keyFingerprints(key).forEach((finger) => {
+          if (!lookup.has(finger)) lookup.set(finger, value);
+        });
+      });
+      return lookup;
+    }
+    function getStudentLookupCandidates(adm, data){
+      return [adm, data?.adm, data?.admissionNo, data?.id].map(normalizeAdm).filter(Boolean);
+    }
+    function pickMapValueByCandidates(rawMap, lookup, candidates){
+      const direct = rawMap || {};
+      for (const candidate of (candidates || [])) {
+        if (!candidate) continue;
+        if (Object.prototype.hasOwnProperty.call(direct, candidate)) return direct[candidate];
+      }
+      for (const candidate of (candidates || [])) {
+        const hits = keyFingerprints(candidate);
+        for (const key of hits) {
+          if (lookup.has(key)) return lookup.get(key);
+        }
+      }
+      return null;
+    }
+    function remapScoreDataToRoster(students, scoresMap, detailMap){
+      const scores = scoresMap && typeof scoresMap === 'object' ? scoresMap : {};
+      const details = detailMap && typeof detailMap === 'object' ? detailMap : {};
+      const scoreLookup = buildNormalizedValueLookup(scores);
+      const detailLookup = buildNormalizedValueLookup(details);
+      const remappedScores = {};
+      const remappedDetails = {};
+      (Array.isArray(students) ? students : []).forEach((student) => {
+        const adm = normalizeAdm(student?.adm || student?.admissionNo || student?.id || '');
+        if (!adm) return;
+        const candidates = getStudentLookupCandidates(adm, student);
+        const scoreEntry = pickMapValueByCandidates(scores, scoreLookup, candidates);
+        const detailEntry = pickMapValueByCandidates(details, detailLookup, candidates);
+        remappedScores[adm] = scoreEntry && typeof scoreEntry === 'object' ? scoreEntry : {};
+        remappedDetails[adm] = detailEntry && typeof detailEntry === 'object' ? detailEntry : { subjects: {} };
+      });
+      return { remappedScores, remappedDetails };
+    }
     function sumPayments(payments){
       if (!payments || typeof payments !== 'object') return 0;
       return Object.values(payments).reduce((sum, p) => sum + toNum(p?.amount || p?.paid || p?.value || 0), 0);
@@ -2558,8 +2617,11 @@
     function computeStudents(attendance, fees, scores, annualOverallMap = {}, annualUsedPartsMap = {}){
       const subjects = state.subjects && state.subjects.length ? state.subjects.slice() : inferSubjects(scores);
       state.subjects = subjects;
+      const scoreLookup = buildNormalizedValueLookup(scores || {});
+      const attendanceLookup = buildNormalizedValueLookup(attendance || {});
       const students = [];
       Object.entries(state.rawStudents).forEach(([adm, data]) => {
+        const candidateKeys = getStudentLookupCandidates(adm, data);
         const fee = fees[adm] || fees[normalizeFeeKey(adm)] || fees[String(data.id || '').trim()] || fees[normalizeFeeKey(String(data.id || ''))] || fees[String(data.admissionNo || '').trim()] || fees[normalizeFeeKey(String(data.admissionNo || ''))] || {
           required: data.totalFee || 0,
           paid: data.paid || 0,
@@ -2572,8 +2634,8 @@
           nextDueLabel: '-',
           schedule: []
         };
-        const att = attendance[adm] || { present:0, absent:0, days:0 };
-        const scoreEntry = scores[adm] || {};
+        const att = pickMapValueByCandidates(attendance, attendanceLookup, candidateKeys) || { present:0, absent:0, days:0 };
+        const scoreEntry = pickMapValueByCandidates(scores, scoreLookup, candidateKeys) || {};
         const subjectStats = buildSubjectStats(subjects, scoreEntry);
         const overall = studentPercentFrom(subjectStats.subjects);
         subjectStats.totalScore = overall.total;
@@ -2877,6 +2939,7 @@
         document.getElementById('previewComment').textContent = 'Select a student to view comments and printable card.';
         document.getElementById('previewHighlights').innerHTML = '';
         document.getElementById('previewSummaryList').innerHTML = '<li>No student selected.</li>';
+        renderExamPerformancePreview(null);
         document.getElementById('previewSubjects').innerHTML = '';
         resetPreviewTotals();
         document.getElementById('previewPhoto').src = PLACEHOLDER_PHOTO;
@@ -2935,6 +2998,7 @@
         <li>Subjects recorded: ${state.subjects.length}</li>
         <li>Best subject: ${bestSubject(s)}</li>
         <li>Needs support: ${lowestSubject(s)}</li>`;
+      renderExamPerformancePreview(s);
 
       const tableResult = renderPreviewSubjectsTable(s.subjectStats.subjects);
       const annualOverride = (state.examKey === 'annual' && isNumber(s.annualPct)) ? s.annualPct : null;
@@ -3014,6 +3078,73 @@ function toNormalizedRows(subjects){
 
     function bestSubject(s){ const x = [...s.subjectStats.subjects].sort((a,b) => b.percent - a.percent)[0]; return x ? `${x.subject} ${x.percent.toFixed(0)}%` : '-'; }
     function lowestSubject(s){ const x = [...s.subjectStats.subjects].sort((a,b) => a.percent - b.percent)[0]; return x ? `${x.subject} ${x.percent.toFixed(0)}%` : '-'; }
+    function buildExamPerformanceSeries(student){
+      const detail = state.reportWindow?.detailsByAdm?.[student?.adm] || { subjects: {} };
+      const grouped = new Map();
+      Object.values(detail.subjects || {}).forEach((logs) => {
+        (logs || []).forEach((log) => {
+          const key = `${log.examKey || log.examLabel || 'exam'}::${log.monthKey || ''}`;
+          const existing = grouped.get(key) || {
+            key,
+            examLabel: log.examLabel || examLabelFromKey(log.examKey || '') || 'Exam',
+            monthKey: log.monthKey || '',
+            monthLabel: log.monthLabel || (MONTH_LABELS[log.monthKey] || '-'),
+            score: 0,
+            max: 0,
+            attempts: 0
+          };
+          const score = Number(log.score || 0);
+          const max = Number(log.max || 0);
+          if (!attemptedItem({ score, max })) return;
+          existing.score += score;
+          existing.max += max;
+          existing.attempts += 1;
+          grouped.set(key, existing);
+        });
+      });
+      return Array.from(grouped.values())
+        .map((entry) => ({
+          ...entry,
+          pct: entry.max > 0 ? (entry.score * 100) / entry.max : 0
+        }))
+        .sort((a, b) => {
+          const ai = MONTHS.indexOf(a.monthKey);
+          const bi = MONTHS.indexOf(b.monthKey);
+          if (ai !== bi) return ai - bi;
+          return String(a.examLabel || '').localeCompare(String(b.examLabel || ''));
+        });
+    }
+    function renderExamPerformancePreview(student){
+      const metaEl = document.getElementById('previewExamPerfMeta');
+      const barsEl = document.getElementById('previewExamPerfBars');
+      if (!metaEl || !barsEl) return;
+      if (!student) {
+        metaEl.textContent = 'No exam history yet.';
+        barsEl.innerHTML = '';
+        return;
+      }
+      const series = buildExamPerformanceSeries(student);
+      if (!series.length) {
+        metaEl.textContent = '0 exams recorded for this student in selected window.';
+        barsEl.innerHTML = '<div class="text-xs text-slate-400">No exam logs found for this learner.</div>';
+        return;
+      }
+      metaEl.textContent = `${series.length} exams recorded in ${state.examType}.`;
+      barsEl.innerHTML = series.map((entry) => {
+        const width = Math.max(4, Math.min(100, Number(entry.pct || 0)));
+        const label = `${entry.examLabel} ${entry.monthLabel ? `(${entry.monthLabel})` : ''}`.trim();
+        return `<div class="rounded-md border border-slate-600/60 bg-slate-900/40 px-2 py-2">
+          <div class="flex items-center justify-between gap-2 text-xs">
+            <span class="text-slate-200">${escapeHtml(label)}</span>
+            <span class="text-slate-300">${entry.pct.toFixed(1)}%</span>
+          </div>
+          <div class="mt-1 h-2 w-full rounded bg-slate-700/60 overflow-hidden">
+            <div class="h-full rounded bg-cyan-300/80" style="width:${width}%"></div>
+          </div>
+          <div class="mt-1 text-[11px] text-slate-400">${entry.attempts} subject entries • ${Number(entry.score || 0).toFixed(1)}/${Number(entry.max || 0).toFixed(0)}</div>
+        </div>`;
+      }).join('');
+    }
     function trendFromPoints(points){
       const list = (points || []).filter(item => isNumber(item?.pct));
       if (list.length < 2) return { label: 'Imeanza kujengwa', cls: 'trend-flat', delta: 0 };
