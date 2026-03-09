@@ -851,7 +851,7 @@
       if (item && typeof item.attempted === 'boolean') return item.attempted;
       const score = Number(item?.score);
       const max   = Number(item?.max);
-      if (!isNumber(score) || !isNumber(max) || max <= 0 || score < 0) return false;
+      if (!isNumber(score) || !isNumber(max) || max <= 0 || score <= 0) return false;
       return hasRecordedScorePayload(item);
     }
     function studentPercentFrom(subjects){
@@ -2409,14 +2409,38 @@
           const topMonth = resolveMonthKey(topKey);
           if (topMonth) {
             if (!months.includes(topMonth)) return;
-            const dedupe = `monthly::${topMonth}`;
-            const nextRecord = normalizeExamRecordMap(topVal, examRecordMeta('monthly', topMonth, 'Monthly'));
-            const existing = recordsByWindow.get(dedupe);
-            if (!existing) {
-              recordsByWindow.set(dedupe, nextRecord);
-            } else {
-              existing.data = mergeNormalizedScoreMaps([existing.data, nextRecord.data]);
+            const monthlyDirect = normalizeMonthlyScoreMap(topVal);
+            if (Object.keys(monthlyDirect).length) {
+              const dedupe = `monthly::${topMonth}`;
+              const nextRecord = {
+                ...examRecordMeta('monthly', topMonth, 'Monthly'),
+                data: monthlyDirect
+              };
+              const existing = recordsByWindow.get(dedupe);
+              if (!existing) {
+                recordsByWindow.set(dedupe, nextRecord);
+              } else {
+                existing.data = mergeNormalizedScoreMaps([existing.data, nextRecord.data]);
+              }
             }
+            Object.entries(topVal).forEach(([nestedExamKey, nestedBucket]) => {
+              if (!nestedBucket || typeof nestedBucket !== 'object') return;
+              const nestedExam = slugifyExamKey(nestedExamKey);
+              if (!nestedExam || SYNTHETIC_WINDOW_EXAM_KEYS.has(nestedExam)) return;
+              const nestedData = normalizeMonthlyScoreMap(nestedBucket);
+              if (!Object.keys(nestedData).length) return;
+              const dedupe = `${nestedExam}::${topMonth}`;
+              const nextRecord = {
+                ...examRecordMeta(nestedExam, topMonth, examLabelFromKey(nestedExamKey)),
+                data: nestedData
+              };
+              const existing = recordsByWindow.get(dedupe);
+              if (!existing) {
+                recordsByWindow.set(dedupe, nextRecord);
+              } else {
+                existing.data = mergeNormalizedScoreMaps([existing.data, nextRecord.data]);
+              }
+            });
             return;
           }
           const normalizedExamKey = slugifyExamKey(topKey);
@@ -2424,8 +2448,13 @@
           Object.entries(topVal).forEach(([monthKey, monthBucket]) => {
             const canonicalMonth = resolveMonthKey(monthKey);
             if (!canonicalMonth || !months.includes(canonicalMonth)) return;
+            const monthData = normalizeMonthlyScoreMap(monthBucket);
+            if (!Object.keys(monthData).length) return;
             const dedupe = `${normalizedExamKey}::${canonicalMonth}`;
-            const nextRecord = normalizeExamRecordMap(monthBucket, examRecordMeta(normalizedExamKey, canonicalMonth, examLabelFromKey(topKey)));
+            const nextRecord = {
+              ...examRecordMeta(normalizedExamKey, canonicalMonth, examLabelFromKey(topKey)),
+              data: monthData
+            };
             const existing = recordsByWindow.get(dedupe);
             if (!existing) {
               recordsByWindow.set(dedupe, nextRecord);
@@ -2456,7 +2485,7 @@
             const subject = canonicalSubjectName(raw?.subject || subjectKey || '');
             const score = Number(raw?.score || 0);
             const max = Number(raw?.max || 0);
-            if (!isNumber(score) || !isNumber(max) || max <= 0) return;
+            if (!attemptedItem({ score, max })) return;
             const current = mergedScores[adm][subject] || { score: 0, max: 0 };
             mergedScores[adm][subject] = { score: current.score + score, max: current.max + max };
             detailsByAdm[adm].subjects[subject] = detailsByAdm[adm].subjects[subject] || [];
@@ -2509,25 +2538,26 @@
         const normalizedSubjects = {};
 
         for (const [subjectKey, scoreObj] of Object.entries(subjects)) {
-          if (!scoreObj || typeof scoreObj !== 'object') continue;
-
           const o = scoreObj;
+          const isPrimitiveScore = typeof o === 'number' && Number.isFinite(o);
+          if (!isPrimitiveScore && (!o || typeof o !== 'object')) continue;
 
-          // ✅ FIX: do NOT spread the object, just pass it.
-          const hasScore = (o && typeof o === 'object') && (
+          const hasScore = isPrimitiveScore || ((o && typeof o === 'object') && (
             Object.prototype.hasOwnProperty.call(o, 'score') ||
             Object.prototype.hasOwnProperty.call(o, 'Score')
-          );
+          ));
 
-          const hasMax = (o && typeof o === 'object') && (
+          const hasMax = !isPrimitiveScore && (o && typeof o === 'object') && (
             Object.prototype.hasOwnProperty.call(o, 'max') ||
             Object.prototype.hasOwnProperty.call(o, 'Max')
           );
 
+          if (!hasScore && !hasMax) continue;
+
           // Score
           let safeScore = 0;
           if (hasScore) {
-            safeScore = Number(o.score ?? o.Score ?? 0);
+            safeScore = isPrimitiveScore ? Number(o) : Number(o.score ?? o.Score ?? 0);
             if (!Number.isFinite(safeScore)) safeScore = 0;
             if (safeScore < 0) safeScore = 0;
             if (safeScore > 10000) safeScore = 10000;
@@ -2535,15 +2565,15 @@
 
           // Label
           let label =
-            (typeof o.label === 'string' && o.label.trim()) ||
-            (typeof o.name === 'string' && o.name.trim()) ||
+            (!isPrimitiveScore && typeof o.label === 'string' && o.label.trim()) ||
+            (!isPrimitiveScore && typeof o.name === 'string' && o.name.trim()) ||
             subjectKey;
           if (!label) label = subjectKey;
           if (label.length > 60) label = label.slice(0, 57) + '...';
 
           // Max
           let maxVal = 100;
-          if (hasMax) {
+          if (hasMax && !isPrimitiveScore) {
             maxVal = Number(o.max ?? o.Max ?? 0);
             if (!Number.isFinite(maxVal) || maxVal <= 0) maxVal = 100;
           }
@@ -2560,7 +2590,7 @@
             subject: label,
             score: safeScore,
             max: maxVal,
-            date: o.date || o.dateDone || o.examDate || o.doneOn || o.timestamp || ''
+            date: (!isPrimitiveScore && (o.date || o.dateDone || o.examDate || o.doneOn || o.timestamp)) || ''
           };
         }
 
@@ -2771,7 +2801,7 @@
         const rawMax = Number(subEntry.max);
         const max = Number.isFinite(rawMax) ? rawMax : 100;
         const percent = max ? (score / max) * 100 : 0;
-        const attempted = hasRecordedScorePayload(subEntry) && isNumber(score) && isNumber(max) && max > 0 && score >= 0;
+        const attempted = attemptedItem({ ...subEntry, score, max });
         const record = { subject, score, max, percent, attempted };
         stats.subjects.push(record);
         stats.subjectMap[subject] = record;
