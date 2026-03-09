@@ -782,6 +782,27 @@
       return Number.isFinite(n) ? String(n) : String(SOMAP_DEFAULT_YEAR);
     }
     function cleanPath(path) { return String(path || '').replace(/^\/+/, ''); }
+    function buildCandidateDbPaths(path) {
+      const clean = cleanPath(path);
+      const scoped = (window.SOMAP && typeof SOMAP.P === 'function') ? SOMAP.P(clean) : clean;
+      const candidates = [scoped];
+      if (isSocrates && clean !== scoped) candidates.push(clean);
+      return candidates;
+    }
+    async function readFirstExisting(paths) {
+      if (!db) return null;
+      for (const rawPath of (paths || [])) {
+        for (const candidatePath of buildCandidateDbPaths(rawPath)) {
+          try {
+            const snap = await db.ref(candidatePath).get();
+            if (snap && snap.exists && snap.exists()) return { snap, path: candidatePath };
+          } catch (err) {
+            console.warn('[Report] read failed', candidatePath, err?.message || err);
+          }
+        }
+      }
+      return null;
+    }
     async function getSnapScopedOrLegacy(path) {
       const clean = cleanPath(path);
       let scopedSnap = null;
@@ -2952,6 +2973,8 @@
         if (!list.includes(digits)) list.push(digits);
         const pref = `Class ${digits}`;
         if (!list.includes(pref)) list.push(pref);
+        const noSpace = `Class${digits}`;
+        if (!list.includes(noSpace)) list.push(noSpace);
       }
       return list.length ? list : [className];
     }
@@ -3018,7 +3041,8 @@
       for (const clsCandidate of classCandidates) {
         let root = null;
         try {
-          root = await getSnapScopedOrLegacy(`/scores/${year}/${clsCandidate}`);
+          const found = await readFirstExisting([`scores/${year}/${clsCandidate}`]);
+          root = found?.snap || null;
         } catch (_) {
           root = null;
         }
