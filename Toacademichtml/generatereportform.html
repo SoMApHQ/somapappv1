@@ -243,6 +243,17 @@
       padding: 0.55rem 0.7rem;
       font-size: 0.78rem;
     }
+    .matrix-wrap {
+      overflow-x: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(148,163,184,0.22);
+      background: rgba(255,255,255,0.9);
+    }
+    .matrix-note {
+      font-size: 0.74rem;
+      color: #475569;
+      line-height: 1.5;
+    }
     @media (max-width: 768px) {
       body { padding: 1.2rem 0.6rem 4rem; }
       .report-card-inner { padding: 1.0rem; }
@@ -502,6 +513,21 @@
             </div>
             <div class="written-report-body">
               <div class="written-report-grid" id="writtenReportSummary"></div>
+              <div class="written-box">
+                <h4>Mitihani aliyofanya</h4>
+                <p class="text-sm leading-7 text-slate-700" id="writtenExamCount">Hakuna exam history iliyopatikana.</p>
+                <p class="matrix-note mt-2" id="writtenExamNames">-</p>
+              </div>
+              <div class="written-box">
+                <h4>Jedwali la ufaulu kwa kila somo na kila exam</h4>
+                <p class="matrix-note mb-3">Safu mlalo zinaonesha masomo. Kila safu wima inaonesha exam aliyofanya mwanafunzi ndani ya dirisha la report hii, kisha wastani wa jumla wa somo hilo.</p>
+                <div class="matrix-wrap">
+                  <table class="preview-table report-table">
+                    <thead id="writtenExamMatrixHead"></thead>
+                    <tbody id="writtenExamMatrixBody"></tbody>
+                  </table>
+                </div>
+              </div>
               <div class="written-box">
                 <h4>Uchambuzi wa jumla</h4>
                 <p class="text-sm leading-7 text-slate-700" id="writtenReportNarrative">Chagua mwanafunzi ili kuona uchambuzi wa kina.</p>
@@ -3129,7 +3155,8 @@ function toNormalizedRows(subjects){
         barsEl.innerHTML = '<div class="text-xs text-slate-400">No exam logs found for this learner.</div>';
         return;
       }
-      metaEl.textContent = `${series.length} exams recorded in ${state.examType}.`;
+      const labels = series.map(entry => `${entry.examLabel}${entry.monthLabel ? ` (${entry.monthLabel})` : ''}`);
+      metaEl.textContent = `${series.length} exams recorded in ${state.examType}: ${labels.join(', ')}.`;
       barsEl.innerHTML = series.map((entry) => {
         const width = Math.max(4, Math.min(100, Number(entry.pct || 0)));
         const label = `${entry.examLabel} ${entry.monthLabel ? `(${entry.monthLabel})` : ''}`.trim();
@@ -3182,9 +3209,58 @@ function toNormalizedRows(subjects){
       if (!items.length) items.push('Aendelee na juhudi hizi, ahifadhi nidhamu ya darasa, na apewe kazi za kumjenga zaidi katika masomo anayoongoza.');
       return items.slice(0, 6);
     }
+    function buildExamBreakdownModel(student){
+      const detail = state.reportWindow?.detailsByAdm?.[student?.adm] || { subjects: {} };
+      const examMap = new Map();
+      Object.values(detail.subjects || {}).forEach((logs) => {
+        (logs || []).forEach((log) => {
+          const key = `${log.examKey || log.examLabel || 'exam'}::${log.monthKey || ''}`;
+          if (examMap.has(key)) return;
+          examMap.set(key, {
+            key,
+            examKey: log.examKey || '',
+            examLabel: log.examLabel || examLabelFromKey(log.examKey || '') || 'Exam',
+            monthKey: log.monthKey || '',
+            monthLabel: log.monthLabel || (MONTH_LABELS[log.monthKey] || '-'),
+            shortLabel: `${log.examLabel || examLabelFromKey(log.examKey || '') || 'Exam'}${log.monthLabel ? ` (${log.monthLabel})` : ''}`
+          });
+        });
+      });
+      const exams = Array.from(examMap.values()).sort((a, b) => {
+        const ai = MONTHS.indexOf(a.monthKey);
+        const bi = MONTHS.indexOf(b.monthKey);
+        if (ai !== bi) return ai - bi;
+        return String(a.examLabel || '').localeCompare(String(b.examLabel || ''));
+      });
+      const subjectRows = (student.subjectStats?.subjects || []).map((entry) => {
+        const logs = (detail.subjects?.[entry.subject] || []).slice();
+        const byExam = new Map(logs.map((log) => [`${log.examKey || log.examLabel || 'exam'}::${log.monthKey || ''}`, log]));
+        return {
+          subject: entry.subject,
+          averagePct: Number(entry.percent || 0),
+          examsDone: logs.length,
+          cells: exams.map((exam) => {
+            const found = byExam.get(exam.key);
+            if (!found) return { text: '-', pct: null };
+            return {
+              text: `${Number(found.pct || 0).toFixed(1)}%`,
+              pct: Number(found.pct || 0),
+              scoreText: `${Number(found.score || 0).toFixed(1)}/${Number(found.max || 0).toFixed(0)}`
+            };
+          })
+        };
+      });
+      return {
+        exams,
+        examCount: exams.length,
+        examNames: exams.map((exam) => exam.shortLabel),
+        subjectRows
+      };
+    }
     function buildWrittenReportModel(student){
       const detail = state.reportWindow?.detailsByAdm?.[student.adm] || { subjects: {} };
       const classList = state.students || [];
+      const examBreakdown = buildExamBreakdownModel(student);
       const subjects = (student.subjectStats?.subjects || []).map(entry => {
         const history = (detail.subjects?.[entry.subject] || []).slice();
         const trend = trendFromPoints(history);
@@ -3209,9 +3285,11 @@ function toNormalizedRows(subjects){
       const best = subjects[0];
       const support = [...subjects].sort((a, b) => a.studentPct - b.studentPct)[0];
       const months = (state.reportWindow?.months || []).map(m => MONTH_LABELS[m] || m).join(', ');
+      const examSummary = examBreakdown.examNames.length ? examBreakdown.examNames.join(', ') : 'hakuna exam iliyorekodiwa';
       const recommendationItems = recommendationList(student, { subjects });
       const narrative = [
         `Hii ni taarifa kwa maandishi kuhusu mwanao ${student.name || ''} jinsi alivyokuwa akiendelea kuanzia ${months || 'kipindi hiki'}.`,
+        `Ndani ya dirisha hili amefanya jumla ya mitihani ${examBreakdown.examCount}, ambayo ni ${examSummary}.`,
         `${attendanceNarrative(student.attendancePercent)} ${feeNarrative(student)}`,
         best ? `Kwa sasa anaonesha nguvu zaidi kwenye ${best.subject} chini ya mwalimu ${best.teacher}.` : '',
         support ? `Somo linalohitaji msukumo wa karibu zaidi ni ${support.subject}.` : '',
@@ -3220,10 +3298,11 @@ function toNormalizedRows(subjects){
       return {
         show: isSyntheticWindowExam(state.examKey),
         title: `Taarifa ya maendeleo ya ${student.name || 'mwanafunzi'}`,
-        intro: `Taarifa hii imeandaliwa kwa exam ya ${state.examType} kwa kujumlisha wastani wa mitihani yote aliyofanya mwanafunzi ndani ya miezi ya ${months || '-'}.`,
+        intro: `Taarifa hii imeandaliwa kwa exam ya ${state.examType} kwa kujumlisha wastani wa mitihani ${examBreakdown.examCount} aliyofanya mwanafunzi ndani ya miezi ya ${months || '-'}. Mitihani hiyo ni ${examSummary}.`,
         narrative,
         recommendations: recommendationItems,
-        subjects
+        subjects,
+        examBreakdown
       };
     }
     function renderMiniGraph(history){
@@ -3244,8 +3323,12 @@ function toNormalizedRows(subjects){
       const intro = document.getElementById('writtenReportIntro');
       const narrative = document.getElementById('writtenReportNarrative');
       const recommendations = document.getElementById('writtenReportRecommendations');
+      const examCountNode = document.getElementById('writtenExamCount');
+      const examNamesNode = document.getElementById('writtenExamNames');
+      const examMatrixHead = document.getElementById('writtenExamMatrixHead');
+      const examMatrixBody = document.getElementById('writtenExamMatrixBody');
       const subjectsNode = document.getElementById('writtenSubjectCards');
-      if (!page || !summary || !title || !intro || !narrative || !recommendations || !subjectsNode) return;
+      if (!page || !summary || !title || !intro || !narrative || !recommendations || !examCountNode || !examNamesNode || !examMatrixHead || !examMatrixBody || !subjectsNode) return;
       if (!student) {
         page.style.display = 'none';
         summary.innerHTML = '';
@@ -3253,6 +3336,10 @@ function toNormalizedRows(subjects){
         intro.textContent = 'Hakuna taarifa ya maandishi kwa exam hii.';
         narrative.textContent = 'Chagua mwanafunzi ili kuona uchambuzi wa kina.';
         recommendations.textContent = '-';
+        examCountNode.textContent = 'Hakuna exam history iliyopatikana.';
+        examNamesNode.textContent = '-';
+        examMatrixHead.innerHTML = '';
+        examMatrixBody.innerHTML = '';
         subjectsNode.innerHTML = '';
         return;
       }
@@ -3265,11 +3352,22 @@ function toNormalizedRows(subjects){
       title.textContent = model.title;
       intro.textContent = model.intro;
       narrative.textContent = model.narrative;
+      examCountNode.textContent = `Mwanafunzi amefanya mitihani ${model.examBreakdown.examCount} ndani ya dirisha la ${state.examType}.`;
+      examNamesNode.textContent = model.examBreakdown.examNames.length ? `Majina ya mitihani: ${model.examBreakdown.examNames.join(', ')}.` : 'Hakuna majina ya mitihani yaliyopatikana.';
+      examMatrixHead.innerHTML = `<tr><th>Somo</th>${model.examBreakdown.exams.map(exam => `<th>${escapeHtml(exam.shortLabel)}</th>`).join('')}<th>Average</th></tr>`;
+      examMatrixBody.innerHTML = model.examBreakdown.subjectRows.length
+        ? model.examBreakdown.subjectRows.map(row => `<tr>
+            <td class="font-semibold">${escapeHtml(row.subject)}</td>
+            ${row.cells.map(cell => `<td class="num" title="${escapeHtml(cell.scoreText || '')}">${escapeHtml(cell.text)}</td>`).join('')}
+            <td class="num font-semibold">${row.averagePct.toFixed(1)}%</td>
+          </tr>`).join('')
+        : '<tr><td colspan="99" class="text-center text-slate-400 py-3">Hakuna exam matrix iliyopatikana.</td></tr>';
       summary.innerHTML = [
         { title: 'Mahudhurio', value: `${student.attendancePercent.toFixed(1)}%`, note: attendanceNarrative(student.attendancePercent) },
         { title: 'Mwenendo wa ada', value: `${student.debtStatus || 'OK'}`, note: feeNarrative(student) },
         { title: 'Somo bora', value: model.subjects[0]?.subject || '-', note: model.subjects[0] ? `${model.subjects[0].studentPct.toFixed(1)}%` : 'Hakuna data' },
-        { title: 'Somo la kusimamiwa', value: [...model.subjects].sort((a, b) => a.studentPct - b.studentPct)[0]?.subject || '-', note: 'Liwekewe ufuatiliaji wa karibu' }
+        { title: 'Somo la kusimamiwa', value: [...model.subjects].sort((a, b) => a.studentPct - b.studentPct)[0]?.subject || '-', note: 'Liwekewe ufuatiliaji wa karibu' },
+        { title: 'Mitihani aliyofanya', value: String(model.examBreakdown.examCount), note: model.examBreakdown.examNames.slice(0, 3).join(', ') || 'Hakuna data' }
       ].map(card => `<div class="written-box"><h4>${escapeHtml(card.title)}</h4><div class="text-lg font-bold text-slate-900">${escapeHtml(card.value)}</div><p class="text-sm text-slate-600 mt-2">${escapeHtml(card.note)}</p></div>`).join('');
       recommendations.innerHTML = `<ul class="space-y-2">${model.recommendations.map(item => `<li>- ${escapeHtml(item)}</li>`).join('')}</ul>`;
       subjectsNode.innerHTML = model.subjects.map(item => `
@@ -3423,6 +3521,26 @@ function toNormalizedRows(subjects){
       model.recommendations.slice(0, 4).forEach(item => {
         y = drawWrappedText(doc, `• ${item}`, margin + 2, y, 180, 4.3) + 1.5;
       });
+
+      const examHeaders = ['Somo', ...model.examBreakdown.exams.map(exam => String(exam.shortLabel || '').slice(0, 16)), 'Average'];
+      const examBody = model.examBreakdown.subjectRows.map(row => ([
+        row.subject,
+        ...row.cells.map(cell => cell.text),
+        `${row.averagePct.toFixed(1)}%`
+      ]));
+      if (examBody.length) {
+        doc.autoTable({
+          startY: y + 3,
+          head: [examHeaders],
+          body: examBody,
+          styles: { fontSize: 7.4, textColor: [15, 23, 42], cellPadding: 1.5 },
+          headStyles: { fillColor: [29, 78, 216], textColor: 255, fontSize: 7.6 },
+          alternateRowStyles: { fillColor: [239, 246, 255] },
+          theme: 'grid',
+          margin: { left: margin, right: margin }
+        });
+        y = (doc.lastAutoTable?.finalY || y) + 8;
+      }
 
       const cards = model.subjects.slice(0, 3);
       cards.forEach((item, idx) => {
