@@ -437,9 +437,11 @@
     // Attempt/grade helpers (inline; do not import other files)
     function isNumber(n){ return Number.isFinite(n) && !Number.isNaN(n); }
     function attemptedItem(item){
-      const score = Number(item?.score);
+      const rawScore = item?.score;
+      const score = Number(rawScore);
       const max   = Number(item?.max);
-      return isNumber(score) && isNumber(max) && max > 0 && score > 0;
+      const missingScore = rawScore === '' || rawScore === null || rawScore === undefined || Number.isNaN(score);
+      return !missingScore && isNumber(score) && isNumber(max) && max > 0 && score >= 0;
     }
     function studentPercentFrom(subjects){
       let s = 0, m = 0, count = 0;
@@ -776,19 +778,42 @@
         Object.entries(record || {}).forEach(([adm, subjects]) => {
           merged[adm] = merged[adm] || {};
           Object.entries(subjects || {}).forEach(([sub, o]) => {
-            const canonicalLabel = SomapSub().canonSubject ? SomapSub().canonSubject(sub) : sub;
-            const labelKey = canonicalLabel || sub;
+            const aliases = getAcademicSubjectAliases(o?.label || sub, sub);
+            const labelKey = aliases[0] || sub;
             const score = Number(o?.score || 0);
             const max = Number(o?.max || 0);
             if (!attemptedItem({ score, max })) return;
             const current = merged[adm][labelKey] || { score: 0, max: 0 };
             const next = { score: current.score + score, max: current.max + max };
-            merged[adm][labelKey] = next;
-            if (!merged[adm][sub]) merged[adm][sub] = next;
+            aliases.forEach((alias) => {
+              merged[adm][alias] = next;
+            });
           });
         });
       });
       return merged;
+    }
+
+    function makeAcademicSubjectKey(label) {
+      return String(label || '').trim().replace(/[.#$/\[\]]/g, '_');
+    }
+    function getAcademicSubjectAliases(subjectLabel, rawKey) {
+      const aliases = [];
+      const seen = new Set();
+      const push = (value) => {
+        const normalized = String(value || '').trim();
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        aliases.push(normalized);
+      };
+      const baseLabel = String(subjectLabel || rawKey || '').trim();
+      const canonicalLabel = SomapSub().canonSubject ? SomapSub().canonSubject(baseLabel) : baseLabel;
+      push(canonicalLabel || baseLabel);
+      push(baseLabel);
+      push(rawKey);
+      push(makeAcademicSubjectKey(canonicalLabel || baseLabel));
+      push(makeAcademicSubjectKey(rawKey));
+      return aliases;
     }
 
     function getSubjectList(className, year){
@@ -1306,16 +1331,13 @@
               const subjObj = val[adm] || {};
               Object.keys(subjObj).forEach(sub => {
                 const o = subjObj[sub] || {};
-                const canonicalLabel = SomapSub().canonSubject
-                  ? SomapSub().canonSubject(sub)
-                  : sub;
-                const labelKey = canonicalLabel || sub;
                 const entry = {
                   score: Number(o.score || 0),
                   max: Number(o.max || 100),
                 };
-                out[adm][labelKey] = entry;
-                if (!out[adm][sub]) out[adm][sub] = entry;
+                getAcademicSubjectAliases(o.label || sub, sub).forEach((alias) => {
+                  out[adm][alias] = entry;
+                });
               });
             });
 
