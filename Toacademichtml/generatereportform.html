@@ -1545,14 +1545,17 @@
         state.rawStudents = {};
         students.forEach(stu => {
           const extra = pickMapValueByCandidates(detailsMap || {}, detailLookup, getStudentLookupCandidates(stu.adm, stu)) || {};
+          const mergedSource = { ...(stu.meta || {}), ...stu, ...extra };
           state.rawStudents[stu.adm] = {
             ...stu,
-            parentName: extra.parentName || stu.parentName,
-            parentContact: extra.parentContact || stu.parentContact,
-            gender: extra.gender || stu.gender,
-            dob: extra.dob || stu.dob,
-            reportingDate: extra.reportingDate || stu.reportingDate,
-            photoUrl: extra.photoUrl || stu.photoUrl || stu.passportPhotoUrl || stu.passportPhotoURL || stu.photoURL || stu.avatarUrl || ''
+            name: resolveStudentName(mergedSource, stu.adm),
+            parentName: resolveParentName(mergedSource) || stu.parentName,
+            parentContact: resolveParentContact(mergedSource) || stu.parentContact,
+            gender: resolveStudentGender(mergedSource) || stu.gender,
+            dob: resolveStudentDob(mergedSource) || stu.dob,
+            reportingDate: resolveReportingDate(mergedSource) || stu.reportingDate,
+            photoUrl: resolveStudentPhoto(mergedSource) || stu.photoUrl || '',
+            meta: mergedSource
           };
         });
         console.log('[Report] final rawStudents count', Object.keys(state.rawStudents).length);
@@ -1753,8 +1756,168 @@
       return roster;
     }
 
+    function cleanStudentText(v){
+      const str = String(v ?? '').trim();
+      if (!str || str === '-' || /^n\/a$/i.test(str) || /^null$/i.test(str) || /^undefined$/i.test(str)) return '';
+      return str;
+    }
+    function joinPersonName(source){
+      if (!source || typeof source !== 'object') return '';
+      return cleanStudentText([
+        source.firstName,
+        source.middleName,
+        source.lastName
+      ].filter(Boolean).join(' '));
+    }
+    function firstStudentText(...values){
+      for (const value of values) {
+        const cleaned = cleanStudentText(value);
+        if (cleaned) return cleaned;
+      }
+      return '';
+    }
+    function resolveStudentName(s, fallbackAdm){
+      const profile = s?.profile || s?.studentProfile || s?.biodata || s?.bio || s?.details || {};
+      return firstStudentText(
+        joinPersonName(s),
+        joinPersonName(profile),
+        s?.fullNameUpper,
+        s?.name,
+        s?.fullName,
+        profile?.fullNameUpper,
+        profile?.fullName,
+        profile?.name
+      ) || ('Student ' + fallbackAdm);
+    }
+    function resolveParentName(s){
+      const parent = s?.parent && typeof s.parent === 'object' ? s.parent : {};
+      const guardian = s?.guardian && typeof s.guardian === 'object' ? s.guardian : {};
+      const primaryParent = s?.primaryParent && typeof s.primaryParent === 'object' ? s.primaryParent : {};
+      return firstStudentText(
+        s?.parentName,
+        s?.primaryParentName,
+        s?.guardianName,
+        s?.parentFullName,
+        joinPersonName(parent),
+        parent?.fullName,
+        parent?.name,
+        parent?.parentName,
+        joinPersonName(primaryParent),
+        primaryParent?.fullName,
+        primaryParent?.name,
+        joinPersonName(guardian),
+        guardian?.fullName,
+        guardian?.name,
+        guardian?.guardianName,
+        typeof s?.parent === 'string' ? s.parent : ''
+      );
+    }
+    function resolveParentContact(s){
+      const parent = s?.parent && typeof s.parent === 'object' ? s.parent : {};
+      const guardian = s?.guardian && typeof s.guardian === 'object' ? s.guardian : {};
+      const primaryParent = s?.primaryParent && typeof s.primaryParent === 'object' ? s.primaryParent : {};
+      return firstStudentText(
+        s?.parentContact,
+        s?.parentPhone,
+        s?.guardianPhone,
+        s?.phone,
+        s?.contact,
+        s?.phoneNumber,
+        parent?.phone,
+        parent?.phoneNumber,
+        parent?.contact,
+        parent?.contactNumber,
+        parent?.parentContact,
+        primaryParent?.phone,
+        primaryParent?.phoneNumber,
+        primaryParent?.contact,
+        guardian?.phone,
+        guardian?.phoneNumber,
+        guardian?.contact,
+        guardian?.guardianPhone
+      );
+    }
+    function resolveStudentDob(s){
+      const profile = s?.profile || s?.studentProfile || s?.biodata || s?.bio || s?.details || {};
+      return firstStudentText(
+        s?.dob,
+        s?.dateOfBirth,
+        s?.birthDate,
+        s?.date_birth,
+        profile?.dob,
+        profile?.dateOfBirth,
+        profile?.birthDate
+      );
+    }
+    function resolveStudentGender(s){
+      const profile = s?.profile || s?.studentProfile || s?.biodata || s?.bio || s?.details || {};
+      return firstStudentText(
+        s?.gender,
+        s?.Gender,
+        s?.sex,
+        profile?.gender,
+        profile?.Gender,
+        profile?.sex
+      );
+    }
+    function resolveReportingDate(s){
+      return firstStudentText(
+        s?.reportingDate,
+        s?.reporting,
+        s?.reportDate,
+        s?.dateReported,
+        s?.admissionDate
+      );
+    }
+    function resolveStudentPhoto(s){
+      const profile = s?.profile || s?.studentProfile || s?.biodata || s?.bio || s?.details || {};
+      const passport = s?.passportPhoto && typeof s.passportPhoto === 'object' ? s.passportPhoto : {};
+      const photos = s?.photos && typeof s.photos === 'object' ? s.photos : {};
+      const media = s?.media && typeof s.media === 'object' ? s.media : {};
+      return firstStudentText(
+        s?.photoUrl,
+        s?.passport,
+        s?.passportPhotoUrl,
+        s?.passportPhotoURL,
+        s?.photo,
+        s?.photoURL,
+        s?.avatar,
+        s?.avatarUrl,
+        s?.imageUrl,
+        s?.image,
+        passport?.url,
+        passport?.photoUrl,
+        photos?.passport,
+        photos?.passportPhotoUrl,
+        photos?.photoUrl,
+        media?.photoUrl,
+        media?.imageUrl,
+        profile?.photoUrl,
+        profile?.passport,
+        profile?.passportPhotoUrl,
+        profile?.passportPhotoURL,
+        profile?.photo,
+        profile?.photoURL,
+        profile?.imageUrl,
+        profile?.avatar,
+        profile?.avatarUrl,
+        profile?.profilePhoto,
+        profile?.image
+      );
+    }
+    function hasStudentDetailFields(entry){
+      return Boolean(
+        resolveStudentName(entry, '') ||
+        resolveParentName(entry) ||
+        resolveParentContact(entry) ||
+        resolveStudentDob(entry) ||
+        resolveStudentGender(entry) ||
+        resolveReportingDate(entry) ||
+        resolveStudentPhoto(entry)
+      );
+    }
     function normalizeStudentRecord(admKey, s){
-      const name = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || s.fullName || ('Student ' + admKey);
+      const name = resolveStudentName(s, admKey);
       const rawClass = s.class || s.currentClass || s.level || s.className || s.grade || s.classLevel || '';
       const sClass = normalizeDisplayClass(rawClass);
       const embeddedStream = extractEmbeddedStream(rawClass);
@@ -1765,15 +1928,21 @@
         feePaid = Object.values(s.payments).reduce((sum, p) => sum + Number(p.amount || 0), 0);
       }
       const balance = Number(s.balance || Math.max(0, feeDue - feePaid) || 0);
-      const photoCandidate = s.photoUrl || s.passport || s.passportPhotoUrl || s.passportPhotoURL || s.photoURL || s.avatar || s.avatarUrl || s.imageUrl || s.image || '';
+      const photoCandidate = resolveStudentPhoto(s);
+      const parentName = resolveParentName(s) || '-';
+      const parentContact = resolveParentContact(s) || '-';
+      const gender = resolveStudentGender(s);
+      const dob = resolveStudentDob(s) || '-';
+      const reportingDate = resolveReportingDate(s) || '-';
       return {
         id: String(s.id || s.studentId || admKey),
         admissionNo: String(s.admissionNumber || s.admNo || s.admissionNo || admKey),
         adm: String(admKey), name, firstName: s.firstName||'', middleName: s.middleName||'', lastName: s.lastName||'',
-        class: sClass, stream: sStream, gender: s.gender||'', dob: s.dob||'-',
-        parentName: s.parentName || s.parent || '-', parentContact: s.parentContact || s.parentPhone || s.guardianPhone || '-',
+        class: sClass, stream: sStream, gender, dob,
+        parentName, parentContact,
         totalFee: feeDue, paid: feePaid, balance,
-        reportingDate: s.reportingDate || '-', photoUrl: photoCandidate
+        reportingDate, photoUrl: photoCandidate,
+        meta: s
       };
     }
 
@@ -1786,19 +1955,37 @@
       const map = {};
       const assignDetail = (bucketKey, entry) => {
         const keys = [
-          bucketKey, entry?.adm, entry?.admissionNumber, entry?.admNo, entry?.admission, entry?.admissionNo, entry?.id, entry?.studentId
+          bucketKey, entry?.adm, entry?.admissionNumber, entry?.admNo, entry?.admission, entry?.admissionNo, entry?.id, entry?.studentId, entry?._key
         ].map(v => String(v || '').trim()).filter(Boolean);
         keys.forEach((candidateKey) => {
           map[candidateKey] = map[candidateKey] || {};
           const m = map[candidateKey];
-          if (entry.parentName || entry.guardianName) m.parentName = entry.parentName || entry.guardianName;
-          if (entry.parentContact || entry.parentPhone || entry.guardianPhone || entry.phone) m.parentContact = entry.parentContact || entry.parentPhone || entry.guardianPhone || entry.phone;
-          if (entry.gender) m.gender = entry.gender;
-          if (entry.dob || entry.dateOfBirth) m.dob = entry.dob || entry.dateOfBirth;
-          if (entry.reporting || entry.reportingDate) m.reportingDate = entry.reporting || entry.reportingDate;
-          if (entry.photoUrl || entry.passport || entry.passportPhotoUrl || entry.passportPhotoURL || entry.photo || entry.photoURL || entry.imageUrl || entry.avatar || entry.avatarUrl || entry.profilePhoto || entry.image) {
-            m.photoUrl = entry.photoUrl || entry.passport || entry.passportPhotoUrl || entry.passportPhotoURL || entry.photo || entry.photoURL || entry.imageUrl || entry.avatar || entry.avatarUrl || entry.profilePhoto || entry.image;
-          }
+          const name = resolveStudentName(entry, '');
+          const parentName = resolveParentName(entry);
+          const parentContact = resolveParentContact(entry);
+          const gender = resolveStudentGender(entry);
+          const dob = resolveStudentDob(entry);
+          const reportingDate = resolveReportingDate(entry);
+          const photoUrl = resolveStudentPhoto(entry);
+          if (name) m.name = name;
+          if (parentName) m.parentName = parentName;
+          if (parentContact) m.parentContact = parentContact;
+          if (gender) m.gender = gender;
+          if (dob) m.dob = dob;
+          if (reportingDate) m.reportingDate = reportingDate;
+          if (photoUrl) m.photoUrl = photoUrl;
+        });
+      };
+      const walkDetailEntries = (bucketKey, value, depth = 0) => {
+        if (!value || typeof value !== 'object' || depth > 4) return;
+        if (hasStudentDetailFields(value)) assignDetail(bucketKey, value);
+        if (Array.isArray(value)) {
+          value.forEach((item, idx) => walkDetailEntries(bucketKey || String(idx), item, depth + 1));
+          return;
+        }
+        Object.entries(value).forEach(([childKey, childValue]) => {
+          if (!childValue || typeof childValue !== 'object') return;
+          walkDetailEntries(bucketKey || childKey, childValue, depth + 1);
         });
       };
       for (const path of candidates){
@@ -1810,7 +1997,7 @@
             keys.forEach(k => {
               const entry = val[k];
               if (entry && typeof entry === 'object'){
-                assignDetail(k, entry);
+                walkDetailEntries(k, entry, 0);
               }
             });
           }
