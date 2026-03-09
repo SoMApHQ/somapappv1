@@ -1376,14 +1376,217 @@
       XLSX.writeFile(wb, `Scoresheet_${state.className || 'Class'}_${state.examKey || 'exam'}_${state.year || 'year'}-${state.month || 'mm'}.xlsx`);
     }
 
-    function exportPDF(){
-      const rows = gatherRowsForExport();
+    const PDF_SOMAP_LOGO = '../images/somap-logo.png.jpg';
+    const PDF_SCHOOL_LOGO = '../images/socrates_logo.png';
+    const FULL_MONTH_NAMES = {
+      Jan: 'January', Feb: 'February', Mar: 'March', Apr: 'April', May: 'May', Jun: 'June',
+      Jul: 'July', Aug: 'August', Sep: 'September', Oct: 'October', Nov: 'November', Dec: 'December'
+    };
+
+    function pdfImageFormat(dataUrl){
+      return String(dataUrl || '').startsWith('data:image/png') ? 'PNG' : 'JPEG';
+    }
+
+    function pdfMonthLabel(monthKey){
+      const short = MONTH_LABELS[monthKey] || monthKey;
+      return FULL_MONTH_NAMES[short] || short || '-';
+    }
+
+    function currentRowsSortedForPdf(){
+      return Object.values(state.rowsByAdm || {}).slice().sort((a, b) => {
+        const ap = Number(a?.tdPstn?.textContent || 999999);
+        const bp = Number(b?.tdPstn?.textContent || 999999);
+        if (ap !== bp) return ap - bp;
+        return String(a?.meta?.name || '').localeCompare(String(b?.meta?.name || ''));
+      });
+    }
+
+    function currentClassAveragePct(){
+      const rows = Object.values(state.rowsByAdm || {}).filter(r => Number.isFinite(r?._avgPct) && (r._attemptCount || 0) > 0);
+      if (!rows.length) return 0;
+      return rows.reduce((sum, row) => sum + Number(row._avgPct || 0), 0) / rows.length;
+    }
+
+    function currentSubjectAveragePct(subjectKey){
+      let sum = 0;
+      let count = 0;
+      Object.values(state.rowsByAdm || {}).forEach(row => {
+        const cell = row?.subjectCells?.[subjectKey];
+        if (!cell) return;
+        const score = Number(cell.scoreInput.value);
+        const max = Number(cell.maxInput.value);
+        if (!attemptedItem({ score, max })) return;
+        sum += (score * 100) / max;
+        count++;
+      });
+      return count ? sum / count : 0;
+    }
+
+    function buildStudentPdfSubjectRows(row){
+      return state.subjectList.map(subject => {
+        const cell = row.subjectCells[subject.key];
+        const score = Number(cell?.scoreInput?.value);
+        const max = Number(cell?.maxInput?.value);
+        const attempted = attemptedItem({ score, max });
+        const pct = attempted ? ((score * 100) / max) : null;
+        const grade = attempted ? gradeFromPercent(pct) : '-';
+        const subjectAvg = currentSubjectAveragePct(subject.key);
+        return [
+          subject.label,
+          attempted ? score.toFixed(1) : '-',
+          attempted ? String(Math.round(max)) : '-',
+          attempted ? `${pct.toFixed(1)}%` : '-',
+          grade,
+          subjectAvg ? `${subjectAvg.toFixed(1)}%` : '-',
+          cell?.pstnSpan?.textContent || '-'
+        ];
+      });
+    }
+
+    async function loadPdfImageAsDataUrl(url){
+      if (!url) return null;
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth || img.width;
+            canvas.height = img.naturalHeight || img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            resolve(canvas.toDataURL('image/png'));
+          } catch (_) {
+            resolve(null);
+          }
+        };
+        img.onerror = () => resolve(null);
+        img.src = url;
+      });
+    }
+
+    function drawPdfMetric(doc, x, y, w, h, label, value, subvalue){
+      doc.setDrawColor(203, 213, 225);
+      doc.setFillColor(248, 250, 252);
+      doc.roundedRect(x, y, w, h, 10, 10, 'FD');
+      doc.setTextColor(100, 116, 139);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text(String(label || '').toUpperCase(), x + 10, y + 14);
+      doc.setTextColor(15, 23, 42);
+      doc.setFontSize(14);
+      doc.text(String(value || '-'), x + 10, y + 31);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(71, 85, 105);
+      if (subvalue) doc.text(String(subvalue), x + 10, y + 45);
+    }
+
+    async function exportPDF(){
+      recomputeAll();
+      const rows = currentRowsSortedForPdf();
+      if (!rows.length) {
+        alert('No student data available to export.');
+        return;
+      }
       const { jsPDF } = window.jspdf;
-      const doc = new jsPDF({ orientation:'l', unit:'pt', format:'a4' });
-      const title = `Scoresheet ${state.className || ''} ${state.examKey || ''} ${state.year || ''}/${state.month || ''}`;
-      doc.setFontSize(14); doc.text(title, 40, 40);
-      doc.autoTable({ startY:60, head:[rows[0]], body:rows.slice(1), styles:{fontSize:7,cellPadding:3}, headStyles:{fillColor:[37,99,235]} });
-      doc.save(title.replace(/[^A-Za-z0-9_\- ]/g,'_') + '.pdf');
+      const doc = new jsPDF({ orientation:'p', unit:'pt', format:'a4' });
+      const somapLogo = await loadPdfImageAsDataUrl(PDF_SOMAP_LOGO);
+      const schoolLogo = await loadPdfImageAsDataUrl(PDF_SCHOOL_LOGO) || somapLogo;
+      const monthLabel = pdfMonthLabel(state.month);
+      const classAvg = currentClassAveragePct();
+      const classSize = rows.length;
+
+      rows.forEach((row, index) => {
+        if (index > 0) doc.addPage();
+        const studentName = row.meta?.name || 'Student';
+        const overallAvg = Number(row._avgPct || 0);
+        const overallGrade = row.tdGrade?.textContent || gradeFromPercent(overallAvg);
+        const overallPos = row.tdPstn?.textContent || '-';
+        const present = Number(row.tdPresent?.textContent || 0);
+        const absent = Number(row.tdAbsent?.textContent || 0);
+        const attendancePct = (present + absent) > 0 ? ((present * 100) / (present + absent)) : 0;
+        const subjectRows = buildStudentPdfSubjectRows(row);
+
+        doc.setFillColor(15, 23, 42);
+        doc.rect(0, 0, 595.28, 92, 'F');
+        doc.setFillColor(14, 165, 233);
+        doc.rect(0, 92, 595.28, 6, 'F');
+
+        if (schoolLogo) doc.addImage(schoolLogo, pdfImageFormat(schoolLogo), 40, 26, 36, 36);
+        if (somapLogo) doc.addImage(somapLogo, pdfImageFormat(somapLogo), 84, 26, 36, 36);
+
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(18);
+        doc.text(String(state.schoolBranch || 'Socrates School'), 132, 42);
+        doc.setFontSize(13);
+        doc.text('Student Scoresheet PDF', 132, 62);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.text(`Class: ${state.className || '-'}   Exam: ${state.examTypeLabel || '-'}   Month: ${monthLabel}   Year: ${state.year || '-'}`, 132, 80);
+
+        doc.setDrawColor(226, 232, 240);
+        doc.setFillColor(255, 255, 255);
+        doc.roundedRect(32, 120, 531, 72, 14, 14, 'FD');
+        doc.setTextColor(15, 23, 42);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(15);
+        doc.text(studentName, 48, 146);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10.5);
+        doc.text(`Admission No: ${row.meta?.adm || '-'}`, 48, 166);
+        doc.text(`Class: ${row.meta?.class || state.className || '-'}`, 210, 166);
+        doc.text(`Exam Type: ${state.examTypeLabel || '-'}`, 360, 166);
+
+        drawPdfMetric(doc, 32, 208, 120, 58, 'Student Avg', `${overallAvg.toFixed(1)}%`, `Grade ${overallGrade}`);
+        drawPdfMetric(doc, 166, 208, 120, 58, 'Class Avg', `${classAvg.toFixed(1)}%`, `${classSize} learners`);
+        drawPdfMetric(doc, 300, 208, 120, 58, 'Position', `${overallPos}`, `Out of ${classSize}`);
+        drawPdfMetric(doc, 434, 208, 129, 58, 'Attendance', `${attendancePct.toFixed(1)}%`, `${present} present / ${absent} absent`);
+
+        doc.autoTable({
+          startY: 286,
+          head: [['Subject', 'Score', 'Max', '%', 'Grade', 'Subject Avg', 'Pos']],
+          body: subjectRows,
+          foot: [[
+            'Totals',
+            Number(row.tdTotal?.textContent || 0).toFixed(1),
+            String(Math.round(Number(row.tdMax?.textContent || 0))),
+            `${overallAvg.toFixed(1)}%`,
+            overallGrade,
+            `${classAvg.toFixed(1)}%`,
+            overallPos
+          ]],
+          margin: { left: 32, right: 32 },
+          theme: 'grid',
+          styles: { fontSize: 9, cellPadding: 6, textColor: [15, 23, 42], lineColor: [226, 232, 240], lineWidth: 0.6 },
+          headStyles: { fillColor: [30, 64, 175], textColor: 255, fontStyle: 'bold' },
+          footStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold' },
+          alternateRowStyles: { fillColor: [248, 250, 252] },
+          columnStyles: {
+            0: { cellWidth: 170 },
+            1: { halign: 'right', cellWidth: 55 },
+            2: { halign: 'right', cellWidth: 45 },
+            3: { halign: 'right', cellWidth: 55 },
+            4: { halign: 'center', cellWidth: 55 },
+            5: { halign: 'right', cellWidth: 75 },
+            6: { halign: 'center', cellWidth: 45 }
+          }
+        });
+
+        const footerY = Math.min((doc.lastAutoTable?.finalY || 700) + 30, 780);
+        doc.setDrawColor(148, 163, 184);
+        doc.line(40, footerY, 220, footerY);
+        doc.line(340, footerY, 520, footerY);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(71, 85, 105);
+        doc.text('Class teacher signature', 40, footerY + 14);
+        doc.text('Head teacher signature', 340, footerY + 14);
+      });
+
+      const title = `Scoresheet_${state.className || 'Class'}_${state.examTypeLabel || 'Exam'}_${state.year || 'Year'}_${monthLabel}`;
+      doc.save(title.replace(/[^A-Za-z0-9_\- ]/g, '_') + '.pdf');
     }
 
     /* ---------- Persist summary (kept) ---------- */
