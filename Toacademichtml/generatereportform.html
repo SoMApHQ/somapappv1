@@ -517,6 +517,7 @@
                 <h4>Mitihani aliyofanya</h4>
                 <p class="text-sm leading-7 text-slate-700" id="writtenExamCount">Hakuna exam history iliyopatikana.</p>
                 <p class="matrix-note mt-2" id="writtenExamNames">-</p>
+                <div class="mt-3" id="writtenExamTrendGraph"></div>
               </div>
               <div class="written-box">
                 <h4>Jedwali la ufaulu kwa kila somo na kila exam</h4>
@@ -1428,9 +1429,10 @@
           fetchScores({year: state.year, className: dbClass, examKey: state.examKey, month: state.month, rawMonth: state.monthRaw}),
           fetchStudentDetailsMap()
         ]);
+        const detailLookup = buildNormalizedValueLookup(detailsMap || {});
         state.rawStudents = {};
         students.forEach(stu => {
-          const extra = detailsMap[stu.adm] || {};
+          const extra = pickMapValueByCandidates(detailsMap || {}, detailLookup, getStudentLookupCandidates(stu.adm, stu)) || {};
           state.rawStudents[stu.adm] = {
             ...stu,
             parentName: extra.parentName || stu.parentName,
@@ -1438,7 +1440,7 @@
             gender: extra.gender || stu.gender,
             dob: extra.dob || stu.dob,
             reportingDate: extra.reportingDate || stu.reportingDate,
-            photoUrl: extra.photoUrl || stu.photoUrl
+            photoUrl: extra.photoUrl || stu.photoUrl || stu.passportPhotoUrl || stu.passportPhotoURL || stu.photoURL || stu.avatarUrl || ''
           };
         });
         const scoreSync = remapScoreDataToRoster(students, scoresRaw, state.reportWindow?.detailsByAdm || {});
@@ -1578,6 +1580,23 @@
         '/parents', '/guardians', '/photos', '/passports', '/images/students'
       ];
       const map = {};
+      const assignDetail = (bucketKey, entry) => {
+        const keys = [
+          bucketKey, entry?.adm, entry?.admissionNumber, entry?.admNo, entry?.admission, entry?.admissionNo, entry?.id, entry?.studentId
+        ].map(v => String(v || '').trim()).filter(Boolean);
+        keys.forEach((candidateKey) => {
+          map[candidateKey] = map[candidateKey] || {};
+          const m = map[candidateKey];
+          if (entry.parentName || entry.guardianName) m.parentName = entry.parentName || entry.guardianName;
+          if (entry.parentContact || entry.parentPhone || entry.guardianPhone || entry.phone) m.parentContact = entry.parentContact || entry.parentPhone || entry.guardianPhone || entry.phone;
+          if (entry.gender) m.gender = entry.gender;
+          if (entry.dob || entry.dateOfBirth) m.dob = entry.dob || entry.dateOfBirth;
+          if (entry.reporting || entry.reportingDate) m.reportingDate = entry.reporting || entry.reportingDate;
+          if (entry.photoUrl || entry.passport || entry.passportPhotoUrl || entry.passportPhotoURL || entry.photo || entry.photoURL || entry.imageUrl || entry.avatar || entry.avatarUrl || entry.profilePhoto || entry.image) {
+            m.photoUrl = entry.photoUrl || entry.passport || entry.passportPhotoUrl || entry.passportPhotoURL || entry.photo || entry.photoURL || entry.imageUrl || entry.avatar || entry.avatarUrl || entry.profilePhoto || entry.image;
+          }
+        });
+      };
       for (const path of candidates){
         try{
           const snap = await getSnapScopedOrLegacy(path);
@@ -1587,19 +1606,7 @@
             keys.forEach(k => {
               const entry = val[k];
               if (entry && typeof entry === 'object'){
-                // Try to find admission key or treat current key as admission
-                const adm = String(entry.adm || entry.admissionNumber || entry.admNo || entry.admission || k);
-                map[adm] = map[adm] || {};
-                const m = map[adm];
-                // Merge common fields
-                if (entry.parentName || entry.guardianName) m.parentName = entry.parentName || entry.guardianName;
-                if (entry.parentContact || entry.parentPhone || entry.guardianPhone || entry.phone) m.parentContact = entry.parentContact || entry.parentPhone || entry.guardianPhone || entry.phone;
-                if (entry.gender) m.gender = entry.gender;
-                if (entry.dob || entry.dateOfBirth) m.dob = entry.dob || entry.dateOfBirth;
-                if (entry.reporting || entry.reportingDate) m.reportingDate = entry.reporting || entry.reportingDate;
-                if (entry.photoUrl || entry.passport || entry.passportPhotoUrl || entry.passportPhotoURL || entry.photo || entry.photoURL || entry.imageUrl || entry.avatar || entry.avatarUrl || entry.profilePhoto || entry.image) {
-                  m.photoUrl = entry.photoUrl || entry.passport || entry.passportPhotoUrl || entry.passportPhotoURL || entry.photo || entry.photoURL || entry.imageUrl || entry.avatar || entry.avatarUrl || entry.profilePhoto || entry.image;
-                }
+                assignDetail(k, entry);
               }
             });
           }
@@ -1843,7 +1850,11 @@
       return lookup;
     }
     function getStudentLookupCandidates(adm, data){
-      return [adm, data?.adm, data?.admissionNo, data?.id].map(normalizeAdm).filter(Boolean);
+      return [
+        adm, data?.adm, data?.admissionNo, data?.admissionNumber, data?.admNo, data?.id, data?.studentId, data?._key,
+        data?.meta?._key, data?.meta?.id, data?.meta?.studentId, data?.meta?.adm, data?.meta?.admissionNo,
+        data?.meta?.admissionNumber, data?.meta?.admNo
+      ].map(normalizeAdm).filter(Boolean);
     }
     function pickMapValueByCandidates(rawMap, lookup, candidates){
       const direct = rawMap || {};
@@ -2407,7 +2418,7 @@
             const subject = canonicalSubjectName(raw?.subject || subjectKey || '');
             const score = Number(raw?.score || 0);
             const max = Number(raw?.max || 0);
-            if (!attemptedItem({ score, max })) return;
+            if (!isNumber(score) || !isNumber(max) || max <= 0) return;
             const current = mergedScores[adm][subject] || { score: 0, max: 0 };
             mergedScores[adm][subject] = { score: current.score + score, max: current.max + max };
             detailsByAdm[adm].subjects[subject] = detailsByAdm[adm].subjects[subject] || [];
@@ -3121,7 +3132,7 @@ function toNormalizedRows(subjects){
           };
           const score = Number(log.score || 0);
           const max = Number(log.max || 0);
-          if (!attemptedItem({ score, max })) return;
+          if (!isNumber(score) || !isNumber(max) || max <= 0) return;
           existing.score += score;
           existing.max += max;
           existing.attempts += 1;
@@ -3171,6 +3182,18 @@ function toNormalizedRows(subjects){
           <div class="mt-1 text-[11px] text-slate-400">${entry.attempts} subject entries • ${Number(entry.score || 0).toFixed(1)}/${Number(entry.max || 0).toFixed(0)}</div>
         </div>`;
       }).join('');
+    }
+    function renderExamTrendGraph(history){
+      const list = (history || []).slice();
+      if (!list.length) return '<div class="text-xs text-slate-500">Hakuna trend ya exam iliyopatikana.</div>';
+      return `<div class="mini-graph">${list.map(item => {
+        const height = Math.max(6, Math.min(100, Number(item.pct || 0)));
+        const short = `${item.examLabel || 'Exam'} ${(item.monthLabel || '').slice(0, 3)}`.trim();
+        return `<div class="mini-bar-wrap">
+          <div class="mini-bar" style="height:${height}%"></div>
+          <div class="mini-bar-label" title="${escapeHtml(short)}">${escapeHtml(short)}</div>
+        </div>`;
+      }).join('')}</div>`;
     }
     function trendFromPoints(points){
       const list = (points || []).filter(item => isNumber(item?.pct));
@@ -3325,10 +3348,11 @@ function toNormalizedRows(subjects){
       const recommendations = document.getElementById('writtenReportRecommendations');
       const examCountNode = document.getElementById('writtenExamCount');
       const examNamesNode = document.getElementById('writtenExamNames');
+      const examTrendNode = document.getElementById('writtenExamTrendGraph');
       const examMatrixHead = document.getElementById('writtenExamMatrixHead');
       const examMatrixBody = document.getElementById('writtenExamMatrixBody');
       const subjectsNode = document.getElementById('writtenSubjectCards');
-      if (!page || !summary || !title || !intro || !narrative || !recommendations || !examCountNode || !examNamesNode || !examMatrixHead || !examMatrixBody || !subjectsNode) return;
+      if (!page || !summary || !title || !intro || !narrative || !recommendations || !examCountNode || !examNamesNode || !examTrendNode || !examMatrixHead || !examMatrixBody || !subjectsNode) return;
       if (!student) {
         page.style.display = 'none';
         summary.innerHTML = '';
@@ -3338,6 +3362,7 @@ function toNormalizedRows(subjects){
         recommendations.textContent = '-';
         examCountNode.textContent = 'Hakuna exam history iliyopatikana.';
         examNamesNode.textContent = '-';
+        examTrendNode.innerHTML = '';
         examMatrixHead.innerHTML = '';
         examMatrixBody.innerHTML = '';
         subjectsNode.innerHTML = '';
@@ -3354,6 +3379,7 @@ function toNormalizedRows(subjects){
       narrative.textContent = model.narrative;
       examCountNode.textContent = `Mwanafunzi amefanya mitihani ${model.examBreakdown.examCount} ndani ya dirisha la ${state.examType}.`;
       examNamesNode.textContent = model.examBreakdown.examNames.length ? `Majina ya mitihani: ${model.examBreakdown.examNames.join(', ')}.` : 'Hakuna majina ya mitihani yaliyopatikana.';
+      examTrendNode.innerHTML = renderExamTrendGraph(buildExamPerformanceSeries(student));
       examMatrixHead.innerHTML = `<tr><th>Somo</th>${model.examBreakdown.exams.map(exam => `<th>${escapeHtml(exam.shortLabel)}</th>`).join('')}<th>Average</th></tr>`;
       examMatrixBody.innerHTML = model.examBreakdown.subjectRows.length
         ? model.examBreakdown.subjectRows.map(row => `<tr>
@@ -3476,6 +3502,34 @@ function toNormalizedRows(subjects){
         doc.text(String((point.monthLabel || '').slice(0, 3)), barX, y + height - 2);
       });
     }
+    function drawPdfSummaryCards(doc, cards, startX, startY, totalWidth){
+      const list = Array.isArray(cards) ? cards : [];
+      if (!list.length) return startY;
+      const gap = 4;
+      const cols = 2;
+      const cardWidth = (totalWidth - gap) / cols;
+      const cardHeight = 20;
+      list.forEach((card, idx) => {
+        const col = idx % cols;
+        const row = Math.floor(idx / cols);
+        const x = startX + (col * (cardWidth + gap));
+        const y = startY + (row * (cardHeight + 4));
+        doc.setFillColor(248, 250, 252);
+        doc.setDrawColor(203, 213, 225);
+        doc.roundedRect(x, y, cardWidth, cardHeight, 3, 3, 'FD');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(71, 85, 105);
+        doc.text(String(card.title || ''), x + 3, y + 5);
+        doc.setFontSize(12);
+        doc.setTextColor(15, 23, 42);
+        doc.text(String(card.value || '-'), x + 3, y + 11);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        drawWrappedText(doc, String(card.note || ''), x + 3, y + 16, cardWidth - 6, 3.4);
+      });
+      return startY + (Math.ceil(list.length / cols) * (cardHeight + 4));
+    }
 
     function drawWrittenReportPage(doc, student){
       const model = buildWrittenReportModel(student);
@@ -3502,6 +3556,21 @@ function toNormalizedRows(subjects){
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9.5);
       y = drawWrappedText(doc, model.intro, margin + 4, y + 13, 176, 4.5) + 5;
+
+      const summaryCards = [
+        { title: 'Mahudhurio', value: `${student.attendancePercent.toFixed(1)}%`, note: attendanceNarrative(student.attendancePercent) },
+        { title: 'Mwenendo wa ada', value: `${student.debtStatus || 'OK'}`, note: feeNarrative(student) },
+        { title: 'Somo bora', value: model.subjects[0]?.subject || '-', note: model.subjects[0] ? `${model.subjects[0].studentPct.toFixed(1)}%` : 'Hakuna data' },
+        { title: 'Mitihani aliyofanya', value: String(model.examBreakdown.examCount), note: model.examBreakdown.examNames.join(', ') || 'Hakuna data' }
+      ];
+      y = drawPdfSummaryCards(doc, summaryCards, margin, y, 186) + 4;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(15, 23, 42);
+      doc.text('Mwenendo wa mitihani', margin, y);
+      drawPdfTrendChart(doc, buildExamPerformanceSeries(student), margin, y + 3, 186, 28);
+      y += 36;
 
       doc.setFillColor(248, 250, 252);
       doc.roundedRect(margin, y, 186, 26, 4, 4, 'F');
