@@ -1710,12 +1710,26 @@
           students = await fetchStudents(dbClass, state.stream, state.year);
           console.log('[Report] firebase roster count', students.length);
         }
-        const [attendance, fees, scoresRaw, detailsMap] = await Promise.all([
+        let [attendance, fees, scoresRaw, detailsMap] = await Promise.all([
           fetchAttendance(state.year, state.month, dbClass, state.examKey, state.monthRaw),
           fetchFees(state.year, dbClass, students),
           fetchScores({year: state.year, className: dbClass, examKey: state.examKey, month: state.month, rawMonth: state.monthRaw}),
           fetchStudentDetailsMap()
         ]);
+        if (!students.length) {
+          const fallbackStudents = buildFallbackStudentsFromData({
+            className: dbClass,
+            stream: state.stream,
+            scoresMap: scoresRaw,
+            attendanceMap: attendance,
+            detailsMap
+          });
+          if (fallbackStudents.length) {
+            console.log('[Report] rebuilt roster from score/attendance data', fallbackStudents.length);
+            students = fallbackStudents;
+            fees = await fetchFees(state.year, dbClass, students);
+          }
+        }
         const detailLookup = buildNormalizedValueLookup(detailsMap || {});
         state.rawStudents = {};
         students.forEach(stu => {
@@ -2468,6 +2482,36 @@
         remappedDetails[adm] = detailEntry && typeof detailEntry === 'object' ? detailEntry : { subjects: {} };
       });
       return { remappedScores, remappedDetails };
+    }
+    function buildFallbackStudentsFromData({ className, stream, scoresMap, attendanceMap, detailsMap }){
+      const keys = new Set();
+      Object.keys(scoresMap || {}).forEach((key) => keys.add(normalizeAdm(key)));
+      Object.keys(attendanceMap || {}).forEach((key) => keys.add(normalizeAdm(key)));
+      const details = detailsMap && typeof detailsMap === 'object' ? detailsMap : {};
+      const detailLookup = buildNormalizedValueLookup(details);
+      const roster = Array.from(keys)
+        .filter(Boolean)
+        .map((adm) => {
+          const seed = {
+            adm,
+            id: adm,
+            admissionNo: adm,
+            class: normalizeDisplayClass(className || state.className || ''),
+            stream: stream || ''
+          };
+          const detail = pickMapValueByCandidates(details, detailLookup, getStudentLookupCandidates(adm, seed)) || {};
+          return normalizeStudentRecord(adm, {
+            ...seed,
+            ...detail,
+            id: String(detail?.id || detail?.studentId || adm),
+            admissionNo: String(detail?.admissionNumber || detail?.admissionNo || detail?.admNo || adm),
+            class: detail?.class || detail?.className || detail?.classLevel || detail?.currentClass || seed.class,
+            stream: detail?.stream || detail?.streamName || detail?.section || seed.stream
+          });
+        })
+        .filter(Boolean);
+      roster.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+      return roster;
     }
     function sumPayments(payments){
       if (!payments || typeof payments !== 'object') return 0;
