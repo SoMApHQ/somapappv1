@@ -937,6 +937,22 @@
       const canon = SomapSub().canonClass ? SomapSub().canonClass(noStream) : noStream;
       return String(canon || noStream || label || '').trim();
     }
+    function canonicalClassKey(str) {
+      const canonical = normalizeDisplayClass(str);
+      const norm = String(canonical || '').toUpperCase().replace(/[\s\-\._]/g, '');
+      if (!norm) return '';
+      return norm.replace(/(19|20)\d{2}$/, '').replace(/^(CLASS|GRADE|STD|STREAM)/gi, '');
+    }
+    function classMatches(target, actual) {
+      if (!target || !actual) return false;
+      const t = canonicalClassKey(target);
+      const a = canonicalClassKey(actual);
+      if (t && a && t === a) return true;
+      const tLead = (t.match(/^\d+/) || [''])[0];
+      const aLead = (a.match(/^\d+/) || [''])[0];
+      if ((tLead === '1' || tLead === '2') && (aLead === '1' || aLead === '2')) return tLead === aLead;
+      return false;
+    }
     function sanitizeStreamFilter(input){
       const raw = String(input || '').trim();
       if (!raw) return '';
@@ -1560,7 +1576,7 @@
       } catch (e) { /* ignore */ }
 
       const deltaYears = Number(year) - SOMAP_DEFAULT_YEAR;
-      const selectedCanon = SomapSub().canonClass ? SomapSub().canonClass(className) : className;
+      const selectedCanon = normalizeDisplayClass(className);
       // When year > anchor (2025), prefer anchor+shift so Class 4 in 2025 → Class 5 in 2026.
 
       const roster = baseStudents.reduce((acc, student) => {
@@ -1586,14 +1602,12 @@
         } else if (String(classRaw).trim().toUpperCase() === 'GRADUATED') return acc;
 
         const classLevel = normalizeClassNameForEnrollment(classRaw);
-        const studentCanon = SomapSub().canonClass ? SomapSub().canonClass(classLevel) : classLevel;
-        const classMatches = !selectedCanon ||
-          (studentCanon && studentCanon.toLowerCase() === (selectedCanon || '').toLowerCase()) ||
-          (String(studentCanon || '').toLowerCase().includes(String(selectedCanon || '').toLowerCase()));
+        const studentCanon = normalizeDisplayClass(classLevel);
+        const classOk = !selectedCanon || classMatches(selectedCanon, studentCanon);
         const normalizedStream = String(student.stream || '').toUpperCase().replace(/[\s-]/g, '');
         const normalizedInputStream = (sanitizedStream || '').toUpperCase().replace(/[\s-]/g, '');
         const streamMatches = !sanitizedStream || normalizedStream.includes(normalizedInputStream);
-        if (!classMatches || !streamMatches) return acc;
+        if (!classOk || !streamMatches) return acc;
 
         acc.push(normalizeStudentRecord(student.admissionNo || student.id, { ...student, class: classLevel }));
         return acc;
@@ -2473,7 +2487,8 @@
             Object.entries(topVal).forEach(([nestedExamKey, nestedBucket]) => {
               if (!nestedBucket || typeof nestedBucket !== 'object') return;
               const nestedExam = slugifyExamKey(nestedExamKey);
-              if (!nestedExam || SYNTHETIC_WINDOW_EXAM_KEYS.has(nestedExam)) return;
+              if (!nestedExam) return;
+              if (SYNTHETIC_WINDOW_EXAM_KEYS.has(nestedExam) && nestedExam !== key) return;
               const nestedData = normalizeMonthlyScoreMap(nestedBucket);
               if (!Object.keys(nestedData).length) return;
               const dedupe = `${nestedExam}::${topMonth}`;
@@ -2700,6 +2715,9 @@
             paths.push(`${base}/${candidate}/${variant}`);
             paths.push(`${base}/${candidate.toLowerCase()}/${variant}`);
             paths.push(`${base}/${candidate.toUpperCase()}/${variant}`);
+            paths.push(`${base}/${variant}/${candidate}`);
+            paths.push(`${base}/${variant}/${candidate.toLowerCase()}`);
+            paths.push(`${base}/${variant}/${candidate.toUpperCase()}`);
           });
 
           // Legacy fallback for 'monthly' key specifically
