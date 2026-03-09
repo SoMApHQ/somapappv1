@@ -1713,7 +1713,7 @@
         ensureCacheContext();
         state.className = normalizeDisplayClass(state.className);
         state.classKey = normalizeDisplayClass(state.classKey || state.className);
-        console.log('[Report] loadAllData', {
+        console.log('[Report] loadAllData selected', {
           className: state.className,
           classKey: state.classKey,
           year: String(state.year),
@@ -1755,13 +1755,13 @@
         console.log('[Report] cached roster count', students.length);
         if (!students.length) {
           students = await fetchStudents(dbClass, state.stream, state.year);
-          rosterSource = 'firebase';
-          console.log('[Report] firebase roster count', students.length);
+          rosterSource = 'fetchStudents';
+          console.log('[Report] fetchStudents count', students.length);
         }
         if (!students.length) {
           students = await fetchStudentsLegacy(dbClass, state.stream, state.year);
           rosterSource = 'legacy';
-          console.log('[Report] legacy roster count', students.length);
+          console.log('[Report] fetchStudentsLegacy count', students.length);
         }
         if (!students.length) {
           const digitMatch = String(dbClass || '').match(/(\d+)/);
@@ -1773,14 +1773,14 @@
             digitMatch ? `Class ${digitMatch[1]}` : '',
             digitMatch ? digitMatch[1] : ''
           ].filter(Boolean)));
-          console.log('[Report] trying class alternatives', alternatives);
+          console.log('[Report] alternative class names tried', alternatives);
 
           for (const alt of alternatives) {
             let altStudents = await fetchStudents(alt, state.stream, state.year);
-            console.log('[Report] alt firebase roster', alt, altStudents.length);
+            console.log('[Report] fetchStudents alt count', alt, altStudents.length);
             if (!altStudents.length) {
               altStudents = await fetchStudentsLegacy(alt, state.stream, state.year);
-              console.log('[Report] alt legacy roster', alt, altStudents.length);
+              console.log('[Report] fetchStudentsLegacy alt count', alt, altStudents.length);
             }
             if (altStudents.length) {
               students = altStudents;
@@ -1809,6 +1809,7 @@
           fetchScores({year: state.year, className: dbClass, examKey: state.examKey, month: state.month, rawMonth: state.monthRaw}),
           fetchStudentDetailsMap()
         ]);
+        console.log('[Report] scoresRaw student count', Object.keys(scoresRaw || {}).length);
 
         let summaryData = {};
         if (!students.length || !Object.keys(scoresRaw || {}).length) {
@@ -1819,9 +1820,13 @@
             state.month,
             state.monthRaw
           );
-          if (Object.keys(summaryData).length) {
-            console.log('[Report] summary fallback', summaryData);
-          }
+          const summaryCount = collectSummaryLearnerEntries(summaryData).length;
+          console.log('[Report] summary fallback count', summaryCount, {
+            hasSummary: Object.keys(summaryData || {}).length > 0,
+            className: dbClass,
+            examKey: state.examKey,
+            month: state.month
+          });
         }
 
         if (!students.length) {
@@ -1854,6 +1859,8 @@
             scoresRaw = summaryScores;
           }
         }
+        state.reportWindow = state.reportWindow || { months: [], records: [], detailsByAdm: {}, mergedScores: {}, summary: null };
+        state.reportWindow.summary = summaryData;
         const detailLookup = buildNormalizedValueLookup(detailsMap || {});
         state.rawStudents = {};
         students.forEach(stu => {
@@ -1890,7 +1897,7 @@
 
     async function loadAllStudentsFromDb(yearOverride){
       if (!db) return [];
-      const year = normalizeYearValue(yearOverride ?? state.year ?? new Date().getFullYear());
+      const year = normalizeYearValue(yearOverride ?? state.year ?? document.getElementById('yearSelect')?.value ?? new Date().getFullYear());
       const deltaYears = Number(year) - SOMAP_DEFAULT_YEAR;
       const tryPaths = ['students','Students','StudentsList','Students_List'];
 
@@ -1910,17 +1917,16 @@
             const s = data[key] || {};
             if (String(s.status || '').toLowerCase() === 'shifted') return null;
 
-            const studentId = s.id || s.studentId || key;
             const admissionNo = s.admissionNumber || s.admNo || s.admissionNo || '';
-            const anchorEnroll = lookupEnrollment(anchorIndex, studentId, admissionNo);
-            const yearEnroll = lookupEnrollment(yearIndex, studentId, admissionNo);
+            const name = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || s.fullName || '';
+            const anchorEnroll = lookupEnrollment(anchorIndex, key, admissionNo);
+            const yearEnroll = lookupEnrollment(yearIndex, key, admissionNo);
             const yearClass = getEnrollmentClassFromRecord(yearEnroll);
             const anchorClass = getEnrollmentClassFromRecord(anchorEnroll);
             const studentClass = getStudentClassFromRecord(s);
             const baseClass = anchorClass || studentClass || 'Unknown';
             const hasAnchor = anchorEnroll && typeof anchorEnroll === 'object' && Object.keys(anchorEnroll).length > 0;
-            const admissionYear = inferAdmissionYear(s);
-            const oldAdmission = Number.isFinite(admissionYear) && admissionYear <= SOMAP_DEFAULT_YEAR;
+            const oldAdmission = Number.isFinite(inferAdmissionYear(s)) && inferAdmissionYear(s) <= SOMAP_DEFAULT_YEAR;
             const shouldShift = hasAnchor || oldAdmission;
             const lastTransfer = s.lastClassTransfer || s.meta?.lastClassTransfer;
             const transferYear = lastTransfer?.effectiveDate ? new Date(String(lastTransfer.effectiveDate) + 'T12:00:00').getFullYear() : null;
@@ -1940,10 +1946,11 @@
             }
             const balance = Number(s.balance || Math.max(0, totalFee - paid) || 0);
 
-            return normalizeStudentRecord(admissionNo || studentId, {
+            return normalizeStudentRecord(admissionNo || key, {
               ...s,
-              id: String(studentId),
-              admissionNo: String(admissionNo || studentId),
+              id: String(key),
+              admissionNo: String(admissionNo || key),
+              name,
               class: finalClass,
               stream: s.stream || s.streamName || s.section || '',
               totalFee,
@@ -1969,11 +1976,10 @@
     async function fetchStudents(className, stream, yearOverride){
       const all = await loadAllStudentsFromDb(yearOverride);
       if (!className && !stream) return all;
-      const sanitizedStream = sanitizeStreamFilter(stream);
-      const normalizedStream = String(sanitizedStream || '').toUpperCase().replace(/[\s-]/g, '');
+      const normalizedStream = String(stream || '').toUpperCase().replace(/[\s-]/g, '');
       return all.filter((student) => {
         const classOk = !className || classMatches(className, student.class);
-        const streamOk = !sanitizedStream || String(student.stream || '').toUpperCase().replace(/[\s-]/g, '').includes(normalizedStream);
+        const streamOk = !stream || String(student.stream || '').toUpperCase().replace(/[\s-]/g, '').includes(normalizedStream);
         return classOk && streamOk;
       });
     }
@@ -3114,81 +3120,78 @@
       return {};
     }
 
-    function buildStudentsFromSummary(summaryData, className, stream) {
-      const students = [];
+    function collectSummaryLearnerEntries(summaryData) {
+      const out = [];
       const seen = new Set();
-      const collect = (arr) => {
+      const pushEntry = (entry, fallbackAdm = '') => {
+        if (!entry || typeof entry !== 'object') return;
+        const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || fallbackAdm || '');
+        if (!adm || seen.has(adm)) return;
+        seen.add(adm);
+        out.push({ ...entry, adm, admissionNo: entry?.admissionNo || entry?.admNo || adm, id: entry?.id || adm });
+      };
+      const collectArray = (arr) => {
         if (!Array.isArray(arr)) return;
-        arr.forEach((entry) => {
-          const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || '');
-          if (!adm || seen.has(adm)) return;
-          seen.add(adm);
-          students.push(normalizeStudentRecord(adm, {
-            adm,
-            id: adm,
-            admissionNo: adm,
-            name: entry?.name || entry?.studentName || '',
-            class: normalizeDisplayClass(className || state.className || ''),
-            stream: stream || ''
-          }));
+        arr.forEach((entry) => pushEntry(entry));
+      };
+      collectArray(summaryData?.students);
+      collectArray(summaryData?.learners);
+      collectArray(summaryData?.top3);
+      collectArray(summaryData?.bottom3);
+      const collectObject = (obj) => {
+        if (!obj || typeof obj !== 'object') return;
+        Object.entries(obj).forEach(([admKey, entry]) => {
+          if (Array.isArray(entry)) {
+            entry.forEach((item) => pushEntry(item, admKey));
+            return;
+          }
+          if (entry && typeof entry === 'object') {
+            pushEntry(entry, admKey);
+            return;
+          }
+          pushEntry({ adm: admKey, position: entry }, admKey);
         });
       };
-      collect(summaryData?.top3);
-      collect(summaryData?.bottom3);
-      if (summaryData?.students && Array.isArray(summaryData.students)) {
-        summaryData.students.forEach((entry) => {
-          const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || '');
-          if (!adm || seen.has(adm)) return;
-          seen.add(adm);
-          students.push(normalizeStudentRecord(adm, {
-            ...entry,
-            adm,
-            id: adm,
-            admissionNo: adm,
-            class: normalizeDisplayClass(className || state.className || entry?.class || ''),
-            stream: stream || entry?.stream || ''
-          }));
-        });
-      }
+      collectObject(summaryData?.positions);
+      collectObject(summaryData?.details);
+      collectObject(summaryData?.detailsByAdm);
+      return out;
+    }
+
+    function buildStudentsFromSummary(summaryData, className, stream) {
+      const students = [];
+      collectSummaryLearnerEntries(summaryData).forEach((entry) => {
+        const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || '');
+        if (!adm) return;
+        students.push(normalizeStudentRecord(adm, {
+          ...entry,
+          adm,
+          id: String(entry?.id || adm),
+          admissionNo: String(entry?.admissionNo || entry?.admNo || adm),
+          name: entry?.name || entry?.studentName || entry?.student || '',
+          class: normalizeDisplayClass(className || state.className || entry?.class || ''),
+          stream: stream || entry?.stream || ''
+        }));
+      });
       students.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
       return students;
     }
 
     function buildScoresFromSummary(summaryData) {
       const scoresMap = {};
-      const collect = (arr) => {
-        if (!Array.isArray(arr)) return;
-        arr.forEach((entry) => {
-          const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || '');
-          if (!adm) return;
-          const avg = Number(entry?.avg);
-          if (!Number.isFinite(avg) || avg < 0) return;
-          scoresMap[adm] = scoresMap[adm] || {};
-          scoresMap[adm]['Overall'] = {
-            subject: 'Overall',
-            score: Math.min(100, Math.max(0, avg)),
-            max: 100,
-            date: ''
-          };
-        });
-      };
-      collect(summaryData?.top3);
-      collect(summaryData?.bottom3);
-      if (summaryData?.students && Array.isArray(summaryData.students)) {
-        summaryData.students.forEach((entry) => {
-          const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || '');
-          if (!adm) return;
-          const avg = Number(entry?.avg ?? entry?.average ?? entry?.pct);
-          if (!Number.isFinite(avg) || avg < 0) return;
-          scoresMap[adm] = scoresMap[adm] || {};
-          scoresMap[adm]['Overall'] = {
-            subject: 'Overall',
-            score: Math.min(100, Math.max(0, avg)),
-            max: 100,
-            date: ''
-          };
-        });
-      }
+      collectSummaryLearnerEntries(summaryData).forEach((entry) => {
+        const adm = normalizeAdm(entry?.adm || entry?.admissionNo || entry?.admNo || entry?.id || '');
+        if (!adm) return;
+        const avg = Number(entry?.avg ?? entry?.average ?? entry?.pct ?? entry?.mean);
+        if (!Number.isFinite(avg) || avg < 0) return;
+        scoresMap[adm] = scoresMap[adm] || {};
+        scoresMap[adm]['Overall'] = {
+          subject: 'Overall',
+          score: Math.min(100, Math.max(0, avg)),
+          max: 100,
+          date: ''
+        };
+      });
       return scoresMap;
     }
 
@@ -3235,102 +3238,117 @@
     async function collectExamWindowRecords({ year, className, examKey, month, rawMonth }) {
       const key = String(examKey || 'monthly').toLowerCase();
       const months = examMonthsForWindow(key, month);
+      const classCandidates = getClassCandidates(className);
+      console.log('[Report] collectExamWindowRecords', {
+        className,
+        classCandidates,
+        year: String(year),
+        examKey: key,
+        month,
+        rawMonth,
+        months
+      });
 
       if (!isSyntheticWindowExam(key)) {
-        const data = await getMonthlyScores(year, className, month, rawMonth, examKey);
-        return [{ ...examRecordMeta(examKey, month, state.examType), data }];
+        const variants = monthVariants(month, rawMonth);
+        const records = [];
+        for (const clsCandidate of classCandidates) {
+          const base = `/scores/${year}/${clsCandidate}`;
+          const paths = [];
+          (variants.length ? variants : [month, rawMonth]).filter(Boolean).forEach((variant) => {
+            paths.push(`${base}/${examKey}/${variant}`);
+            paths.push(`${base}/${String(examKey || '').toLowerCase()}/${variant}`);
+            paths.push(`${base}/${String(examKey || '').toUpperCase()}/${variant}`);
+            if (key === 'monthly') paths.push(`${base}/${variant}`);
+          });
+          for (const refPath of paths) {
+            try {
+              const found = await readFirstExisting([refPath]);
+              const snap = found?.snap || null;
+              console.log('[Report.fetchScores] trying', refPath, Boolean(snap && snap.exists && snap.exists()));
+              if (!(snap && snap.exists && snap.exists())) continue;
+              const data = normalizeMonthlyScoreMap(snap.val());
+              if (!Object.keys(data).length) continue;
+              records.push({ ...examRecordMeta(examKey, month, state.examType), data });
+              return records;
+            } catch (err) {
+              console.warn('[Report.fetchScores] error on', refPath, err);
+            }
+          }
+        }
+        console.warn('[Report.fetchScores] NO DATA for', { year, className, examKey, month, classCandidates });
+        return [];
       }
 
-      const recordsByWindow = new Map();
-      const classCandidates = getClassCandidates(className);
-      const upsertWindowRecord = (dedupe, nextRecord) => {
-        const existing = recordsByWindow.get(dedupe);
-        if (!existing) {
-          recordsByWindow.set(dedupe, nextRecord);
-        } else {
-          existing.data = mergeNormalizedScoreMaps([existing.data, nextRecord.data]);
-        }
-      };
+      const records = [];
+      const seen = new Set();
       for (const clsCandidate of classCandidates) {
         let root = null;
         try {
-          const found = await readFirstExisting([`scores/${year}/${clsCandidate}`]);
+          const found = await readFirstExisting([`/scores/${year}/${clsCandidate}`]);
           root = found?.snap || null;
         } catch (_) {
           root = null;
         }
-        if (!root?.exists?.()) continue;
+        if (!(root && root.exists && root.exists())) continue;
         const val = root.val() || {};
         Object.entries(val).forEach(([topKey, topVal]) => {
           if (!topVal || typeof topVal !== 'object') return;
           const topMonth = resolveMonthKey(topKey);
           if (topMonth) {
             if (!months.includes(topMonth)) return;
-            const monthlyDirect = normalizeMonthlyScoreMap(topVal);
-            if (Object.keys(monthlyDirect).length) {
-              const dedupe = `monthly::${topMonth}`;
-              const nextRecord = {
-                ...examRecordMeta('monthly', topMonth, 'Monthly'),
-                data: monthlyDirect
-              };
-              upsertWindowRecord(dedupe, nextRecord);
-            }
-            Object.entries(topVal).forEach(([nestedExamKey, nestedBucket]) => {
-              if (!nestedBucket || typeof nestedBucket !== 'object') return;
-              const nestedExam = slugifyExamKey(nestedExamKey);
-              if (!nestedExam) return;
-              if (SYNTHETIC_WINDOW_EXAM_KEYS.has(nestedExam) && nestedExam !== key) return;
-              const nestedData = normalizeMonthlyScoreMap(nestedBucket);
-              if (!Object.keys(nestedData).length) return;
-              const dedupe = `${nestedExam}::${topMonth}`;
-              const nextRecord = {
-                ...examRecordMeta(nestedExam, topMonth, examLabelFromKey(nestedExamKey)),
-                data: nestedData
-              };
-              upsertWindowRecord(dedupe, nextRecord);
+            const dedupe = `monthly::${topMonth}`;
+            if (seen.has(dedupe)) return;
+            const data = normalizeMonthlyScoreMap(topVal);
+            if (!Object.keys(data).length) return;
+            seen.add(dedupe);
+            records.push({
+              ...examRecordMeta('monthly', topMonth, 'Monthly'),
+              data
             });
             return;
           }
-          const normalizedExamKey = slugifyExamKey(topKey);
-          // When fetching a synthetic exam (e.g. Midterm 1), data is stored under that key with nested months.
-          // Only skip synthetic keys that are NOT the one we're fetching.
-          if (SYNTHETIC_WINDOW_EXAM_KEYS.has(normalizedExamKey) && normalizedExamKey !== key) return;
+          const topExamKey = slugifyExamKey(topKey);
+          if (SYNTHETIC_WINDOW_EXAM_KEYS.has(topExamKey)) return;
           Object.entries(topVal).forEach(([monthKey, monthBucket]) => {
-            const canonicalMonth = resolveMonthKey(monthKey);
-            if (!canonicalMonth || !months.includes(canonicalMonth)) return;
-            const monthData = normalizeMonthlyScoreMap(monthBucket);
-            if (!Object.keys(monthData).length) return;
-            const dedupe = `${normalizedExamKey}::${canonicalMonth}`;
-            const nextRecord = {
-              ...examRecordMeta(normalizedExamKey, canonicalMonth, examLabelFromKey(topKey)),
-              data: monthData
-            };
-            upsertWindowRecord(dedupe, nextRecord);
+            const resolvedMonth = resolveMonthKey(monthKey);
+            if (!resolvedMonth || !months.includes(resolvedMonth)) return;
+            const dedupe = `${topExamKey}::${resolvedMonth}`;
+            if (seen.has(dedupe)) return;
+            const data = normalizeMonthlyScoreMap(monthBucket);
+            if (!Object.keys(data).length) return;
+            seen.add(dedupe);
+            records.push({
+              ...examRecordMeta(topExamKey, resolvedMonth, examLabelFromKey(topKey)),
+              data
+            });
           });
         });
+        if (records.length) break;
       }
-      // Fallback exhaustive scan:
-      // pull all built-in + custom exam keys across all months in the selected synthetic window.
-      // Include the requested synthetic exam (e.g. midterm1) since scoresheet may store under that path.
-      const allExamOptions = getAllExamOptions()
-        .map(item => ({ key: String(item?.key || '').trim(), label: String(item?.label || '').trim() }))
-        .filter(item => item.key && (item.key.toLowerCase() === key || !SYNTHETIC_WINDOW_EXAM_KEYS.has(String(item.key).toLowerCase())));
-      for (const clsCandidate of classCandidates) {
-        for (const monthKey of months) {
-          const monthLabel = MONTH_LABELS[monthKey] || monthKey;
-          for (const examOpt of allExamOptions) {
-            const monthData = await getMonthlyScores(year, clsCandidate, monthKey, monthLabel, examOpt.key);
-            if (!monthData || !Object.keys(monthData).length) continue;
-            const dedupe = `${slugifyExamKey(examOpt.key)}::${monthKey}`;
-            const nextRecord = {
-              ...examRecordMeta(examOpt.key, monthKey, examOpt.label || examLabelFromKey(examOpt.key)),
-              data: monthData
-            };
-            upsertWindowRecord(dedupe, nextRecord);
+
+      if (!records.length) {
+        const allExamOptions = getAllExamOptions()
+          .map(item => ({ key: String(item?.key || '').trim(), label: String(item?.label || '').trim() }))
+          .filter(item => item.key && (item.key.toLowerCase() === key || !SYNTHETIC_WINDOW_EXAM_KEYS.has(String(item.key).toLowerCase())));
+        for (const clsCandidate of classCandidates) {
+          for (const monthKey of months) {
+            const monthLabel = MONTH_LABELS[monthKey] || monthKey;
+            for (const examOpt of allExamOptions) {
+              const monthData = await getMonthlyScores(year, clsCandidate, monthKey, monthLabel, examOpt.key);
+              if (!monthData || !Object.keys(monthData).length) continue;
+              const dedupe = `${slugifyExamKey(examOpt.key)}::${monthKey}`;
+              if (seen.has(dedupe)) continue;
+              seen.add(dedupe);
+              records.push({
+                ...examRecordMeta(examOpt.key, monthKey, examOpt.label || examLabelFromKey(examOpt.key)),
+                data: monthData
+              });
+            }
           }
         }
       }
-      const records = Array.from(recordsByWindow.values());
+
       records.sort((a, b) => {
         const ai = MONTHS.indexOf(a.monthKey);
         const bi = MONTHS.indexOf(b.monthKey);
@@ -3391,6 +3409,13 @@
         mergedScores: merged.mergedScores,
         summary: null
       };
+      console.log('[Report] scoresRaw student count', Object.keys(merged.mergedScores || {}).length, {
+        className,
+        year: String(year),
+        examKey,
+        month,
+        records: records.length
+      });
       return merged.mergedScores;
     }
 
