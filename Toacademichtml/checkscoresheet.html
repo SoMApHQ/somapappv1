@@ -219,6 +219,9 @@
       'Midterm 2': 'midterm2',
       'Annual': 'annual'
     };
+    const EXAM_REGISTRY_KEY = 'somap_custom_exam_registry_v1';
+    const EXAM_REGISTRY_PATH = 'academic/customExamRegistry';
+    let customExamRegistryCache = [];
     const MONTH_KEYS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const MONTH_LABELS = {
       '1':'Jan','01':'Jan',January:'Jan',
@@ -245,10 +248,142 @@
       const canonical = SomapSub().canonSubject ? SomapSub().canonSubject(label) : label;
       return String(canonical || '').trim().replace(/[.#$/\[\]]/g, '_');
     }
+    function normalizeExamLabel(label) {
+      return String(label || '').replace(/\s*\(custom\)\s*$/i, '').trim().replace(/\s+/g, ' ');
+    }
+    function slugifyExamKey(label) {
+      return normalizeExamLabel(label).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-') || 'custom-exam';
+    }
+    function normalizeExamRegistryItems(items) {
+      const seen = new Set();
+      return (Array.isArray(items) ? items : [])
+        .map(item => {
+          const label = normalizeExamLabel(item?.label);
+          const key = String(item?.key || '').trim() || slugifyExamKey(label);
+          if (!label) return null;
+          return { label, key };
+        })
+        .filter(Boolean)
+        .filter(item => {
+          const dedupe = `${item.label}::${item.key}`.toLowerCase();
+          if (seen.has(dedupe)) return false;
+          seen.add(dedupe);
+          return true;
+        });
+    }
+    function readLocalExamRegistry() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(EXAM_REGISTRY_KEY) || '[]');
+        return normalizeExamRegistryItems(Array.isArray(parsed) ? parsed : []);
+      } catch (_) {
+        return [];
+      }
+    }
+    function writeLocalExamRegistry(items) {
+      try { localStorage.setItem(EXAM_REGISTRY_KEY, JSON.stringify(items || [])); } catch (_) {}
+    }
+    function getStoredExamRegistry() {
+      return customExamRegistryCache.slice();
+    }
+    function examLabelFromKey(rawKey) {
+      const key = String(rawKey || '').trim();
+      if (!key) return '';
+      const builtIn = Object.entries(EXAM_KEYS).find(([, value]) => String(value).toLowerCase() === key.toLowerCase());
+      if (builtIn) return builtIn[0];
+      const custom = getStoredExamRegistry().find(item => String(item?.key || '').toLowerCase() === key.toLowerCase());
+      if (custom?.label) return custom.label;
+      return key
+        .replace(/[_-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/\b\w/g, m => m.toUpperCase());
+    }
     function getExamKeyFromLabel(label) {
-      const direct = EXAM_KEYS[label];
+      const cleanLabel = normalizeExamLabel(label);
+      const direct = EXAM_KEYS[cleanLabel];
       if (direct) return direct;
-      return String(label || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+      const found = getStoredExamRegistry().find(item => normalizeExamLabel(item?.label).toLowerCase() === cleanLabel.toLowerCase());
+      return found?.key || slugifyExamKey(cleanLabel);
+    }
+    function isComputedWindowExamLabel(label) {
+      const key = String(getExamKeyFromLabel(label) || '').toLowerCase();
+      return ['midterm1', 'endterm', 'midterm2', 'annual'].includes(key);
+    }
+    function isMonthLikeToken(token) {
+      const t = String(token || '').trim();
+      if (!t) return true;
+      const lower = t.toLowerCase();
+      if (MONTH_KEYS.some(m => m.toLowerCase() === lower)) return true;
+      if (Object.keys(MONTH_LABELS).some(k => String(k).toLowerCase() === lower)) return true;
+      return false;
+    }
+    async function discoverCustomExamsFromData({ year, className } = {}) {
+      const discovered = [];
+      const yearValue = String(year || state.year || window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear());
+      const classCandidates = [];
+      const clsRaw = String(className || classSelect?.value || state.className || state.assignedClass || '').trim();
+      if (clsRaw) {
+        classCandidates.push(clsRaw);
+        const digits = clsRaw.match(/(\d+)/)?.[1];
+        if (digits) {
+          if (!classCandidates.includes(digits)) classCandidates.push(digits);
+          const prefixed = `Class ${digits}`;
+          if (!classCandidates.includes(prefixed)) classCandidates.push(prefixed);
+        }
+      }
+      for (const cls of classCandidates) {
+        const scoreRoot = await readFirstExisting([`scores/${yearValue}/${cls}`]);
+        const scoreVal = scoreRoot?.snap?.exists?.() ? (scoreRoot.snap.val() || {}) : {};
+        Object.keys(scoreVal).forEach(key => {
+          if (isMonthLikeToken(key)) return;
+          const examKey = slugifyExamKey(key);
+          if (Object.values(EXAM_KEYS).includes(examKey)) return;
+          discovered.push({ label: examLabelFromKey(key), key: examKey });
+        });
+
+        const summaryRoot = await readFirstExisting([`summaries/${yearValue}/${cls}`]);
+        const summaryVal = summaryRoot?.snap?.exists?.() ? (summaryRoot.snap.val() || {}) : {};
+        Object.keys(summaryVal).forEach(key => {
+          if (isMonthLikeToken(key)) return;
+          const examKey = slugifyExamKey(key);
+          if (Object.values(EXAM_KEYS).includes(examKey)) return;
+          discovered.push({ label: examLabelFromKey(key), key: examKey });
+        });
+      }
+      return normalizeExamRegistryItems(discovered);
+    }
+    async function loadExamRegistry({ year, className } = {}) {
+      const localItems = readLocalExamRegistry();
+      let remoteItems = [];
+      try {
+        const found = await readFirstExisting([EXAM_REGISTRY_PATH]);
+        remoteItems = normalizeExamRegistryItems(found?.snap?.exists?.() ? found.snap.val() : []);
+      } catch (_) {
+        remoteItems = [];
+      }
+      const discovered = await discoverCustomExamsFromData({ year, className });
+      customExamRegistryCache = normalizeExamRegistryItems([...(remoteItems || []), ...(localItems || []), ...(discovered || [])]);
+      writeLocalExamRegistry(customExamRegistryCache);
+      return customExamRegistryCache;
+    }
+    function getAllExamOptions() {
+      const builtIn = Object.keys(EXAM_KEYS).map(label => ({ label, key: EXAM_KEYS[label], builtIn: true }));
+      const custom = getStoredExamRegistry().filter(item => item && item.label && item.key).map(item => ({ ...item, builtIn: false }));
+      const seen = new Set();
+      return [...builtIn, ...custom].filter(item => {
+        const key = `${item.label}::${item.key}`.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+    function populateExamTypeSelect(selectedLabel) {
+      if (!examType) return;
+      const options = getAllExamOptions();
+      examType.innerHTML = options.map(item => `<option value="${String(item.label).replace(/"/g, '&quot;')}">${item.builtIn ? item.label : `${item.label} (Custom)`}</option>`).join('');
+      const fallback = options[0]?.label || 'Monthly';
+      const normalizedSelected = normalizeExamLabel(selectedLabel);
+      examType.value = options.some(item => normalizeExamLabel(item.label) === normalizedSelected) ? normalizedSelected : fallback;
     }
     function monthVariants(mon){
       const set = new Set();
@@ -294,6 +429,79 @@
     function pdfMonthLabel(monthKey){
       const short = MONTH_LABELS[monthKey] || monthKey;
       return FULL_MONTH_NAMES[short] || short || '-';
+    }
+    function normalizeAdmValue(val) {
+      return String(val || '').trim();
+    }
+    function getQueryParams() {
+      const params = new URLSearchParams(window.location.search || '');
+      return {
+        year: params.get('year') || '',
+        className: params.get('class') || '',
+        stream: params.get('stream') || '',
+        examTypeLabel: params.get('examType') || params.get('examTypeLabel') || '',
+        month: params.get('month') || ''
+      };
+    }
+    function getInitialFilterSnapshot() {
+      const ss = window.sessionStorage || {};
+      const qp = getQueryParams();
+      return {
+        className: qp.className || ss.getItem('className') || state.assignedClass || '',
+        stream: qp.stream || ss.getItem('stream') || '',
+        month: qp.month || ss.getItem('somap_exam_month') || ss.getItem('month') || 'October',
+        year: qp.year || ss.getItem('year') || window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear().toString(),
+        examTypeLabel: qp.examTypeLabel || ss.getItem('examTypeLabel') || ss.getItem('somap_exam_type') || ss.getItem('examType') || 'Monthly'
+      };
+    }
+    function getCachedRosterStudents(className, year, stream){
+      try {
+        const raw = sessionStorage.getItem('somap_scoresheet_roster');
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        const parsedClass = normalizeClassNameForEnrollment(parsed?.className || '');
+        const targetClass = normalizeClassNameForEnrollment(className || '');
+        const sameClass = parsedClass === targetClass || classMatches(parsedClass, targetClass) || classMatches(targetClass, parsedClass);
+        const sameYear = String(parsed?.year || '') === String(year || '');
+        if (!sameClass || !sameYear || !Array.isArray(parsed?.students)) return [];
+        const normalizedStream = String(stream || '').toUpperCase().replace(/[\s-]/g, '');
+        return parsed.students
+          .map((stu) => {
+            const feeDue = Number(stu.totalFee ?? stu.feeDue ?? 0);
+            const feePaid = Number(stu.paid ?? stu.feePaid ?? 0);
+            const balance = Number(stu.balance ?? Math.max(0, feeDue - feePaid) ?? 0);
+            const adm = normalizeAdmValue(stu.adm || stu.admissionNo || stu.id || stu.studentId || '');
+            return {
+              id: String(stu.id || stu.studentId || adm),
+              adm,
+              admissionNo: normalizeAdmValue(stu.admissionNo || stu.adm || stu.id || ''),
+              name: stu.name || stu.fullName || [stu.firstName, stu.middleName, stu.lastName].filter(Boolean).join(' ').trim() || `Student ${adm}`,
+              class: normalizeClassNameForEnrollment(stu.class || className || ''),
+              stream: stu.stream || '',
+              feeDue,
+              feePaid,
+              balance,
+              meta: stu.meta || stu
+            };
+          })
+          .filter(student => {
+            if (!normalizedStream) return true;
+            return String(student.stream || '').toUpperCase().replace(/[\s-]/g, '').includes(normalizedStream);
+          });
+      } catch (_) {
+        return [];
+      }
+    }
+    function persistRosterCache(students, className, year, stream) {
+      try {
+        sessionStorage.setItem('somap_scoresheet_roster', JSON.stringify({
+          students: Array.isArray(students) ? students : [],
+          className: className || '',
+          year: year || '',
+          stream: stream || '',
+          timestamp: Date.now()
+        }));
+      } catch (_) {}
     }
     function normalizeAttendanceMap(val){
       const out = {};
@@ -485,7 +693,8 @@
         classSelect.innerHTML = `<option value="${assigned}">${assigned}</option>`;
         classSelect.value = assigned;
         classSelect.disabled = true;
-        sessionStorage.setItem('assignedClass', assigned);
+        sessionStorage.setItem('teacherAssignedClass', assigned);
+        sessionStorage.removeItem('assignedClass');
       }
     }
 
@@ -838,7 +1047,7 @@
       return parseClassFromEmail(user?.email || '') ||
         profile?.class ||
         profile?.classLevel ||
-        sessionStorage.getItem('assignedClass') ||
+        sessionStorage.getItem('teacherAssignedClass') ||
         '';
     }
 
@@ -850,8 +1059,16 @@
 
     function startAuthWatcher(){
       if(!firebase?.auth){
-        initFilterControls();
-        loadAll();
+        Promise.resolve(loadExamRegistry(getInitialFilterSnapshot()))
+          .then(() => {
+            initFilterControls();
+            return loadAll();
+          })
+          .catch(err => {
+            console.warn('[checkscoresheet] init without auth failed', err?.message || err);
+            initFilterControls();
+            loadAll();
+          });
         return;
       }
       firebase.auth().onAuthStateChanged(async (user)=>{
@@ -884,6 +1101,7 @@
         if(state.assignedClass){
           lockClassDropdown(state.assignedClass);
         }
+        await loadExamRegistry(getInitialFilterSnapshot());
         initFilterControls();
         loadAll();
       });
@@ -1054,49 +1272,54 @@
 
     /* ---------- Load sequence (main entry) ---------- */
     function initFilterControls(){
+      const snapshot = getInitialFilterSnapshot();
       const ss = window.sessionStorage || {};
-      const assigned = state.assignedClass || ss.getItem('assignedClass') || ss.getItem('className') || '';
+      const assigned = state.assignedClass || ss.getItem('teacherAssignedClass') || '';
       if(classSelect){
-        const opts = Array.from(new Set(Object.keys(SomapSub().SUBJECTS_BY_CLASS || {})));
+        const opts = Array.from(new Set([
+          ...Object.keys(SomapSub().SUBJECTS_BY_CLASS || {}),
+          snapshot.className || '',
+          assigned || ''
+        ].filter(Boolean)));
         if(assigned){
           lockClassDropdown(assigned);
         } else {
           classSelect.innerHTML = opts.map(o=>`<option value="${o}">${o}</option>`).join('');
+          if (snapshot.className) classSelect.value = snapshot.className;
           classSelect.disabled = false;
         }
       }
       if(streamInput){
-        const storedStream = ss.getItem('stream') || '';
-        if(storedStream) streamInput.value = storedStream;
+        streamInput.value = snapshot.stream || '';
       }
       if(monthSelect){
-        monthSelect.value = ss.getItem('month') || monthSelect.value || new Date().toISOString().slice(5,7);
+        monthSelect.value = snapshot.month || monthSelect.value || 'October';
       }
       if(yearInput){
-        yearInput.value = ss.getItem('year') || yearInput.value || new Date().getFullYear();
+        yearInput.value = snapshot.year || yearInput.value || new Date().getFullYear();
       }
       if(examType){
-        const storedType = ss.getItem('somap_exam_type') || ss.getItem('examType') || 'Monthly';
-        examType.value = storedType;
-        const canon = SomapExam().canonExamType ? SomapExam().canonExamType(storedType) : storedType;
-        if(monthSelect){ monthSelect.disabled = (canon !== 'Monthly'); }
+        populateExamTypeSelect(snapshot.examTypeLabel);
+        examType.value = normalizeExamLabel(snapshot.examTypeLabel || examType.value || 'Monthly');
+        if(monthSelect){ monthSelect.disabled = isComputedWindowExamLabel(examType.value); }
       }
       if(monthSelect){
-        const storedMonth = ss.getItem('somap_exam_month') || monthSelect.value || 'October';
-        monthSelect.value = storedMonth;
+        monthSelect.value = snapshot.month || monthSelect.value || 'October';
       }
     }
 
     function readFilters(){
       const ss = window.sessionStorage || {};
-      state.className = classSelect?.value || state.assignedClass || ss.getItem('assignedClass') || ss.getItem('className') || '';
-      const rawStream = (streamInput?.value || ss.getItem('stream') || '');
+      const qp = getQueryParams();
+      state.className = classSelect?.value || qp.className || state.assignedClass || ss.getItem('className') || '';
+      const rawStream = (streamInput?.value || qp.stream || ss.getItem('stream') || '');
       const classNumMatch = state.className.match(/\d+/);
       const classNum = classNumMatch ? classNumMatch[0] : '';
       state.stream = rawStream.replace(/class/i, '').replace(classNum, '').trim().toUpperCase();
-      state.month = monthSelect?.value || ss.getItem('somap_exam_month') || ss.getItem('month') || '';
-      state.year = yearInput?.value || ss.getItem('year') || '';
-      state.examType = examType?.value || ss.getItem('somap_exam_type') || ss.getItem('examType') || 'Monthly';
+      state.month = monthSelect?.value || qp.month || ss.getItem('somap_exam_month') || ss.getItem('month') || '';
+      state.year = yearInput?.value || qp.year || ss.getItem('year') || '';
+      state.examType = examType?.value || qp.examTypeLabel || ss.getItem('examTypeLabel') || ss.getItem('somap_exam_type') || ss.getItem('examType') || 'Monthly';
+      state.examType = normalizeExamLabel(state.examType);
       state.examTypeLabel = state.examType;
       state.examKey = getExamKeyFromLabel(state.examTypeLabel);
       state.schoolBranch = ss.getItem('schoolBranch') || '';
@@ -1118,17 +1341,24 @@
       if(!state.className){ alert('Select class to view saved scores.'); return; }
       if(!state.year){ state.year = new Date().getFullYear().toString(); }
       if(!state.month){ state.month = 'October'; }
+      await loadExamRegistry({ year: state.year, className: state.className });
+      populateExamTypeSelect(state.examType);
+      state.examType = normalizeExamLabel(examType?.value || state.examType || 'Monthly');
+      state.examTypeLabel = state.examType;
+      state.examKey = getExamKeyFromLabel(state.examTypeLabel);
+      if(monthSelect){ monthSelect.disabled = isComputedWindowExamLabel(state.examTypeLabel); }
       if(classSelect && !classSelect.value) lockClassDropdown(state.className);
       try {
         const ss = window.sessionStorage || {};
         ss.setItem('className', state.className);
-        ss.setItem('assignedClass', state.className);
         ss.setItem('stream', state.stream || '');
         ss.setItem('year', state.year);
         ss.setItem('month', state.month);
+        ss.setItem('examTypeLabel', state.examTypeLabel);
         ss.setItem('somap_exam_type', state.examType);
         ss.setItem('somap_exam_month', state.month);
         ss.setItem('examType', state.examType);
+        if (state.assignedClass) ss.setItem('teacherAssignedClass', state.assignedClass);
       } catch(e) {}
 
       await loadCustomSubjectsForYear(state.year);
@@ -1136,16 +1366,23 @@
       state.subjectList = state.subjectConfigs.map(s => s.key);
 
       lblStatus.textContent = 'Loading saved scores...';
-      const rosterIds = await fetchRosterIds(state.year, state.className);
-      const fetchedStudents = await fetchStudents(state.className, state.stream, state.year);
-      const byAdm = {}; fetchedStudents.forEach(s => byAdm[s.adm] = s);
-      const matchedRoster = rosterIds
-        .map(id => byAdm[String(id)] || null)
-        .filter(Boolean);
-      if(matchedRoster.length){
-        state.students = matchedRoster;
+      const cachedStudents = getCachedRosterStudents(state.className, state.year, state.stream);
+      if(cachedStudents.length){
+        state.students = cachedStudents;
       } else {
-        state.students = fetchedStudents;
+        const rosterIds = await fetchRosterIds(state.year, state.className);
+        const fetchedStudents = await fetchStudents(state.className, state.stream, state.year);
+        const byRef = new Map();
+        fetchedStudents.forEach(student => {
+          [student.adm, student.admissionNo, student.id].map(normalizeAdmValue).filter(Boolean).forEach(ref => {
+            if (!byRef.has(ref)) byRef.set(ref, student);
+          });
+        });
+        const matchedRoster = rosterIds
+          .map(id => byRef.get(normalizeAdmValue(id)) || null)
+          .filter(Boolean)
+          .filter((student, index, arr) => arr.findIndex(item => normalizeAdmValue(item.adm || item.admissionNo || item.id) === normalizeAdmValue(student.adm || student.admissionNo || student.id)) === index);
+        state.students = matchedRoster.length ? matchedRoster : fetchedStudents;
       }
       state.attendance = await fetchAttendance(state.year, state.month, state.className) || {};
       state.fees = await fetchFees(state.year, state.className) || {};
@@ -1161,6 +1398,7 @@
           feeDue: 0, feePaid: 0, balance: 0
         }));
       }
+      persistRosterCache(state.students, state.className, state.year, state.stream);
 
       buildTable();
       recomputeAll();
@@ -1250,9 +1488,9 @@
     if(examType){
       examType.addEventListener('change', (e)=>{
         const v = e.target.value;
-        const canon = SomapExam().canonExamType ? SomapExam().canonExamType(v) : v;
         sessionStorage.setItem('somap_exam_type', v);
-        if(monthSelect){ monthSelect.disabled = (canon !== 'Monthly'); }
+        sessionStorage.setItem('examTypeLabel', normalizeExamLabel(v));
+        if(monthSelect){ monthSelect.disabled = isComputedWindowExamLabel(v); }
         loadAll();
       });
     }

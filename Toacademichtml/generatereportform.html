@@ -845,6 +845,59 @@
     function writeLocalExamRegistry(items) {
       try { localStorage.setItem(EXAM_REGISTRY_KEY, JSON.stringify(items || [])); } catch (_) {}
     }
+    function isMonthLikeToken(token) {
+      const t = String(token || '').trim();
+      if (!t) return true;
+      const lower = t.toLowerCase();
+      if (MONTHS.some(m => m.toLowerCase() === lower)) return true;
+      if (Object.keys(MONTH_LABELS).some(k => String(k).toLowerCase() === lower)) return true;
+      return false;
+    }
+    async function discoverCustomExamsFromData({ year, className } = {}) {
+      const discovered = [];
+      const urlParams = new URLSearchParams(window.location.search || '');
+      const ss = window.sessionStorage;
+      const yearValue = String(year || urlParams.get('year') || ss.getItem('year') || state.year || new Date().getFullYear());
+      const classCandidates = [];
+      const clsRaw = String(
+        className ||
+        urlParams.get('class') ||
+        urlParams.get('className') ||
+        ss.getItem('className') ||
+        state.className ||
+        state.classKey ||
+        ''
+      ).trim();
+      if (clsRaw) {
+        classCandidates.push(clsRaw);
+        const digits = clsRaw.match(/(\d+)/)?.[1];
+        if (digits) {
+          if (!classCandidates.includes(digits)) classCandidates.push(digits);
+          const prefixed = `Class ${digits}`;
+          if (!classCandidates.includes(prefixed)) classCandidates.push(prefixed);
+        }
+      }
+      for (const cls of classCandidates) {
+        const scoreRoot = await getSnapScopedOrLegacy(`scores/${yearValue}/${cls}`);
+        const scoreVal = scoreRoot?.exists?.() ? (scoreRoot.val() || {}) : {};
+        Object.keys(scoreVal).forEach(key => {
+          if (isMonthLikeToken(key)) return;
+          const examKey = slugifyExamKey(key);
+          if (Object.values(EXAM_KEYS).includes(examKey)) return;
+          discovered.push({ label: examLabelFromKey(key), key: examKey });
+        });
+
+        const summaryRoot = await getSnapScopedOrLegacy(`summaries/${yearValue}/${cls}`);
+        const summaryVal = summaryRoot?.exists?.() ? (summaryRoot.val() || {}) : {};
+        Object.keys(summaryVal).forEach(key => {
+          if (isMonthLikeToken(key)) return;
+          const examKey = slugifyExamKey(key);
+          if (Object.values(EXAM_KEYS).includes(examKey)) return;
+          discovered.push({ label: examLabelFromKey(key), key: examKey });
+        });
+      }
+      return normalizeExamRegistryItems(discovered);
+    }
     async function loadExamRegistry() {
       const localItems = readLocalExamRegistry();
       let remoteItems = [];
@@ -854,7 +907,8 @@
       } catch (_) {
         remoteItems = [];
       }
-      customExamRegistryCache = normalizeExamRegistryItems([...(remoteItems || []), ...(localItems || [])]);
+      const discovered = await discoverCustomExamsFromData({ year: state.year, className: state.className || state.classKey });
+      customExamRegistryCache = normalizeExamRegistryItems([...(remoteItems || []), ...(localItems || []), ...(discovered || [])]);
       writeLocalExamRegistry(customExamRegistryCache);
     }
     function examLabelFromKey(rawKey) {
