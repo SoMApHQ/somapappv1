@@ -27,6 +27,7 @@
   <script src="../firebase.js"></script>
   <script src="../somapappv1multischool/js/context.js"></script>
   <script src="../Todashboardhtml/yearContext.js"></script>
+  <script src="../js/modules/class_teachers.js"></script>
   <script>
     const SOMAP_DEFAULT_YEAR = 2025;
     const CLASS_ORDER = ['Baby Class','Middle Class','Pre-Unit','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
@@ -239,6 +240,53 @@
         padding: 0.5rem 0;
       }
     }
+    .teacher-banner {
+      display: grid;
+      gap: 0.9rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      padding: 1rem;
+      border-bottom: 1px solid rgba(148,163,184,0.16);
+      background: linear-gradient(180deg, rgba(8,15,28,0.82), rgba(15,23,42,0.7));
+    }
+    .teacher-banner-card {
+      display: flex;
+      gap: 0.85rem;
+      align-items: center;
+      border: 1px solid rgba(148,163,184,0.16);
+      background: rgba(15,23,42,0.46);
+      border-radius: 18px;
+      padding: 0.85rem;
+    }
+    .teacher-banner-photo {
+      width: 58px;
+      height: 58px;
+      border-radius: 16px;
+      object-fit: cover;
+      border: 1px solid rgba(148,163,184,0.18);
+      background: rgba(255,255,255,0.08);
+      flex: 0 0 auto;
+    }
+    .teacher-banner-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: rgba(148,163,184,0.74);
+      margin-bottom: 0.25rem;
+    }
+    .teacher-banner-name {
+      font-size: 0.98rem;
+      font-weight: 700;
+      color: #f8fafc;
+    }
+    .teacher-banner-meta {
+      font-size: 0.86rem;
+      color: rgba(226,232,240,0.76);
+      margin-top: 0.12rem;
+    }
+    .teacher-banner-empty {
+      font-size: 0.88rem;
+      color: rgba(148,163,184,0.82);
+    }
   </style>
 </head>
 <body class="text-slate-100" style="margin: 0; padding: 0; min-height: 100%; overflow-x: hidden; overflow-y: auto;">
@@ -294,6 +342,8 @@
             <button id="btnRecalc" class="px-3 py-2 bg-slate-900 border border-slate-700 rounded text-sm text-slate-100">Recalculate</button>
           </div>
         </div>
+
+        <div id="classTeacherBanner" class="teacher-banner"></div>
 
         <div class="overflow-auto scroll-shadow" style="max-height:calc(100vh - 200px)">
           <table id="scoresTable" class="scoresheet-table w-full min-w-table text-sm">
@@ -655,7 +705,8 @@
     /* ---------- STATE ---------- */
     const state = {
       students: [], attendance: {}, fees: {}, scores: {}, subjectList: [],
-      rowsByAdm: {}, className:'', stream:'', month:'', year:'', examKey:'', examTypeLabel:'Monthly', schoolBranch:''
+      rowsByAdm: {}, className:'', stream:'', month:'', year:'', examKey:'', examTypeLabel:'Monthly', schoolBranch:'',
+      classTeacherAssignments: {}
     };
     let currentClass = '';
     let currentYear = '';
@@ -666,6 +717,7 @@
     const lblCount = document.getElementById('lblCount');
     const lblSubjects = document.getElementById('lblSubjects');
     const lblStatus = document.getElementById('lblStatus');
+    const classTeacherBanner = document.getElementById('classTeacherBanner');
 
     const btnRecalc = document.getElementById('btnRecalc');
     const btnSaveAll = document.getElementById('btnSaveAll');
@@ -732,6 +784,62 @@
         }
       }
       return null;
+    }
+
+    async function loadClassTeacherAssignmentsForYear(year) {
+      try {
+        const found = await readFirstExisting([`years/${year}/classTeacherAssignments`]);
+        const raw = found?.snap?.exists?.() ? (found.snap.val() || {}) : {};
+        state.classTeacherAssignments = window.SomapClassTeachers?.normalizeAssignmentsMap
+          ? window.SomapClassTeachers.normalizeAssignmentsMap(raw)
+          : (raw || {});
+      } catch (error) {
+        console.warn('[scoresheet] class teacher assignments load failed', error?.message || error);
+        state.classTeacherAssignments = {};
+      }
+    }
+
+    function renderTeacherBannerCard(person, label) {
+      if (!person || !person.name) {
+        return `
+          <article class="teacher-banner-card">
+            <img class="teacher-banner-photo" src="../images/somap-logo.png.jpg" alt="${label}">
+            <div>
+              <div class="teacher-banner-label">${label}</div>
+              <div class="teacher-banner-empty">No assignment yet.</div>
+            </div>
+          </article>
+        `;
+      }
+      const phone = person.phone || window.SomapClassTeachers?.formatPhoneLocal(person.phoneRaw) || '-';
+      return `
+        <article class="teacher-banner-card">
+          <img class="teacher-banner-photo" src="${person.photoUrl || '../images/somap-logo.png.jpg'}" alt="${person.name}" onerror="this.onerror=null;this.src='../images/somap-logo.png.jpg';">
+          <div>
+            <div class="teacher-banner-label">${label}</div>
+            <div class="teacher-banner-name">${escapeHtml(person.name)}</div>
+            <div class="teacher-banner-meta">${escapeHtml(phone)}</div>
+          </div>
+        </article>
+      `;
+    }
+
+    function getCurrentClassTeacherAssignment() {
+      return window.SomapClassTeachers?.resolveAssignment
+        ? window.SomapClassTeachers.resolveAssignment(state.classTeacherAssignments, state.className, state.stream)
+        : null;
+    }
+
+    function renderClassTeacherBanner() {
+      if (!classTeacherBanner) return;
+      const assignment = getCurrentClassTeacherAssignment();
+      const streamLabel = window.SomapClassTeachers?.streamDisplay
+        ? window.SomapClassTeachers.streamDisplay(state.stream)
+        : (state.stream || 'All Streams');
+      classTeacherBanner.innerHTML = [
+        renderTeacherBannerCard(assignment?.classTeacher, `Class Teacher • ${state.className || '-'} • ${streamLabel}`),
+        renderTeacherBannerCard(assignment?.assistantTeacher, 'Assistant Class Teacher')
+      ].join('');
     }
     async function scopedOrSocratesLegacy(scopedSubPath, legacyPath) {
       const scoped = scopedPath(scopedSubPath);
@@ -1633,6 +1741,7 @@
       const monthLabel = pdfMonthLabel(state.month);
       const classAvg = currentClassAveragePct();
       const classSize = rows.length;
+      const classTeacherAssignment = getCurrentClassTeacherAssignment();
 
       rows.forEach((row, index) => {
         if (index > 0) doc.addPage();
@@ -1717,7 +1826,10 @@
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(9);
         doc.setTextColor(71, 85, 105);
-        doc.text('Class teacher signature', 40, footerY + 14);
+        const classTeacherName = classTeacherAssignment?.classTeacher?.name || 'Class teacher';
+        const classTeacherPhone = classTeacherAssignment?.classTeacher?.phone || window.SomapClassTeachers?.formatPhoneLocal(classTeacherAssignment?.classTeacher?.phoneRaw) || '';
+        doc.text(`Class teacher signature`, 40, footerY + 14);
+        doc.text(`${classTeacherName}${classTeacherPhone ? ` • ${classTeacherPhone}` : ''}`, 40, footerY + 28);
         doc.text('Head teacher signature', 340, footerY + 14);
       });
 
@@ -1912,6 +2024,7 @@
       currentClass = state.className;
       currentYear = state.year;
       await loadCustomSubjectsForYear(state.year);
+      await loadClassTeacherAssignmentsForYear(state.year);
       state.subjectList = getSubjectsForClassAndYear(state.className, state.year);
       console.log('Subject list for', state.className, ':', state.subjectList.map(s => s.label));
 
@@ -1934,6 +2047,7 @@
       cacheScoresheetRoster(state.students);
 
       console.log('Building table...');
+      renderClassTeacherBanner();
       buildTable();
       console.log('Recomputing all...');
       recomputeAll();

@@ -41,6 +41,7 @@
   <script src="../somapappv1multischool/js/context.js"></script>
   <script src="../somapappv1multischool/js/dbhelpers.js"></script>
   <script src="../js/finance_core.js"></script>
+  <script src="../js/modules/class_teachers.js"></script>
 
   <style>
     :root { color-scheme: only dark; }
@@ -173,6 +174,52 @@
     .chips-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.45rem; }
     .chip { background: rgba(148,163,184,0.22); border-radius: 0.6rem; padding: 0.32rem 0.45rem; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.03em; color: #1e293b; display: flex; align-items: center; gap: 0.25rem; }
     .chip i { color: #475569; }
+    .teacher-preview-grid {
+      display: grid;
+      gap: 0.75rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+    .teacher-preview-card {
+      border-radius: 18px;
+      border: 1px solid rgba(148,163,184,0.18);
+      background: rgba(248,250,252,0.92);
+      padding: 0.85rem;
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+    .teacher-preview-photo {
+      width: 58px;
+      height: 58px;
+      min-width: 58px;
+      border-radius: 16px;
+      object-fit: cover;
+      border: 1px solid rgba(148,163,184,0.24);
+      background: rgba(226,232,240,0.8);
+    }
+    .teacher-preview-label {
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: #64748b;
+      margin-bottom: 0.2rem;
+      font-weight: 700;
+    }
+    .teacher-preview-name {
+      font-size: 0.96rem;
+      font-weight: 700;
+      color: #0f172a;
+    }
+    .teacher-preview-meta {
+      font-size: 0.82rem;
+      color: #475569;
+      margin-top: 0.12rem;
+      line-height: 1.4;
+    }
+    .teacher-preview-empty {
+      font-size: 0.85rem;
+      color: #64748b;
+    }
     .table-action { display: inline-flex; align-items: center; gap: 0.2rem; padding: 0.32rem 0.55rem; border-radius: 0.55rem; font-size: 0.72rem; font-weight: 600; }
     .table-action.primary { background: rgba(56,189,248,0.18); color: #38bdf8; }
     .table-action.alt { background: rgba(244,114,182,0.18); color: #f472b6; }
@@ -594,6 +641,7 @@
               <span class="subvalue">Reporting <strong id="previewReportingCard">-</strong></span>
             </div>
           </div>
+          <div id="previewTeacherCards" class="teacher-preview-grid"></div>
           <div class="chips-grid" id="previewHighlights"></div>
           <div class="overflow-x-auto">
             <table class="preview-table report-table">
@@ -651,7 +699,7 @@
               <tbody id="previewFeeSchedule"></tbody>
             </table>
           </div>
-          <div class="chips-grid">
+          <div class="chips-grid" id="previewSignatureChips">
             <div class="chip"><i class="fas fa-pen"></i> Class teacher signature __________________</div>
             <div class="chip"><i class="fas fa-user"></i> Head of school signature __________________</div>
           </div>
@@ -1338,6 +1386,8 @@
       className: '', classKey: '', stream: '', year: new Date().getFullYear(), month: 'Sep', monthRaw: preferredMonthStorage('Sep'), examType: 'Monthly', examKey: 'monthly', branch: 'School',
       rawStudents: {}, students: [], filtered: [], selectedAdm: null, subjects: [], teachers: new Map(),
       teacherByClassSubject: new Map(), teacherBySubject: new Map(),
+      classTeacherAssignments: {},
+      classTeacherPhotoCache: new Map(),
       logoDataUrl: null,
       schoolLogoDataUrl: null,
       reportWindow: { months: [], records: [], detailsByAdm: {}, mergedScores: {}, summary: null },
@@ -1712,6 +1762,79 @@
       }
     }
 
+    async function loadClassTeacherAssignmentsForYear(year) {
+      try {
+        const snap = await getSnapScopedOrLegacy(`years/${year}/classTeacherAssignments`);
+        const raw = snap?.val?.() || {};
+        state.classTeacherAssignments = window.SomapClassTeachers?.normalizeAssignmentsMap
+          ? window.SomapClassTeachers.normalizeAssignmentsMap(raw)
+          : (raw || {});
+      } catch (error) {
+        console.warn('[Report] class teacher assignments load failed', error?.message || error);
+        state.classTeacherAssignments = {};
+      }
+    }
+
+    function getAssignmentForStudent(student) {
+      const studentClass = normalizeDisplayClass(student?.class || state.className || '');
+      const studentStream = sanitizeStreamFilter(student?.stream || state.stream || '');
+      return window.SomapClassTeachers?.resolveAssignment
+        ? window.SomapClassTeachers.resolveAssignment(state.classTeacherAssignments, studentClass, studentStream)
+        : null;
+    }
+
+    function renderTeacherPreviewCard(person, label) {
+      if (!person || !person.name) {
+        return `
+          <div class="teacher-preview-card">
+            <img class="teacher-preview-photo" src="../images/somap-logo.png.jpg" alt="${label}">
+            <div>
+              <div class="teacher-preview-label">${label}</div>
+              <div class="teacher-preview-empty">No assignment yet.</div>
+            </div>
+          </div>
+        `;
+      }
+      const phone = person.phone || window.SomapClassTeachers?.formatPhoneLocal(person.phoneRaw) || '-';
+      return `
+        <div class="teacher-preview-card">
+          <img class="teacher-preview-photo" src="${person.photoUrl || '../images/somap-logo.png.jpg'}" alt="${escapeHtml(person.name)}" onerror="this.onerror=null;this.src='../images/somap-logo.png.jpg';">
+          <div>
+            <div class="teacher-preview-label">${label}</div>
+            <div class="teacher-preview-name">${escapeHtml(person.name)}</div>
+            <div class="teacher-preview-meta">${escapeHtml(phone)}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderClassTeacherPreview(student) {
+      const host = document.getElementById('previewTeacherCards');
+      if (!host) return;
+      const assignment = getAssignmentForStudent(student);
+      host.innerHTML = [
+        renderTeacherPreviewCard(assignment?.classTeacher, 'Class Teacher'),
+        renderTeacherPreviewCard(assignment?.assistantTeacher, 'Assistant Class Teacher')
+      ].join('');
+      const chipText = assignment?.classTeacher?.name
+        ? `${assignment.classTeacher.name}${assignment.classTeacher.phone ? ` • ${assignment.classTeacher.phone}` : ''}`
+        : 'Class teacher signature __________________';
+      const chips = document.querySelectorAll('#previewSignatureChips .chip');
+      if (chips[0]) chips[0].innerHTML = `<i class="fas fa-pen"></i> ${escapeHtml(chipText)}`;
+    }
+
+    async function getTeacherPhotoData(person) {
+      if (!person?.photoUrl) return null;
+      const key = String(person.photoUrl);
+      if (state.classTeacherPhotoCache.has(key)) {
+        return state.classTeacherPhotoCache.get(key);
+      }
+      const transformed = transformToJpegIfCloudinary(key, 320, 320) || key;
+      const data = await loadImageAsDataURL(transformed);
+      state.classTeacherPhotoCache.set(key, data || null);
+      return data || null;
+    }
+
     async function findStudentClass(){
       try {
         const roster = await loadAllStudentsFromDb(state.year);
@@ -1800,6 +1923,7 @@
           monthRaw: state.monthRaw,
           stream: state.stream || ''
         });
+        await loadClassTeacherAssignmentsForYear(state.year);
         await loadCustomSubjectsForYear(state.year);
         state.subjects = subjectListForClass(state.className, state.year) || state.subjects || [];
         let dbClass = state.classKey || state.className;
@@ -4086,6 +4210,7 @@
         const commentEl = document.getElementById('previewComment');
         if (commentEl) commentEl.textContent = 'Select a student to view comments.';
         document.getElementById('previewPhoto').src = PLACEHOLDER_PHOTO;
+        renderClassTeacherPreview({ class: currentClass, stream: state.stream || '' });
         renderWrittenReportPreview(null);
         return;
       }
@@ -4163,6 +4288,7 @@
       imgEl.crossOrigin = 'anonymous';
       imgEl.onerror = function(){ this.onerror=null; this.src=PLACEHOLDER_PHOTO; };
       imgEl.src = transformed || PLACEHOLDER_PHOTO;
+      renderClassTeacherPreview(s);
       renderWrittenReportPreview(s);
     }
 
@@ -4764,6 +4890,7 @@ function toNormalizedRows(subjects){
     }
 
     function drawWrittenReportPage(doc, student){
+      const assignment = getAssignmentForStudent(student);
       const model = buildWrittenReportModel(student);
       if (!model.show) return;
       doc.addPage();
@@ -4879,7 +5006,10 @@ function toNormalizedRows(subjects){
 
       if (y < 250) {
         doc.line(18, 275, 85, 275);
-        doc.text('Sahihi ya mwalimu wa darasa', 18, 281);
+        const classTeacherLine = assignment?.classTeacher?.name
+          ? `${assignment.classTeacher.name}${assignment.classTeacher.phone ? ` • ${assignment.classTeacher.phone}` : ''}`
+          : 'Sahihi ya mwalimu wa darasa';
+        doc.text(classTeacherLine, 18, 281);
         doc.line(120, 275, 192, 275);
         doc.text('Sahihi ya mkuu wa shule', 120, 281);
       }
@@ -4916,6 +5046,9 @@ function toNormalizedRows(subjects){
       const annualOverride = (state.examKey === 'annual' && isNumber(s.annualPct)) ? s.annualPct : null;
       const overallPct = annualOverride !== null ? annualOverride : overall.pct;
       const overallGrade = gradeFromPercent(overallPct);
+      const classTeacherAssignment = getAssignmentForStudent(s);
+      const classTeacher = classTeacherAssignment?.classTeacher || null;
+      const assistantTeacher = classTeacherAssignment?.assistantTeacher || null;
       const subjectRows = normalizedSubjects.map((entry, index) => {
         const teacher = entry.teacher || getTeacherName(entry.subject, state.className);
         return [
@@ -4941,6 +5074,8 @@ function toNormalizedRows(subjects){
         const transformed = transformToJpegIfCloudinary(String(pdfPhotoUrl), 600, 800) || pdfPhotoUrl;
         photoData = await loadImageAsDataURL(transformed);
       }
+      const classTeacherPhotoData = await getTeacherPhotoData(classTeacher);
+      const assistantTeacherPhotoData = await getTeacherPhotoData(assistantTeacher);
       doc.setTextColor(255, 255, 255);
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(12);
@@ -5003,8 +5138,38 @@ function toNormalizedRows(subjects){
       drawMetricCard(132, infoY + 24, 31, 22, 'Position', posLabel, 'Selected class rank');
       drawMetricCard(166, infoY + 24, 31, 22, 'Attendance', `${s.attendancePercent.toFixed(1)}%`, `${s.presents}/${s.absents} present/absent`);
 
+      let tableStartY = infoY + 40;
+      if (classTeacher || assistantTeacher) {
+        const drawTeacherCard = (x, y, width, label, person, photoData) => {
+          doc.setDrawColor(203, 213, 225);
+          doc.setFillColor(248, 250, 252);
+          doc.roundedRect(x, y, width, 24, 3, 3, 'FD');
+          if (photoData) {
+            doc.addImage(photoData, imageFormat(photoData), x + 3, y + 3, 18, 18);
+          } else {
+            doc.setFillColor(226, 232, 240);
+            doc.roundedRect(x + 3, y + 3, 18, 18, 2, 2, 'F');
+          }
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(7.2);
+          doc.setTextColor(71, 85, 105);
+          doc.text(label.toUpperCase(), x + 24, y + 6);
+          doc.setFontSize(9.2);
+          doc.setTextColor(15, 23, 42);
+          doc.text(person?.name || 'Not assigned', x + 24, y + 12);
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(7.8);
+          doc.setTextColor(71, 85, 105);
+          const phone = person?.phone || window.SomapClassTeachers?.formatPhoneLocal(person?.phoneRaw) || 'No contact';
+          doc.text(phone, x + 24, y + 18);
+        };
+        drawTeacherCard(margin, infoY + 40, 90, 'Class Teacher', classTeacher, classTeacherPhotoData);
+        drawTeacherCard(108, infoY + 40, 90, 'Assistant', assistantTeacher, assistantTeacherPhotoData);
+        tableStartY = infoY + 68;
+      }
+
       doc.autoTable({
-        startY: infoY + 40,
+        startY: tableStartY,
         head: [["#","Subject","Score","Max","%","Pos","Teacher"]],
         body: subjectRows,
         foot: [["","Totals", overall.total.toFixed(1), overall.max.toFixed(0), `${overallPct.toFixed(1)}%`, posLabel, '']],
@@ -5082,7 +5247,10 @@ function toNormalizedRows(subjects){
         afterFeeY = doc.lastAutoTable.finalY + 8;
       }
       doc.setDrawColor(148, 163, 184);
-      doc.line(margin, afterFeeY, 90, afterFeeY); doc.text('Class teacher signature', margin, afterFeeY + 5);
+      const classTeacherLine = classTeacher?.name
+        ? `${classTeacher.name}${classTeacher.phone ? ` • ${classTeacher.phone}` : ''}`
+        : 'Class teacher signature';
+      doc.line(margin, afterFeeY, 90, afterFeeY); doc.text(classTeacherLine, margin, afterFeeY + 5);
       doc.line(120, afterFeeY, 200, afterFeeY); doc.text('Head of school signature', 120, afterFeeY + 5);
       drawWrittenReportPage(doc, s);
       return doc;
