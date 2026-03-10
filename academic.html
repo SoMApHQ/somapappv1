@@ -1242,6 +1242,74 @@
       } catch (e) { console.warn('fetchFees', e && e.message); return {}; }
     }
 
+    function normalizeAcademicScoreBucket(raw) {
+      const out = {};
+      if (!raw || typeof raw !== 'object') return out;
+      Object.entries(raw).forEach(([adm, subjectMap]) => {
+        if (!subjectMap || typeof subjectMap !== 'object' || Array.isArray(subjectMap)) return;
+        const normalizedSubjects = {};
+        Object.entries(subjectMap).forEach(([sub, value]) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+          const hasScore = Object.prototype.hasOwnProperty.call(value, 'score') || Object.prototype.hasOwnProperty.call(value, 'Score');
+          if (!hasScore) return;
+          const score = Number(value.score ?? value.Score);
+          const max = Number(value.max ?? value.Max ?? 100);
+          if (!Number.isFinite(score) || !Number.isFinite(max) || max <= 0 || score < 0) return;
+          const entry = { score, max };
+          getAcademicSubjectAliases(value.label || sub, sub).forEach((alias) => {
+            normalizedSubjects[alias] = entry;
+          });
+        });
+        if (Object.keys(normalizedSubjects).length) out[adm] = normalizedSubjects;
+      });
+      return out;
+    }
+
+    function appendSyntheticScoresFromRootAcademic(root, months, collected, seen) {
+      Object.entries(root || {}).forEach(([topKey, topVal]) => {
+        if (!topVal || typeof topVal !== 'object' || Array.isArray(topVal)) return;
+
+        const topMonth = resolveMonthKeyAcademic(topKey);
+        if (topMonth) {
+          if (!months.includes(topMonth)) return;
+          const directMonthly = normalizeAcademicScoreBucket(topVal);
+          if (Object.keys(directMonthly).length) {
+            const dedupe = `monthly::${topMonth}`;
+            if (!seen.has(dedupe)) {
+              seen.add(dedupe);
+              collected.push(directMonthly);
+            }
+            return;
+          }
+          Object.entries(topVal).forEach(([nestedExamKey, nestedBucket]) => {
+            if (!nestedBucket || typeof nestedBucket !== 'object' || Array.isArray(nestedBucket)) return;
+            const normalizedExamKey = slugifyExamKey(nestedExamKey);
+            if (SYNTHETIC_WINDOW_EXAM_KEYS.has(normalizedExamKey)) return;
+            const examScores = normalizeAcademicScoreBucket(nestedBucket);
+            if (!Object.keys(examScores).length) return;
+            const dedupe = `${normalizedExamKey}::${topMonth}`;
+            if (seen.has(dedupe)) return;
+            seen.add(dedupe);
+            collected.push(examScores);
+          });
+          return;
+        }
+
+        const topExamKey = slugifyExamKey(topKey);
+        if (SYNTHETIC_WINDOW_EXAM_KEYS.has(topExamKey)) return;
+        Object.entries(topVal).forEach(([monthKey, monthBucket]) => {
+          const resolvedMonth = resolveMonthKeyAcademic(monthKey);
+          if (!resolvedMonth || !months.includes(resolvedMonth)) return;
+          const examScores = normalizeAcademicScoreBucket(monthBucket);
+          if (!Object.keys(examScores).length) return;
+          const dedupe = `${topExamKey}::${resolvedMonth}`;
+          if (seen.has(dedupe)) return;
+          seen.add(dedupe);
+          collected.push(examScores);
+        });
+      });
+    }
+
     async function fetchScores({ year, className, examKey, month }) {
       if (!getDB()) return {};
 
@@ -1271,30 +1339,7 @@
           const found = await readFirstExisting([`/scores/${year}/${clsKey}`]);
           const snap = found?.snap || null;
           if (!(snap && snap.exists && snap.exists())) continue;
-          const root = snap.val() || {};
-          Object.entries(root).forEach(([topKey, topVal]) => {
-            if (!topVal || typeof topVal !== 'object') return;
-            const topMonth = resolveMonthKeyAcademic(topKey);
-            if (topMonth) {
-              if (!months.includes(topMonth)) return;
-              const dedupe = `monthly::${topMonth}`;
-              if (seen.has(dedupe)) return;
-              seen.add(dedupe);
-              collected.push(topVal);
-              return;
-            }
-            const topExamKey = slugifyExamKey(topKey);
-            if (SYNTHETIC_WINDOW_EXAM_KEYS.has(topExamKey)) return;
-            Object.entries(topVal).forEach(([monthKey, monthBucket]) => {
-              const resolvedMonth = resolveMonthKeyAcademic(monthKey);
-              if (!resolvedMonth || !months.includes(resolvedMonth)) return;
-              const dedupe = `${topExamKey}::${resolvedMonth}`;
-              if (seen.has(dedupe)) return;
-              seen.add(dedupe);
-              collected.push(monthBucket);
-            });
-          });
-          if (collected.length) break;
+          appendSyntheticScoresFromRootAcademic(snap.val() || {}, months, collected, seen);
         }
         return mergeScoreMapsAcademic(collected);
       }

@@ -538,6 +538,107 @@
     }
 
     function letterGrade(pct) { return gradeFromPercent(pct); }
+    const SYNTHETIC_WINDOW_EXAM_KEYS = new Set(['midterm1', 'endterm', 'midterm2', 'annual']);
+    const EXAM_MONTH_PLAN = {
+      monthly:  (selectedMonth) => [canonicalMonthKey(selectedMonth) || selectedMonth],
+      midterm1: () => ['Jan', 'Feb', 'Mar'],
+      endterm:  () => ['Jan', 'Feb', 'Mar', 'Apr', 'May'],
+      midterm2: () => ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Aug', 'Sep'],
+      annual:   () => ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov']
+    };
+    function examMonthsForWindowScoresheet(examKey, selectedMonth) {
+      const key = String(examKey || 'monthly').toLowerCase();
+      const planner = EXAM_MONTH_PLAN[key] || EXAM_MONTH_PLAN.monthly;
+      const months = planner(selectedMonth);
+      return Array.from(new Set((months || []).map((item) => canonicalMonthKey(item) || String(item || '').trim()).filter(Boolean)));
+    }
+    function isSyntheticWindowExamKey(examKey) {
+      return SYNTHETIC_WINDOW_EXAM_KEYS.has(String(examKey || '').toLowerCase());
+    }
+    function normalizeScoresheetScoreBucket(raw) {
+      const out = {};
+      if (!raw || typeof raw !== 'object') return out;
+      Object.entries(raw).forEach(([adm, subjectMap]) => {
+        if (!subjectMap || typeof subjectMap !== 'object' || Array.isArray(subjectMap)) return;
+        const normalizedSubjects = {};
+        Object.entries(subjectMap).forEach(([sub, value]) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+          const hasScore = Object.prototype.hasOwnProperty.call(value, 'score') || Object.prototype.hasOwnProperty.call(value, 'Score');
+          if (!hasScore) return;
+          const labelFromDB = value.label || sub;
+          const subjectKey = makeSubjectKey(labelFromDB);
+          const score = Number(value.score ?? value.Score);
+          const max = Number(value.max ?? value.Max ?? 100);
+          if (!Number.isFinite(score) || !Number.isFinite(max) || max <= 0 || score < 0) return;
+          const entry = { score, max };
+          normalizedSubjects[subjectKey] = entry;
+          if (labelFromDB !== subjectKey) normalizedSubjects[labelFromDB] = entry;
+        });
+        if (Object.keys(normalizedSubjects).length) out[adm] = normalizedSubjects;
+      });
+      return out;
+    }
+    function mergeScoresheetScoreMaps(records) {
+      const merged = {};
+      (records || []).forEach((record) => {
+        Object.entries(record || {}).forEach(([adm, subjectMap]) => {
+          merged[adm] = merged[adm] || {};
+          Object.entries(subjectMap || {}).forEach(([subjectKey, value]) => {
+            const previous = merged[adm][subjectKey] || { score: 0, max: 0 };
+            const score = Number(value?.score || 0);
+            const max = Number(value?.max || 0);
+            if (!Number.isFinite(score) || !Number.isFinite(max) || max <= 0) return;
+            merged[adm][subjectKey] = {
+              score: previous.score + score,
+              max: previous.max + max
+            };
+          });
+        });
+      });
+      return merged;
+    }
+    function appendSyntheticScoresFromRootScoresheet(root, months, collected, seen) {
+      Object.entries(root || {}).forEach(([topKey, topVal]) => {
+        if (!topVal || typeof topVal !== 'object' || Array.isArray(topVal)) return;
+        const topMonth = canonicalMonthKey(topKey);
+        if (topMonth) {
+          if (!months.includes(topMonth)) return;
+          const directMonthly = normalizeScoresheetScoreBucket(topVal);
+          if (Object.keys(directMonthly).length) {
+            const dedupe = `monthly::${topMonth}`;
+            if (!seen.has(dedupe)) {
+              seen.add(dedupe);
+              collected.push(directMonthly);
+            }
+            return;
+          }
+          Object.entries(topVal).forEach(([nestedExamKey, nestedBucket]) => {
+            if (!nestedBucket || typeof nestedBucket !== 'object' || Array.isArray(nestedBucket)) return;
+            const normalizedExamKey = slugifyExamKey(nestedExamKey);
+            if (SYNTHETIC_WINDOW_EXAM_KEYS.has(normalizedExamKey)) return;
+            const examScores = normalizeScoresheetScoreBucket(nestedBucket);
+            if (!Object.keys(examScores).length) return;
+            const dedupe = `${normalizedExamKey}::${topMonth}`;
+            if (seen.has(dedupe)) return;
+            seen.add(dedupe);
+            collected.push(examScores);
+          });
+          return;
+        }
+        const topExamKey = slugifyExamKey(topKey);
+        if (SYNTHETIC_WINDOW_EXAM_KEYS.has(topExamKey)) return;
+        Object.entries(topVal).forEach(([monthKey, monthBucket]) => {
+          const resolvedMonth = canonicalMonthKey(monthKey);
+          if (!resolvedMonth || !months.includes(resolvedMonth)) return;
+          const examScores = normalizeScoresheetScoreBucket(monthBucket);
+          if (!Object.keys(examScores).length) return;
+          const dedupe = `${topExamKey}::${resolvedMonth}`;
+          if (seen.has(dedupe)) return;
+          seen.add(dedupe);
+          collected.push(examScores);
+        });
+      });
+    }
 
     function getTeacherComment(grade, name) {
       switch (grade) {
@@ -905,6 +1006,20 @@
         }
       }
 
+      const normalizedExamKey = String(examKey || '').toLowerCase();
+      if (isSyntheticWindowExamKey(normalizedExamKey)) {
+        const months = examMonthsForWindowScoresheet(normalizedExamKey, month);
+        const collected = [];
+        const seen = new Set();
+        for (const clsKey of classCandidates) {
+          const found = await readFirstExisting([`scores/${year}/${clsKey}`]);
+          const snap = found?.snap || null;
+          if (!(snap && snap.exists && snap.exists())) continue;
+          appendSyntheticScoresFromRootScoresheet(snap.val() || {}, months, collected, seen);
+        }
+        return mergeScoresheetScoreMaps(collected);
+      }
+
       const variants = monthVariants(month);
       const paths = [];
 
@@ -1087,6 +1202,10 @@
     async function saveAllScores(){
       const db = getDB();
       if(!db){ alert('Firebase not initialized'); return; }
+      if (isSyntheticWindowExamKey(state.examKey)) {
+        alert('This exam is automatic. It is calculated from all exams in the selected months and cannot be saved manually.');
+        return;
+      }
       const { year, className, examKey, month } = state;
       const basePath = `scores/${year}/${className}/${examKey}/${month}`;
       const payload = {};
@@ -1174,6 +1293,7 @@
       }
 
       const tplCell = document.getElementById('tplSubjectCell');
+      const readOnlySynthetic = isSyntheticWindowExamKey(state.examKey);
 
       state.students.forEach((s, idx)=>{
         const tr = document.createElement('tr');
@@ -1215,6 +1335,12 @@
           const sc = savedScores[subject.key] || savedScores[subject.label] || {};
           scoreInp.value = sc.score ?? '';
           maxInp.value = sc.max ?? 100;
+          scoreInp.disabled = readOnlySynthetic;
+          maxInp.disabled = readOnlySynthetic;
+          if (readOnlySynthetic) {
+            scoreInp.title = 'Automatic exam';
+            maxInp.title = 'Automatic exam';
+          }
 
           scoreInp.addEventListener('input', recomputeAll);
           maxInp.addEventListener('input', recomputeAll);
@@ -1257,6 +1383,16 @@
 
       lblCount.textContent = String(state.students.length);
       lblSubjects.textContent = String(state.subjectList.length);
+      if (btnSaveAll) {
+        btnSaveAll.disabled = readOnlySynthetic;
+        btnSaveAll.classList.toggle('opacity-50', readOnlySynthetic);
+        btnSaveAll.classList.toggle('cursor-not-allowed', readOnlySynthetic);
+        btnSaveAll.title = readOnlySynthetic ? 'Automatic exams cannot be saved manually.' : '';
+      }
+      if (readOnlySynthetic && state.students.length) {
+        lblStatus.innerHTML = '<span class="text-amber-600">Automatic window exam loaded. Scores are read-only because they are calculated from all exams in the selected months.</span>';
+        return;
+      }
       
       // Update status message
       if(state.students.length === 0) {

@@ -283,6 +283,79 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .trend-graph-card {
+      border-radius: 20px;
+      border: 1px solid rgba(96, 165, 250, 0.24);
+      background: linear-gradient(180deg, rgba(239, 246, 255, 0.95), rgba(248, 250, 252, 0.92));
+      padding: 0.9rem;
+    }
+    .trend-graph-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.6rem;
+    }
+    .trend-graph-title {
+      font-size: 0.8rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #0f172a;
+    }
+    .trend-graph-subtitle {
+      font-size: 0.72rem;
+      color: #475569;
+    }
+    .trend-graph-shell {
+      width: 100%;
+      overflow-x: auto;
+    }
+    .trend-graph-svg {
+      width: 100%;
+      min-width: 360px;
+      height: auto;
+      display: block;
+    }
+    .trend-graph-legend {
+      display: grid;
+      gap: 0.45rem;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      margin-top: 0.75rem;
+    }
+    .trend-legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-width: 0;
+      font-size: 0.72rem;
+      color: #334155;
+    }
+    .trend-legend-dot {
+      width: 0.75rem;
+      height: 0.75rem;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      box-shadow: 0 0 0 2px rgba(255,255,255,0.9);
+    }
+    .trend-legend-text {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .conclusion-box {
+      border-radius: 20px;
+      border: 1px solid rgba(16, 185, 129, 0.16);
+      background: linear-gradient(135deg, rgba(236, 253, 245, 0.96), rgba(239, 246, 255, 0.94));
+      padding: 0.95rem 1rem;
+    }
+    .conclusion-box h4 {
+      margin: 0 0 0.4rem;
+      font-size: 0.95rem;
+      font-weight: 800;
+      color: #065f46;
+    }
     .exam-log {
       display: grid;
       gap: 0.45rem;
@@ -609,6 +682,10 @@
               <div class="written-box">
                 <h4>Uchambuzi wa jumla</h4>
                 <p class="text-sm leading-7 text-slate-700" id="writtenReportNarrative">Chagua mwanafunzi ili kuona uchambuzi wa kina.</p>
+              </div>
+              <div class="conclusion-box">
+                <h4>Hitimisho</h4>
+                <p class="text-sm leading-7 text-slate-700" id="writtenReportConclusion">Hakuna hitimisho bado.</p>
               </div>
               <div class="written-box">
                 <h4>Mapendekezo kwa mzazi, mwanafunzi na walimu</h4>
@@ -3235,6 +3312,60 @@
       return merged;
     }
 
+    function appendSyntheticExamWindowRecords(root, months, records, seen) {
+      Object.entries(root || {}).forEach(([topKey, topVal]) => {
+        if (!topVal || typeof topVal !== 'object' || Array.isArray(topVal)) return;
+
+        const topMonth = resolveMonthKey(topKey);
+        if (topMonth) {
+          if (!months.includes(topMonth)) return;
+          const directMonthly = normalizeMonthlyScoreMap(topVal);
+          if (Object.keys(directMonthly).length) {
+            const dedupe = `monthly::${topMonth}`;
+            if (!seen.has(dedupe)) {
+              seen.add(dedupe);
+              records.push({
+                ...examRecordMeta('monthly', topMonth, 'Monthly'),
+                data: directMonthly
+              });
+            }
+            return;
+          }
+          Object.entries(topVal).forEach(([nestedExamKey, nestedBucket]) => {
+            if (!nestedBucket || typeof nestedBucket !== 'object' || Array.isArray(nestedBucket)) return;
+            const normalizedExamKey = slugifyExamKey(nestedExamKey);
+            if (SYNTHETIC_WINDOW_EXAM_KEYS.has(normalizedExamKey)) return;
+            const examScores = normalizeMonthlyScoreMap(nestedBucket);
+            if (!Object.keys(examScores).length) return;
+            const dedupe = `${normalizedExamKey}::${topMonth}`;
+            if (seen.has(dedupe)) return;
+            seen.add(dedupe);
+            records.push({
+              ...examRecordMeta(normalizedExamKey, topMonth, examLabelFromKey(nestedExamKey)),
+              data: examScores
+            });
+          });
+          return;
+        }
+
+        const topExamKey = slugifyExamKey(topKey);
+        if (SYNTHETIC_WINDOW_EXAM_KEYS.has(topExamKey)) return;
+        Object.entries(topVal).forEach(([monthKey, monthBucket]) => {
+          const resolvedMonth = resolveMonthKey(monthKey);
+          if (!resolvedMonth || !months.includes(resolvedMonth)) return;
+          const examScores = normalizeMonthlyScoreMap(monthBucket);
+          if (!Object.keys(examScores).length) return;
+          const dedupe = `${topExamKey}::${resolvedMonth}`;
+          if (seen.has(dedupe)) return;
+          seen.add(dedupe);
+          records.push({
+            ...examRecordMeta(topExamKey, resolvedMonth, examLabelFromKey(topKey)),
+            data: examScores
+          });
+        });
+      });
+    }
+
     async function collectExamWindowRecords({ year, className, examKey, month, rawMonth }) {
       const key = String(examKey || 'monthly').toLowerCase();
       const months = examMonthsForWindow(key, month);
@@ -3291,40 +3422,7 @@
           root = null;
         }
         if (!(root && root.exists && root.exists())) continue;
-        const val = root.val() || {};
-        Object.entries(val).forEach(([topKey, topVal]) => {
-          if (!topVal || typeof topVal !== 'object') return;
-          const topMonth = resolveMonthKey(topKey);
-          if (topMonth) {
-            if (!months.includes(topMonth)) return;
-            const dedupe = `monthly::${topMonth}`;
-            if (seen.has(dedupe)) return;
-            const data = normalizeMonthlyScoreMap(topVal);
-            if (!Object.keys(data).length) return;
-            seen.add(dedupe);
-            records.push({
-              ...examRecordMeta('monthly', topMonth, 'Monthly'),
-              data
-            });
-            return;
-          }
-          const topExamKey = slugifyExamKey(topKey);
-          if (SYNTHETIC_WINDOW_EXAM_KEYS.has(topExamKey)) return;
-          Object.entries(topVal).forEach(([monthKey, monthBucket]) => {
-            const resolvedMonth = resolveMonthKey(monthKey);
-            if (!resolvedMonth || !months.includes(resolvedMonth)) return;
-            const dedupe = `${topExamKey}::${resolvedMonth}`;
-            if (seen.has(dedupe)) return;
-            const data = normalizeMonthlyScoreMap(monthBucket);
-            if (!Object.keys(data).length) return;
-            seen.add(dedupe);
-            records.push({
-              ...examRecordMeta(topExamKey, resolvedMonth, examLabelFromKey(topKey)),
-              data
-            });
-          });
-        });
-        if (records.length) break;
+        appendSyntheticExamWindowRecords(root.val() || {}, months, records, seen);
       }
 
       if (!records.length) {
@@ -4174,6 +4272,65 @@ function toNormalizedRows(subjects){
     function graphColorAt(index){
       return GRAPH_COLORS[Math.abs(Number(index || 0)) % GRAPH_COLORS.length];
     }
+    function shortExamAxisLabel(item){
+      const exam = String(item?.examLabel || 'Exam').trim();
+      const month = String(item?.monthLabel || '').trim();
+      const compactExam = exam.length > 14 ? `${exam.slice(0, 12)}...` : exam;
+      return `${compactExam}${month ? ` ${month.slice(0, 3)}` : ''}`.trim();
+    }
+    function renderExamLineGraph(history, opts = {}){
+      const list = (history || []).filter(item => isNumber(item?.pct));
+      if (!list.length) return '<div class="text-xs text-slate-500">Hakuna trend ya exam iliyopatikana.</div>';
+      const compact = Boolean(opts.compact);
+      const width = Math.max(360, list.length * (compact ? 82 : 96));
+      const height = compact ? 220 : 240;
+      const pad = { top: 20, right: 18, bottom: compact ? 68 : 74, left: 34 };
+      const plotWidth = Math.max(40, width - pad.left - pad.right);
+      const plotHeight = Math.max(40, height - pad.top - pad.bottom);
+      const step = list.length > 1 ? plotWidth / (list.length - 1) : 0;
+      const yForPct = (pct) => pad.top + ((100 - Math.max(0, Math.min(100, Number(pct || 0)))) / 100) * plotHeight;
+      const points = list.map((item, idx) => ({
+        ...item,
+        x: pad.left + (idx * step),
+        y: yForPct(item.pct),
+        color: graphColorAt(idx),
+        axisLabel: shortExamAxisLabel(item)
+      }));
+      const polyline = points.map(point => `${point.x},${point.y}`).join(' ');
+      const area = points.length ? `${pad.left},${pad.top + plotHeight} ${polyline} ${points[points.length - 1].x},${pad.top + plotHeight}` : '';
+      const gridValues = [0, 25, 50, 75, 100];
+      const delta = points.length >= 2 ? Number(points[points.length - 1].pct) - Number(points[0].pct) : 0;
+      const deltaLabel = points.length >= 2 ? `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}% from first to latest exam` : 'Single exam recorded';
+      return `<div class="trend-graph-card">
+        <div class="trend-graph-header">
+          <div>
+            <div class="trend-graph-title">Progression line</div>
+            <div class="trend-graph-subtitle">${escapeHtml(deltaLabel)}</div>
+          </div>
+          <div class="text-xs font-semibold text-slate-600">${points.length} exams</div>
+        </div>
+        <div class="trend-graph-shell">
+          <svg class="trend-graph-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Exam progression line graph">
+            <defs>
+              <linearGradient id="trendAreaFill" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stop-color="#60a5fa" stop-opacity="0.28"></stop>
+                <stop offset="100%" stop-color="#60a5fa" stop-opacity="0.02"></stop>
+              </linearGradient>
+            </defs>
+            ${gridValues.map(value => {
+              const y = yForPct(value);
+              return `<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="rgba(148,163,184,0.35)" stroke-dasharray="4 6"></line><text x="${pad.left - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="#64748b">${value}%</text>`;
+            }).join('')}
+            <line x1="${pad.left}" y1="${pad.top + plotHeight}" x2="${width - pad.right}" y2="${pad.top + plotHeight}" stroke="#94a3b8" stroke-width="1"></line>
+            ${points.length > 1 ? `<polygon points="${area}" fill="url(#trendAreaFill)"></polygon><polyline points="${polyline}" fill="none" stroke="#1d4ed8" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"></polyline>` : ''}
+            ${points.map((point) => `<g><circle cx="${point.x}" cy="${point.y}" r="6.5" fill="${point.color}" stroke="#ffffff" stroke-width="2.5"></circle><text x="${point.x}" y="${point.y - 11}" text-anchor="middle" font-size="11" font-weight="700" fill="#0f172a">${Number(point.pct || 0).toFixed(1)}%</text><text x="${point.x}" y="${height - 28}" text-anchor="middle" font-size="11" fill="#475569">${escapeHtml(point.axisLabel)}</text></g>`).join('')}
+          </svg>
+        </div>
+        <div class="trend-graph-legend">
+          ${points.map((point) => `<div class="trend-legend-item"><span class="trend-legend-dot" style="background:${point.color}"></span><span class="trend-legend-text">${escapeHtml(`${point.examLabel}${point.monthLabel ? ` (${point.monthLabel})` : ''} - ${Number(point.pct || 0).toFixed(1)}%`)}</span></div>`).join('')}
+        </div>
+      </div>`;
+    }
     function renderExamPerformancePreview(student){
       const metaEl = document.getElementById('previewExamPerfMeta');
       const barsEl = document.getElementById('previewExamPerfBars');
@@ -4191,6 +4348,8 @@ function toNormalizedRows(subjects){
       }
       const labels = series.map(entry => `${entry.examLabel}${entry.monthLabel ? ` (${entry.monthLabel})` : ''}`);
       metaEl.textContent = `${series.length} exams recorded in ${state.examType}: ${labels.join(', ')}.`;
+      barsEl.innerHTML = renderExamLineGraph(series, { compact: true });
+      return;
       barsEl.innerHTML = series.map((entry, idx) => {
         const width = Math.max(4, Math.min(100, Number(entry.pct || 0)));
         const label = `${entry.examLabel} ${entry.monthLabel ? `(${entry.monthLabel})` : ''}`.trim();
@@ -4208,17 +4367,7 @@ function toNormalizedRows(subjects){
       }).join('');
     }
     function renderExamTrendGraph(history){
-      const list = (history || []).slice();
-      if (!list.length) return '<div class="text-xs text-slate-500">Hakuna trend ya exam iliyopatikana.</div>';
-      return `<div class="mini-graph">${list.map((item, idx) => {
-        const height = Math.max(6, Math.min(100, Number(item.pct || 0)));
-        const short = `${item.examLabel || 'Exam'} ${(item.monthLabel || '').slice(0, 3)}`.trim();
-        const color = graphColorAt(idx);
-        return `<div class="mini-bar-wrap">
-          <div class="mini-bar" style="height:${height}%;background:${color}"></div>
-          <div class="mini-bar-label" title="${escapeHtml(short)}">${escapeHtml(short)}</div>
-        </div>`;
-      }).join('')}</div>`;
+      return renderExamLineGraph(history, { compact: false });
     }
     function trendFromPoints(points){
       const list = (points || []).filter(item => isNumber(item?.pct));
@@ -4256,6 +4405,24 @@ function toNormalizedRows(subjects){
       });
       if (!items.length) items.push('Aendelee na juhudi hizi, ahifadhi nidhamu ya darasa, na apewe kazi za kumjenga zaidi katika masomo anayoongoza.');
       return items.slice(0, 6);
+    }
+    function buildWrittenReportConclusion(student, examSeries, subjects){
+      const overallTrend = trendFromPoints(examSeries);
+      const best = (subjects || [])[0];
+      const support = [...(subjects || [])].sort((a, b) => a.studentPct - b.studentPct)[0];
+      const latest = examSeries[examSeries.length - 1];
+      if (!examSeries.length) {
+        return 'Hakuna hitimisho la kuaminika kwa sasa kwa sababu hakuna historia ya mitihani iliyokusanywa ndani ya dirisha hili.';
+      }
+      if (examSeries.length === 1) {
+        return `Kwa sasa kuna exam moja tu iliyorekodiwa, hivyo hitimisho la muda ni kwamba mwanafunzi ameanza kwenye ${latest.examLabel}${latest.monthLabel ? ` ya ${latest.monthLabel}` : ''} kwa wastani wa ${Number(latest.pct || 0).toFixed(1)}%.`;
+      }
+      const directionText = overallTrend.delta > 5
+        ? 'anaonesha mwelekeo mzuri wa kupanda'
+        : (overallTrend.delta < -5 ? 'anaonesha mwelekeo wa kushuka unaohitaji ufuatiliaji wa karibu' : 'amekuwa na mwenendo wa wastani unaohitaji uthabiti zaidi');
+      const bestText = best ? `Nguvu yake kubwa kwa sasa ni ${best.subject} (${best.studentPct.toFixed(1)}%).` : '';
+      const supportText = support ? `Somo la kupewa kipaumbele zaidi ni ${support.subject} (${support.studentPct.toFixed(1)}%).` : '';
+      return `Kwa hitimisho, mwanafunzi ${directionText} katika mitihani yote ya dirisha la ${state.examType}. ${bestText} ${supportText} Kwa wastani wa jumla wa ${student.avg.toFixed(1)}% na matokeo ya mwisho ya ${Number(latest.pct || 0).toFixed(1)}% kwenye ${latest.examLabel}${latest.monthLabel ? ` ya ${latest.monthLabel}` : ''}, hatua inayofuata ni kuimarisha masomo dhaifu bila kupunguza maeneo anayofanya vizuri.`.replace(/\s+/g, ' ').trim();
     }
     function buildExamBreakdownModel(student){
       const detail = state.reportWindow?.detailsByAdm?.[student?.adm] || { subjects: {} };
@@ -4309,6 +4476,7 @@ function toNormalizedRows(subjects){
       const detail = state.reportWindow?.detailsByAdm?.[student.adm] || { subjects: {} };
       const classList = state.students || [];
       const examBreakdown = buildExamBreakdownModel(student);
+      const examSeries = buildExamPerformanceSeries(student);
       const subjects = (student.subjectStats?.subjects || []).map(entry => {
         const history = (detail.subjects?.[entry.subject] || []).slice();
         const trend = trendFromPoints(history);
@@ -4335,6 +4503,7 @@ function toNormalizedRows(subjects){
       const months = (state.reportWindow?.months || []).map(m => MONTH_LABELS[m] || m).join(', ');
       const examSummary = examBreakdown.examNames.length ? examBreakdown.examNames.join(', ') : 'hakuna exam iliyorekodiwa';
       const recommendationItems = recommendationList(student, { subjects });
+      const conclusion = buildWrittenReportConclusion(student, examSeries, subjects);
       const narrative = [
         `Hii ni taarifa kwa maandishi kuhusu mwanao ${student.name || ''} jinsi alivyokuwa akiendelea kuanzia ${months || 'kipindi hiki'}.`,
         `Ndani ya dirisha hili amefanya jumla ya mitihani ${examBreakdown.examCount}, ambayo ni ${examSummary}.`,
@@ -4346,11 +4515,13 @@ function toNormalizedRows(subjects){
       return {
         show: isSyntheticWindowExam(state.examKey),
         title: `Taarifa ya maendeleo ya ${student.name || 'mwanafunzi'}`,
-        intro: `Taarifa hii imeandaliwa kwa exam ya ${state.examType} kwa kujumlisha wastani wa mitihani ${examBreakdown.examCount} aliyofanya mwanafunzi ndani ya miezi ya ${months || '-'}. Mitihani hiyo ni ${examSummary}.`,
+        intro: `Taarifa hii imeandaliwa kwa exam ya ${state.examType} kwa kujumlisha wastani wa mitihani yote ${examBreakdown.examCount} aliyofanya mwanafunzi ndani ya miezi ya ${months || '-'}. Mitihani hiyo ni ${examSummary}.`,
         narrative,
+        conclusion,
         recommendations: recommendationItems,
         subjects,
-        examBreakdown
+        examBreakdown,
+        examSeries
       };
     }
     function renderMiniGraph(history){
@@ -4371,6 +4542,7 @@ function toNormalizedRows(subjects){
       const title = document.getElementById('writtenReportTitle');
       const intro = document.getElementById('writtenReportIntro');
       const narrative = document.getElementById('writtenReportNarrative');
+      const conclusion = document.getElementById('writtenReportConclusion');
       const recommendations = document.getElementById('writtenReportRecommendations');
       const examCountNode = document.getElementById('writtenExamCount');
       const examNamesNode = document.getElementById('writtenExamNames');
@@ -4378,13 +4550,14 @@ function toNormalizedRows(subjects){
       const examMatrixHead = document.getElementById('writtenExamMatrixHead');
       const examMatrixBody = document.getElementById('writtenExamMatrixBody');
       const subjectsNode = document.getElementById('writtenSubjectCards');
-      if (!page || !summary || !title || !intro || !narrative || !recommendations || !examCountNode || !examNamesNode || !examTrendNode || !examMatrixHead || !examMatrixBody || !subjectsNode) return;
+      if (!page || !summary || !title || !intro || !narrative || !conclusion || !recommendations || !examCountNode || !examNamesNode || !examTrendNode || !examMatrixHead || !examMatrixBody || !subjectsNode) return;
       if (!student) {
         page.style.display = 'none';
         summary.innerHTML = '';
         title.textContent = 'Maendeleo ya mwanafunzi';
         intro.textContent = 'Hakuna taarifa ya maandishi kwa exam hii.';
         narrative.textContent = 'Chagua mwanafunzi ili kuona uchambuzi wa kina.';
+        conclusion.textContent = 'Hakuna hitimisho bado.';
         recommendations.textContent = '-';
         examCountNode.textContent = 'Hakuna exam history iliyopatikana.';
         examNamesNode.textContent = '-';
@@ -4403,9 +4576,10 @@ function toNormalizedRows(subjects){
       title.textContent = model.title;
       intro.textContent = model.intro;
       narrative.textContent = model.narrative;
-      examCountNode.textContent = `Mwanafunzi amefanya mitihani ${model.examBreakdown.examCount} ndani ya dirisha la ${state.examType}.`;
+      conclusion.textContent = model.conclusion;
+      examCountNode.textContent = `Mwanafunzi amefanya mitihani ${model.examBreakdown.examCount} iliyorekodiwa ndani ya dirisha la ${state.examType}.`;
       examNamesNode.textContent = model.examBreakdown.examNames.length ? `Majina ya mitihani: ${model.examBreakdown.examNames.join(', ')}.` : 'Hakuna majina ya mitihani yaliyopatikana.';
-      examTrendNode.innerHTML = renderExamTrendGraph(buildExamPerformanceSeries(student));
+      examTrendNode.innerHTML = renderExamTrendGraph(model.examSeries);
       examMatrixHead.innerHTML = `<tr><th>Somo</th>${model.examBreakdown.exams.map(exam => `<th>${escapeHtml(exam.shortLabel)}</th>`).join('')}<th>Average</th></tr>`;
       examMatrixBody.innerHTML = model.examBreakdown.subjectRows.length
         ? model.examBreakdown.subjectRows.map(row => `<tr>
@@ -4505,6 +4679,16 @@ function toNormalizedRows(subjects){
       return y + (lines.length * lineHeight);
     }
 
+    function hexToRgb(hex){
+      const clean = String(hex || '').replace('#', '').trim();
+      const full = clean.length === 3 ? clean.split('').map(ch => ch + ch).join('') : clean;
+      const normalized = /^[0-9a-fA-F]{6}$/.test(full) ? full : '2563eb';
+      return {
+        r: parseInt(normalized.slice(0, 2), 16),
+        g: parseInt(normalized.slice(2, 4), 16),
+        b: parseInt(normalized.slice(4, 6), 16)
+      };
+    }
     function drawPdfTrendChart(doc, history, x, y, width, height){
       const points = (history || []).slice(0, 6);
       doc.setDrawColor(191, 219, 254);
@@ -4516,16 +4700,38 @@ function toNormalizedRows(subjects){
         doc.text('Hakuna trend ya kutosha', x + 4, y + (height / 2));
         return;
       }
-      const gap = width / Math.max(points.length, 1);
+      const left = x + 8;
+      const right = x + width - 8;
+      const top = y + 6;
+      const bottom = y + height - 8;
+      const plotWidth = Math.max(10, right - left);
+      const plotHeight = Math.max(10, bottom - top);
+      const step = points.length > 1 ? plotWidth / (points.length - 1) : 0;
+      [0, 50, 100].forEach((value) => {
+        const gy = top + ((100 - value) / 100) * plotHeight;
+        doc.setDrawColor(203, 213, 225);
+        doc.setLineWidth(0.2);
+        doc.line(left, gy, right, gy);
+      });
+      const coords = points.map((point, idx) => ({
+        x: left + (idx * step),
+        y: top + ((100 - Math.max(0, Math.min(100, Number(point.pct || 0)))) / 100) * plotHeight
+      }));
+      if (coords.length > 1) {
+        doc.setDrawColor(29, 78, 216);
+        doc.setLineWidth(0.8);
+        for (let i = 1; i < coords.length; i++) {
+          doc.line(coords[i - 1].x, coords[i - 1].y, coords[i].x, coords[i].y);
+        }
+      }
       points.forEach((point, idx) => {
-        const barHeight = Math.max(4, (Math.min(100, Math.max(0, Number(point.pct || 0))) / 100) * (height - 14));
-        const barX = x + 4 + (idx * gap);
-        const barY = y + height - 8 - barHeight;
-        doc.setFillColor(14, 165, 233);
-        doc.roundedRect(barX, barY, Math.max(6, gap - 6), barHeight, 1.6, 1.6, 'F');
-        doc.setFontSize(7);
+        const color = hexToRgb(graphColorAt(idx));
+        const coord = coords[idx];
+        doc.setFillColor(color.r, color.g, color.b);
+        doc.circle(coord.x, coord.y, 1.7, 'F');
+        doc.setFontSize(6.8);
         doc.setTextColor(71, 85, 105);
-        doc.text(String((point.monthLabel || '').slice(0, 3)), barX, y + height - 2);
+        doc.text(String(shortExamAxisLabel(point)).slice(0, 12), coord.x - 6, bottom + 4);
       });
     }
     function drawPdfSummaryCards(doc, cards, startX, startY, totalWidth){
@@ -4595,7 +4801,7 @@ function toNormalizedRows(subjects){
       doc.setFontSize(10);
       doc.setTextColor(15, 23, 42);
       doc.text('Mwenendo wa mitihani', margin, y);
-      drawPdfTrendChart(doc, buildExamPerformanceSeries(student), margin, y + 3, 186, 28);
+      drawPdfTrendChart(doc, model.examSeries, margin, y + 3, 186, 28);
       y += 36;
 
       doc.setFillColor(248, 250, 252);
@@ -4606,6 +4812,17 @@ function toNormalizedRows(subjects){
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
       y = drawWrappedText(doc, model.narrative, margin + 4, y + 13, 176, 4.3) + 6;
+
+      doc.setFillColor(236, 253, 245);
+      doc.roundedRect(margin, y, 186, 18, 4, 4, 'F');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      doc.setTextColor(6, 95, 70);
+      doc.text('Hitimisho', margin + 4, y + 6);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.7);
+      doc.setTextColor(15, 23, 42);
+      y = drawWrappedText(doc, model.conclusion, margin + 4, y + 12, 176, 4.1) + 6;
 
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(11);
