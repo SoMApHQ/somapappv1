@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Schemes of Work | SoMAp</title>
+  <script src="../../somapappv1multischool/js/context.js"></script>
+  <script src="../../Todashboardhtml/yearContext.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
@@ -382,8 +384,21 @@
   <script type="module">
     const db = window.db || firebase.database();
     const workerId = localStorage.getItem('workerId');
-    const schoolId = window.currentSchoolId || localStorage.getItem('currentSchoolId') || localStorage.getItem('schoolId') || 'socrates';
-    const schoolName = (localStorage.getItem('schoolName') || 'Socrates School Arusha').toUpperCase();
+    const school = (typeof SOMAP !== 'undefined' && SOMAP.getSchool) ? SOMAP.getSchool() : null;
+    const schoolId = (school && school.id) || window.currentSchoolId || localStorage.getItem('somap.currentSchoolId') || localStorage.getItem('currentSchoolId') || localStorage.getItem('schoolId') || 'socrates-school';
+    const schoolName = (school && school.name) || (localStorage.getItem('schoolName') || 'Socrates School Arusha').toUpperCase();
+    const schoolRef = (path) => (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') ? db.ref(SOMAP.P(path)) : db.ref(path);
+    const getYear = () => (typeof window !== 'undefined' && window.somapYearContext?.getSelectedYear) ? window.somapYearContext.getSelectedYear() : new Date().getFullYear();
+    const isSocratesSchool = (id) => ['socrates-school', 'default', 'socrates'].includes(String(id || '').toLowerCase());
+
+    async function scopedOrLegacy(scopedPath, legacyPath) {
+      const snap = await schoolRef(scopedPath).once('value');
+      if (snap.exists()) return snap;
+      if (isSocratesSchool(schoolId) && legacyPath) {
+        return db.ref(legacyPath).once('value');
+      }
+      return snap;
+    }
 
     const teacherNameEl = document.getElementById('teacherName');
     const teacherTypeEl = document.getElementById('teacherType');
@@ -461,15 +476,46 @@
     }
 
     async function loadProfile() {
-      const [profileSnap, configSnap] = await Promise.all([
-        db.ref(`workers/${workerId}/profile`).once('value'),
-        db.ref(`teachers_config/${workerId}`).once('value')
+      const currentYear = String(getYear());
+      const previousYear = String(Number(currentYear) - 1);
+
+      const [workerSnap, configSnap] = await Promise.all([
+        scopedOrLegacy(`years/${currentYear}/workers/${workerId}`, `workers/${workerId}`),
+        scopedOrLegacy(`years/${currentYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`)
       ]);
-      const profile = profileSnap.val() || {};
+
+      let profile = {};
+      const workerData = workerSnap.val();
+
+      if (workerData) {
+        const w = workerData.profile ? workerData.profile : workerData;
+        profile = w || {};
+      }
+
+      if (!profile.fullNameUpper && !profile.firstName) {
+        const legacyProfileSnap = await db.ref(`workers/${workerId}/profile`).once('value');
+        profile = legacyProfileSnap.val() || profile;
+      }
+
       teacherConfig = configSnap.val() || {};
 
+      if (!teacherConfig.classes?.length && teacherConfig.classSubjectMappings?.length) {
+        const prevConfigSnap = await scopedOrLegacy(`years/${previousYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`);
+        const prevConfig = prevConfigSnap.val();
+        if (prevConfig?.classes?.length || prevConfig?.subjects?.length) {
+          teacherConfig = { ...teacherConfig, ...prevConfig };
+        }
+      }
+
+      if (!teacherConfig.classes?.length && teacherConfig.classSubjectMappings?.length) {
+        const allClasses = [...new Set((teacherConfig.classSubjectMappings || []).map((m) => m.class).filter(Boolean))];
+        const allSubjects = [...new Set((teacherConfig.classSubjectMappings || []).flatMap((m) => m.subjects || []).filter(Boolean))];
+        teacherConfig.classes = teacherConfig.classes || allClasses;
+        teacherConfig.subjects = teacherConfig.subjects || allSubjects;
+      }
+
       const fullName = profile.fullNameUpper || [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ').toUpperCase();
-      teacherNameEl.textContent = fullName || 'Unknown';
+      teacherNameEl.textContent = fullName || localStorage.getItem('somap_workerName') || 'Unknown';
       teacherTypeEl.textContent = teacherConfig.teacherType || 'Teacher';
 
       const classes = teacherConfig.classes || [];
