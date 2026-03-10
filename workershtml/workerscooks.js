@@ -797,9 +797,18 @@ function buildRegisterStats(studentMap, attendanceByClass) {
       if (isSocrates) {
         await db.ref(`inventory/items/${item.id}`).remove();
       }
+      // Cascade: remove logic rule for this item so it does not appear as orphan (Firebase ID) in Logic
+      await schoolRef(`${logicPath()}/${item.id}`).remove();
+      if (isSocrates) {
+        await db.ref(`kitchen_logic/rules/${item.id}`).remove();
+      }
       toast('Bidhaa imefutwa.', 'success');
-      const items = await fetchInventoryItems(workerSession.schoolId);
+      const [items, rules] = await Promise.all([
+        fetchInventoryItems(workerSession.schoolId),
+        loadLogicRules(workerSession.schoolId)
+      ]);
       setInventoryItems(items);
+      setLogicRules(rules);
     } catch (err) {
       console.error(err);
       toast(err.message || 'Imeshindikana kufuta bidhaa.', 'error');
@@ -1080,10 +1089,22 @@ function buildRegisterStats(studentMap, attendanceByClass) {
         h('div', { className: 'mini-list' },
           Object.entries(logicRules || {}).length
             ? Object.entries(logicRules).map(([itemId, rule]) => {
-                const label = inventoryItems.find(it => it.id === itemId)?.name || itemId;
-                return h('div', { key: itemId, className: 'mini-list__item' }, [
-                  h('strong', null, label),
-                  h('span', { className: 'mini-list__meta' }, `${rule.perChild || 0} ${rule.unit || ''} / mwanafunzi (${rule.perMeal || 'both'})`)
+                const storeItem = inventoryItems.find(it => it.id === itemId);
+                const label = storeItem?.name || itemId;
+                const isOrphaned = !storeItem;
+                return h('div', { key: itemId, className: `mini-list__item${isOrphaned ? ' mini-list__item--orphaned' : ''}` }, [
+                  h('div', { className: 'mini-list__item-main' }, [
+                    h('strong', null, label),
+                    h('span', { className: 'mini-list__meta' }, `${rule.perChild || 0} ${rule.unit || ''} / mwanafunzi (${rule.perMeal || 'both'})`)
+                  ]),
+                  isOrphaned ? h('div', { className: 'mini-list__item-actions' }, [
+                    h('button', {
+                      type: 'button',
+                      className: 'workers-btn small danger',
+                      title: 'Futa kanuni (bidhaa haipo stoo)',
+                      onClick: () => deleteLogicRule(itemId)
+                    }, '🗑')
+                  ]) : null
                 ]);
               })
             : h('p', { className: 'workers-card__subtitle' }, 'Hakuna kanuni bado. Ongeza ili kupata matumizi yanayotarajiwa.')
@@ -1518,6 +1539,23 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     } catch (err) {
       console.error(err);
       toast(err.message || 'Imeshindikana kuokoa kanuni.', 'error');
+    }
+  }
+
+  async function deleteLogicRule(itemId) {
+    if (!confirm('Una uhakika unataka kufuta kanuni hii? (Bidhaa haipo stoo.)')) return;
+    try {
+      await schoolRef(`${logicPath()}/${itemId}`).remove();
+      const isSocrates = ['socrates-school', 'default', 'socrates'].includes(school?.id);
+      if (isSocrates) {
+        await db.ref(`kitchen_logic/rules/${itemId}`).remove();
+      }
+      toast('Kanuni imefutwa.', 'success');
+      const rules = await loadLogicRules(workerSession.schoolId);
+      setLogicRules(rules);
+    } catch (err) {
+      console.error(err);
+      toast(err.message || 'Imeshindikana kufuta kanuni.', 'error');
     }
   }
 
