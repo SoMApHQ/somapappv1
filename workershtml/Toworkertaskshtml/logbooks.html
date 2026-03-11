@@ -4,8 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Logbooks | SoMAp Teacher Dashboard</title>
+  <script src="../../somapappv1multischool/js/context.js"></script>
+  <script src="../../Todashboardhtml/yearContext.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="../../firebase.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
@@ -438,16 +441,16 @@
         <h1>📚 Teaching Logbooks</h1>
         <p class="header-subtitle">Daily teaching logs and progress tracking</p>
       </div>
-      <a href="../workertasks.html" class="btn btn-back">
-        ← Back to Dashboard
-      </a>
-    </div>
-
-    <!-- Year Selector -->
-    <div class="year-selector-wrap">
-      <label>Academic Year:</label>
-      <select data-somap-year-select id="yearSelector"></select>
-      <span style="font-size: 0.85rem; color: rgba(255,255,255,0.7);">Working year: <b id="yearHint">2025</b></span>
+      <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+        <div style="display:flex;gap:.5rem;align-items:center;">
+          <label style="color: rgba(255,255,255,0.9); font-size: 0.85rem; font-weight: 600;">Academic Year</label>
+          <select data-somap-year-select data-somap-year-min="2024" data-somap-year-max="2042" style="padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.15); color: white; font-size: 0.9rem;"></select>
+          <span style="color: rgba(255,255,255,0.7); font-size: 0.8rem;">Working year: <b id="yearHint" style="color: white;">--</b></span>
+        </div>
+        <a href="../workertasks.html" id="backToDashboard" class="btn btn-back">
+          ← Back to Dashboard
+        </a>
+      </div>
     </div>
 
     <div class="teacher-info">
@@ -458,6 +461,14 @@
       <div class="info-item">
         <span class="info-label">Teacher Type</span>
         <span class="info-value" id="teacherType">Loading...</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">School</span>
+        <span class="info-value" id="schoolName">Loading...</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">Academic Year</span>
+        <span class="info-value" id="academicYear">--</span>
       </div>
       <div class="info-item">
         <span class="info-label">Total Logs</span>
@@ -633,52 +644,60 @@
       if (j >= CLASS_ORDER.length) return 'GRADUATED';
       return CLASS_ORDER[j];
     }
-
-    window.somapYearContext = window.somapYearContext || (function(){
-      let selected = (sessionStorage.getItem('somap_selected_year') || SOMAP_DEFAULT_YEAR)+'';
-      const listeners = new Set();
-      return {
-        getSelectedYear(){ return selected; },
-        setSelectedYear(y){
-          y = String(y);
-          if (selected===y) return;
-          selected = y;
-          try{ sessionStorage.setItem('somap_selected_year', y); }catch{}
-          listeners.forEach(fn=>{ try{ fn(y); }catch{} });
-        },
-        onYearChanged(fn){ if (typeof fn==='function') listeners.add(fn); }
-      };
-    })();
   </script>
 
   <script type="module">
-    const firebaseConfig = {
-      apiKey: "AIzaSyBhONntRE_aRsU0y1YcPZzWud3CBfwH_a8",
-      authDomain: "somaptestt.firebaseapp.com",
-      databaseURL: "https://somaptestt-default-rtdb.firebaseio.com",
-      projectId: "somaptestt",
-      storageBucket: "somaptestt.appspot.com",
-      messagingSenderId: "105526245138",
-      appId: "1:105526245138:web:b8e7c0cb82a46e861965cb"
-    };
-    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-    const db = firebase.database();
-    window.db = db;
+    function applySchoolFromUrl() {
+      const params = new URLSearchParams(window.location.search || '');
+      const schoolParam = params.get('school');
+      const yearParam = params.get('year');
+      if (schoolParam) {
+        localStorage.setItem('somap.currentSchoolId', schoolParam);
+        try {
+          const stored = JSON.parse(localStorage.getItem('somap.currentSchool') || 'null');
+          const schoolMeta = (stored && stored.id === schoolParam) ? stored : { id: schoolParam, name: schoolParam === 'socrates-school' ? 'Socrates School' : schoolParam };
+          localStorage.setItem('somap.currentSchool', JSON.stringify(schoolMeta));
+          if (window.SOMAP?.setSchool) window.SOMAP.setSchool(schoolMeta);
+        } catch (_) {}
+      }
+      if (yearParam && window.somapYearContext?.setSelectedYear) {
+        window.somapYearContext.setSelectedYear(yearParam);
+      }
+    }
+    applySchoolFromUrl();
+
+    const db = window.db || firebase.database();
+    const school = (typeof SOMAP !== 'undefined' && SOMAP.getSchool) ? SOMAP.getSchool() : null;
+    const schoolId = (school && school.id) || window.currentSchoolId || localStorage.getItem('somap.currentSchoolId') || localStorage.getItem('currentSchoolId') || localStorage.getItem('schoolId') || 'socrates-school';
+    const schoolRef = (path) => (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') ? db.ref(SOMAP.P(path)) : db.ref(path);
+    const getYear = () => (typeof window.somapYearContext?.getSelectedYear === 'function' ? window.somapYearContext.getSelectedYear() : null) || new Date().getFullYear();
+    const isSocratesSchool = (id) => ['socrates-school', 'default', 'socrates'].includes(String(id || '').toLowerCase());
+
+    async function scopedOrLegacy(scopedPath, legacyPath) {
+      const snap = await schoolRef(scopedPath).once('value');
+      if (snap.exists()) return snap;
+      if (isSocratesSchool(schoolId) && legacyPath) {
+        return db.ref(legacyPath).once('value');
+      }
+      return snap;
+    }
+
+    const base = (p) => (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') ? SOMAP.P(p) : p;
 
     // State
     let workerId = null;
     let teacherConfig = null;
     let logs = {};
-    const schoolId = window.currentSchoolId || null;
-    const base = (p) => schoolId ? `schools/${schoolId}/${p}` : p;
 
     // UI Elements
     const teacherName = document.getElementById('teacherName');
     const teacherType = document.getElementById('teacherType');
+    const schoolNameEl = document.getElementById('schoolName');
+    const academicYearEl = document.getElementById('academicYear');
     const currentDate = document.getElementById('currentDate');
     const totalLogs = document.getElementById('totalLogs');
     const logsList = document.getElementById('logsList');
-    const yearSelector = document.getElementById('yearSelector');
+    const yearSelector = document.querySelector('[data-somap-year-select]');
     const yearHint = document.getElementById('yearHint');
 
     function toast(message, type = 'success') {
@@ -717,20 +736,40 @@
       return 'unknown';
     }
 
-    // Initialize year selector (after DOM ready)
+    // ========== IMMEDIATE DISPLAY FROM CACHE (like workertasks/lessonplan) ==========
+    const cachedName = localStorage.getItem('somap_workerName');
+    const cachedRole = localStorage.getItem('somap_role');
+    const resolvedSchool = (typeof SOMAP !== 'undefined' && SOMAP.getSchool) ? SOMAP.getSchool() : null;
+    const schoolDisplay = (resolvedSchool && resolvedSchool.name) || (schoolId === 'socrates-school' ? 'Socrates School' : schoolId);
+    const displayYear = String(getYear());
+    if (teacherName) teacherName.textContent = cachedName || 'Loading...';
+    if (teacherType) teacherType.textContent = cachedRole || 'Loading...';
+    if (schoolNameEl) schoolNameEl.textContent = schoolDisplay;
+    if (academicYearEl) academicYearEl.textContent = displayYear;
+
+    // Initialize year selector (uses yearContext autoAttach)
     function initYearSelector() {
       if (!yearSelector) return;
-      yearSelector.innerHTML = SOMAP_ALLOWED_YEARS.map(y => `<option value="${y}">${y}</option>`).join('');
-      const current = window.somapYearContext.getSelectedYear();
-      yearSelector.value = current;
-      if (yearHint) yearHint.textContent = current;
-      yearSelector.addEventListener('change', e => {
-        const ny = String(e.target.value);
-        window.somapYearContext.setSelectedYear(ny);
-        if (yearHint) yearHint.textContent = ny;
-        loadLogs();
-        recomputeLogForm();
-      });
+      const syncHint = () => {
+        const y = window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
+        if (yearSelector.value !== y) yearSelector.value = y;
+        if (yearHint) yearHint.textContent = y;
+        if (academicYearEl) academicYearEl.textContent = y;
+      };
+      syncHint();
+      if (window.somapYearContext?.onYearChanged) {
+        window.somapYearContext.onYearChanged(() => {
+          syncHint();
+          loadLogs();
+          if (typeof recomputeLogForm === 'function') recomputeLogForm();
+        });
+      } else {
+        yearSelector.addEventListener('change', () => {
+          syncHint();
+          loadLogs();
+          if (typeof recomputeLogForm === 'function') recomputeLogForm();
+        });
+      }
     }
 
     // Set today's date
@@ -757,26 +796,75 @@
     if (!workerId) {
       toast('Please login first', 'error');
       setTimeout(() => window.location.href = '../../index.html', 2000);
+    } else {
+      const backLink = document.getElementById('backToDashboard');
+      if (backLink) {
+        const s = localStorage.getItem('somap.currentSchoolId') || 'socrates-school';
+        const y = (typeof window.somapYearContext?.getSelectedYear === 'function' ? window.somapYearContext.getSelectedYear() : null) || new Date().getFullYear();
+        backLink.href = `../workertasks.html?school=${encodeURIComponent(s)}&year=${encodeURIComponent(y)}`;
+      }
     }
 
     async function loadTeacherConfig() {
       try {
-        const configSnap = await db.ref(`teachers_config/${workerId}`).once('value');
-        const workerSnap = await db.ref(`workers/${workerId}/profile`).once('value');
-        
-        if (!configSnap.exists()) {
+        const currentYear = String(getYear());
+        const previousYear = String(Number(currentYear) - 1);
+
+        const [configSnap, workerSnap] = await Promise.all([
+          scopedOrLegacy(`years/${currentYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`),
+          scopedOrLegacy(`years/${currentYear}/workers/${workerId}`, `workers/${workerId}`)
+        ]);
+
+        let profile = {};
+        const workerData = workerSnap.val();
+        if (workerData) {
+          const w = workerData.profile ? workerData.profile : workerData;
+          profile = w || {};
+        }
+        if (!profile.fullNameUpper && !profile.firstName) {
+          const legacyProfileSnap = await db.ref(`workers/${workerId}/profile`).once('value');
+          profile = legacyProfileSnap.val() || profile;
+        }
+
+        teacherConfig = configSnap.val() || {};
+        if (!teacherConfig.teacherType) {
+          const prevConfigSnap = await scopedOrLegacy(`years/${previousYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`);
+          const prevConfig = prevConfigSnap.val();
+          if (prevConfig?.teacherType) {
+            teacherConfig = { ...teacherConfig, ...prevConfig };
+          }
+        }
+        if (!teacherConfig.teacherType && isSocratesSchool(schoolId)) {
+          const rootConfigSnap = await db.ref(`years/${currentYear}/teachers_config/${workerId}`).once('value');
+          const rootConfig = rootConfigSnap.val();
+          if (rootConfig?.teacherType) {
+            teacherConfig = { ...teacherConfig, ...rootConfig };
+          }
+        }
+
+        if (!teacherConfig.classes?.length && teacherConfig.classSubjectMappings?.length) {
+          teacherConfig.classes = [...new Set((teacherConfig.classSubjectMappings || []).map(m => m.class).filter(Boolean))];
+          teacherConfig.subjects = teacherConfig.subjects || [...new Set((teacherConfig.classSubjectMappings || []).flatMap(m => m.subjects || []).filter(Boolean))];
+        }
+
+        if (!teacherConfig.teacherType || !(teacherConfig.classes?.length || teacherConfig.subjects?.length || teacherConfig.classSubjectMappings?.length)) {
           toast('Please complete your teacher profile setup first', 'warning');
-          setTimeout(() => window.location.href = '../workertasks.html', 2000);
+          setTimeout(() => {
+            const s = localStorage.getItem('somap.currentSchoolId') || 'socrates-school';
+            const y = window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
+            window.location.href = `../workertasks.html?school=${encodeURIComponent(s)}&year=${encodeURIComponent(y)}`;
+          }, 2000);
           return;
         }
 
-        teacherConfig = configSnap.val();
-        const profile = workerSnap.val();
-
-        const fullName = profile.fullNameUpper || 
-          [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ').toUpperCase();
-        teacherName.textContent = fullName;
-        teacherType.textContent = teacherConfig.teacherType;
+        const fullName = profile.fullNameUpper || [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ').toUpperCase() || localStorage.getItem('somap_workerName') || 'Unknown';
+        if (teacherName) teacherName.textContent = fullName;
+        if (teacherType) teacherType.textContent = teacherConfig.teacherType || 'Teacher';
+        const schoolResolved = (typeof SOMAP !== 'undefined' && SOMAP.getSchool) ? SOMAP.getSchool() : null;
+        const schoolDisp = (schoolResolved && schoolResolved.name) || (schoolId === 'socrates-school' ? 'Socrates School' : schoolId);
+        if (schoolNameEl) schoolNameEl.textContent = schoolDisp;
+        if (academicYearEl) academicYearEl.textContent = currentYear;
+        if (yearHint) yearHint.textContent = currentYear;
 
         populateSelects();
         loadLogs();
@@ -792,12 +880,12 @@
       const lbFilterClass = document.getElementById('lbFilterClass');
       const lbFilterSubject = document.getElementById('lbFilterSubject');
 
-      teacherConfig.classes.forEach(className => {
+      (teacherConfig?.classes || []).forEach(className => {
         if (lbFilterClass) lbFilterClass.add(new Option(className, className));
         if (lbClass) lbClass.add(new Option(className, className));
       });
 
-      teacherConfig.subjects.forEach(subject => {
+      (teacherConfig?.subjects || []).forEach(subject => {
         if (lbSubject) lbSubject.add(new Option(subject, subject));
       });
     }
