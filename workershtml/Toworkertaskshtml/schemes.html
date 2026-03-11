@@ -11,6 +11,9 @@
   <script src="../../firebase.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="../../js/scheme-template-parser.js"></script>
   <style>
     :root {
       --glass-bg: rgba(255, 255, 255, 0.08);
@@ -486,6 +489,7 @@
     let teacherSchemesCache = [];
     let editingScheme = null;
     let currentTemplateId = null;
+    let schoolLogoDataUrlPromise = null;
 
     currentDateEl.textContent = new Date().toLocaleDateString('en-US', {
       timeZone: 'Africa/Nairobi',
@@ -521,6 +525,94 @@
       if (placeholder) select.add(new Option(placeholder.label, placeholder.value));
       items.forEach(v => select.add(new Option(v, v)));
       if (current) select.value = current;
+    }
+
+    function sortedRowValues(rows) {
+      return Object.values(rows || {}).sort((a, b) => (a.sn || 0) - (b.sn || 0));
+    }
+
+    function fillSchemeForm(data) {
+      currentTemplateId = data.templateId || data.fromTemplateId || currentTemplateId;
+      schemeClass.value = data.className || '';
+      schemeSubject.value = data.subjectName || data.subjectKey || '';
+      schemeTerm.value = data.termKey || 'term1';
+      academicYear.value = data.year || '';
+      totalWeeks.value = data.totalWeeks || Object.keys(data.rows || {}).length || 12;
+      hoursPerWeek.value = data.hoursPerWeek || 6;
+      generalObjectives.value = data.generalObjectives || '';
+      assessmentMethods.value = data.assessmentMethods || '';
+      teachingResources.value = data.teachingResources || '';
+      rowsTableBody.innerHTML = '';
+      const rowValues = sortedRowValues(data.rows);
+      if (rowValues.length === 0) {
+        createRow();
+      } else {
+        rowValues.forEach((row) => createRow(row));
+      }
+      schemeFormCard.classList.remove('hidden');
+      schemeFormCard.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    async function resolveTemplateForUse(template) {
+      const parser = window.SomapSchemeTemplateParser;
+      const structured = template?.parsedTemplate
+        ? {
+            generalObjectives: template.parsedTemplate.generalObjectives || '',
+            assessmentMethods: template.parsedTemplate.assessmentMethods || '',
+            teachingResources: template.parsedTemplate.teachingResources || '',
+            hoursPerWeek: template.parsedTemplate.hoursPerWeek || null,
+            totalWeeks: template.parsedTemplate.totalWeeks || null,
+            rowsMap: template.parsedTemplate.rows || null,
+            extractionMeta: template.parsedTemplate.extractionMeta || null
+          }
+        : null;
+
+      const merged = parser ? parser.mergeTemplateData(template, structured) : template;
+      const hasRows = Object.keys(merged?.rows || {}).length > 0;
+      const hasObjectives = Boolean(merged?.generalObjectives);
+      if (hasRows && hasObjectives) {
+        return merged;
+      }
+      if (!parser || !template?.pdf?.url) {
+        return merged;
+      }
+
+      const parsed = await parser.parseUrl(template.pdf.url, { name: template.pdf.fileName || template.subjectName || 'scheme.pdf' });
+      return parser.mergeTemplateData(template, parsed);
+    }
+
+    async function getSchoolLogoDataUrl() {
+      if (schoolLogoDataUrlPromise) return schoolLogoDataUrlPromise;
+
+      schoolLogoDataUrlPromise = (async () => {
+        const fallbackUrl = '../../images/somap-logo.png.jpg';
+        let logoUrl = fallbackUrl;
+
+        try {
+          const snap = await db.ref(`/schools/${schoolId}/profile/logoUrl`).once('value');
+          if (snap.exists() && snap.val()) {
+            logoUrl = snap.val();
+          }
+        } catch (error) {
+          console.warn('Failed to resolve school logo', error);
+        }
+
+        try {
+          const response = await fetch(logoUrl, { credentials: 'omit' });
+          const blob = await response.blob();
+          return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        } catch (error) {
+          console.warn('Failed to load school logo', error);
+          return null;
+        }
+      })();
+
+      return schoolLogoDataUrlPromise;
     }
 
     async function loadProfile() {
@@ -711,41 +803,26 @@
           const subjKey = btn.dataset.subject;
           const termKey = btn.dataset.term;
           const templateId = btn.dataset.templateId;
+          const originalLabel = btn.textContent;
           try {
+            btn.disabled = true;
+            btn.textContent = 'Mapping scheme...';
             const snap = await db.ref(`schemes/${schoolId}/templates/${year}/${clsKey}/${subjKey}/${termKey}/${templateId}`).once('value');
             if (!snap.exists()) {
               toast('Template not found.');
               return;
             }
-            applyTemplate(snap.val());
+            const hydratedTemplate = await resolveTemplateForUse(snap.val());
+            fillSchemeForm(hydratedTemplate);
           } catch (err) {
             console.error(err);
-            toast('Failed to load template.');
+            toast(err?.message || 'Failed to load template.');
+          } finally {
+            btn.disabled = false;
+            btn.textContent = originalLabel;
           }
         });
       });
-    }
-
-    function applyTemplate(tmpl) {
-      currentTemplateId = tmpl.templateId;
-      schemeClass.value = tmpl.className || '';
-      schemeSubject.value = tmpl.subjectName || tmpl.subjectKey || '';
-      schemeTerm.value = tmpl.termKey || 'term1';
-      academicYear.value = tmpl.year || '';
-      totalWeeks.value = tmpl.totalWeeks || Object.keys(tmpl.rows || {}).length || 12;
-      hoursPerWeek.value = tmpl.hoursPerWeek || 6;
-      generalObjectives.value = tmpl.generalObjectives || '';
-      assessmentMethods.value = tmpl.assessmentMethods || '';
-      teachingResources.value = tmpl.teachingResources || '';
-      rowsTableBody.innerHTML = '';
-      const rowValues = Object.values(tmpl.rows || {}).sort((a, b) => (a.sn || 0) - (b.sn || 0));
-      if (rowValues.length === 0) {
-        createRow();
-      } else {
-        rowValues.forEach(r => createRow(r));
-      }
-      schemeFormCard.classList.remove('hidden');
-      schemeFormCard.scrollIntoView({ behavior: 'smooth' });
     }
 
     async function loadTeacherSchemes() {
@@ -814,24 +891,7 @@
       if (!scheme) return;
       editingScheme = scheme;
       currentTemplateId = scheme.fromTemplateId || null;
-      schemeClass.value = scheme.className;
-      schemeSubject.value = scheme.subjectName || scheme.subjectKey;
-      schemeTerm.value = scheme.termKey;
-      academicYear.value = scheme.year;
-      totalWeeks.value = scheme.totalWeeks || Object.keys(scheme.rows || {}).length || 12;
-      hoursPerWeek.value = scheme.hoursPerWeek || 6;
-      generalObjectives.value = scheme.generalObjectives || '';
-      assessmentMethods.value = scheme.assessmentMethods || '';
-      teachingResources.value = scheme.teachingResources || '';
-      rowsTableBody.innerHTML = '';
-      const rowValues = Object.values(scheme.rows || {}).sort((a, b) => (a.sn || 0) - (b.sn || 0));
-      if (rowValues.length === 0) {
-        createRow();
-      } else {
-        rowValues.forEach(r => createRow(r));
-      }
-      schemeFormCard.classList.remove('hidden');
-      schemeFormCard.scrollIntoView({ behavior: 'smooth' });
+      fillSchemeForm(scheme);
     }
 
     async function saveScheme() {
@@ -882,7 +942,7 @@
       await loadTeacherSchemes();
     }
 
-    function downloadPdf() {
+    async function downloadPdf() {
       const cls = schemeClass.value || 'Class';
       const subj = schemeSubject.value || 'Subject';
       const term = termLabel(schemeTerm.value);
@@ -898,13 +958,55 @@
         toast('PDF library not loaded.');
         return;
       }
-      const doc = new jsPdfLib.jsPDF({ orientation: 'landscape', unit: 'pt' });
-      doc.setFontSize(12);
-      doc.text("PRESIDENT'S OFFICE, REGIONAL ADMINISTRATION AND LOCAL GOVERNMENT", 40, 30);
-      doc.text(schoolName, 40, 48);
+      const doc = new jsPdfLib.jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const marginX = 32;
       const today = new Date().toLocaleDateString('en-GB');
-      doc.text(`SCHEME OF WORK FOR ${subj} ${cls}`, 40, 66);
-      doc.text(`YEAR: ${year}   TERM: ${term.toUpperCase()}   TEACHER: ${teacherNameEl.textContent}   DATE: ${today}`, 40, 84);
+      const logoDataUrl = await getSchoolLogoDataUrl();
+
+      let y = 30;
+      if (logoDataUrl) {
+        try {
+          doc.addImage(logoDataUrl, 'PNG', marginX, y - 4, 44, 44);
+        } catch (error) {
+          console.warn('Logo render failed', error);
+        }
+      }
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(12);
+      doc.text("PRESIDENT'S OFFICE, REGIONAL ADMINISTRATION AND LOCAL GOVERNMENT", marginX + 56, y + 8);
+      doc.setFontSize(14);
+      doc.text(schoolName, marginX + 56, y + 28);
+      doc.setFontSize(13);
+      doc.text(`SCHEME OF WORK FOR ${subj.toUpperCase()} ${cls.toUpperCase()}`, marginX, y + 64);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text(`Academic Year: ${year}`, marginX, y + 84);
+      doc.text(`Term: ${term}`, marginX + 120, y + 84);
+      doc.text(`Teacher: ${teacherNameEl.textContent}`, marginX + 230, y + 84);
+      doc.text(`Date: ${today}`, pageWidth - 110, y + 84);
+
+      y += 104;
+
+      const sectionWidth = pageWidth - (marginX * 2) - 10;
+      const drawSection = (title, value) => {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.text(title, marginX, y);
+        y += 12;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        const lines = doc.splitTextToSize(value || 'Not provided.', sectionWidth);
+        doc.text(lines, marginX, y);
+        y += (lines.length * 10) + 10;
+      };
+
+      drawSection('General Objectives / Learning Outcomes', generalObjectives.value);
+      drawSection('Assessment Methods', assessmentMethods.value);
+      drawSection('Teaching Resources / Materials', teachingResources.value);
+
       const body = rows.map((r, idx) => [
         idx + 1,
         r.mainCompetence || '',
@@ -928,10 +1030,18 @@
           'Assessment Tools / Criteria','Reference','Remarks'
         ]],
         body,
-        startY: 104,
-        styles: { fontSize: 8, cellPadding: 4 }
+        startY: y + 4,
+        margin: { left: marginX, right: marginX, top: 28 },
+        styles: { fontSize: 8, cellPadding: 4, overflow: 'linebreak', cellWidth: 'wrap' },
+        headStyles: { fillColor: [89, 85, 167], textColor: 255 },
+        didDrawPage: () => {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.text(`${schoolName} | ${subj} | ${cls} | ${term} | ${year}`, marginX, pageHeight - 14);
+          doc.text(`Teacher: ${teacherNameEl.textContent}`, pageWidth - 170, pageHeight - 14);
+        }
       });
-      const fileName = `scheme-${subj}-${cls}-${year}-${schemeTerm.value}.pdf`.replace(/\\s+/g, '-').toLowerCase();
+      const fileName = `scheme-${subj}-${cls}-${year}-${schemeTerm.value}.pdf`.replace(/\s+/g, '-').toLowerCase();
       doc.save(fileName);
     }
 
@@ -961,5 +1071,3 @@
   </script>
 </body>
 </html>
-
-

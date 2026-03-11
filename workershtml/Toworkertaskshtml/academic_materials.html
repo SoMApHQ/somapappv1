@@ -10,7 +10,10 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="../../firebase.js"></script>
+  <script src="../../js/scheme-template-parser.js"></script>
   <style>
     :root {
       --glass-bg: rgba(255, 255, 255, 0.1);
@@ -267,6 +270,7 @@
         <div>
           <label for="uploadFile">Scheme File (PDF or DOCX)</label>
           <input id="uploadFile" type="file" accept=".pdf,.doc,.docx" required>
+          <p class="muted" id="autoParseStatus" style="margin:8px 0 0 0;">Choose a scheme file to extract objectives and table rows automatically.</p>
         </div>
       </div>
       <div class="form-grid" style="margin-top:12px;">
@@ -395,18 +399,19 @@
     const uploadClass = document.getElementById('uploadClass');
     const uploadSubject = document.getElementById('uploadSubject');
     const uploadYear = document.getElementById('uploadYear');
-      const uploadTerm = document.getElementById('uploadTerm');
-      const uploadHours = document.getElementById('uploadHours');
-      const uploadFile = document.getElementById('uploadFile');
-      const uploadObjectives = document.getElementById('uploadObjectives');
-      const uploadAssessment = document.getElementById('uploadAssessment');
-      const uploadResources = document.getElementById('uploadResources');
-      const uploadRowsJson = document.getElementById('uploadRowsJson');
-      const templatesTable = document.getElementById('templatesTable');
-      const filterYear = document.getElementById('filterYear');
-      const filterClass = document.getElementById('filterClass');
-      const filterSubject = document.getElementById('filterSubject');
-      const filterTerm = document.getElementById('filterTerm');
+    const uploadTerm = document.getElementById('uploadTerm');
+    const uploadHours = document.getElementById('uploadHours');
+    const uploadFile = document.getElementById('uploadFile');
+    const uploadObjectives = document.getElementById('uploadObjectives');
+    const uploadAssessment = document.getElementById('uploadAssessment');
+    const uploadResources = document.getElementById('uploadResources');
+    const uploadRowsJson = document.getElementById('uploadRowsJson');
+    const autoParseStatus = document.getElementById('autoParseStatus');
+    const templatesTable = document.getElementById('templatesTable');
+    const filterYear = document.getElementById('filterYear');
+    const filterClass = document.getElementById('filterClass');
+    const filterSubject = document.getElementById('filterSubject');
+    const filterTerm = document.getElementById('filterTerm');
     const preparedByLabel = document.getElementById('preparedByLabel');
     const schoolTag = document.getElementById('schoolTag');
     const accessNotice = document.getElementById('accessNotice');
@@ -419,6 +424,8 @@
     let currentProfile = null;
     let teacherConfig = null;
     let templatesCache = [];
+    let extractedTemplateDraft = null;
+    let parseInFlight = null;
 
     function safeKey(value) {
       return String(value || '').replace(/[.#$/\[\]]/g, '_');
@@ -435,6 +442,83 @@
       if (placeholder) select.add(new Option(placeholder.label, placeholder.value));
       values.forEach(v => select.add(new Option(v, v)));
       if (current) select.value = current;
+    }
+
+    function normalizeParsedRows(rows) {
+      return (rows || []).map((row, idx) => ({
+        sn: Number(row.sn || idx + 1),
+        mainCompetence: row.mainCompetence || '',
+        specificCompetence: row.specificCompetence || '',
+        learningActivities: row.learningActivities || '',
+        specificActivities: row.specificActivities || '',
+        month: row.month || '',
+        week: row.week || '',
+        periods: Number(row.periods || 0),
+        methods: row.methods || '',
+        tools: row.tools || '',
+        assessment: row.assessment || '',
+        reference: row.reference || '',
+        remarks: row.remarks || ''
+      }));
+    }
+
+    function rowsArrayToMap(rows) {
+      return normalizeParsedRows(rows).reduce((acc, row, idx) => {
+        acc[`row${idx + 1}`] = row;
+        return acc;
+      }, {});
+    }
+
+    function setAutoParseStatus(message, type = 'info') {
+      if (!autoParseStatus) return;
+      const colors = {
+        info: 'var(--text-muted)',
+        success: '#bbf7d0',
+        warning: '#fde68a',
+        error: '#fecaca'
+      };
+      autoParseStatus.textContent = message;
+      autoParseStatus.style.color = colors[type] || colors.info;
+    }
+
+    function applyExtractedTemplateToInputs(parsed) {
+      if (!parsed) return;
+      if (parsed.generalObjectives) uploadObjectives.value = parsed.generalObjectives;
+      if (parsed.assessmentMethods) uploadAssessment.value = parsed.assessmentMethods;
+      if (parsed.teachingResources) uploadResources.value = parsed.teachingResources;
+      if (parsed.hoursPerWeek) uploadHours.value = parsed.hoursPerWeek;
+      if (parsed.rows?.length) {
+        uploadRowsJson.value = JSON.stringify(normalizeParsedRows(parsed.rows), null, 2);
+      }
+    }
+
+    async function extractTemplateFromSelectedFile(file) {
+      if (!file) return null;
+      if (!window.SomapSchemeTemplateParser) {
+        setAutoParseStatus('Automatic mapping is unavailable right now. You can still upload manually.', 'warning');
+        return null;
+      }
+
+      setAutoParseStatus(`Reading ${file.name} and mapping the scheme structure...`, 'info');
+      try {
+        const parsed = await window.SomapSchemeTemplateParser.parseFile(file);
+        extractedTemplateDraft = parsed;
+        applyExtractedTemplateToInputs(parsed);
+        if (parsed.rows?.length || parsed.generalObjectives) {
+          setAutoParseStatus(
+            `Mapped ${parsed.rows?.length || 0} row(s)${parsed.generalObjectives ? ' and the objectives section' : ''}. Review the fields, then upload.`,
+            'success'
+          );
+        } else {
+          setAutoParseStatus('The file was read, but only limited structure could be extracted. You can complete the missing parts manually.', 'warning');
+        }
+        return parsed;
+      } catch (error) {
+        console.error('Scheme extraction failed', error);
+        extractedTemplateDraft = null;
+        setAutoParseStatus('Automatic mapping failed for this file. You can still fill the fields and upload normally.', 'error');
+        return null;
+      }
     }
 
     async function loadProfile() {
@@ -551,6 +635,18 @@
       return { url: data.secure_url, publicId: data.public_id };
     }
 
+    uploadFile?.addEventListener('change', async () => {
+      const file = uploadFile.files?.[0];
+      extractedTemplateDraft = null;
+      parseInFlight = null;
+      if (!file) {
+        setAutoParseStatus('Choose a scheme file to extract objectives and table rows automatically.', 'info');
+        return;
+      }
+      parseInFlight = extractTemplateFromSelectedFile(file);
+      await parseInFlight;
+    });
+
     uploadForm?.addEventListener('submit', async (e) => {
       e.preventDefault();
       if (!uploadFile.files.length) {
@@ -566,7 +662,7 @@
       const subjectKey = safeKey(subjectName);
       const hoursPerWeek = Number(uploadHours.value) || 0;
       const file = uploadFile.files[0];
-      const parsedRows = [];
+      let parsedRows = [];
 
       if (!className || !subjectName || !year) {
         toast('Please fill all required fields.', 'warning');
@@ -601,6 +697,11 @@
         }
       }
 
+      const extracted = parseInFlight ? await parseInFlight : (extractedTemplateDraft || await extractTemplateFromSelectedFile(file));
+      if (!parsedRows.length && extracted?.rows?.length) {
+        parsedRows = normalizeParsedRows(extracted.rows);
+      }
+
       try {
         uploadForm.querySelector('button[type="submit"]').textContent = 'Uploading...';
         const folderPath = `${year}/${classKey}/${subjectKey}/${termKey}`;
@@ -617,29 +718,39 @@
           subjectName,
           subjectKey,
           termKey,
-          hoursPerWeek: hoursPerWeek || null,
-          totalWeeks: parsedRows.length ? Math.max(parsedRows.length, 12) : null,
-          generalObjectives: uploadObjectives.value || '',
-          assessmentMethods: uploadAssessment.value || '',
-          teachingResources: uploadResources.value || '',
-          rows: parsedRows.length
-            ? parsedRows.reduce((acc, row, idx) => {
-                acc[`row${idx + 1}`] = row;
-                return acc;
-              }, {})
-            : null,
+          hoursPerWeek: hoursPerWeek || extracted?.hoursPerWeek || null,
+          totalWeeks: Number(parsedRows.length || extracted?.totalWeeks || 0) || null,
+          generalObjectives: uploadObjectives.value.trim() || extracted?.generalObjectives || '',
+          assessmentMethods: uploadAssessment.value.trim() || extracted?.assessmentMethods || '',
+          teachingResources: uploadResources.value.trim() || extracted?.teachingResources || '',
+          rows: parsedRows.length ? rowsArrayToMap(parsedRows) : (extracted?.rowsMap || null),
+          parsedTemplate: extracted ? {
+            generalObjectives: extracted.generalObjectives || '',
+            assessmentMethods: extracted.assessmentMethods || '',
+            teachingResources: extracted.teachingResources || '',
+            hoursPerWeek: extracted.hoursPerWeek || null,
+            totalWeeks: extracted.totalWeeks || null,
+            rows: extracted.rowsMap || null,
+            extractionMeta: {
+              ...(extracted.extractionMeta || {}),
+              extractedAt: Date.now()
+            }
+          } : null,
           preparedBy: {
             uid: workerId,
             name: preparedByLabel.textContent.replace('Prepared by: ', '') || 'Unknown',
             role: teacherConfig?.teacherType || ''
           },
-          pdf: { url, publicId },
+          pdf: { url, publicId, fileName: file.name || '' },
           meta: { createdAt: Date.now(), updatedAt: Date.now(), source: 'academic_upload' }
         };
 
         await templateRef.set(payload);
         toast('Scheme uploaded successfully.', 'success');
         uploadForm.reset();
+        extractedTemplateDraft = null;
+        parseInFlight = null;
+        setAutoParseStatus('Choose a scheme file to extract objectives and table rows automatically.', 'info');
         uploadYear.value = year;
         uploadHours.value = hoursPerWeek || 6;
         await loadTemplates();
