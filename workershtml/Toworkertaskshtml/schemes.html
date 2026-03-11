@@ -242,6 +242,44 @@
     .template-card h3, .scheme-card h3 { margin: 0 0 6px 0; }
     .template-card p, .scheme-card p { margin: 4px 0; color: var(--muted); }
 
+    .template-mode-note {
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(251, 191, 36, 0.14);
+      border: 1px solid rgba(251, 191, 36, 0.28);
+      color: #fde68a;
+      margin-top: 12px;
+    }
+
+    .pdf-preview-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+      margin-top: 12px;
+    }
+
+    .pdf-preview-page {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 14px;
+      padding: 10px;
+    }
+
+    .pdf-preview-page canvas {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 10px;
+      background: white;
+    }
+
+    .pdf-preview-page span {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+
     .flex {
       display: flex;
       align-items: center;
@@ -387,33 +425,48 @@
         <textarea id="teachingResources" placeholder="List all resources needed for the term (textbooks, charts, videos, etc.)"></textarea>
       </div>
 
-      <div style="margin-top:14px;" class="flex">
-        <h3 style="margin:0;">Official Scheme Table (Tanzania Format)</h3>
-        <button class="btn secondary" type="button" id="addRowBtn">Add Row</button>
+      <div id="templateModeNote" class="template-mode-note hidden"></div>
+
+      <div id="templatePdfSection" class="card hidden" style="margin-top:14px; background:rgba(255,255,255,0.05);">
+        <div class="flex" style="justify-content: space-between;">
+          <h3 style="margin:0;">Base Template PDF</h3>
+          <span class="tag" id="templatePdfInfo">Preserved template mode</span>
+        </div>
+        <p style="margin:8px 0 0 0; color: var(--muted);">
+          The original academic PDF is kept as the working base for this scheme. The preview below preserves the official layout while your teacher copy uses your name, school branding, year, and saved notes.
+        </p>
+        <div class="pdf-preview-grid" id="templatePdfPages"></div>
       </div>
 
-      <div class="table-wrap">
-        <table class="scheme-table">
-          <thead>
-            <tr>
-              <th>S/N</th>
-              <th>Main Competence</th>
-              <th>Specific Competence</th>
-              <th>Learning Activities</th>
-              <th>Specific Activities / Content</th>
-              <th>Month</th>
-              <th>Week</th>
-              <th>Periods</th>
-              <th>Teaching & Learning Methods</th>
-              <th>Teaching & Learning Tools</th>
-              <th>Assessment Tools / Criteria</th>
-              <th>Reference</th>
-              <th>Remarks</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody id="rowsTableBody"></tbody>
-        </table>
+      <div id="schemeTableSection" style="margin-top:14px;">
+        <div class="flex">
+        <h3 style="margin:0;">Official Scheme Table (Tanzania Format)</h3>
+        <button class="btn secondary" type="button" id="addRowBtn">Add Row</button>
+        </div>
+
+        <div class="table-wrap">
+          <table class="scheme-table">
+            <thead>
+              <tr>
+                <th>S/N</th>
+                <th>Main Competence</th>
+                <th>Specific Competence</th>
+                <th>Learning Activities</th>
+                <th>Specific Activities / Content</th>
+                <th>Month</th>
+                <th>Week</th>
+                <th>Periods</th>
+                <th>Teaching & Learning Methods</th>
+                <th>Teaching & Learning Tools</th>
+                <th>Assessment Tools / Criteria</th>
+                <th>Reference</th>
+                <th>Remarks</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="rowsTableBody"></tbody>
+          </table>
+        </div>
       </div>
 
       <div class="actions" style="margin-top:16px;">
@@ -467,6 +520,10 @@
     const rowsTableBody = document.getElementById('rowsTableBody');
     const schemesList = document.getElementById('schemesList');
     const savedSchemesInfo = document.getElementById('savedSchemesInfo');
+    const templateModeNote = document.getElementById('templateModeNote');
+    const templatePdfSection = document.getElementById('templatePdfSection');
+    const templatePdfPages = document.getElementById('templatePdfPages');
+    const schemeTableSection = document.getElementById('schemeTableSection');
     const backBtn = document.getElementById('backBtn');
 
     const schemeClass = document.getElementById('schemeClass');
@@ -490,6 +547,8 @@
     let editingScheme = null;
     let currentTemplateId = null;
     let schoolLogoDataUrlPromise = null;
+    let editorMode = 'table';
+    let currentSourcePdf = null;
 
     currentDateEl.textContent = new Date().toLocaleDateString('en-US', {
       timeZone: 'Africa/Nairobi',
@@ -531,23 +590,117 @@
       return Object.values(rows || {}).sort((a, b) => (a.sn || 0) - (b.sn || 0));
     }
 
-    function fillSchemeForm(data) {
+    function looksSuspiciousText(value) {
+      return /SCHEME OF WORK NAME|Objectives of Primary Education|MAIN SPECIFIC|Teaching & learning tools|Teaching & learning methods|S\/N Main Competence|NAME OF .?S NAME|MONTH WEEK PERIO/i.test(String(value || ''));
+    }
+
+    function hasUsableNarrative(value) {
+      const text = String(value || '').trim();
+      if (!text) return false;
+      if (looksSuspiciousText(text)) return false;
+      return text.length >= 12;
+    }
+
+    function assessTemplateQuality(data) {
+      const rows = sortedRowValues(data?.rows);
+      if (!rows.length) {
+        return { quality: 'empty', suspiciousRows: 0, totalRows: 0 };
+      }
+
+      const suspiciousRows = rows.filter((row) => {
+        const combined = [
+          row.mainCompetence,
+          row.specificCompetence,
+          row.learningActivities,
+          row.specificActivities,
+          row.methods,
+          row.tools,
+          row.assessment,
+          row.reference
+        ].join(' ');
+        return looksSuspiciousText(combined) || /^month$/i.test(String(row.month || '').trim());
+      }).length;
+
+      const ratio = suspiciousRows / rows.length;
+      return {
+        quality: ratio > 0.18 ? 'poor' : 'good',
+        suspiciousRows,
+        totalRows: rows.length
+      };
+    }
+
+    function setEditorMode(mode, message = '') {
+      editorMode = mode;
+      const pdfMode = mode === 'pdf_base';
+      schemeTableSection.classList.toggle('hidden', pdfMode);
+      templatePdfSection.classList.toggle('hidden', !pdfMode);
+      templateModeNote.classList.toggle('hidden', !message);
+      templateModeNote.textContent = message || '';
+    }
+
+    async function renderTemplatePdfPreview(sourcePdf) {
+      templatePdfPages.innerHTML = '';
+      if (!sourcePdf?.url || !window.pdfjsLib) return;
+
+      try {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        const buffer = await fetch(sourcePdf.url, { credentials: 'omit' }).then((res) => res.arrayBuffer());
+        const pdf = await window.pdfjsLib.getDocument({ data: buffer }).promise;
+
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+          const page = await pdf.getPage(pageNumber);
+          const viewport = page.getViewport({ scale: 0.55 });
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d');
+          canvas.width = Math.floor(viewport.width);
+          canvas.height = Math.floor(viewport.height);
+          await page.render({ canvasContext: context, viewport }).promise;
+
+          const wrap = document.createElement('div');
+          wrap.className = 'pdf-preview-page';
+          const label = document.createElement('span');
+          label.textContent = `Page ${pageNumber}`;
+          wrap.appendChild(label);
+          wrap.appendChild(canvas);
+          templatePdfPages.appendChild(wrap);
+        }
+      } catch (error) {
+        console.error('Failed to render PDF preview', error);
+        templatePdfPages.innerHTML = '<div class="empty">Unable to render the base PDF preview right now.</div>';
+      }
+    }
+
+    function fillSchemeForm(data, options = {}) {
+      const quality = options.quality || assessTemplateQuality(data);
+      const usePdfMode = options.forcePdfMode || (quality.quality === 'poor' && data?.sourcePdf?.url);
       currentTemplateId = data.templateId || data.fromTemplateId || currentTemplateId;
+      currentSourcePdf = data.sourcePdf || data.pdf || null;
       schemeClass.value = data.className || '';
       schemeSubject.value = data.subjectName || data.subjectKey || '';
       schemeTerm.value = data.termKey || 'term1';
       academicYear.value = data.year || '';
       totalWeeks.value = data.totalWeeks || Object.keys(data.rows || {}).length || 12;
       hoursPerWeek.value = data.hoursPerWeek || 6;
-      generalObjectives.value = data.generalObjectives || '';
-      assessmentMethods.value = data.assessmentMethods || '';
-      teachingResources.value = data.teachingResources || '';
-      rowsTableBody.innerHTML = '';
-      const rowValues = sortedRowValues(data.rows);
-      if (rowValues.length === 0) {
-        createRow();
+      generalObjectives.value = hasUsableNarrative(data.generalObjectives) ? data.generalObjectives : '';
+      assessmentMethods.value = hasUsableNarrative(data.assessmentMethods) ? data.assessmentMethods : '';
+      teachingResources.value = hasUsableNarrative(data.teachingResources) ? data.teachingResources : '';
+
+      if (usePdfMode) {
+        setEditorMode(
+          'pdf_base',
+          'This template PDF is being preserved directly because automatic row mapping is not reliable for this document. You can still edit the summary fields above and download a teacher-branded copy based on the original academic PDF.'
+        );
+        rowsTableBody.innerHTML = '';
+        renderTemplatePdfPreview(currentSourcePdf);
       } else {
-        rowValues.forEach((row) => createRow(row));
+        setEditorMode('table');
+        rowsTableBody.innerHTML = '';
+        const rowValues = sortedRowValues(data.rows);
+        if (rowValues.length === 0) {
+          createRow();
+        } else {
+          rowValues.forEach((row) => createRow(row));
+        }
       }
       schemeFormCard.classList.remove('hidden');
       schemeFormCard.scrollIntoView({ behavior: 'smooth' });
@@ -567,7 +720,10 @@
           }
         : null;
 
-      const merged = parser ? parser.mergeTemplateData(template, structured) : template;
+      const merged = {
+        ...(parser ? parser.mergeTemplateData(template, structured) : template),
+        sourcePdf: template?.pdf || template?.sourcePdf || null
+      };
       const hasRows = Object.keys(merged?.rows || {}).length > 0;
       const hasObjectives = Boolean(merged?.generalObjectives);
       if (hasRows && hasObjectives) {
@@ -578,7 +734,10 @@
       }
 
       const parsed = await parser.parseUrl(template.pdf.url, { name: template.pdf.fileName || template.subjectName || 'scheme.pdf' });
-      return parser.mergeTemplateData(template, parsed);
+      return {
+        ...parser.mergeTemplateData(template, parsed),
+        sourcePdf: template?.pdf || template?.sourcePdf || null
+      };
     }
 
     async function getSchoolLogoDataUrl() {
@@ -613,6 +772,97 @@
       })();
 
       return schoolLogoDataUrlPromise;
+    }
+
+    async function exportPreservedTemplatePdf() {
+      if (!currentSourcePdf?.url) {
+        toast('No base PDF is attached to this scheme.');
+        return;
+      }
+      if (!window.pdfjsLib || !window.jspdf?.jsPDF) {
+        toast('PDF libraries are not loaded.');
+        return;
+      }
+
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      const buffer = await fetch(currentSourcePdf.url, { credentials: 'omit' }).then((res) => res.arrayBuffer());
+      const pdf = await window.pdfjsLib.getDocument({ data: buffer }).promise;
+      const jsPdfLib = window.jspdf;
+      const doc = new jsPdfLib.jsPDF({ unit: 'pt', format: 'a4' });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const logoDataUrl = await getSchoolLogoDataUrl();
+      const today = new Date().toLocaleDateString('en-GB');
+      const margin = 36;
+
+      if (logoDataUrl) {
+        try {
+          doc.addImage(logoDataUrl, 'PNG', margin, 28, 52, 52);
+        } catch (error) {
+          console.warn('Logo render failed', error);
+        }
+      }
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.text(schoolName, margin + 64, 48);
+      doc.setFontSize(12);
+      doc.text(`Teacher Copy: ${schemeSubject.value || 'Subject'} - ${schemeClass.value || 'Class'} (${termLabel(schemeTerm.value)})`, margin + 64, 68);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text(`Teacher: ${teacherNameEl.textContent}`, margin, 104);
+      doc.text(`Academic Year: ${academicYear.value || ''}`, margin + 220, 104);
+      doc.text(`Date: ${today}`, pageWidth - 110, 104);
+
+      let y = 132;
+      const writeBlock = (title, value) => {
+        doc.setFont('helvetica', 'bold');
+        doc.text(title, margin, y);
+        y += 12;
+        doc.setFont('helvetica', 'normal');
+        const lines = doc.splitTextToSize(value || 'Not provided.', pageWidth - (margin * 2));
+        doc.text(lines, margin, y);
+        y += (lines.length * 10) + 10;
+      };
+
+      writeBlock('General Objectives / Learning Outcomes', generalObjectives.value);
+      writeBlock('Assessment Methods', assessmentMethods.value);
+      writeBlock('Teaching Resources / Materials', teachingResources.value);
+
+      doc.setFont('helvetica', 'italic');
+      doc.text('Official academic template pages follow below.', margin, Math.min(y + 6, pageHeight - 40));
+
+      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+        doc.addPage('a4', 'portrait');
+        const page = await pdf.getPage(pageNumber);
+        const viewport = page.getViewport({ scale: 1.7 });
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        await page.render({ canvasContext: context, viewport }).promise;
+
+        const imgData = canvas.toDataURL('image/jpeg', 0.92);
+        const availableWidth = pageWidth - (margin * 2);
+        const availableHeight = pageHeight - 70;
+        const ratio = Math.min(availableWidth / canvas.width, availableHeight / canvas.height);
+        const renderWidth = canvas.width * ratio;
+        const renderHeight = canvas.height * ratio;
+        const x = (pageWidth - renderWidth) / 2;
+        const imgY = 28;
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.text(`${schoolName} | ${schemeSubject.value || ''} | ${schemeClass.value || ''} | ${academicYear.value || ''}`, margin, 18);
+        doc.text(`Teacher: ${teacherNameEl.textContent}`, pageWidth - 170, 18);
+        doc.addImage(imgData, 'JPEG', x, imgY, renderWidth, renderHeight);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
+        doc.text(`Official template page ${pageNumber}`, margin, pageHeight - 16);
+      }
+
+      const fileName = `scheme-${schemeSubject.value || 'subject'}-${schemeClass.value || 'class'}-${academicYear.value || ''}-teacher-copy.pdf`.replace(/\s+/g, '-').toLowerCase();
+      doc.save(fileName);
     }
 
     async function loadProfile() {
@@ -705,6 +955,7 @@
     function clearForm() {
       editingScheme = null;
       currentTemplateId = null;
+      currentSourcePdf = null;
       schemeClass.value = filterClass.value || '';
       schemeSubject.value = filterSubject.value || '';
       schemeTerm.value = filterTerm.value || 'term1';
@@ -715,6 +966,8 @@
       assessmentMethods.value = '';
       teachingResources.value = '';
       rowsTableBody.innerHTML = '';
+      templatePdfPages.innerHTML = '';
+      setEditorMode('table');
       createRow();
       createRow();
     }
@@ -869,6 +1122,7 @@
         <div class="scheme-card">
           <h3>${s.subjectName || s.subjectKey} - ${s.className} (${termLabel(s.termKey)})</h3>
           <p>Year: ${s.year} | Weeks: ${s.totalWeeks || Object.keys(s.rows || {}).length || '-'} | Hours/Week: ${s.hoursPerWeek || '-'}</p>
+          <p>Mode: ${s.editorMode === 'pdf_base' ? 'Preserved PDF base' : 'Mapped table editor'}</p>
           <p>Updated: ${s.meta?.updatedAt ? new Date(s.meta.updatedAt).toLocaleString() : '-'}</p>
           <div class="flex">
             <button class="btn secondary load-scheme" data-id="${s.schemeId}" data-year="${s.year}" data-class="${s.classKey || safeKey(s.className)}" data-subject="${s.subjectKey || safeKey(s.subjectName)}" data-term="${s.termKey}">Load to edit</button>
@@ -891,7 +1145,7 @@
       if (!scheme) return;
       editingScheme = scheme;
       currentTemplateId = scheme.fromTemplateId || null;
-      fillSchemeForm(scheme);
+      fillSchemeForm(scheme, { forcePdfMode: scheme.editorMode === 'pdf_base' });
     }
 
     async function saveScheme() {
@@ -904,7 +1158,7 @@
         toast('Please fill class, subject, term, and academic year.');
         return;
       }
-      if (!Object.keys(rows).length) {
+      if (editorMode !== 'pdf_base' && !Object.keys(rows).length) {
         toast('Please add at least one row.');
         return;
       }
@@ -928,7 +1182,9 @@
         generalObjectives: generalObjectives.value || '',
         assessmentMethods: assessmentMethods.value || '',
         teachingResources: teachingResources.value || '',
-        rows,
+        rows: editorMode === 'pdf_base' ? (editingScheme?.rows || null) : rows,
+        editorMode,
+        sourcePdf: currentSourcePdf || null,
         meta: {
           createdAt: editingScheme?.meta?.createdAt || Date.now(),
           updatedAt: Date.now(),
@@ -943,6 +1199,10 @@
     }
 
     async function downloadPdf() {
+      if (editorMode === 'pdf_base') {
+        await exportPreservedTemplatePdf();
+        return;
+      }
       const cls = schemeClass.value || 'Class';
       const subj = schemeSubject.value || 'Subject';
       const term = termLabel(schemeTerm.value);
