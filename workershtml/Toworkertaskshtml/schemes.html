@@ -1029,6 +1029,7 @@
 
     async function resolveTemplateForUse(template) {
       const parser = window.SomapSchemeTemplateParser;
+      const sourcePdf = template?.pdf || template?.sourcePdf || null;
       const structured = template?.parsedTemplate
         ? {
             generalObjectives: template.parsedTemplate.generalObjectives || '',
@@ -1043,21 +1044,21 @@
 
       const merged = {
         ...(parser ? parser.mergeTemplateData(template, structured) : template),
-        sourcePdf: template?.pdf || template?.sourcePdf || null
+        sourcePdf
       };
       const hasRows = Object.keys(merged?.rows || {}).length > 0;
       const hasObjectives = Boolean(merged?.generalObjectives);
       if (hasRows && hasObjectives) {
         return merged;
       }
-      if (!parser || !template?.pdf?.url) {
+      if (!parser || !sourcePdf?.url) {
         return merged;
       }
 
-      const parsed = await parser.parseUrl(template.pdf.url, { name: template.pdf.fileName || template.subjectName || 'scheme.pdf' });
+      const parsed = await parser.parseUrl(sourcePdf.url, { name: sourcePdf.fileName || template.subjectName || 'scheme.pdf' });
       return {
         ...parser.mergeTemplateData(template, parsed),
-        sourcePdf: template?.pdf || template?.sourcePdf || null
+        sourcePdf
       };
     }
 
@@ -1401,12 +1402,8 @@
               return;
             }
             const template = snap.val();
-            if (template?.pdf?.url) {
-              fillSchemeForm({ ...template, sourcePdf: template.pdf }, { forceEditableDocument: true });
-            } else {
-              const hydratedTemplate = await resolveTemplateForUse(template);
-              fillSchemeForm(hydratedTemplate);
-            }
+            const hydratedTemplate = await resolveTemplateForUse(template);
+            fillSchemeForm(hydratedTemplate, { forceEditableDocument: Boolean(template?.pdf?.url) });
           } catch (err) {
             console.error(err);
             toast(err?.message || 'Failed to load template.');
@@ -1474,7 +1471,7 @@
       });
     }
 
-    function loadSchemeForEdit(meta) {
+    async function loadSchemeForEdit(meta) {
       const scheme = teacherSchemesCache.find(s =>
         s.schemeId === meta.id &&
         s.year === meta.year &&
@@ -1485,7 +1482,10 @@
       if (!scheme) return;
       editingScheme = scheme;
       currentTemplateId = scheme.fromTemplateId || null;
-      fillSchemeForm(scheme, { forceEditableDocument: scheme.editorMode === 'editable_document' });
+      const hydratedScheme = scheme.editorMode === 'editable_document' && !Object.keys(scheme.rows || {}).length
+        ? await resolveTemplateForUse(scheme)
+        : scheme;
+      fillSchemeForm(hydratedScheme, { forceEditableDocument: scheme.editorMode === 'editable_document' });
     }
 
     async function saveScheme() {

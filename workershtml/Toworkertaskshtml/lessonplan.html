@@ -1079,6 +1079,14 @@
       return compactTextBlock(row?.tools || row?.reference || '');
     }
 
+    function getStructuredRowsMap(data) {
+      return data?.rows || data?.parsedTemplate?.rows || null;
+    }
+
+    function hasStructuredRows(data) {
+      return Boolean(Object.keys(getStructuredRowsMap(data) || {}).length);
+    }
+
     function normalizeSchemeRows(rowsMap) {
       return Object.entries(rowsMap || {}).map(([rowKey, row]) => {
         const week = parseNumericValue(row?.week);
@@ -1319,7 +1327,7 @@
 
     async function ensureStructuredSchemeData(data) {
       if (!data) return null;
-      const hasRows = Boolean(Object.keys(data?.rows || data?.parsedTemplate?.rows || {}).length);
+      const hasRows = hasStructuredRows(data);
       if (hasRows) return data;
 
       const parser = window.SomapSchemeTemplateParser;
@@ -1354,9 +1362,7 @@
 
     function buildSchemeBundle(sourceData, sourceType, lessonDate) {
       const rows = normalizeSchemeRows(
-        sourceData?.rows ||
-        sourceData?.parsedTemplate?.rows ||
-        null
+        getStructuredRowsMap(sourceData)
       ).sort((a, b) => {
         const monthDiff = monthOrderIndex(a.row?.month) - monthOrderIndex(b.row?.month);
         if (monthDiff !== 0) return monthDiff;
@@ -1547,23 +1553,35 @@
       if (!cacheEntry || options.force) {
         const teacherSchemeRaw = await fetchLatestTeacherScheme(targetYear, className, subjectName, termKey);
         const teacherScheme = await ensureStructuredSchemeData(teacherSchemeRaw);
-        let teacherRows = teacherScheme?.rows || teacherScheme?.parsedTemplate?.rows || null;
+        let teacherRows = getStructuredRowsMap(teacherScheme);
         let fallbackTemplate = null;
 
-        if ((!teacherRows || !Object.keys(teacherRows).length) && teacherScheme?.fromTemplateId) {
+        if (!teacherRows && teacherScheme?.fromTemplateId) {
           fallbackTemplate = await ensureStructuredSchemeData(
             await fetchTemplateById(targetYear, className, subjectName, termKey, teacherScheme.fromTemplateId)
           );
-          teacherRows = fallbackTemplate?.rows || fallbackTemplate?.parsedTemplate?.rows || null;
+          teacherRows = getStructuredRowsMap(fallbackTemplate);
         }
 
-        const templateScheme = fallbackTemplate || await ensureStructuredSchemeData(
-          await fetchLatestTemplate(targetYear, className, subjectName, termKey)
-        );
-        const sourceData = teacherScheme
-          ? { ...teacherScheme, rows: teacherRows || teacherScheme.rows || null }
-          : templateScheme;
-        const sourceType = teacherScheme ? 'teacher_scheme' : templateScheme ? 'academic_template' : 'none';
+        const templateScheme = hasStructuredRows(fallbackTemplate)
+          ? fallbackTemplate
+          : await ensureStructuredSchemeData(
+              await fetchLatestTemplate(targetYear, className, subjectName, termKey)
+            );
+        const teacherSource = teacherScheme && teacherRows
+          ? { ...teacherScheme, rows: teacherRows }
+          : null;
+        const templateSource = hasStructuredRows(templateScheme) ? templateScheme : null;
+        const sourceData = teacherSource || templateSource || teacherScheme || templateScheme;
+        const sourceType = teacherSource
+          ? 'teacher_scheme'
+          : templateSource
+            ? 'academic_template'
+            : teacherScheme
+              ? 'teacher_scheme'
+              : templateScheme
+                ? 'academic_template'
+                : 'none';
 
         cacheEntry = buildSchemeBundle(sourceData, sourceType, lessonDate);
         schemeLookupCache.set(cacheKey, cacheEntry);
