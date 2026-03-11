@@ -728,18 +728,29 @@
     async function getBaseMaps(year) {
       const anchorY = String(SOMAP_DEFAULT_YEAR);
       const y = String(year);
-      const [studentsSnap, anchorSnap, ySnap, listSnap] = await Promise.all([
+      const [studentsSnap, anchorSnap, ySnap, listSnap, shiftSnap] = await Promise.all([
         schoolRef('students').once('value'),
         schoolRef(`enrollments/${anchorY}`).once('value').catch(() => ({ val: () => null })),
         schoolRef(`enrollments/${y}`).once('value').catch(() => ({ val: () => null })),
-        schoolRef(`studentlist/${y}`).once('value').catch(() => ({ val: () => null }))
+        schoolRef(`studentlist/${y}`).once('value').catch(() => ({ val: () => null })),
+        schoolRef('shiftReports').once('value').catch(() => ({ val: () => null }))
       ]);
+      const students = (studentsSnap && studentsSnap.val && studentsSnap.val()) || {};
+      const enrollAnchor = (anchorSnap && anchorSnap.val && anchorSnap.val()) || {};
+      const enrollYear = (ySnap && ySnap.val && ySnap.val()) || {};
+      const shiftReports = (shiftSnap && shiftSnap.val && shiftSnap.val()) || {};
+      const rosterBundle = ClassUtils.buildAcademicRoster
+        ? ClassUtils.buildAcademicRoster(students, enrollAnchor, enrollYear, shiftReports, { targetYear: y, defaultYear: SOMAP_DEFAULT_YEAR })
+        : { roster: [], shiftRegistry: { shiftedByClass: {}, matchedShiftedByClass: {} } };
       return {
         y,
-        students: (studentsSnap && studentsSnap.val && studentsSnap.val()) || {},
-        enrollAnchor: (anchorSnap && anchorSnap.val && anchorSnap.val()) || {},
-        enrollYear: (ySnap && ySnap.val && ySnap.val()) || {},
-        studentlistYear: (listSnap && listSnap.val && listSnap.val()) || {}
+        students,
+        enrollAnchor,
+        enrollYear,
+        studentlistYear: (listSnap && listSnap.val && listSnap.val()) || {},
+        shiftReports,
+        roster: rosterBundle.roster || [],
+        shiftRegistry: rosterBundle.shiftRegistry || { shiftedByClass: {}, matchedShiftedByClass: {} }
       };
     }
 
@@ -765,6 +776,13 @@
 
     function countClassForYear(targetClass, maps, targetYear) {
       const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(targetClass) : targetClass;
+      if (Array.isArray(maps.roster) && maps.roster.length) {
+        let total = maps.roster.filter((student) => String(student.className || '').trim().toLowerCase() === String(canonicalTarget || '').trim().toLowerCase()).length;
+        const shiftTarget = Number(maps.shiftRegistry?.shiftedByClass?.[canonicalTarget] || 0);
+        const shiftMatched = Number(maps.shiftRegistry?.matchedShiftedByClass?.[canonicalTarget] || 0);
+        total = Math.max(0, total - Math.max(0, shiftTarget - shiftMatched));
+        return total;
+      }
       const yList = maps.studentlistYear?.[canonicalTarget] || maps.studentlistYear?.[targetClass];
       if (yList && typeof yList === 'object' && Object.keys(yList).length > 0) {
         return Object.keys(yList).length;
@@ -824,10 +842,11 @@
         const year = String(getYear());
         const chosenClass = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(journalClass.value) : journalClass.value;
         const maps = await getBaseMaps(year);
-        totalEl.value = countClassForYear(chosenClass, maps, year);
+        const total = countClassForYear(chosenClass, maps, year);
+        totalEl.value = total;
         const att = await loadAttendanceCounts(year, chosenClass, journalDate.value, maps.students || {});
         presentEl.value = att.present || 0;
-        absentEl.value = att.absent || Math.max(0, (parseInt(totalEl.value, 10) || 0) - (att.present || 0));
+        absentEl.value = Math.max(0, total - (att.present || 0));
       } catch (error) {
         console.error('Error recomputing journal attendance:', error);
       }

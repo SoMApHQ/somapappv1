@@ -139,6 +139,217 @@
     return ladder[target];
   }
 
+  function normalizeGenderBucket(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (['m', 'male', 'boy', 'boys', 'man'].includes(raw)) return 'boys';
+    if (['f', 'female', 'girl', 'girls', 'woman'].includes(raw)) return 'girls';
+    return 'unknown';
+  }
+
+  function buildEnrollmentIndex(enrollments = {}) {
+    const byId = { ...(enrollments || {}) };
+    const byAdmission = {};
+    Object.entries(enrollments || {}).forEach(([key, value]) => {
+      if (!value || typeof value !== 'object') return;
+      const admission = value.admissionNumber || value.admissionNo || value.admNo || '';
+      if (admission && !byAdmission[admission]) byAdmission[admission] = value;
+      if (!byId[key]) byId[key] = value;
+    });
+    return { byId, byAdmission };
+  }
+
+  function lookupEnrollment(index, studentId, admissionNo) {
+    if (!index) return {};
+    if (studentId && index.byId?.[studentId]) return index.byId[studentId];
+    if (admissionNo && index.byId?.[admissionNo]) return index.byId[admissionNo];
+    if (admissionNo && index.byAdmission?.[admissionNo]) return index.byAdmission[admissionNo];
+    return {};
+  }
+
+  function getEnrollmentClassFromRecord(entry = {}) {
+    if (!entry || typeof entry !== 'object') return '';
+    return entry.className || entry.classLevel || entry.class || entry.grade || '';
+  }
+
+  function getStudentClassFromRecord(student = {}) {
+    if (!student || typeof student !== 'object') return '';
+    return student.className || student.classLevel || student.class || student.grade || student.gradeLevel || '';
+  }
+
+  function parseYearFromValue(value) {
+    if (value == null) return null;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      const dt = new Date(value);
+      if (!Number.isNaN(dt.getTime())) return dt.getFullYear();
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      if (/^\d{4}$/.test(trimmed)) return Number(trimmed);
+      const numeric = Number(trimmed);
+      if (!Number.isNaN(numeric)) {
+        const dt = new Date(numeric);
+        if (!Number.isNaN(dt.getTime())) return dt.getFullYear();
+      }
+      const parsed = Date.parse(trimmed);
+      if (!Number.isNaN(parsed)) return new Date(parsed).getFullYear();
+    }
+    if (typeof value === 'object') {
+      const yearField = value.year ?? value.y ?? null;
+      if (typeof yearField === 'number' && Number.isFinite(yearField)) return yearField;
+      if (typeof yearField === 'string' && /^\d{4}$/.test(yearField.trim())) return Number(yearField.trim());
+      const seconds = Number(value.seconds ?? value._seconds ?? value.secondsValue ?? NaN);
+      if (!Number.isNaN(seconds)) {
+        const nanos = Number(value.nanoseconds ?? value._nanoseconds ?? 0);
+        const millis = seconds * 1000 + Math.floor((Number.isFinite(nanos) ? nanos : 0) / 1e6);
+        const dt = new Date(millis);
+        if (!Number.isNaN(dt.getTime())) return dt.getFullYear();
+      }
+      if (typeof value.toDate === 'function') {
+        const dt = value.toDate();
+        if (dt instanceof Date && !Number.isNaN(dt.getTime())) return dt.getFullYear();
+      }
+    }
+    return null;
+  }
+
+  function inferAdmissionYear(student = {}) {
+    const sources = [
+      student.createdTs,
+      student.admissionTs,
+      student.createdAt,
+      student.created_at,
+      student.admissionDate,
+      student.admission_date,
+      student.admissionYear,
+      student.admYear,
+      student.admissionYearValue,
+      student.yearOfAdmission
+    ];
+    for (const candidate of sources) {
+      const year = parseYearFromValue(candidate);
+      if (Number.isFinite(year)) return Number(year);
+    }
+    return null;
+  }
+
+  function buildShiftRegistry(shiftEntries = {}, targetYear) {
+    const shiftedIdSet = new Set();
+    const shiftedNameSet = new Set();
+    const shiftedByClass = {};
+    const matchedShiftedByClass = {};
+    const selectedYearNum = Number(targetYear);
+    const normalizeRef = (value) => String(value || '').trim().toLowerCase();
+    const normalizeName = (value) => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+    Object.values(shiftEntries || {}).forEach((entry) => {
+      const status = String(entry?.status || '').trim().toLowerCase();
+      if (status !== 'shifted') return;
+      const shiftYearVal = parseYearFromValue(entry?.shiftYear);
+      const dateYearVal = parseYearFromValue(entry?.dateShifted);
+      if (shiftYearVal !== null) {
+        if (shiftYearVal !== selectedYearNum) return;
+      } else if (dateYearVal !== null && dateYearVal !== selectedYearNum) {
+        return;
+      }
+
+      [
+        entry?.key,
+        entry?.studentId,
+        entry?.id,
+        entry?.admissionNo,
+        entry?.admissionNumber,
+        entry?.admission
+      ].forEach((ref) => {
+        const normalized = normalizeRef(ref);
+        if (normalized) shiftedIdSet.add(normalized);
+      });
+
+      [
+        entry?.studentName,
+        entry?.name,
+        entry?.fullName
+      ].forEach((nameRef) => {
+        const normalized = normalizeName(nameRef);
+        if (normalized) shiftedNameSet.add(normalized);
+      });
+
+      const cls = normalizeClassName(entry?.className || entry?.classLevel || entry?.class || entry?.grade || '');
+      if (cls) shiftedByClass[cls] = (shiftedByClass[cls] || 0) + 1;
+    });
+
+    return { shiftedIdSet, shiftedNameSet, shiftedByClass, matchedShiftedByClass };
+  }
+
+  function buildAcademicRoster(studentsMap = {}, anchorEnrollments = {}, yearEnrollments = {}, shiftEntries = {}, options = {}) {
+    const defaultYear = Number(options.defaultYear || new Date().getFullYear());
+    const targetYear = Number(options.targetYear || defaultYear);
+    const delta = targetYear - defaultYear;
+    const anchorIndex = buildEnrollmentIndex(anchorEnrollments || {});
+    const yearIndex = buildEnrollmentIndex(yearEnrollments || {});
+    const shiftRegistry = buildShiftRegistry(shiftEntries || {}, targetYear);
+    const roster = [];
+
+    Object.entries(studentsMap || {}).forEach(([id, student]) => {
+      const s = student || {};
+      const status = String(s.status || '').trim().toLowerCase();
+      if (status === 'shifted') return;
+
+      const admissionNo = s.admissionNumber || s.admNo || s.admissionNo || '';
+      const fullName = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || s.fullName || id || 'Unknown';
+      const refKey = String(id || '').trim().toLowerCase();
+      const admissionRef = String(admissionNo || '').trim().toLowerCase();
+      const normalizedName = String(fullName || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+      const isShiftedStudent = shiftRegistry.shiftedIdSet.has(refKey)
+        || shiftRegistry.shiftedIdSet.has(admissionRef)
+        || shiftRegistry.shiftedNameSet.has(normalizedName);
+
+      const anchorEnrollment = lookupEnrollment(anchorIndex, id, admissionNo);
+      const yearEnrollment = lookupEnrollment(yearIndex, id, admissionNo);
+      const yearClass = getEnrollmentClassFromRecord(yearEnrollment);
+      const anchorClass = getEnrollmentClassFromRecord(anchorEnrollment);
+      const studentClass = getStudentClassFromRecord(s);
+      const baseClass = anchorClass || studentClass || 'Unknown';
+      const admissionYear = inferAdmissionYear(s);
+      const hasAnchorRecord = anchorEnrollment && typeof anchorEnrollment === 'object' && Object.keys(anchorEnrollment).length > 0;
+      const shouldShift = hasAnchorRecord || (Number.isFinite(admissionYear) && admissionYear <= defaultYear);
+
+      const lastTransfer = s.lastClassTransfer || s.meta?.lastClassTransfer;
+      const transferEffectiveYear = lastTransfer?.effectiveDate ? new Date(String(lastTransfer.effectiveDate) + 'T12:00:00').getFullYear() : null;
+      const transferClass = lastTransfer?.toClass || '';
+
+      let computedClass = yearClass;
+      if (!computedClass && transferClass && Number(transferEffectiveYear) === targetYear) {
+        computedClass = transferClass;
+      }
+      if (!computedClass) {
+        computedClass = shouldShift ? shiftCanonicalClass(baseClass, delta) : baseClass;
+      }
+
+      const finalClass = normalizeClassName(computedClass || 'Unknown', { allowGraduated: true }) || 'Unknown';
+      if (finalClass === 'Graduated') return;
+
+      if (isShiftedStudent) {
+        shiftRegistry.matchedShiftedByClass[finalClass] = (shiftRegistry.matchedShiftedByClass[finalClass] || 0) + 1;
+        return;
+      }
+
+      roster.push({
+        id,
+        admissionNo,
+        name: fullName,
+        className: finalClass,
+        gender: normalizeGenderBucket(s.gender || s.sex || s.Gender || s.Sex || ''),
+        rawGender: s.gender || s.sex || s.Gender || s.Sex || '',
+        status: status || 'active',
+        raw: s
+      });
+    });
+
+    return { roster, shiftRegistry };
+  }
+
   function buildAttendancePathCandidates(year, className, dateKey) {
     const canonical = normalizeClassName(className);
     const monthKey = /^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ''))
@@ -173,22 +384,23 @@
     const summary = { present: 0, absent: 0, boysP: 0, girlsP: 0, boysA: 0, girlsA: 0 };
     Object.keys(node || {}).forEach((studentId) => {
       const rec = node[studentId] || {};
-      const status = String(rec.daily || rec.status || rec.s || '').trim().toUpperCase();
       const amStatus = String(rec.am || '').trim().toUpperCase();
       const pmStatus = String(rec.pm || '').trim().toUpperCase();
-      const isPresent = ['P', 'PRESENT', '1', 'TRUE'].includes(status) || amStatus === 'P' || pmStatus === 'P';
+      const derivedDaily = rec.daily || rec.status || rec.s || ((amStatus === 'P' && pmStatus === 'P') ? 'P' : `${amStatus}${pmStatus}`);
+      const status = String(derivedDaily || '').trim().toUpperCase();
+      const isPresent = ['P', 'PRESENT', 'PR'].includes(status);
       const student = studentsMap[studentId] || {};
-      const gender = String(rec.gender || rec.sex || student.gender || student.sex || '').trim().toUpperCase();
-      const isBoy = ['M', 'B', 'BOY', 'MALE'].includes(gender);
+      const gender = normalizeGenderBucket(rec.gender || rec.sex || student.gender || student.sex || student.rawGender || '');
+      const isBoy = gender === 'boys';
 
       if (isPresent) {
         summary.present += 1;
         if (isBoy) summary.boysP += 1;
-        else summary.girlsP += 1;
+        else if (gender === 'girls') summary.girlsP += 1;
       } else {
         summary.absent += 1;
         if (isBoy) summary.boysA += 1;
-        else summary.girlsA += 1;
+        else if (gender === 'girls') summary.girlsA += 1;
       }
     });
     return summary;
@@ -204,6 +416,8 @@
     canonicalizeClassList,
     buildSubjectListForClasses,
     shiftCanonicalClass,
+    normalizeGenderBucket,
+    buildAcademicRoster,
     buildAttendancePathCandidates,
     summarizeAttendanceNode
   };

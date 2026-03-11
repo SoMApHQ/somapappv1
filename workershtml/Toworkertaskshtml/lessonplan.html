@@ -2092,17 +2092,28 @@
 
     async function getBaseMaps(year){
       const anchorY = String(SOMAP_DEFAULT_YEAR), y = String(year);
-      const [studentsSnap, anchorSnap, ySnap, listSnap] = await Promise.all([
+      const [studentsSnap, anchorSnap, ySnap, listSnap, shiftSnap] = await Promise.all([
         schoolRef('students').once('value'),
         schoolRef(`enrollments/${anchorY}`).once('value').catch(()=>({val:()=>null})),
         schoolRef(`enrollments/${y}`).once('value').catch(()=>({val:()=>null})),
-        schoolRef(`studentlist/${y}`).once('value').catch(()=>({val:()=>null}))
+        schoolRef(`studentlist/${y}`).once('value').catch(()=>({val:()=>null})),
+        schoolRef('shiftReports').once('value').catch(()=>({val:()=>null}))
       ]);
+      const students = (studentsSnap && studentsSnap.val && studentsSnap.val())||{};
+      const enrollAnchor = (anchorSnap && anchorSnap.val && anchorSnap.val())||{};
+      const enrollYear = (ySnap && ySnap.val && ySnap.val())||{};
+      const shiftReports = (shiftSnap && shiftSnap.val && shiftSnap.val())||{};
+      const rosterBundle = ClassUtils.buildAcademicRoster
+        ? ClassUtils.buildAcademicRoster(students, enrollAnchor, enrollYear, shiftReports, { targetYear: y, defaultYear: SOMAP_DEFAULT_YEAR })
+        : { roster: [], shiftRegistry: { shiftedByClass: {}, matchedShiftedByClass: {} } };
       return {
-        students: (studentsSnap && studentsSnap.val && studentsSnap.val())||{},
-        enrollAnchor: (anchorSnap && anchorSnap.val && anchorSnap.val())||{},
-        enrollYear: (ySnap && ySnap.val && ySnap.val())||{},
-        studentlistYear: (listSnap && listSnap.val && listSnap.val())||{}
+        students,
+        enrollAnchor,
+        enrollYear,
+        studentlistYear: (listSnap && listSnap.val && listSnap.val())||{},
+        shiftReports,
+        roster: rosterBundle.roster || [],
+        shiftRegistry: rosterBundle.shiftRegistry || { shiftedByClass: {}, matchedShiftedByClass: {} }
       };
     }
 
@@ -2131,8 +2142,15 @@
     }
 
     function countClassForYear(targetClass, maps, targetYear){
-      // Try explicit studentlist/{year}/{className} first
       const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(targetClass) : targetClass;
+      if (Array.isArray(maps.roster) && maps.roster.length) {
+        let total = maps.roster.filter((student) => L(student.className) === L(canonicalTarget)).length;
+        const shiftTarget = Number(maps.shiftRegistry?.shiftedByClass?.[canonicalTarget] || 0);
+        const shiftMatched = Number(maps.shiftRegistry?.matchedShiftedByClass?.[canonicalTarget] || 0);
+        total = Math.max(0, total - Math.max(0, shiftTarget - shiftMatched));
+        return total;
+      }
+      // Try explicit studentlist/{year}/{className} first
       const yList = maps.studentlistYear?.[canonicalTarget] || maps.studentlistYear?.[targetClass];
       if (yList && typeof yList === 'object' && Object.keys(yList).length > 0) {
         return Object.keys(yList).length;
@@ -2165,6 +2183,24 @@
     function countClassRosterStats(targetClass, maps, targetYear){
       const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(targetClass) : targetClass;
       const stats = { total: 0, boys: 0, girls: 0 };
+      if (Array.isArray(maps.roster) && maps.roster.length) {
+        maps.roster.forEach((student) => {
+          if (L(student.className) !== L(canonicalTarget)) return;
+          stats.total += 1;
+          if (student.gender === 'boys') stats.boys += 1;
+          else if (student.gender === 'girls') stats.girls += 1;
+        });
+        const shiftTarget = Number(maps.shiftRegistry?.shiftedByClass?.[canonicalTarget] || 0);
+        const shiftMatched = Number(maps.shiftRegistry?.matchedShiftedByClass?.[canonicalTarget] || 0);
+        let deficit = Math.max(0, shiftTarget - shiftMatched);
+        while (deficit > 0 && stats.total > 0) {
+          if (stats.boys >= stats.girls && stats.boys > 0) stats.boys -= 1;
+          else if (stats.girls > 0) stats.girls -= 1;
+          stats.total -= 1;
+          deficit -= 1;
+        }
+        return stats;
+      }
       const students = maps.students || {};
 
       for (const id of Object.keys(students)) {
