@@ -1214,28 +1214,104 @@
     }
 
     async function fetchLatestTeacherScheme(year, className, subjectName, termKey) {
-      const path = `schemes/${schoolId}/teacher/${workerId}/${year}/${safeKey(className)}/${safeKey(subjectName)}/${termKey}`;
-      const snap = await db.ref(path).once('value');
-      const items = Object.values(snap.val() || {});
-      if (!items.length) return null;
-      items.sort((a, b) => (b?.meta?.updatedAt || 0) - (a?.meta?.updatedAt || 0));
-      return items[0];
+      const classKey = safeKey(className);
+      const subjectKey = safeKey(subjectName);
+      const exactPath = `schemes/${schoolId}/teacher/${workerId}/${year}/${classKey}/${subjectKey}/${termKey}`;
+      const exactSnap = await db.ref(exactPath).once('value');
+      let items = Object.values(exactSnap.val() || {});
+      if (items.length) {
+        items.sort((a, b) => (b?.meta?.updatedAt || 0) - (a?.meta?.updatedAt || 0));
+        return items[0];
+      }
+
+      const subjectPath = `schemes/${schoolId}/teacher/${workerId}/${year}/${classKey}/${subjectKey}`;
+      const subjectSnap = await db.ref(subjectPath).once('value');
+      const byTerm = subjectSnap.val() || {};
+      const flattened = [];
+      Object.entries(byTerm).forEach(([storedTerm, schemes]) => {
+        Object.values(schemes || {}).forEach((scheme) => {
+          flattened.push({ ...scheme, __storedTerm: storedTerm });
+        });
+      });
+      if (!flattened.length) return null;
+
+      const filtered = flattened.filter((item) => {
+        const sameTerm = item.termKey === termKey || item.__storedTerm === termKey || termLabelFromKey(item.termKey) === termLabelFromKey(termKey);
+        const sameClass = L(item.className) === L(className) || L(item.classKey) === L(classKey);
+        const sameSubject = L(item.subjectName) === L(subjectName) || L(item.subjectKey) === L(subjectKey);
+        return sameTerm && sameClass && sameSubject;
+      });
+      const pool = filtered.length ? filtered : flattened;
+      pool.sort((a, b) => (b?.meta?.updatedAt || 0) - (a?.meta?.updatedAt || 0));
+      return pool[0];
     }
 
     async function fetchTemplateById(year, className, subjectName, termKey, templateId) {
       if (!templateId) return null;
-      const path = `schemes/${schoolId}/templates/${year}/${safeKey(className)}/${safeKey(subjectName)}/${termKey}/${templateId}`;
-      const snap = await db.ref(path).once('value');
-      return snap.exists() ? snap.val() : null;
+      const classKey = safeKey(className);
+      const subjectKey = safeKey(subjectName);
+      const exactPath = `schemes/${schoolId}/templates/${year}/${classKey}/${subjectKey}/${termKey}/${templateId}`;
+      const exactSnap = await db.ref(exactPath).once('value');
+      if (exactSnap.exists()) return exactSnap.val();
+
+      const subjectPath = `schemes/${schoolId}/templates/${year}/${classKey}/${subjectKey}`;
+      const subjectSnap = await db.ref(subjectPath).once('value');
+      const byTerm = subjectSnap.val() || {};
+      for (const templates of Object.values(byTerm)) {
+        if (templates && templates[templateId]) {
+          return templates[templateId];
+        }
+      }
+      return null;
     }
 
     async function fetchLatestTemplate(year, className, subjectName, termKey) {
-      const path = `schemes/${schoolId}/templates/${year}/${safeKey(className)}/${safeKey(subjectName)}/${termKey}`;
-      const snap = await db.ref(path).once('value');
-      const items = Object.values(snap.val() || {});
-      if (!items.length) return null;
-      items.sort((a, b) => (b?.meta?.updatedAt || b?.meta?.createdAt || 0) - (a?.meta?.updatedAt || a?.meta?.createdAt || 0));
-      return items[0];
+      const classKey = safeKey(className);
+      const subjectKey = safeKey(subjectName);
+      const exactPath = `schemes/${schoolId}/templates/${year}/${classKey}/${subjectKey}/${termKey}`;
+      const exactSnap = await db.ref(exactPath).once('value');
+      let items = Object.values(exactSnap.val() || {});
+      if (items.length) {
+        items.sort((a, b) => (b?.meta?.updatedAt || b?.meta?.createdAt || 0) - (a?.meta?.updatedAt || a?.meta?.createdAt || 0));
+        return items[0];
+      }
+
+      const subjectPath = `schemes/${schoolId}/templates/${year}/${classKey}/${subjectKey}`;
+      const subjectSnap = await db.ref(subjectPath).once('value');
+      const byTerm = subjectSnap.val() || {};
+      const flattened = [];
+      Object.entries(byTerm).forEach(([storedTerm, templates]) => {
+        Object.values(templates || {}).forEach((template) => {
+          flattened.push({ ...template, __storedTerm: storedTerm });
+        });
+      });
+
+      if (!flattened.length) {
+        const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
+        const yearTree = yearSnap.val() || {};
+        Object.values(yearTree || {}).forEach((subjectsNode) => {
+          Object.values(subjectsNode || {}).forEach((termsNode) => {
+            Object.entries(termsNode || {}).forEach(([storedTerm, templates]) => {
+              Object.values(templates || {}).forEach((template) => flattened.push({ ...template, __storedTerm: storedTerm }));
+            });
+          });
+        });
+      }
+
+      const filtered = flattened.filter((item) => {
+        const sameTerm = item.termKey === termKey || item.__storedTerm === termKey || termLabelFromKey(item.termKey) === termLabelFromKey(termKey);
+        const sameClass = L(item.className) === L(className) || L(item.classKey) === L(classKey);
+        const sameSubject = L(item.subjectName) === L(subjectName) || L(item.subjectKey) === L(subjectKey);
+        return sameTerm && sameClass && sameSubject;
+      });
+      const pool = filtered.length ? filtered : flattened.filter((item) => {
+        const sameClass = L(item.className) === L(className) || L(item.classKey) === L(classKey);
+        const sameSubject = L(item.subjectName) === L(subjectName) || L(item.subjectKey) === L(subjectKey);
+        return sameClass && sameSubject;
+      });
+      if (!pool.length) return null;
+      pool.sort((a, b) => (b?.meta?.updatedAt || b?.meta?.createdAt || 0) - (a?.meta?.updatedAt || a?.meta?.createdAt || 0));
+      return pool[0];
     }
 
     function buildSchemeBundle(sourceData, sourceType, lessonDate) {
