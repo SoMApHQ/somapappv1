@@ -1345,11 +1345,17 @@
       const teacherData = teacherRootSnap.val() || {};
       const allSchemes = [];
       Object.entries(teacherData).forEach(([yr, byClass]) => {
-        if (yr !== year) return;
+        if (String(yr) !== String(year)) return;
         Object.entries(byClass || {}).forEach(([cls, bySubj]) => {
           Object.entries(bySubj || {}).forEach(([subj, byTermNode]) => {
             Object.entries(byTermNode || {}).forEach(([t, schemes]) => {
-              Object.values(schemes || {}).forEach((s) => allSchemes.push({ ...s, __storedTerm: t, __storedClass: cls, __storedSubject: subj }));
+              if (schemes && typeof schemes === 'object' && !Array.isArray(schemes)) {
+                Object.values(schemes).forEach((s) => {
+                  if (s && typeof s === 'object' && (s.schemeId || s.meta || s.className)) {
+                    allSchemes.push({ ...s, __storedTerm: t, __storedClass: cls, __storedSubject: subj });
+                  }
+                });
+              }
             });
           });
         });
@@ -1369,16 +1375,35 @@
       if (!templateId) return null;
       const classKey = safeKey(className);
       const subjectKey = safeKey(subjectName);
-      const exactPath = `schemes/${schoolId}/templates/${year}/${classKey}/${subjectKey}/${termKey}/${templateId}`;
-      const exactSnap = await db.ref(exactPath).once('value');
-      if (exactSnap.exists()) return exactSnap.val();
+      const classPathKey = pathKey(className);
+      const subjectPathKey = pathKey(subjectName);
+      const pathVariants = [
+        [classKey, subjectKey],
+        [classPathKey, subjectPathKey],
+        [classPathKey, subjectKey],
+        [classKey, subjectPathKey]
+      ].filter(([c, s], i, arr) => arr.findIndex(([a, b]) => a === c && b === s) === i);
 
-      const subjectPath = `schemes/${schoolId}/templates/${year}/${classKey}/${subjectKey}`;
-      const subjectSnap = await db.ref(subjectPath).once('value');
-      const byTerm = subjectSnap.val() || {};
-      for (const templates of Object.values(byTerm)) {
-        if (templates && templates[templateId]) {
-          return templates[templateId];
+      for (const [cKey, sKey] of pathVariants) {
+        const exactPath = `schemes/${schoolId}/templates/${year}/${cKey}/${sKey}/${termKey}/${templateId}`;
+        const exactSnap = await db.ref(exactPath).once('value');
+        if (exactSnap.exists()) return exactSnap.val();
+
+        const subjectPath = `schemes/${schoolId}/templates/${year}/${cKey}/${sKey}`;
+        const subjectSnap = await db.ref(subjectPath).once('value');
+        const byTerm = subjectSnap.val() || {};
+        for (const templates of Object.values(byTerm)) {
+          if (templates && templates[templateId]) return templates[templateId];
+        }
+      }
+      // Crawl templates tree to find by templateId
+      const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
+      const yearTree = yearSnap.val() || {};
+      for (const bySubj of Object.values(yearTree)) {
+        for (const byTerm of Object.values(bySubj || {})) {
+          for (const templates of Object.values(byTerm || {})) {
+            if (templates && templates[templateId]) return templates[templateId];
+          }
         }
       }
       return null;
@@ -1444,6 +1469,27 @@
             return pool[0];
           }
         }
+      }
+      // Final fallback: crawl full templates tree for year (year/class/subject/term/templateId)
+      const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
+      const yearTree = yearSnap.val() || {};
+      const crawled = [];
+      Object.values(yearTree || {}).forEach((bySubj) => {
+        Object.values(bySubj || {}).forEach((byTerm) => {
+          Object.entries(byTerm || {}).forEach(([storedTerm, templates]) => {
+            Object.values(templates || {}).forEach((t) => crawled.push({ ...t, __storedTerm: storedTerm }));
+          });
+        });
+      });
+      const found = crawled.filter((t) => {
+        const sameTerm = t.termKey === termKey || t.__storedTerm === termKey || termLabelFromKey(t.termKey) === termLabelFromKey(termKey);
+        const sameClass = L(t.className) === L(className) || L(t.classKey) === L(classKey) || L(pathKey(t.className)) === L(classPathKey);
+        const sameSubject = L(t.subjectName) === L(subjectName) || L(t.subjectKey) === L(subjectKey) || L(pathKey(t.subjectName)) === L(subjectPathKey);
+        return sameTerm && sameClass && sameSubject;
+      });
+      if (found.length) {
+        found.sort((a, b) => (b?.meta?.updatedAt || b?.meta?.createdAt || 0) - (a?.meta?.updatedAt || a?.meta?.createdAt || 0));
+        return found[0];
       }
       return null;
     }
