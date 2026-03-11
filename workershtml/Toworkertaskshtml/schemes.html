@@ -11,6 +11,7 @@
   <script src="../../firebase.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="../../js/scheme-template-parser.js"></script>
@@ -253,8 +254,7 @@
 
     .pdf-preview-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 14px;
+      gap: 18px;
       margin-top: 12px;
     }
 
@@ -262,15 +262,8 @@
       background: rgba(255,255,255,0.08);
       border: 1px solid rgba(255,255,255,0.16);
       border-radius: 14px;
-      padding: 10px;
-    }
-
-    .pdf-preview-page canvas {
-      width: 100%;
-      height: auto;
-      display: block;
-      border-radius: 10px;
-      background: white;
+      padding: 12px;
+      overflow: auto;
     }
 
     .pdf-preview-page span {
@@ -278,6 +271,33 @@
       margin-bottom: 8px;
       font-size: 0.88rem;
       color: var(--muted);
+    }
+
+    .editable-doc-page {
+      position: relative;
+      background: white;
+      color: #111827;
+      border-radius: 8px;
+      min-height: 400px;
+      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+      overflow: hidden;
+      margin: 0 auto;
+    }
+
+    .editable-fragment {
+      position: absolute;
+      color: #111827;
+      outline: none;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.22;
+      padding: 1px 2px;
+      border-radius: 4px;
+    }
+
+    .editable-fragment:focus {
+      background: rgba(191, 219, 254, 0.45);
+      box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.4);
     }
 
     .flex {
@@ -429,11 +449,11 @@
 
       <div id="templatePdfSection" class="card hidden" style="margin-top:14px; background:rgba(255,255,255,0.05);">
         <div class="flex" style="justify-content: space-between;">
-          <h3 style="margin:0;">Base Template PDF</h3>
-          <span class="tag" id="templatePdfInfo">Preserved template mode</span>
+          <h3 style="margin:0;">Editable Base Document</h3>
+          <span class="tag" id="templatePdfInfo">PDF converted to editable document</span>
         </div>
         <p style="margin:8px 0 0 0; color: var(--muted);">
-          The original academic PDF is kept as the working base for this scheme. The preview below preserves the official layout while your teacher copy uses your name, school branding, year, and saved notes.
+          The academic PDF is opened below as an editable document so the teacher can work directly on the source content and then save/download it back as PDF.
         </p>
         <div class="pdf-preview-grid" id="templatePdfPages"></div>
       </div>
@@ -549,6 +569,7 @@
     let schoolLogoDataUrlPromise = null;
     let editorMode = 'table';
     let currentSourcePdf = null;
+    let currentEditableDocument = null;
 
     currentDateEl.textContent = new Date().toLocaleDateString('en-US', {
       timeZone: 'Africa/Nairobi',
@@ -601,44 +622,65 @@
       return text.length >= 12;
     }
 
-    function assessTemplateQuality(data) {
-      const rows = sortedRowValues(data?.rows);
-      if (!rows.length) {
-        return { quality: 'empty', suspiciousRows: 0, totalRows: 0 };
-      }
-
-      const suspiciousRows = rows.filter((row) => {
-        const combined = [
-          row.mainCompetence,
-          row.specificCompetence,
-          row.learningActivities,
-          row.specificActivities,
-          row.methods,
-          row.tools,
-          row.assessment,
-          row.reference
-        ].join(' ');
-        return looksSuspiciousText(combined) || /^month$/i.test(String(row.month || '').trim());
-      }).length;
-
-      const ratio = suspiciousRows / rows.length;
-      return {
-        quality: ratio > 0.18 ? 'poor' : 'good',
-        suspiciousRows,
-        totalRows: rows.length
-      };
-    }
-
     function setEditorMode(mode, message = '') {
       editorMode = mode;
-      const pdfMode = mode === 'pdf_base';
-      schemeTableSection.classList.toggle('hidden', pdfMode);
-      templatePdfSection.classList.toggle('hidden', !pdfMode);
+      const documentMode = mode === 'editable_document';
+      schemeTableSection.classList.toggle('hidden', documentMode);
+      templatePdfSection.classList.toggle('hidden', !documentMode);
       templateModeNote.classList.toggle('hidden', !message);
       templateModeNote.textContent = message || '';
     }
 
-    async function renderTemplatePdfPreview(sourcePdf) {
+    function serializeEditableDocument() {
+      const pages = Array.from(templatePdfPages.querySelectorAll('.editable-doc-page')).map((pageNode, pageIndex) => ({
+        pageNumber: Number(pageNode.dataset.page || pageIndex + 1),
+        width: Number(pageNode.dataset.width || 0),
+        height: Number(pageNode.dataset.height || 0),
+        blocks: Array.from(pageNode.querySelectorAll('.editable-fragment')).map((block, blockIndex) => ({
+          id: block.dataset.id || `p${pageIndex + 1}_b${blockIndex + 1}`,
+          text: block.textContent || '',
+          left: Number(block.dataset.left || 0),
+          top: Number(block.dataset.top || 0),
+          width: Number(block.dataset.width || 0),
+          minHeight: Number(block.dataset.minHeight || 0),
+          fontSize: Number(block.dataset.fontSize || 12),
+          fontWeight: block.dataset.fontWeight || '400',
+          textAlign: block.dataset.textAlign || 'left'
+        }))
+      }));
+
+      currentEditableDocument = { pages };
+      return currentEditableDocument;
+    }
+
+    function createEditableBlock(pageNode, block) {
+      const div = document.createElement('div');
+      div.className = 'editable-fragment';
+      div.contentEditable = 'true';
+      div.spellcheck = false;
+      div.dataset.id = block.id;
+      div.dataset.left = block.left;
+      div.dataset.top = block.top;
+      div.dataset.width = block.width;
+      div.dataset.minHeight = block.minHeight;
+      div.dataset.fontSize = block.fontSize;
+      div.dataset.fontWeight = block.fontWeight || '400';
+      div.dataset.textAlign = block.textAlign || 'left';
+      div.style.left = `${block.left}px`;
+      div.style.top = `${block.top}px`;
+      div.style.width = `${Math.max(block.width, 24)}px`;
+      div.style.minHeight = `${Math.max(block.minHeight, 14)}px`;
+      div.style.fontSize = `${Math.max(block.fontSize, 8)}px`;
+      div.style.fontWeight = block.fontWeight || '400';
+      div.style.textAlign = block.textAlign || 'left';
+      div.textContent = block.text || '';
+      div.addEventListener('input', () => {
+        currentEditableDocument = serializeEditableDocument();
+      });
+      pageNode.appendChild(div);
+    }
+
+    async function renderEditableDocument(sourcePdf, savedDocument = null) {
       templatePdfPages.innerHTML = '';
       if (!sourcePdf?.url || !window.pdfjsLib) return;
 
@@ -646,33 +688,112 @@
         window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
         const buffer = await fetch(sourcePdf.url, { credentials: 'omit' }).then((res) => res.arrayBuffer());
         const pdf = await window.pdfjsLib.getDocument({ data: buffer }).promise;
+        const savedPages = savedDocument?.pages || [];
 
         for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-          const page = await pdf.getPage(pageNumber);
-          const viewport = page.getViewport({ scale: 0.55 });
-          const canvas = document.createElement('canvas');
-          const context = canvas.getContext('2d');
-          canvas.width = Math.floor(viewport.width);
-          canvas.height = Math.floor(viewport.height);
-          await page.render({ canvasContext: context, viewport }).promise;
-
           const wrap = document.createElement('div');
           wrap.className = 'pdf-preview-page';
           const label = document.createElement('span');
           label.textContent = `Page ${pageNumber}`;
           wrap.appendChild(label);
-          wrap.appendChild(canvas);
+
+          const savedPage = savedPages.find((page) => Number(page.pageNumber) === pageNumber);
+          const pageNode = document.createElement('div');
+          pageNode.className = 'editable-doc-page';
+
+          if (savedPage?.blocks?.length) {
+            pageNode.dataset.page = pageNumber;
+            pageNode.dataset.width = savedPage.width;
+            pageNode.dataset.height = savedPage.height;
+            pageNode.style.width = `${savedPage.width}px`;
+            pageNode.style.height = `${savedPage.height}px`;
+            savedPage.blocks.forEach((block) => createEditableBlock(pageNode, block));
+          } else {
+            const page = await pdf.getPage(pageNumber);
+            const viewport = page.getViewport({ scale: 1.2 });
+            const textContent = await page.getTextContent();
+            const rawItems = (textContent.items || [])
+              .map((item, index) => {
+                const tx = window.pdfjsLib.Util.transform(viewport.transform, item.transform);
+                const fontSize = Math.max(Math.sqrt((tx[2] * tx[2]) + (tx[3] * tx[3])), 8);
+                return {
+                  id: `p${pageNumber}_i${index + 1}`,
+                  text: String(item.str || '').trim(),
+                  left: tx[4],
+                  top: tx[5] - fontSize,
+                  width: Math.max(item.width || (String(item.str || '').length * fontSize * 0.5), 24),
+                  minHeight: fontSize + 4,
+                  fontSize,
+                  fontWeight: item.fontName && /bold/i.test(item.fontName) ? '700' : '400',
+                  textAlign: 'left'
+                };
+              })
+              .filter((item) => item.text);
+
+            rawItems.sort((a, b) => {
+              const diff = Math.abs(a.top - b.top);
+              if (diff > 4) return a.top - b.top;
+              return a.left - b.left;
+            });
+
+            const lines = [];
+            rawItems.forEach((item) => {
+              const currentLine = lines[lines.length - 1];
+              if (!currentLine || Math.abs(currentLine.top - item.top) > 4) {
+                lines.push({
+                  top: item.top,
+                  left: item.left,
+                  right: item.left + item.width,
+                  fontSize: item.fontSize,
+                  fontWeight: item.fontWeight,
+                  parts: [item]
+                });
+                return;
+              }
+
+              currentLine.left = Math.min(currentLine.left, item.left);
+              currentLine.right = Math.max(currentLine.right, item.left + item.width);
+              currentLine.parts.push(item);
+            });
+
+            const items = lines.map((line, lineIndex) => ({
+              id: `p${pageNumber}_l${lineIndex + 1}`,
+              text: line.parts
+                .sort((a, b) => a.left - b.left)
+                .map((part) => part.text)
+                .join(' ')
+                .replace(/\s{2,}/g, ' ')
+                .trim(),
+              left: line.left,
+              top: line.top,
+              width: Math.max(line.right - line.left + 24, 48),
+              minHeight: line.fontSize + 6,
+              fontSize: line.fontSize,
+              fontWeight: line.fontWeight,
+              textAlign: 'left'
+            }));
+
+            pageNode.dataset.page = pageNumber;
+            pageNode.dataset.width = Math.ceil(viewport.width);
+            pageNode.dataset.height = Math.ceil(viewport.height);
+            pageNode.style.width = `${Math.ceil(viewport.width)}px`;
+            pageNode.style.height = `${Math.ceil(viewport.height)}px`;
+            items.forEach((item) => createEditableBlock(pageNode, item));
+          }
+
+          wrap.appendChild(pageNode);
           templatePdfPages.appendChild(wrap);
         }
+
+        currentEditableDocument = serializeEditableDocument();
       } catch (error) {
-        console.error('Failed to render PDF preview', error);
-        templatePdfPages.innerHTML = '<div class="empty">Unable to render the base PDF preview right now.</div>';
+        console.error('Failed to render editable document', error);
+        templatePdfPages.innerHTML = '<div class="empty">Unable to open the template as an editable document right now.</div>';
       }
     }
 
     function fillSchemeForm(data, options = {}) {
-      const quality = options.quality || assessTemplateQuality(data);
-      const usePdfMode = options.forcePdfMode || (quality.quality === 'poor' && data?.sourcePdf?.url);
+      const useEditableDocument = options.forceEditableDocument || Boolean(data?.editableDocument?.pages?.length) || Boolean(data?.sourcePdf?.url);
       currentTemplateId = data.templateId || data.fromTemplateId || currentTemplateId;
       currentSourcePdf = data.sourcePdf || data.pdf || null;
       schemeClass.value = data.className || '';
@@ -685,13 +806,13 @@
       assessmentMethods.value = hasUsableNarrative(data.assessmentMethods) ? data.assessmentMethods : '';
       teachingResources.value = hasUsableNarrative(data.teachingResources) ? data.teachingResources : '';
 
-      if (usePdfMode) {
+      if (useEditableDocument) {
         setEditorMode(
-          'pdf_base',
-          'This template PDF is being preserved directly because automatic row mapping is not reliable for this document. You can still edit the summary fields above and download a teacher-branded copy based on the original academic PDF.'
+          'editable_document',
+          'The source PDF has been opened as an editable document. Edit it directly below, then save and download your teacher PDF copy.'
         );
         rowsTableBody.innerHTML = '';
-        renderTemplatePdfPreview(currentSourcePdf);
+        renderEditableDocument(currentSourcePdf, data.editableDocument || null);
       } else {
         setEditorMode('table');
         rowsTableBody.innerHTML = '';
@@ -774,19 +895,18 @@
       return schoolLogoDataUrlPromise;
     }
 
-    async function exportPreservedTemplatePdf() {
-      if (!currentSourcePdf?.url) {
-        toast('No base PDF is attached to this scheme.');
+    async function exportEditableDocumentPdf() {
+      if (!window.html2canvas || !window.jspdf?.jsPDF) {
+        toast('html2canvas and jsPDF must be loaded.');
         return;
       }
-      if (!window.pdfjsLib || !window.jspdf?.jsPDF) {
-        toast('PDF libraries are not loaded.');
+      const pageNodes = Array.from(templatePdfPages.querySelectorAll('.editable-doc-page'));
+      if (!pageNodes.length) {
+        toast('There is no editable document open.');
         return;
       }
 
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-      const buffer = await fetch(currentSourcePdf.url, { credentials: 'omit' }).then((res) => res.arrayBuffer());
-      const pdf = await window.pdfjsLib.getDocument({ data: buffer }).promise;
+      currentEditableDocument = serializeEditableDocument();
       const jsPdfLib = window.jspdf;
       const doc = new jsPdfLib.jsPDF({ unit: 'pt', format: 'a4' });
       const pageWidth = doc.internal.pageSize.getWidth();
@@ -830,22 +950,19 @@
       writeBlock('Teaching Resources / Materials', teachingResources.value);
 
       doc.setFont('helvetica', 'italic');
-      doc.text('Official academic template pages follow below.', margin, Math.min(y + 6, pageHeight - 40));
+      doc.text('Edited template pages follow below.', margin, Math.min(y + 6, pageHeight - 40));
 
-      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      for (let index = 0; index < pageNodes.length; index += 1) {
         doc.addPage('a4', 'portrait');
-        const page = await pdf.getPage(pageNumber);
-        const viewport = page.getViewport({ scale: 1.7 });
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        canvas.width = Math.floor(viewport.width);
-        canvas.height = Math.floor(viewport.height);
-        await page.render({ canvasContext: context, viewport }).promise;
+        const canvas = await window.html2canvas(pageNodes[index], {
+          scale: 2,
+          backgroundColor: '#ffffff',
+          useCORS: true,
+          logging: false
+        });
 
-        const imgData = canvas.toDataURL('image/jpeg', 0.92);
-        const availableWidth = pageWidth - (margin * 2);
-        const availableHeight = pageHeight - 70;
-        const ratio = Math.min(availableWidth / canvas.width, availableHeight / canvas.height);
+        const imgData = canvas.toDataURL('image/jpeg', 0.95);
+        const ratio = Math.min((pageWidth - (margin * 2)) / canvas.width, (pageHeight - 70) / canvas.height);
         const renderWidth = canvas.width * ratio;
         const renderHeight = canvas.height * ratio;
         const x = (pageWidth - renderWidth) / 2;
@@ -858,7 +975,7 @@
         doc.addImage(imgData, 'JPEG', x, imgY, renderWidth, renderHeight);
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(8);
-        doc.text(`Official template page ${pageNumber}`, margin, pageHeight - 16);
+        doc.text(`Edited template page ${index + 1}`, margin, pageHeight - 16);
       }
 
       const fileName = `scheme-${schemeSubject.value || 'subject'}-${schemeClass.value || 'class'}-${academicYear.value || ''}-teacher-copy.pdf`.replace(/\s+/g, '-').toLowerCase();
@@ -956,6 +1073,7 @@
       editingScheme = null;
       currentTemplateId = null;
       currentSourcePdf = null;
+      currentEditableDocument = null;
       schemeClass.value = filterClass.value || '';
       schemeSubject.value = filterSubject.value || '';
       schemeTerm.value = filterTerm.value || 'term1';
@@ -1059,14 +1177,19 @@
           const originalLabel = btn.textContent;
           try {
             btn.disabled = true;
-            btn.textContent = 'Mapping scheme...';
+            btn.textContent = 'Opening editable copy...';
             const snap = await db.ref(`schemes/${schoolId}/templates/${year}/${clsKey}/${subjKey}/${termKey}/${templateId}`).once('value');
             if (!snap.exists()) {
               toast('Template not found.');
               return;
             }
-            const hydratedTemplate = await resolveTemplateForUse(snap.val());
-            fillSchemeForm(hydratedTemplate);
+            const template = snap.val();
+            if (template?.pdf?.url) {
+              fillSchemeForm({ ...template, sourcePdf: template.pdf }, { forceEditableDocument: true });
+            } else {
+              const hydratedTemplate = await resolveTemplateForUse(template);
+              fillSchemeForm(hydratedTemplate);
+            }
           } catch (err) {
             console.error(err);
             toast(err?.message || 'Failed to load template.');
@@ -1122,7 +1245,7 @@
         <div class="scheme-card">
           <h3>${s.subjectName || s.subjectKey} - ${s.className} (${termLabel(s.termKey)})</h3>
           <p>Year: ${s.year} | Weeks: ${s.totalWeeks || Object.keys(s.rows || {}).length || '-'} | Hours/Week: ${s.hoursPerWeek || '-'}</p>
-          <p>Mode: ${s.editorMode === 'pdf_base' ? 'Preserved PDF base' : 'Mapped table editor'}</p>
+          <p>Mode: ${s.editorMode === 'editable_document' ? 'Editable document base' : 'Mapped table editor'}</p>
           <p>Updated: ${s.meta?.updatedAt ? new Date(s.meta.updatedAt).toLocaleString() : '-'}</p>
           <div class="flex">
             <button class="btn secondary load-scheme" data-id="${s.schemeId}" data-year="${s.year}" data-class="${s.classKey || safeKey(s.className)}" data-subject="${s.subjectKey || safeKey(s.subjectName)}" data-term="${s.termKey}">Load to edit</button>
@@ -1145,7 +1268,7 @@
       if (!scheme) return;
       editingScheme = scheme;
       currentTemplateId = scheme.fromTemplateId || null;
-      fillSchemeForm(scheme, { forcePdfMode: scheme.editorMode === 'pdf_base' });
+      fillSchemeForm(scheme, { forceEditableDocument: scheme.editorMode === 'editable_document' });
     }
 
     async function saveScheme() {
@@ -1158,7 +1281,7 @@
         toast('Please fill class, subject, term, and academic year.');
         return;
       }
-      if (editorMode !== 'pdf_base' && !Object.keys(rows).length) {
+      if (editorMode !== 'editable_document' && !Object.keys(rows).length) {
         toast('Please add at least one row.');
         return;
       }
@@ -1182,7 +1305,8 @@
         generalObjectives: generalObjectives.value || '',
         assessmentMethods: assessmentMethods.value || '',
         teachingResources: teachingResources.value || '',
-        rows: editorMode === 'pdf_base' ? (editingScheme?.rows || null) : rows,
+        rows: editorMode === 'editable_document' ? (editingScheme?.rows || null) : rows,
+        editableDocument: editorMode === 'editable_document' ? serializeEditableDocument() : null,
         editorMode,
         sourcePdf: currentSourcePdf || null,
         meta: {
@@ -1199,8 +1323,8 @@
     }
 
     async function downloadPdf() {
-      if (editorMode === 'pdf_base') {
-        await exportPreservedTemplatePdf();
+      if (editorMode === 'editable_document') {
+        await exportEditableDocumentPdf();
         return;
       }
       const cls = schemeClass.value || 'Class';
