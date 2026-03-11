@@ -9,6 +9,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
+  <script src="../../js/scheme-template-parser.js"></script>
 
   <style>
     * {
@@ -1314,6 +1315,41 @@
       return pool[0];
     }
 
+    async function ensureStructuredSchemeData(data) {
+      if (!data) return null;
+      const hasRows = Boolean(Object.keys(data?.rows || data?.parsedTemplate?.rows || {}).length);
+      if (hasRows) return data;
+
+      const parser = window.SomapSchemeTemplateParser;
+      const pdfMeta = data?.pdf || data?.sourcePdf || null;
+      if (!parser || !pdfMeta?.url) return data;
+
+      try {
+        const structured = data?.parsedTemplate
+          ? {
+              generalObjectives: data.parsedTemplate.generalObjectives || '',
+              assessmentMethods: data.parsedTemplate.assessmentMethods || '',
+              teachingResources: data.parsedTemplate.teachingResources || '',
+              hoursPerWeek: data.parsedTemplate.hoursPerWeek || null,
+              totalWeeks: data.parsedTemplate.totalWeeks || null,
+              rowsMap: data.parsedTemplate.rows || null,
+              extractionMeta: data.parsedTemplate.extractionMeta || null
+            }
+          : null;
+
+        const merged = parser.mergeTemplateData(data, structured);
+        if (Object.keys(merged?.rows || {}).length) return merged;
+
+        const parsed = await parser.parseUrl(pdfMeta.url, {
+          name: pdfMeta.fileName || data.subjectName || data.subject || 'scheme.pdf'
+        });
+        return parser.mergeTemplateData(data, parsed);
+      } catch (error) {
+        console.warn('Failed to parse scheme rows for lesson-plan guidance', error);
+        return data;
+      }
+    }
+
     function buildSchemeBundle(sourceData, sourceType, lessonDate) {
       const rows = normalizeSchemeRows(
         sourceData?.rows ||
@@ -1507,16 +1543,21 @@
       let cacheEntry = schemeLookupCache.get(cacheKey);
 
       if (!cacheEntry || options.force) {
-        const teacherScheme = await fetchLatestTeacherScheme(targetYear, className, subjectName, termKey);
+        const teacherSchemeRaw = await fetchLatestTeacherScheme(targetYear, className, subjectName, termKey);
+        const teacherScheme = await ensureStructuredSchemeData(teacherSchemeRaw);
         let teacherRows = teacherScheme?.rows || teacherScheme?.parsedTemplate?.rows || null;
         let fallbackTemplate = null;
 
         if ((!teacherRows || !Object.keys(teacherRows).length) && teacherScheme?.fromTemplateId) {
-          fallbackTemplate = await fetchTemplateById(targetYear, className, subjectName, termKey, teacherScheme.fromTemplateId);
+          fallbackTemplate = await ensureStructuredSchemeData(
+            await fetchTemplateById(targetYear, className, subjectName, termKey, teacherScheme.fromTemplateId)
+          );
           teacherRows = fallbackTemplate?.rows || fallbackTemplate?.parsedTemplate?.rows || null;
         }
 
-        const templateScheme = fallbackTemplate || await fetchLatestTemplate(targetYear, className, subjectName, termKey);
+        const templateScheme = fallbackTemplate || await ensureStructuredSchemeData(
+          await fetchLatestTemplate(targetYear, className, subjectName, termKey)
+        );
         const sourceData = teacherScheme
           ? { ...teacherScheme, rows: teacherRows || teacherScheme.rows || null }
           : templateScheme;
