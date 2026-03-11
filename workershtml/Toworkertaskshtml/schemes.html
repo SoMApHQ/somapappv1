@@ -751,6 +751,140 @@
       });
     }
 
+    function readableBlockText(block) {
+      return String(block?.originalText || block?.text || '').trim();
+    }
+
+    function normalizeBlockToken(block) {
+      return readableBlockText(block).replace(/[^A-Za-z0-9]+/g, '').toUpperCase();
+    }
+
+    function groupBlocksByLine(blocks) {
+      const sorted = [...(blocks || [])].sort((a, b) => {
+        const diff = Math.abs((a.top || 0) - (b.top || 0));
+        if (diff > 4) return (a.top || 0) - (b.top || 0);
+        return (a.left || 0) - (b.left || 0);
+      });
+
+      const lines = [];
+      sorted.forEach((block) => {
+        const current = lines[lines.length - 1];
+        if (!current || Math.abs((current.top || 0) - (block.top || 0)) > 4) {
+          lines.push({ top: block.top || 0, blocks: [block] });
+          return;
+        }
+        current.blocks.push(block);
+      });
+
+      lines.forEach((line) => line.blocks.sort((a, b) => (a.left || 0) - (b.left || 0)));
+      return lines;
+    }
+
+    function createIdentityOverlayBlock(id, lineBlocks, tokenCount, value, color, minWidth, minFontSize, fontScale) {
+      const labelBlocks = lineBlocks.slice(0, tokenCount);
+      if (!labelBlocks.length) return null;
+
+      let right = Math.max(...labelBlocks.map((block) => (block.left || 0) + (block.width || 0)));
+      let scanIndex = tokenCount;
+
+      while (scanIndex < lineBlocks.length && /^[:;,.]+$/.test(readableBlockText(lineBlocks[scanIndex]))) {
+        right = Math.max(right, (lineBlocks[scanIndex].left || 0) + (lineBlocks[scanIndex].width || 0));
+        scanIndex += 1;
+      }
+
+      let placeholderLeft = right + 8;
+      let placeholderRight = placeholderLeft + minWidth;
+      let foundPlaceholder = false;
+
+      for (let idx = scanIndex; idx < lineBlocks.length; idx += 1) {
+        const raw = readableBlockText(lineBlocks[idx]);
+        if (/^[._-]{3,}$/.test(raw) || /^\.+$/.test(raw)) {
+          if (!foundPlaceholder) placeholderLeft = lineBlocks[idx].left || placeholderLeft;
+          placeholderRight = Math.max(placeholderRight, (lineBlocks[idx].left || 0) + (lineBlocks[idx].width || 0));
+          foundPlaceholder = true;
+          continue;
+        }
+        if (foundPlaceholder) break;
+      }
+
+      const fontSize = Math.max(...labelBlocks.map((block) => Number(block.fontSize || 12)), minFontSize) * fontScale;
+      return {
+        id,
+        text: value,
+        originalText: '',
+        left: placeholderLeft,
+        top: Math.min(...labelBlocks.map((block) => Number(block.top || 0))) - 2,
+        width: Math.max(placeholderRight - placeholderLeft, minWidth),
+        minHeight: fontSize + 6,
+        fontSize,
+        fontWeight: '700',
+        textColor: color,
+        textAlign: 'left',
+        changed: true
+      };
+    }
+
+    function appendIdentityBlocks(pageNumber, blocks) {
+      if (pageNumber !== 1) return blocks || [];
+      const existing = [...(blocks || [])];
+      const lines = groupBlocksByLine(existing);
+      const definitions = [
+        {
+          id: 'identity-school',
+          tokens: ['NAME', 'OF', 'SCHOOL'],
+          value: schoolName,
+          color: '#0f4c81',
+          minWidth: 220,
+          minFontSize: 16,
+          fontScale: 1.18
+        },
+        {
+          id: 'identity-teacher',
+          tokens: ['TEACHERS', 'NAME'],
+          value: teacherNameEl.textContent,
+          color: '#8a1538',
+          minWidth: 230,
+          minFontSize: 15,
+          fontScale: 1.14
+        },
+        {
+          id: 'identity-year',
+          tokens: ['YEAR'],
+          value: academicYear.value || String(getYear()),
+          color: '#166534',
+          minWidth: 72,
+          minFontSize: 13,
+          fontScale: 1.1
+        }
+      ];
+
+      definitions.forEach((definition) => {
+        if (existing.some((block) => block.id === definition.id)) return;
+
+        for (const line of lines) {
+          const normalized = line.blocks.map((block) => normalizeBlockToken(block));
+          for (let i = 0; i <= normalized.length - definition.tokens.length; i += 1) {
+            const slice = normalized.slice(i, i + definition.tokens.length);
+            if (slice.join('|') !== definition.tokens.join('|')) continue;
+            const overlay = createIdentityOverlayBlock(
+              definition.id,
+              line.blocks.slice(i),
+              definition.tokens.length,
+              definition.value,
+              definition.color,
+              definition.minWidth,
+              definition.minFontSize,
+              definition.fontScale
+            );
+            if (overlay) existing.push(overlay);
+            return;
+          }
+        }
+      });
+
+      return existing;
+    }
+
     async function renderPdfPageBackground(page, width, height) {
       const baseViewport = page.getViewport({ scale: 1 });
       const scale = width / baseViewport.width;
@@ -802,7 +936,7 @@
             bg.src = background.dataUrl;
             bg.alt = `Page ${pageNumber} background`;
             pageNode.appendChild(bg);
-            savedPage.blocks.forEach((block) => createEditableBlock(pageNode, block));
+            appendIdentityBlocks(pageNumber, savedPage.blocks).forEach((block) => createEditableBlock(pageNode, block));
           } else {
             const viewport = page.getViewport({ scale: 1.2 });
             const textContent = await page.getTextContent();
@@ -827,7 +961,7 @@
               })
               .filter((item) => item.text);
 
-            const normalizedItems = autoFillEditableBlocks(items);
+            const normalizedItems = appendIdentityBlocks(pageNumber, autoFillEditableBlocks(items));
             const background = await renderPdfPageBackground(page, Math.ceil(viewport.width), Math.ceil(viewport.height));
 
             pageNode.dataset.page = pageNumber;
