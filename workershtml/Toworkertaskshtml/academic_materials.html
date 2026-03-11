@@ -211,15 +211,20 @@
         <p>Upload official schemes of work and academic resources for teachers to use as templates.</p>
       </div>
       <div class="inline">
-        <a href="../workertasks.html" style="text-decoration:none;">
+        <a href="../workertasks.html" id="backToDashboard" style="text-decoration:none;">
           <button type="button" style="background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.3);">Back to Dashboard</button>
         </a>
       </div>
     </header>
 
-    <section class="card" id="accessNotice" class="hidden">
+    <section class="card hidden" id="accessNotice">
       <h2>Access Restricted</h2>
-      <p class="muted">This page is available to Academic Teachers and Assistant Headteachers only.</p>
+      <p class="muted" id="accessNoticeText">This page is available to Academic Teachers and Assistant Headteachers only.</p>
+    </section>
+
+    <section class="card hidden" id="welcomeNotice">
+      <h2 id="welcomeTitle">Welcome</h2>
+      <p class="muted" id="welcomeText">Loading...</p>
     </section>
 
     <section class="card" id="uploadCard">
@@ -327,6 +332,25 @@
   </main>
 
   <script type="module">
+    function applySchoolFromUrl() {
+      const params = new URLSearchParams(window.location.search || '');
+      const schoolParam = params.get('school');
+      const yearParam = params.get('year');
+      if (schoolParam) {
+        localStorage.setItem('somap.currentSchoolId', schoolParam);
+        try {
+          const stored = JSON.parse(localStorage.getItem('somap.currentSchool') || 'null');
+          const schoolMeta = (stored && stored.id === schoolParam) ? stored : { id: schoolParam, name: schoolParam === 'socrates-school' ? 'Socrates School' : schoolParam };
+          localStorage.setItem('somap.currentSchool', JSON.stringify(schoolMeta));
+          if (window.SOMAP?.setSchool) window.SOMAP.setSchool(schoolMeta);
+        } catch (_) {}
+      }
+      if (yearParam && window.somapYearContext?.setSelectedYear) {
+        window.somapYearContext.setSelectedYear(yearParam);
+      }
+    }
+    applySchoolFromUrl();
+
     const db = window.db || firebase.database();
     const workerId = localStorage.getItem('workerId');
     const allowedRoles = ['Academic Teacher', 'Assistant Headteacher'];
@@ -386,6 +410,10 @@
     const preparedByLabel = document.getElementById('preparedByLabel');
     const schoolTag = document.getElementById('schoolTag');
     const accessNotice = document.getElementById('accessNotice');
+    const accessNoticeText = document.getElementById('accessNoticeText');
+    const welcomeNotice = document.getElementById('welcomeNotice');
+    const welcomeTitle = document.getElementById('welcomeTitle');
+    const welcomeText = document.getElementById('welcomeText');
     const uploadCard = document.getElementById('uploadCard');
 
     let currentProfile = null;
@@ -444,14 +472,36 @@
           teacherConfig = { ...teacherConfig, ...prevConfig };
         }
       }
-      const fullName = currentProfile.fullNameUpper || [currentProfile.firstName, currentProfile.middleName, currentProfile.lastName].filter(Boolean).join(' ').toUpperCase();
-      preparedByLabel.textContent = `Prepared by: ${fullName || 'Unknown'}`;
+      if (!teacherConfig.teacherType && isSocratesSchool(schoolId)) {
+        const rootConfigSnap = await db.ref(`years/${currentYear}/teachers_config/${workerId}`).once('value');
+        const rootConfig = rootConfigSnap.val();
+        if (rootConfig?.teacherType) {
+          teacherConfig = { ...teacherConfig, ...rootConfig };
+        }
+      }
+      const fullName = currentProfile.fullNameUpper || [currentProfile.firstName, currentProfile.middleName, currentProfile.lastName].filter(Boolean).join(' ').toUpperCase() || localStorage.getItem('somap_workerName') || 'Unknown';
+      preparedByLabel.textContent = `Prepared by: ${fullName}`;
       schoolTag.textContent = `School: ${schoolId}`;
 
-      const role = teacherConfig.teacherType || currentProfile.role || localStorage.getItem('somap_role') || '';
-      const canUpload = allowedRoles.includes(role);
-      uploadCard.style.display = canUpload ? 'block' : 'none';
-      accessNotice.classList.toggle('hidden', canUpload);
+      const roleRaw = teacherConfig.teacherType || currentProfile.role || currentProfile.designation || localStorage.getItem('somap_role') || '';
+      const role = String(roleRaw || '').trim();
+      const roleLower = role.toLowerCase();
+      const canUpload = allowedRoles.some(r => r.toLowerCase() === roleLower);
+
+      if (canUpload) {
+        welcomeNotice.classList.remove('hidden');
+        welcomeTitle.textContent = `Welcome, ${fullName}`;
+        welcomeText.textContent = role ? `You are signed in as ${role}.` : 'You have access to upload and manage academic materials.';
+        accessNotice.classList.add('hidden');
+        uploadCard.style.display = 'block';
+      } else {
+        accessNotice.classList.remove('hidden');
+        accessNoticeText.textContent = role
+          ? `${fullName}, your current role (${role}) does not have access. This page is available to Academic Teachers and Assistant Headteachers only.`
+          : `${fullName}, this page is available to Academic Teachers and Assistant Headteachers only.`;
+        welcomeNotice.classList.add('hidden');
+        uploadCard.style.display = 'none';
+      }
       if (!canUpload) return;
 
       // Academic/assistant headteacher sees the whole school set; if teacherConfig expands classes/subjects, merge them in.
@@ -464,10 +514,10 @@
       populateSelect(filterClass, classes, { label: 'All Classes', value: 'all' });
       populateSelect(filterSubject, subjects, { label: 'All Subjects', value: 'all' });
 
-      const currentYear = new Date().getFullYear();
       uploadYear.value = currentYear;
       const years = [];
-      for (let i = currentYear - 1; i <= currentYear + 2; i++) years.push(String(i));
+      const yearNum = Number(currentYear);
+      for (let i = yearNum - 1; i <= yearNum + 2; i++) years.push(String(i));
       populateSelect(filterYear, years, { label: 'All Years', value: 'all' });
     }
 
@@ -661,6 +711,12 @@
 
     (async function init() {
       try {
+        const backLink = document.getElementById('backToDashboard');
+        if (backLink) {
+          const s = localStorage.getItem('somap.currentSchoolId') || 'socrates-school';
+          const y = (typeof window.somapYearContext?.getSelectedYear === 'function' ? window.somapYearContext.getSelectedYear() : null) || new Date().getFullYear();
+          backLink.href = `../workertasks.html?school=${encodeURIComponent(s)}&year=${encodeURIComponent(y)}`;
+        }
         await loadProfile();
         await loadTemplates();
       } catch (err) {
