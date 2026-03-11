@@ -1087,6 +1087,21 @@
       return Boolean(Object.keys(getStructuredRowsMap(data) || {}).length);
     }
 
+    function editableDocumentToText(editableDocument) {
+      return (editableDocument?.pages || [])
+        .map((page) => (page?.blocks || [])
+          .sort((a, b) => {
+            const topDiff = Math.abs(Number(a?.top || 0) - Number(b?.top || 0));
+            if (topDiff > 4) return Number(a?.top || 0) - Number(b?.top || 0);
+            return Number(a?.left || 0) - Number(b?.left || 0);
+          })
+          .map((block) => String(block?.text || block?.originalText || '').trim())
+          .filter(Boolean)
+          .join('\n'))
+        .filter(Boolean)
+        .join('\n\n');
+    }
+
     function normalizeSchemeRows(rowsMap) {
       return Object.entries(rowsMap || {}).map(([rowKey, row]) => {
         const week = parseNumericValue(row?.week);
@@ -1332,7 +1347,7 @@
 
       const parser = window.SomapSchemeTemplateParser;
       const pdfMeta = data?.pdf || data?.sourcePdf || null;
-      if (!parser || !pdfMeta?.url) return data;
+      if (!parser) return data;
 
       try {
         const structured = data?.parsedTemplate
@@ -1349,6 +1364,15 @@
 
         const merged = parser.mergeTemplateData(data, structured);
         if (Object.keys(merged?.rows || {}).length) return merged;
+
+        const editableText = editableDocumentToText(data?.editableDocument);
+        if (editableText) {
+          const parsedFromDocument = parser.parseStructuredText(editableText);
+          const mergedFromDocument = parser.mergeTemplateData(data, parsedFromDocument);
+          if (hasStructuredRows(mergedFromDocument)) return mergedFromDocument;
+        }
+
+        if (!pdfMeta?.url) return data;
 
         const parsed = await parser.parseUrl(pdfMeta.url, {
           name: pdfMeta.fileName || data.subjectName || data.subject || 'scheme.pdf'
