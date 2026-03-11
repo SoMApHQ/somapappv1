@@ -9,6 +9,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
+  <script src="../../shared/academic-class-utils.js"></script>
 
   <style>
     * {
@@ -193,6 +194,10 @@
       transition: all 0.3s ease;
     }
 
+    .form-group select {
+      color-scheme: dark;
+    }
+
     .form-group select:focus,
     .form-group input:focus,
     .form-group textarea:focus {
@@ -202,8 +207,9 @@
       box-shadow: 0 0 0 4px rgba(240, 147, 251, 0.2);
     }
 
-    .form-group select option {
-      background: #5a67d8;
+    .form-group select option,
+    .form-group select optgroup {
+      background: #0f172a;
       color: white;
     }
 
@@ -468,11 +474,11 @@
         <div class="form-row">
           <div class="form-group">
             <label>Total Students Enrolled *</label>
-            <input type="number" id="totalEnrolled" min="1" placeholder="e.g., 30" required>
+            <input type="number" id="totalEnrolled" min="1" placeholder="Auto-filled from class enrollment" required readonly style="background: rgba(255,255,255,0.08); cursor: not-allowed;">
           </div>
           <div class="form-group">
             <label>Students Present *</label>
-            <input type="number" id="studentsPresent" min="0" placeholder="e.g., 28" required>
+            <input type="number" id="studentsPresent" min="0" placeholder="Auto-filled from attendance" required readonly style="background: rgba(255,255,255,0.08); cursor: not-allowed;">
           </div>
           <div class="form-group">
             <label>Students Absent *</label>
@@ -616,6 +622,8 @@
     let workerId = null;
     let teacherConfig = null;
     let journals = {};
+    const ClassUtils = window.SomapAcademicClassUtils || {};
+    const SOMAP_DEFAULT_YEAR = 2025;
 
     const teacherName = document.getElementById('teacherName');
     const teacherType = document.getElementById('teacherType');
@@ -700,11 +708,129 @@
     // Calculate absent students
     document.getElementById('totalEnrolled').addEventListener('input', calculateAbsent);
     document.getElementById('studentsPresent').addEventListener('input', calculateAbsent);
+    document.getElementById('journalClass').addEventListener('change', recomputeJournalAttendance);
+    document.getElementById('journalDate').addEventListener('change', recomputeJournalAttendance);
 
     function calculateAbsent() {
       const total = parseInt(document.getElementById('totalEnrolled').value) || 0;
       const present = parseInt(document.getElementById('studentsPresent').value) || 0;
       document.getElementById('studentsAbsent').value = Math.max(0, total - present);
+    }
+
+    function yyyymmdd(dateStr) {
+      if (!dateStr) return '';
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
+      const d = new Date(dateStr);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toISOString().slice(0, 10);
+    }
+
+    async function getBaseMaps(year) {
+      const anchorY = String(SOMAP_DEFAULT_YEAR);
+      const y = String(year);
+      const [studentsSnap, anchorSnap, ySnap, listSnap] = await Promise.all([
+        schoolRef('students').once('value'),
+        schoolRef(`enrollments/${anchorY}`).once('value').catch(() => ({ val: () => null })),
+        schoolRef(`enrollments/${y}`).once('value').catch(() => ({ val: () => null })),
+        schoolRef(`studentlist/${y}`).once('value').catch(() => ({ val: () => null }))
+      ]);
+      return {
+        y,
+        students: (studentsSnap && studentsSnap.val && studentsSnap.val()) || {},
+        enrollAnchor: (anchorSnap && anchorSnap.val && anchorSnap.val()) || {},
+        enrollYear: (ySnap && ySnap.val && ySnap.val()) || {},
+        studentlistYear: (listSnap && listSnap.val && listSnap.val()) || {}
+      };
+    }
+
+    function resolveClassForYear(studentId, studentRecord, enrollAnchor, enrollYear, targetYear) {
+      const directClass = ClassUtils.normalizeClassName
+        ? ClassUtils.normalizeClassName(studentRecord?.classLevel || studentRecord?.className || studentRecord?.class || '')
+        : (studentRecord?.classLevel || studentRecord?.className || studentRecord?.class || '');
+      if (directClass && String(targetYear) === String(SOMAP_DEFAULT_YEAR)) {
+        return directClass;
+      }
+
+      const anchor = enrollAnchor[studentId] || {};
+      const baseClass = ClassUtils.normalizeClassName
+        ? ClassUtils.normalizeClassName(anchor.className || anchor.classLevel || directClass || studentRecord?.classLevel || studentRecord?.className || 'Baby Class', { allowGraduated: true })
+        : (anchor.className || anchor.classLevel || directClass || studentRecord?.classLevel || studentRecord?.className || 'Baby Class');
+      const yrRec = enrollYear[studentId] || {};
+      if (yrRec.className || yrRec.classLevel) {
+        return ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(yrRec.className || yrRec.classLevel, { allowGraduated: true }) : (yrRec.className || yrRec.classLevel);
+      }
+
+      return ClassUtils.shiftCanonicalClass ? ClassUtils.shiftCanonicalClass(baseClass, Number(targetYear) - SOMAP_DEFAULT_YEAR) : baseClass;
+    }
+
+    function countClassForYear(targetClass, maps, targetYear) {
+      const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(targetClass) : targetClass;
+      const yList = maps.studentlistYear?.[canonicalTarget] || maps.studentlistYear?.[targetClass];
+      if (yList && typeof yList === 'object' && Object.keys(yList).length > 0) {
+        return Object.keys(yList).length;
+      }
+
+      let count = 0;
+      const students = maps.students || {};
+      Object.keys(students).forEach((id) => {
+        const studentRecord = students[id];
+        if (!studentRecord || typeof studentRecord !== 'object') return;
+        const cls = resolveClassForYear(id, studentRecord, maps.enrollAnchor, maps.enrollYear, targetYear);
+        const normalizedClass = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(cls) : cls;
+        if (String(normalizedClass || '').trim().toLowerCase() === String(canonicalTarget || '').trim().toLowerCase()) {
+          count += 1;
+        }
+      });
+      return count;
+    }
+
+    async function loadAttendanceCounts(year, className, dateStr, studentsMap) {
+      const y = String(year);
+      const cls = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(className) : String(className || '').trim();
+      const key = yyyymmdd(dateStr);
+      const tryPaths = ClassUtils.buildAttendancePathCandidates
+        ? ClassUtils.buildAttendancePathCandidates(y, cls, key).map((path) => schoolRef(path))
+        : [schoolRef(`classAttendance/${y}/${cls}/${key}`)];
+
+      let node = null;
+      for (const ref of tryPaths) {
+        try {
+          const snap = await ref.once('value');
+          const val = snap && snap.val ? snap.val() : null;
+          if (val && typeof val === 'object' && Object.keys(val).length > 0) {
+            node = val;
+            break;
+          }
+        } catch (error) {
+          continue;
+        }
+      }
+
+      if (!node) return { present: 0, absent: 0, boysP: 0, girlsP: 0, boysA: 0, girlsA: 0 };
+      return ClassUtils.summarizeAttendanceNode
+        ? ClassUtils.summarizeAttendanceNode(node, studentsMap)
+        : { present: 0, absent: 0, boysP: 0, girlsP: 0, boysA: 0, girlsA: 0 };
+    }
+
+    async function recomputeJournalAttendance() {
+      const journalClass = document.getElementById('journalClass');
+      const journalDate = document.getElementById('journalDate');
+      const totalEl = document.getElementById('totalEnrolled');
+      const presentEl = document.getElementById('studentsPresent');
+      const absentEl = document.getElementById('studentsAbsent');
+      if (!journalClass?.value || !journalDate?.value) return;
+
+      try {
+        const year = String(getYear());
+        const chosenClass = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(journalClass.value) : journalClass.value;
+        const maps = await getBaseMaps(year);
+        totalEl.value = countClassForYear(chosenClass, maps, year);
+        const att = await loadAttendanceCounts(year, chosenClass, journalDate.value, maps.students || {});
+        presentEl.value = att.present || 0;
+        absentEl.value = att.absent || Math.max(0, (parseInt(totalEl.value, 10) || 0) - (att.present || 0));
+      } catch (error) {
+        console.error('Error recomputing journal attendance:', error);
+      }
     }
 
     workerId = localStorage.getItem('workerId');
@@ -741,7 +867,9 @@
           profile = legacyProfileSnap.val() || profile;
         }
 
-        teacherConfig = configSnap.val() || {};
+        teacherConfig = ClassUtils.normalizeTeacherConfig
+          ? ClassUtils.normalizeTeacherConfig(configSnap.val() || {}, { includeGraduated: true })
+          : (configSnap.val() || {});
         if (!teacherConfig.teacherType) {
           const prevConfigSnap = await scopedOrLegacy(`years/${previousYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`);
           const prevConfig = prevConfigSnap.val();
@@ -757,7 +885,9 @@
           }
         }
 
-        if (!teacherConfig.classes?.length && teacherConfig.classSubjectMappings?.length) {
+        if (ClassUtils.normalizeTeacherConfig) {
+          teacherConfig = ClassUtils.normalizeTeacherConfig(teacherConfig, { includeGraduated: true });
+        } else if (!teacherConfig.classes?.length && teacherConfig.classSubjectMappings?.length) {
           teacherConfig.classes = [...new Set((teacherConfig.classSubjectMappings || []).map(m => m.class).filter(Boolean))];
           teacherConfig.subjects = teacherConfig.subjects || [...new Set((teacherConfig.classSubjectMappings || []).flatMap(m => m.subjects || []).filter(Boolean))];
         }
@@ -783,6 +913,7 @@
 
         populateSelects();
         loadJournals();
+        recomputeJournalAttendance();
       } catch (error) {
         console.error('Error loading config:', error);
         toast('Error loading teacher configuration', 'error');
@@ -790,10 +921,16 @@
     }
 
     function populateSelects() {
-      (teacherConfig?.classes || []).forEach(className => {
-        filterClass.add(new Option(className, className));
-        const journalClassEl = document.getElementById('journalClass');
-        if (journalClassEl) journalClassEl.add(new Option(className, className));
+      const classes = (ClassUtils.canonicalizeClassList
+        ? ClassUtils.canonicalizeClassList(teacherConfig?.classes || [], { includeGraduated: true })
+        : (teacherConfig?.classes || [])
+      ).filter((className) => className !== 'Graduated');
+      const journalClassEl = document.getElementById('journalClass');
+      if (filterClass) while (filterClass.options.length > 1) filterClass.remove(1);
+      if (journalClassEl) while (journalClassEl.options.length > 1) journalClassEl.remove(1);
+      classes.forEach((className) => {
+        filterClass?.add(new Option(className, className));
+        journalClassEl?.add(new Option(className, className));
       });
     }
 
@@ -812,11 +949,15 @@
     function renderJournals() {
       const selectedClass = filterClass.value;
       const dayRange = parseInt(filterDateRange.value);
+      const currentYear = String(getYear());
 
       const cutoffTime = dayRange > 0 ? Date.now() - (dayRange * 24 * 60 * 60 * 1000) : 0;
 
       let filtered = Object.entries(journals).filter(([id, journal]) => {
-        if (selectedClass && journal.class !== selectedClass) return false;
+        const journalClass = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(journal.class) : journal.class;
+        const journalYear = String(journal.year || String(journal.date || '').slice(0, 4) || '');
+        if (journalYear && journalYear !== currentYear) return false;
+        if (selectedClass && journalClass !== selectedClass) return false;
         if (dayRange > 0 && journal.timestamp < cutoffTime) return false;
         return true;
       });
@@ -846,7 +987,7 @@
         <div class="journal-card">
           <div class="journal-header">
             <div>
-              <div class="journal-title">${journal.class} - ${journal.date}</div>
+              <div class="journal-title">${ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(journal.class) : journal.class} - ${journal.date}</div>
               <div class="journal-meta">
                 <span class="meta-tag">📅 ${dateStr}</span>
                 <span class="meta-tag">👥 ${journal.studentsPresent}/${journal.totalEnrolled} Present</span>
@@ -886,7 +1027,9 @@
     };
 
     saveJournalBtn.addEventListener('click', async () => {
-      const journalClass = document.getElementById('journalClass').value;
+      const journalClass = ClassUtils.normalizeClassName
+        ? ClassUtils.normalizeClassName(document.getElementById('journalClass').value)
+        : document.getElementById('journalClass').value;
       const journalDate = document.getElementById('journalDate').value;
       const totalEnrolled = document.getElementById('totalEnrolled').value;
       const studentsPresent = document.getElementById('studentsPresent').value;
@@ -901,6 +1044,8 @@
 
       const journalData = {
         class: journalClass,
+        className: journalClass,
+        year: String(getYear()),
         date: journalDate,
         dayOfWeek: document.getElementById('dayOfWeek').value,
         totalEnrolled: parseInt(totalEnrolled),
@@ -918,6 +1063,7 @@
         challenges: document.getElementById('challenges').value,
         reminders: document.getElementById('reminders').value,
         timestamp: Date.now(),
+        teacherId: workerId,
         teacherName: teacherName.textContent
       };
 
@@ -946,6 +1092,7 @@
 
         totalEntries.textContent = Object.keys(journals).length;
         renderJournals();
+        recomputeJournalAttendance();
       } catch (error) {
         console.error('Error saving journal:', error);
         toast('Error saving journal', 'error');

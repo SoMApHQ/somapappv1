@@ -9,6 +9,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
+  <script src="../../shared/academic-class-utils.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -156,6 +157,16 @@
       color: white;
       font-size: 1rem;
       outline: none;
+    }
+
+    select {
+      color-scheme: dark;
+    }
+
+    select option,
+    select optgroup {
+      background: #0f172a;
+      color: #f8fafc;
     }
 
     select:focus, input:focus, textarea:focus {
@@ -583,6 +594,7 @@
     const cancelSchemeBtn = document.getElementById('cancelSchemeBtn');
     const downloadPdfBtn = document.getElementById('downloadPdfBtn');
 
+    const ClassUtils = window.SomapAcademicClassUtils || {};
     let teacherConfig = null;
     let templatesCache = [];
     let teacherSchemesCache = [];
@@ -1259,7 +1271,9 @@
         profile = legacyProfileSnap.val() || profile;
       }
 
-      teacherConfig = configSnap.val() || {};
+      teacherConfig = ClassUtils.normalizeTeacherConfig
+        ? ClassUtils.normalizeTeacherConfig(configSnap.val() || {}, { includeGraduated: true })
+        : (configSnap.val() || {});
 
       if (!teacherConfig.classes?.length && teacherConfig.classSubjectMappings?.length) {
         const prevConfigSnap = await scopedOrLegacy(`years/${previousYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`);
@@ -1269,7 +1283,9 @@
         }
       }
 
-      if (!teacherConfig.classes?.length && teacherConfig.classSubjectMappings?.length) {
+      if (ClassUtils.normalizeTeacherConfig) {
+        teacherConfig = ClassUtils.normalizeTeacherConfig(teacherConfig, { includeGraduated: true });
+      } else if (!teacherConfig.classes?.length && teacherConfig.classSubjectMappings?.length) {
         const allClasses = [...new Set((teacherConfig.classSubjectMappings || []).map((m) => m.class).filter(Boolean))];
         const allSubjects = [...new Set((teacherConfig.classSubjectMappings || []).flatMap((m) => m.subjects || []).filter(Boolean))];
         teacherConfig.classes = teacherConfig.classes || allClasses;
@@ -1280,14 +1296,19 @@
       teacherNameEl.textContent = fullName || localStorage.getItem('somap_workerName') || 'Unknown';
       teacherTypeEl.textContent = teacherConfig.teacherType || 'Teacher';
 
-      const classes = teacherConfig.classes || [];
-      const subjects = teacherConfig.subjects || [];
+      const classes = (ClassUtils.canonicalizeClassList
+        ? ClassUtils.canonicalizeClassList(teacherConfig.classes || [], { includeGraduated: true })
+        : (teacherConfig.classes || [])
+      ).filter((className) => className !== 'Graduated');
+      const subjects = ClassUtils.buildSubjectListForClasses
+        ? ClassUtils.buildSubjectListForClasses(classes, teacherConfig.subjects || [])
+        : (teacherConfig.subjects || []);
       populateSelect(filterClass, classes, { label: 'All Classes', value: '' });
       populateSelect(filterSubject, subjects, { label: 'All Subjects', value: '' });
       populateSelect(schemeClass, classes, { label: 'Select Class', value: '' });
       populateSelect(schemeSubject, subjects, { label: 'Select Subject', value: '' });
 
-      const yearNow = new Date().getFullYear();
+      const yearNow = window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
       academicYear.value = yearNow;
       filterYear.value = yearNow;
     }

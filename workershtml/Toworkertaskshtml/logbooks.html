@@ -9,6 +9,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
+  <script src="../../shared/academic-class-utils.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
@@ -100,8 +101,13 @@
       font-weight: 600;
     }
 
-    .year-selector-wrap select option {
-      background: #5a67d8;
+    .year-selector-wrap select {
+      color-scheme: dark;
+    }
+
+    .year-selector-wrap select option,
+    .year-selector-wrap select optgroup {
+      background: #0f172a;
       color: white;
     }
 
@@ -632,12 +638,14 @@
     // ========== YEAR CONTEXT & CLASS SHIFTING ==========
     const SOMAP_ALLOWED_YEARS = Array.from({length: 20}, (_,i)=>2023+i); // 2023..2042
     const SOMAP_DEFAULT_YEAR = 2025;
-    const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
+    const ClassUtils = window.SomapAcademicClassUtils || {};
+    const CLASS_ORDER = (ClassUtils.CLASS_OPTIONS || ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7']).filter((className) => className !== 'Graduated');
     
     const L = s => String(s||'').trim().toLowerCase();
 
     function shiftClass(baseClass, deltaYears){
-      const i = CLASS_ORDER.findIndex(c => L(c)===L(baseClass));
+      const normalizedBase = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(baseClass, { allowGraduated: true }) : baseClass;
+      const i = CLASS_ORDER.findIndex(c => L(c)===L(normalizedBase));
       if (i<0) return baseClass||'';
       const j = i + Number(deltaYears||0);
       if (j < 0) return 'PRE-ADMISSION';
@@ -826,7 +834,9 @@
           profile = legacyProfileSnap.val() || profile;
         }
 
-        teacherConfig = configSnap.val() || {};
+        teacherConfig = ClassUtils.normalizeTeacherConfig
+          ? ClassUtils.normalizeTeacherConfig(configSnap.val() || {}, { includeGraduated: true })
+          : (configSnap.val() || {});
         if (!teacherConfig.teacherType) {
           const prevConfigSnap = await scopedOrLegacy(`years/${previousYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`);
           const prevConfig = prevConfigSnap.val();
@@ -842,7 +852,9 @@
           }
         }
 
-        if (!teacherConfig.classes?.length && teacherConfig.classSubjectMappings?.length) {
+        if (ClassUtils.normalizeTeacherConfig) {
+          teacherConfig = ClassUtils.normalizeTeacherConfig(teacherConfig, { includeGraduated: true });
+        } else if (!teacherConfig.classes?.length && teacherConfig.classSubjectMappings?.length) {
           teacherConfig.classes = [...new Set((teacherConfig.classSubjectMappings || []).map(m => m.class).filter(Boolean))];
           teacherConfig.subjects = teacherConfig.subjects || [...new Set((teacherConfig.classSubjectMappings || []).flatMap(m => m.subjects || []).filter(Boolean))];
         }
@@ -880,12 +892,20 @@
       const lbFilterClass = document.getElementById('lbFilterClass');
       const lbFilterSubject = document.getElementById('lbFilterSubject');
 
-      (teacherConfig?.classes || []).forEach(className => {
+      const classes = (ClassUtils.canonicalizeClassList
+        ? ClassUtils.canonicalizeClassList(teacherConfig?.classes || [], { includeGraduated: true })
+        : (teacherConfig?.classes || [])
+      ).filter((className) => className !== 'Graduated');
+      const subjects = ClassUtils.buildSubjectListForClasses
+        ? ClassUtils.buildSubjectListForClasses(classes, teacherConfig?.subjects || [])
+        : (teacherConfig?.subjects || []);
+
+      classes.forEach(className => {
         if (lbFilterClass) lbFilterClass.add(new Option(className, className));
         if (lbClass) lbClass.add(new Option(className, className));
       });
 
-      (teacherConfig?.subjects || []).forEach(subject => {
+      subjects.forEach(subject => {
         if (lbSubject) lbSubject.add(new Option(subject, subject));
       });
     }
@@ -910,16 +930,20 @@
 
     function resolveClassForYear(studentId, studentRecord, enrollAnchor, enrollYear, targetYear) {
       // First, try to get class directly from student record (most reliable for current year)
-      const directClass = studentRecord?.classLevel || studentRecord?.className || studentRecord?.class || '';
+      const directClass = ClassUtils.normalizeClassName
+        ? ClassUtils.normalizeClassName(studentRecord?.classLevel || studentRecord?.className || studentRecord?.class || '')
+        : (studentRecord?.classLevel || studentRecord?.className || studentRecord?.class || '');
       if (directClass && String(targetYear) === String(SOMAP_DEFAULT_YEAR)) {
         return directClass;
       }
       
       // For other years, use enrollment data with shifting
       const anchor = enrollAnchor[studentId] || {};
-      const baseClass = anchor.className || anchor.classLevel || directClass || studentRecord?.classLevel || studentRecord?.className || 'Baby Class';
+      const baseClass = ClassUtils.normalizeClassName
+        ? ClassUtils.normalizeClassName(anchor.className || anchor.classLevel || directClass || studentRecord?.classLevel || studentRecord?.className || 'Baby Class', { allowGraduated: true })
+        : (anchor.className || anchor.classLevel || directClass || studentRecord?.classLevel || studentRecord?.className || 'Baby Class');
       const yrRec = enrollYear[studentId] || {};
-      if (yrRec.className || yrRec.classLevel) return (yrRec.className || yrRec.classLevel);
+      if (yrRec.className || yrRec.classLevel) return (ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(yrRec.className || yrRec.classLevel, { allowGraduated: true }) : (yrRec.className || yrRec.classLevel));
       
       // Shift from anchor year
       const delta = Number(targetYear) - SOMAP_DEFAULT_YEAR;
@@ -928,7 +952,8 @@
 
     function countClassForYear(targetClass, maps, targetYear) {
       // Try explicit studentlist/{year}/{className} first
-      const yList = maps.studentlistYear?.[targetClass];
+      const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(targetClass) : targetClass;
+      const yList = maps.studentlistYear?.[canonicalTarget] || maps.studentlistYear?.[targetClass];
       if (yList && typeof yList === 'object' && Object.keys(yList).length > 0) {
         return Object.keys(yList).length;
       }
@@ -945,8 +970,8 @@
         const cls = resolveClassForYear(id, studentRecord, maps.enrollAnchor, maps.enrollYear, targetYear);
         
         // Normalize both class names for comparison (case-insensitive, trim spaces)
-        const normalizedTarget = L(targetClass);
-        const normalizedClass = L(cls);
+        const normalizedTarget = L(canonicalTarget);
+        const normalizedClass = L(ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(cls) : cls);
         
         if (normalizedClass === normalizedTarget) {
           n++;
@@ -958,19 +983,18 @@
     }
 
     async function loadAttendanceCounts(year, className, dateStr, studentsMap) {
-      const y = String(year), cls = className.trim(), key = yyyymmdd(dateStr);
-      const tryPaths = [
-        base(`classAttendance/${y}/${cls}/${key}`),
-        base(`attendance/class/${y}/${cls}/${key}`),
-        base(`attendance/${y}/${cls}/${key}`),
-        base(`classAttendance/${cls}/${key}`),
-        base(`attendance/${cls}/${key}`),
-        // Also try alternative class name formats
-        base(`classAttendance/${y}/${cls.replace(/\s+/g, '_')}/${key}`),
-        base(`attendance/${y}/${cls.replace(/\s+/g, '_')}/${key}`),
-        base(`classAttendance/${cls.replace(/\s+/g, '_')}/${key}`),
-        base(`attendance/${cls.replace(/\s+/g, '_')}/${key}`)
-      ];
+      const y = String(year);
+      const cls = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(className) : className.trim();
+      const key = yyyymmdd(dateStr);
+      const tryPaths = (ClassUtils.buildAttendancePathCandidates
+        ? ClassUtils.buildAttendancePathCandidates(y, cls, key)
+        : [
+            `classAttendance/${y}/${cls}/${key}`,
+            `attendance/class/${y}/${cls}/${key}`,
+            `attendance/${y}/${cls}/${key}`,
+            `classAttendance/${cls}/${key}`,
+            `attendance/${cls}/${key}`
+          ]).map((path) => base(path));
       
       let node = null;
       let usedPath = null;

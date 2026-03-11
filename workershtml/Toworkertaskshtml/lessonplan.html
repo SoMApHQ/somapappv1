@@ -9,6 +9,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
+  <script src="../../shared/academic-class-utils.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="../../js/scheme-template-parser.js"></script>
@@ -203,6 +204,10 @@
       transition: all 0.3s ease;
     }
 
+    .form-group select {
+      color-scheme: dark;
+    }
+
     .form-group select:focus,
     .form-group input:focus,
     .form-group textarea:focus {
@@ -212,7 +217,8 @@
       box-shadow: 0 0 0 4px rgba(240, 147, 251, 0.2);
     }
 
-    .form-group select option {
+    .form-group select option,
+    .form-group select optgroup {
       background: #5a67d8;
       color: white;
     }
@@ -792,7 +798,8 @@
     // ========== YEAR CONTEXT & CLASS SHIFTING ==========
     const SOMAP_ALLOWED_YEARS = Array.from({length: 20}, (_,i)=>2023+i); // 2023..2042
     const SOMAP_DEFAULT_YEAR = 2025;
-    const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 1AB','Class 2AB','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
+    const ClassUtils = window.SomapAcademicClassUtils || {};
+    const CLASS_ORDER = (ClassUtils.CLASS_OPTIONS || ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7']).filter((item) => item !== 'Graduated');
     
     const L = s => String(s||'').trim().toLowerCase();
 
@@ -2086,10 +2093,10 @@
     async function getBaseMaps(year){
       const anchorY = String(SOMAP_DEFAULT_YEAR), y = String(year);
       const [studentsSnap, anchorSnap, ySnap, listSnap] = await Promise.all([
-        db.ref('students').once('value'),
-        db.ref(`enrollments/${anchorY}`).once('value').catch(()=>({val:()=>null})),
-        db.ref(`enrollments/${y}`).once('value').catch(()=>({val:()=>null})),
-        db.ref(`studentlist/${y}`).once('value').catch(()=>({val:()=>null}))
+        schoolRef('students').once('value'),
+        schoolRef(`enrollments/${anchorY}`).once('value').catch(()=>({val:()=>null})),
+        schoolRef(`enrollments/${y}`).once('value').catch(()=>({val:()=>null})),
+        schoolRef(`studentlist/${y}`).once('value').catch(()=>({val:()=>null}))
       ]);
       return {
         students: (studentsSnap && studentsSnap.val && studentsSnap.val())||{},
@@ -2101,25 +2108,32 @@
 
     function resolveClassForYear(studentId, studentRecord, enrollAnchor, enrollYear, targetYear){
       // First, try to get class directly from student record (most reliable for current year)
-      const directClass = studentRecord?.classLevel || studentRecord?.className || studentRecord?.class || '';
+      const directClass = ClassUtils.normalizeClassName
+        ? ClassUtils.normalizeClassName(studentRecord?.classLevel || studentRecord?.className || studentRecord?.class || '')
+        : (studentRecord?.classLevel || studentRecord?.className || studentRecord?.class || '');
       if (directClass && String(targetYear) === String(SOMAP_DEFAULT_YEAR)) {
         return directClass;
       }
       
       // For other years, use enrollment data with shifting
       const anchor = enrollAnchor[studentId]||{};
-      const baseClass = anchor.className || anchor.classLevel || directClass || studentRecord?.classLevel || studentRecord?.className || 'Baby Class';
+      const baseClass = ClassUtils.normalizeClassName
+        ? ClassUtils.normalizeClassName(anchor.className || anchor.classLevel || directClass || studentRecord?.classLevel || studentRecord?.className || 'Baby Class')
+        : (anchor.className || anchor.classLevel || directClass || studentRecord?.classLevel || studentRecord?.className || 'Baby Class');
       const yrRec = enrollYear[studentId]||{};
-      if (yrRec.className || yrRec.classLevel) return (yrRec.className || yrRec.classLevel);
+      if (yrRec.className || yrRec.classLevel) {
+        return ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(yrRec.className || yrRec.classLevel) : (yrRec.className || yrRec.classLevel);
+      }
       
       // Shift from anchor year
       const delta = Number(targetYear) - SOMAP_DEFAULT_YEAR;
-      return shiftClass(baseClass, delta);
+      return ClassUtils.shiftCanonicalClass ? ClassUtils.shiftCanonicalClass(baseClass, delta) : shiftClass(baseClass, delta);
     }
 
     function countClassForYear(targetClass, maps, targetYear){
       // Try explicit studentlist/{year}/{className} first
-      const yList = maps.studentlistYear?.[targetClass];
+      const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(targetClass) : targetClass;
+      const yList = maps.studentlistYear?.[canonicalTarget] || maps.studentlistYear?.[targetClass];
       if (yList && typeof yList === 'object' && Object.keys(yList).length > 0) {
         return Object.keys(yList).length;
       }
@@ -2136,8 +2150,8 @@
         const cls = resolveClassForYear(id, studentRecord, maps.enrollAnchor, maps.enrollYear, targetYear);
         
         // Normalize both class names for comparison (case-insensitive, trim spaces)
-        const normalizedTarget = L(targetClass);
-        const normalizedClass = L(cls);
+        const normalizedTarget = L(canonicalTarget);
+        const normalizedClass = L(ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(cls) : cls);
         
         if (normalizedClass === normalizedTarget) {
           n++;
@@ -2149,30 +2163,27 @@
     }
 
     async function loadAttendanceCounts(year, className, dateStr, studentsMap){
-      const y = String(year), cls = className.trim(), key = yyyymmdd(dateStr);
-      const tryPaths = [
-        `classAttendance/${y}/${cls}/${key}`,
-        `attendance/class/${y}/${cls}/${key}`,
-        `attendance/${y}/${cls}/${key}`,
-        `classAttendance/${cls}/${key}`,
-        `attendance/${cls}/${key}`,
-        // Also try alternative class name formats
-        `classAttendance/${y}/${cls.replace(/\s+/g, '_')}/${key}`,
-        `attendance/${y}/${cls.replace(/\s+/g, '_')}/${key}`,
-        `classAttendance/${cls.replace(/\s+/g, '_')}/${key}`,
-        `attendance/${cls.replace(/\s+/g, '_')}/${key}`
-      ];
+      const y = String(year);
+      const cls = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(className) : String(className || '').trim();
+      const key = yyyymmdd(dateStr);
+      const tryPaths = ClassUtils.buildAttendancePathCandidates
+        ? ClassUtils.buildAttendancePathCandidates(y, cls, key)
+        : [
+            `classAttendance/${y}/${cls}/${key}`,
+            `attendance/class/${y}/${cls}/${key}`,
+            `attendance/${y}/${cls}/${key}`,
+            `classAttendance/${cls}/${key}`,
+            `attendance/${cls}/${key}`
+          ];
       
       let node = null;
-      let usedPath = null;
       
       for(const p of tryPaths){
         try {
-          const snap = await db.ref(p).once('value');
+          const snap = await schoolRef(p).once('value');
           const val = snap && snap.val ? snap.val() : null;
           if (val && typeof val === 'object' && Object.keys(val).length > 0){ 
             node = val; 
-            usedPath = p;
             console.log(`Found attendance at path: ${p}`);
             break; 
           }
@@ -2187,36 +2198,17 @@
         return { present:0, absent:0, boysP:0, girlsP:0, boysA:0, girlsA:0 };
       }
       
-      let pb=0, pg=0, ab=0, ag=0;
-      
-      for(const sid of Object.keys(node)){
-        const rec = node[sid]||{};
-        // Check multiple status formats
-        const status = String(rec.status || rec.s || (rec.am || rec.pm || '') || '').toUpperCase().trim();
-        const amStatus = String(rec.am || '').toUpperCase().trim();
-        const pmStatus = String(rec.pm || '').toUpperCase().trim();
-        
-        // Consider present if status is P, PRESENT, 1, true, or if either AM/PM is P
-        const isPresent = status==='P' || status==='PRESENT' || status==='1' || status===1 || status===true || 
-                         amStatus==='P' || pmStatus==='P';
-        
-        // Get gender from attendance record or student record
-        const genderFromAtt = String(rec.gender || rec.sex || '').toUpperCase().trim();
-        const studentRecord = studentsMap[sid];
-        const genderFromStudent = String(studentRecord?.gender || studentRecord?.sex || '').toUpperCase().trim();
-        const gen = genderFromAtt || genderFromStudent;
-        const isBoy = gen==='M' || gen==='B' || gen==='BOY' || gen==='MALE';
-        
-        if (isPresent){
-          if(isBoy) pb++; else pg++;
-        } else {
-          if(isBoy) ab++; else ag++;
-        }
-      }
+      const summary = ClassUtils.summarizeAttendanceNode
+        ? ClassUtils.summarizeAttendanceNode(node, studentsMap)
+        : { present:0, absent:0, boysP:0, girlsP:0, boysA:0, girlsA:0 };
+      const pb = summary.boysP || 0;
+      const pg = summary.girlsP || 0;
+      const ab = summary.boysA || 0;
+      const ag = summary.girlsA || 0;
       
       console.log(`Attendance counts - Present: ${pb+pg} (♂${pb} ♀${pg}), Absent: ${ab+ag} (♂${ab} ♀${ag})`);
       
-      return { present: pb+pg, absent: ab+ag, boysP:pb, girlsP:pg, boysA:ab, girlsA:ag };
+      return summary;
     }
 
     // ========== AUTO-FILL LOGIC ==========
@@ -2372,7 +2364,9 @@
           profile = legacyProfileSnap.val() || profile;
         }
 
-        teacherConfig = configSnap.val() || {};
+        teacherConfig = ClassUtils.normalizeTeacherConfig
+          ? ClassUtils.normalizeTeacherConfig(configSnap.val() || {})
+          : (configSnap.val() || {});
         if (!teacherConfig.teacherType) {
           const prevConfigSnap = await scopedOrLegacy(`years/${previousYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`);
           const prevConfig = prevConfigSnap.val();
@@ -2421,16 +2415,31 @@
 
     // Populate select dropdowns
     function populateSelects() {
-      // Classes
-      teacherConfig.classes.forEach(className => {
+      const normalizedConfig = ClassUtils.normalizeTeacherConfig
+        ? ClassUtils.normalizeTeacherConfig(teacherConfig || {})
+        : (teacherConfig || {});
+      teacherConfig = normalizedConfig;
+
+      const classes = normalizedConfig.classes || [];
+      const subjects = normalizedConfig.subjects || [];
+
+      [filterClass, planClass].forEach((select) => {
+        if (!select) return;
+        while (select.options.length > 1) select.remove(1);
+      });
+      [filterSubject, planSubject].forEach((select) => {
+        if (!select) return;
+        while (select.options.length > 1) select.remove(1);
+      });
+
+      classes.forEach(className => {
         const opt1 = new Option(className, className);
         const opt2 = new Option(className, className);
         filterClass.add(opt1);
         planClass.add(opt2);
       });
 
-      // Subjects
-      teacherConfig.subjects.forEach(subject => {
+      subjects.forEach(subject => {
         const opt1 = new Option(subject, subject);
         const opt2 = new Option(subject, subject);
         filterSubject.add(opt1);
