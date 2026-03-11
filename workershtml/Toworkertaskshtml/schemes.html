@@ -11,7 +11,6 @@
   <script src="../../firebase.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="../../js/scheme-template-parser.js"></script>
@@ -284,6 +283,14 @@
       margin: 0 auto;
     }
 
+    .editable-doc-bg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
     .editable-fragment {
       position: absolute;
       color: #111827;
@@ -293,6 +300,7 @@
       line-height: 1.22;
       padding: 1px 2px;
       border-radius: 4px;
+      background: rgba(255, 255, 255, 0.88);
     }
 
     .editable-fragment:focus {
@@ -432,15 +440,15 @@
         </div>
       </div>
 
-      <div style="margin-top:12px;">
+      <div id="generalObjectivesSection" style="margin-top:12px;">
         <label>General Objectives / Learning Outcomes</label>
         <textarea id="generalObjectives" placeholder="What should students achieve by the end of this term?"></textarea>
       </div>
-      <div style="margin-top:12px;">
+      <div id="assessmentMethodsSection" style="margin-top:12px;">
         <label>Assessment Methods</label>
         <textarea id="assessmentMethods" placeholder="Describe how you will assess students' progress throughout the term."></textarea>
       </div>
-      <div style="margin-top:12px;">
+      <div id="teachingResourcesSection" style="margin-top:12px;">
         <label>Teaching Resources / Materials</label>
         <textarea id="teachingResources" placeholder="List all resources needed for the term (textbooks, charts, videos, etc.)"></textarea>
       </div>
@@ -552,6 +560,9 @@
     const academicYear = document.getElementById('academicYear');
     const totalWeeks = document.getElementById('totalWeeks');
     const hoursPerWeek = document.getElementById('hoursPerWeek');
+    const generalObjectivesSection = document.getElementById('generalObjectivesSection');
+    const assessmentMethodsSection = document.getElementById('assessmentMethodsSection');
+    const teachingResourcesSection = document.getElementById('teachingResourcesSection');
     const generalObjectives = document.getElementById('generalObjectives');
     const assessmentMethods = document.getElementById('assessmentMethods');
     const teachingResources = document.getElementById('teachingResources');
@@ -627,6 +638,9 @@
       const documentMode = mode === 'editable_document';
       schemeTableSection.classList.toggle('hidden', documentMode);
       templatePdfSection.classList.toggle('hidden', !documentMode);
+      generalObjectivesSection.classList.toggle('hidden', documentMode);
+      assessmentMethodsSection.classList.toggle('hidden', documentMode);
+      teachingResourcesSection.classList.toggle('hidden', documentMode);
       templateModeNote.classList.toggle('hidden', !message);
       templateModeNote.textContent = message || '';
     }
@@ -680,6 +694,32 @@
       pageNode.appendChild(div);
     }
 
+    function autoFillEditableBlocks(blocks) {
+      return (blocks || []).map((block) => {
+        let text = String(block.text || '');
+        text = text.replace(/(NAME OF SCHOOL\s*:)\s*\.{3,}/i, `$1 ${schoolName}`);
+        text = text.replace(/(TEACHER[’']?S NAME\s*:)\s*\.{3,}/i, `$1 ${teacherNameEl.textContent}`);
+        text = text.replace(/(YEAR\s*:)\s*\d{4}/i, `$1 ${academicYear.value || getYear()}`);
+        return { ...block, text };
+      });
+    }
+
+    async function renderPdfPageBackground(page, width, height) {
+      const baseViewport = page.getViewport({ scale: 1 });
+      const scale = width / baseViewport.width;
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      await page.render({ canvasContext: context, viewport }).promise;
+      return {
+        dataUrl: canvas.toDataURL('image/jpeg', 0.95),
+        width: canvas.width,
+        height: canvas.height
+      };
+    }
+
     async function renderEditableDocument(sourcePdf, savedDocument = null) {
       templatePdfPages.innerHTML = '';
       if (!sourcePdf?.url || !window.pdfjsLib) return;
@@ -691,6 +731,7 @@
         const savedPages = savedDocument?.pages || [];
 
         for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+          const page = await pdf.getPage(pageNumber);
           const wrap = document.createElement('div');
           wrap.className = 'pdf-preview-page';
           const label = document.createElement('span');
@@ -702,14 +743,20 @@
           pageNode.className = 'editable-doc-page';
 
           if (savedPage?.blocks?.length) {
+            const background = await renderPdfPageBackground(page, savedPage.width, savedPage.height);
             pageNode.dataset.page = pageNumber;
-            pageNode.dataset.width = savedPage.width;
-            pageNode.dataset.height = savedPage.height;
-            pageNode.style.width = `${savedPage.width}px`;
-            pageNode.style.height = `${savedPage.height}px`;
+            pageNode.dataset.width = background.width;
+            pageNode.dataset.height = background.height;
+            pageNode.dataset.background = background.dataUrl;
+            pageNode.style.width = `${background.width}px`;
+            pageNode.style.height = `${background.height}px`;
+            const bg = document.createElement('img');
+            bg.className = 'editable-doc-bg';
+            bg.src = background.dataUrl;
+            bg.alt = `Page ${pageNumber} background`;
+            pageNode.appendChild(bg);
             savedPage.blocks.forEach((block) => createEditableBlock(pageNode, block));
           } else {
-            const page = await pdf.getPage(pageNumber);
             const viewport = page.getViewport({ scale: 1.2 });
             const textContent = await page.getTextContent();
             const rawItems = (textContent.items || [])
@@ -773,12 +820,21 @@
               textAlign: 'left'
             }));
 
+            const normalizedItems = autoFillEditableBlocks(items);
+            const background = await renderPdfPageBackground(page, Math.ceil(viewport.width), Math.ceil(viewport.height));
+
             pageNode.dataset.page = pageNumber;
-            pageNode.dataset.width = Math.ceil(viewport.width);
-            pageNode.dataset.height = Math.ceil(viewport.height);
-            pageNode.style.width = `${Math.ceil(viewport.width)}px`;
-            pageNode.style.height = `${Math.ceil(viewport.height)}px`;
-            items.forEach((item) => createEditableBlock(pageNode, item));
+            pageNode.dataset.width = background.width;
+            pageNode.dataset.height = background.height;
+            pageNode.dataset.background = background.dataUrl;
+            pageNode.style.width = `${background.width}px`;
+            pageNode.style.height = `${background.height}px`;
+            const bg = document.createElement('img');
+            bg.className = 'editable-doc-bg';
+            bg.src = background.dataUrl;
+            bg.alt = `Page ${pageNumber} background`;
+            pageNode.appendChild(bg);
+            normalizedItems.forEach((item) => createEditableBlock(pageNode, item));
           }
 
           wrap.appendChild(pageNode);
@@ -896,8 +952,8 @@
     }
 
     async function exportEditableDocumentPdf() {
-      if (!window.html2canvas || !window.jspdf?.jsPDF) {
-        toast('html2canvas and jsPDF must be loaded.');
+      if (!window.jspdf?.jsPDF) {
+        toast('jsPDF must be loaded.');
         return;
       }
       const pageNodes = Array.from(templatePdfPages.querySelectorAll('.editable-doc-page'));
@@ -908,74 +964,47 @@
 
       currentEditableDocument = serializeEditableDocument();
       const jsPdfLib = window.jspdf;
-      const doc = new jsPdfLib.jsPDF({ unit: 'pt', format: 'a4' });
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
-      const logoDataUrl = await getSchoolLogoDataUrl();
-      const today = new Date().toLocaleDateString('en-GB');
-      const margin = 36;
-
-      if (logoDataUrl) {
-        try {
-          doc.addImage(logoDataUrl, 'PNG', margin, 28, 52, 52);
-        } catch (error) {
-          console.warn('Logo render failed', error);
-        }
-      }
-
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(14);
-      doc.text(schoolName, margin + 64, 48);
-      doc.setFontSize(12);
-      doc.text(`Teacher Copy: ${schemeSubject.value || 'Subject'} - ${schemeClass.value || 'Class'} (${termLabel(schemeTerm.value)})`, margin + 64, 68);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
-      doc.text(`Teacher: ${teacherNameEl.textContent}`, margin, 104);
-      doc.text(`Academic Year: ${academicYear.value || ''}`, margin + 220, 104);
-      doc.text(`Date: ${today}`, pageWidth - 110, 104);
-
-      let y = 132;
-      const writeBlock = (title, value) => {
-        doc.setFont('helvetica', 'bold');
-        doc.text(title, margin, y);
-        y += 12;
-        doc.setFont('helvetica', 'normal');
-        const lines = doc.splitTextToSize(value || 'Not provided.', pageWidth - (margin * 2));
-        doc.text(lines, margin, y);
-        y += (lines.length * 10) + 10;
-      };
-
-      writeBlock('General Objectives / Learning Outcomes', generalObjectives.value);
-      writeBlock('Assessment Methods', assessmentMethods.value);
-      writeBlock('Teaching Resources / Materials', teachingResources.value);
-
-      doc.setFont('helvetica', 'italic');
-      doc.text('Edited template pages follow below.', margin, Math.min(y + 6, pageHeight - 40));
+      const firstNode = pageNodes[0];
+      const firstWidth = Number(firstNode.dataset.width || 595);
+      const firstHeight = Number(firstNode.dataset.height || 842);
+      const doc = new jsPdfLib.jsPDF({
+        unit: 'pt',
+        format: [firstWidth, firstHeight],
+        orientation: firstWidth > firstHeight ? 'landscape' : 'portrait'
+      });
 
       for (let index = 0; index < pageNodes.length; index += 1) {
-        doc.addPage('a4', 'portrait');
-        const canvas = await window.html2canvas(pageNodes[index], {
-          scale: 2,
-          backgroundColor: '#ffffff',
-          useCORS: true,
-          logging: false
+        const pageNode = pageNodes[index];
+        const pageWidth = Number(pageNode.dataset.width || firstWidth);
+        const pageHeight = Number(pageNode.dataset.height || firstHeight);
+
+        if (index > 0) {
+          doc.addPage([pageWidth, pageHeight], pageWidth > pageHeight ? 'landscape' : 'portrait');
+        }
+
+        const bgData = pageNode.dataset.background || '';
+        if (bgData) {
+          doc.addImage(bgData, 'JPEG', 0, 0, pageWidth, pageHeight);
+        }
+
+        const blocks = Array.from(pageNode.querySelectorAll('.editable-fragment'));
+        blocks.forEach((block) => {
+          const left = Number(block.dataset.left || 0);
+          const top = Number(block.dataset.top || 0);
+          const width = Number(block.dataset.width || 0);
+          const minHeight = Number(block.dataset.minHeight || 14);
+          const fontSize = Number(block.dataset.fontSize || 12);
+          const text = String(block.textContent || '').trim();
+          const lines = doc.splitTextToSize(text || ' ', Math.max(width - 4, 16));
+          const rectHeight = Math.max(minHeight, (lines.length * fontSize * 1.18) + 4);
+
+          doc.setFillColor(255, 255, 255);
+          doc.rect(left, top, Math.max(width, 18), rectHeight, 'F');
+          doc.setTextColor(17, 24, 39);
+          doc.setFont('helvetica', (block.dataset.fontWeight || '400') === '700' ? 'bold' : 'normal');
+          doc.setFontSize(fontSize);
+          doc.text(lines, left + 2, top + fontSize, { baseline: 'alphabetic', maxWidth: Math.max(width - 4, 16) });
         });
-
-        const imgData = canvas.toDataURL('image/jpeg', 0.95);
-        const ratio = Math.min((pageWidth - (margin * 2)) / canvas.width, (pageHeight - 70) / canvas.height);
-        const renderWidth = canvas.width * ratio;
-        const renderHeight = canvas.height * ratio;
-        const x = (pageWidth - renderWidth) / 2;
-        const imgY = 28;
-
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(10);
-        doc.text(`${schoolName} | ${schemeSubject.value || ''} | ${schemeClass.value || ''} | ${academicYear.value || ''}`, margin, 18);
-        doc.text(`Teacher: ${teacherNameEl.textContent}`, pageWidth - 170, 18);
-        doc.addImage(imgData, 'JPEG', x, imgY, renderWidth, renderHeight);
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(8);
-        doc.text(`Edited template page ${index + 1}`, margin, pageHeight - 16);
       }
 
       const fileName = `scheme-${schemeSubject.value || 'subject'}-${schemeClass.value || 'class'}-${academicYear.value || ''}-teacher-copy.pdf`.replace(/\s+/g, '-').toLowerCase();
