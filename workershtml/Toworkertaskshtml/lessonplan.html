@@ -853,6 +853,7 @@
     let preferredSchemeEntryId = null;
     let applyingSchemeSelection = false;
     const schemeLookupCache = new Map();
+    let schoolLogoDataUrlPromise = null;
 
     // UI Elements
     const teacherName = document.getElementById('teacherName');
@@ -900,6 +901,10 @@
     const delayExplanation = document.getElementById('delayExplanation');
     const scheduleInfoCard = document.getElementById('scheduleInfoCard');
     const openSchemePageLink = document.getElementById('openSchemePageLink');
+    const lpFromDate = document.getElementById('lpFromDate');
+    const lpToDate = document.getElementById('lpToDate');
+    const lpExportPdf = document.getElementById('lpExportPdf');
+    const lpExportCsv = document.getElementById('lpExportCsv');
 
     // Toast
     function toast(message, type = 'success') {
@@ -920,6 +925,160 @@
 
     function safeKey(value) {
       return String(value || '').replace(/[.#$/\[\]]/g, '_');
+    }
+
+    function sanitizeFileSegment(value) {
+      return String(value || '')
+        .trim()
+        .replace(/[^\w\s-]/g, '')
+        .replace(/\s+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '') || 'value';
+    }
+
+    function getCurrentTeacherDisplayName() {
+      return compactTextBlock(teacherName?.textContent || localStorage.getItem('somap_workerName') || 'Unknown');
+    }
+
+    function getCurrentSchoolName() {
+      return compactTextBlock(
+        schoolNameEl?.textContent ||
+        school?.name ||
+        localStorage.getItem('somap.currentSchoolName') ||
+        (schoolId === 'socrates-school' ? 'Socrates School' : schoolId)
+      );
+    }
+
+    function canViewAllLessonPlans() {
+      const allowedTypes = new Set([
+        'admin',
+        'head teacher',
+        'headteacher',
+        'head of school',
+        'academic master',
+        'academic mistress',
+        'director'
+      ]);
+      return Boolean(window.lessonPlanAdminMode === true && allowedTypes.has(L(teacherConfig?.teacherType)));
+    }
+
+    function getCurrentLessonPlanFilters(overrides = {}) {
+      return {
+        year: String(overrides.year || window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear()),
+        teacherId: String(overrides.teacherId || workerId || ''),
+        className: String(overrides.className !== undefined ? overrides.className : filterClass?.value || ''),
+        subject: String(overrides.subject !== undefined ? overrides.subject : filterSubject?.value || ''),
+        term: String(overrides.term !== undefined ? overrides.term : filterTerm?.value || ''),
+        fromDate: String(overrides.fromDate !== undefined ? overrides.fromDate : lpFromDate?.value || ''),
+        toDate: String(overrides.toDate !== undefined ? overrides.toDate : lpToDate?.value || ''),
+        schoolId: String(overrides.schoolId || schoolId || '')
+      };
+    }
+
+    function getPlanOwnerId(plan) {
+      return String(plan?.teacherId || plan?.teacher?.uid || plan?.ownerId || '').trim();
+    }
+
+    function getPlanOwnerName(plan) {
+      return compactTextBlock(plan?.teacherName || plan?.teacher?.name || plan?.recordedBy || '');
+    }
+
+    function getEffectiveSchoolLogoUrl(plan) {
+      return plan?.schoolLogoUrl || school?.logoUrl || localStorage.getItem('somap.currentSchoolLogoUrl') || '';
+    }
+
+    function normalizeLessonPlanRecord(plan, fallback = {}) {
+      if (!plan || typeof plan !== 'object') return null;
+      const className = compactTextBlock(plan.className || plan.class || fallback.className || '');
+      const date = compactTextBlock(plan.date || fallback.date || '');
+      const normalized = {
+        ...plan,
+        id: plan.id || fallback.id || '',
+        schoolId: compactTextBlock(plan.schoolId || fallback.schoolId || schoolId),
+        schoolName: compactTextBlock(plan.schoolName || fallback.schoolName || getCurrentSchoolName()),
+        schoolLogoUrl: compactTextBlock(plan.schoolLogoUrl || fallback.schoolLogoUrl || getEffectiveSchoolLogoUrl(plan)),
+        academicYear: String(plan.academicYear || plan.year || fallback.year || getYear()),
+        year: String(plan.year || plan.academicYear || fallback.year || getYear()),
+        teacherId: getPlanOwnerId(plan),
+        teacherName: getPlanOwnerName(plan),
+        teacherType: compactTextBlock(plan.teacherType || plan.teacher?.type || fallback.teacherType || teacherConfig?.teacherType || 'Teacher'),
+        className,
+        class: className,
+        subject: compactTextBlock(plan.subject || fallback.subject || ''),
+        term: compactTextBlock(plan.term || fallback.term || ''),
+        week: String(plan.week || fallback.week || ''),
+        date,
+        durationMinutes: Number(plan.durationMinutes || plan.duration || fallback.durationMinutes || 0) || 0,
+        topic: plan.topic || '',
+        objectives: plan.objectives || '',
+        intro: plan.intro || '',
+        activities: plan.activities || '',
+        resources: plan.resources || '',
+        assessment: plan.assessment || '',
+        conclusion: plan.conclusion || '',
+        homework: plan.homework || '',
+        reflection: plan.reflection || '',
+        totals: {
+          totalStudents: Number(plan?.totals?.totalStudents || plan.totalStudents || 0) || 0,
+          present: Number(plan?.totals?.present || plan.studentsPresent || 0) || 0,
+          presentBoys: Number(plan?.totals?.presentBoys || 0) || 0,
+          presentGirls: Number(plan?.totals?.presentGirls || 0) || 0,
+          absentBoys: Number(plan?.totals?.absentBoys || 0) || 0,
+          absentGirls: Number(plan?.totals?.absentGirls || 0) || 0
+        },
+        coverageStatus: plan.coverageStatus || 'started',
+        schemeTracking: plan.schemeTracking || null,
+        createdAt: plan.createdAt || fallback.createdAt || 0,
+        updatedAt: plan.updatedAt || fallback.updatedAt || 0,
+        recordedBy: compactTextBlock(plan.recordedBy || getPlanOwnerName(plan) || fallback.recordedBy || '')
+      };
+
+      if (!normalized.teacherName) normalized.teacherName = normalized.recordedBy || getCurrentTeacherDisplayName();
+      if (!normalized.teacherId && normalized.teacherName && normalizeLookupToken(normalized.teacherName) === normalizeLookupToken(getCurrentTeacherDisplayName())) {
+        normalized.teacherId = String(workerId || '');
+      }
+
+      return normalized;
+    }
+
+    function matchesLessonPlanFilters(plan, filters = {}) {
+      if (!plan) return false;
+      if (filters.schoolId && plan.schoolId && plan.schoolId !== filters.schoolId) return false;
+      if (filters.year && String(plan.year || plan.academicYear || '') !== String(filters.year)) return false;
+      if (filters.className && compactTextBlock(plan.className) !== compactTextBlock(filters.className)) return false;
+      if (filters.subject && compactTextBlock(plan.subject) !== compactTextBlock(filters.subject)) return false;
+      if (filters.term && compactTextBlock(plan.term) !== compactTextBlock(filters.term)) return false;
+      if (filters.fromDate && (!plan.date || plan.date < filters.fromDate)) return false;
+      if (filters.toDate && (!plan.date || plan.date > filters.toDate)) return false;
+
+      if (!canViewAllLessonPlans()) {
+        const ownerId = getPlanOwnerId(plan);
+        const ownerName = getPlanOwnerName(plan);
+        const currentName = getCurrentTeacherDisplayName();
+        const sameTeacherById = ownerId && filters.teacherId && ownerId === filters.teacherId;
+        const sameTeacherByName = !ownerId && ownerName && normalizeLookupToken(ownerName) === normalizeLookupToken(currentName);
+        if (!sameTeacherById && !sameTeacherByName) return false;
+      }
+
+      return true;
+    }
+
+    function getFilteredLessonPlans(filters = getCurrentLessonPlanFilters()) {
+      return Object.values(lessonPlans || {})
+        .map((plan) => normalizeLessonPlanRecord(plan))
+        .filter((plan) => matchesLessonPlanFilters(plan, filters))
+        .sort((a, b) => {
+          const dateDiff = String(b.date || '').localeCompare(String(a.date || ''));
+          if (dateDiff !== 0) return dateDiff;
+          return Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0);
+        });
+    }
+
+    function getLessonPlanTemplateType(className) {
+      const normalized = compactTextBlock(className);
+      if (['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 1AB','Class 2','Class 2AB'].includes(normalized)) return 'early';
+      if (['Class 3','Class 4','Class 5'].includes(normalized)) return 'middle';
+      return 'upper';
     }
 
     function getLessonPlanBasePath(year) {
@@ -2282,8 +2441,9 @@
     // Load lesson plans (year-aware)
     async function loadLessonPlans() {
       try {
-        const year = window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
+        const year = String(window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear());
         const basePath = getLessonPlanBasePath(year);
+        const ownershipFilters = getCurrentLessonPlanFilters({ year, fromDate: '', toDate: '' });
 
         // Also check legacy path for backward compatibility
         const legacySnap = await db.ref(`lesson_plans/${workerId}`).once('value').catch(()=>({val:()=>null}));
@@ -2294,7 +2454,10 @@
         Object.keys(legacyData).forEach(id => {
           const plan = legacyData[id];
           if (plan && typeof plan === 'object') {
-            legacyPlans[id] = { ...plan, id, year: plan.year || year };
+            const normalized = normalizeLessonPlanRecord(plan, { id, year });
+            if (normalized && matchesLessonPlanFilters(normalized, ownershipFilters)) {
+              legacyPlans[id] = normalized;
+            }
           }
         });
         
@@ -2311,7 +2474,10 @@
             Object.keys(ids).forEach(id => {
               const plan = ids[id];
               if (plan && typeof plan === 'object') {
-                yearPlans[id] = { ...plan, id, year };
+                const normalized = normalizeLessonPlanRecord(plan, { id, year, className, date });
+                if (normalized && matchesLessonPlanFilters(normalized, ownershipFilters)) {
+                  yearPlans[id] = normalized;
+                }
               }
             });
           });
@@ -2319,14 +2485,6 @@
         
         // Merge: prefer year-based over legacy
         lessonPlans = { ...legacyPlans, ...yearPlans };
-        
-        // Count plans for selected year only
-        let count = 0;
-        Object.values(lessonPlans).forEach(plan => {
-          if (!plan.year || plan.year === year) count++;
-        });
-        
-        totalPlans.textContent = count;
         renderPlans();
       } catch (error) {
         console.error('Error loading plans:', error);
@@ -2475,8 +2633,11 @@ ${plan.reflection || 'N/A'}
 
     // Edit plan
     window.editPlan = function(planId) {
-      const plan = lessonPlans[planId];
-      if (!plan) return;
+      const plan = normalizeLessonPlanRecord(lessonPlans[planId]);
+      if (!plan || !matchesLessonPlanFilters(plan, getCurrentLessonPlanFilters({ fromDate: '', toDate: '' }))) {
+        toast('That lesson plan is not available in your current teacher context.', 'warning');
+        return;
+      }
 
       editingPlanId = planId;
 
@@ -2523,8 +2684,8 @@ ${plan.reflection || 'N/A'}
       if (!confirm('Are you sure you want to delete this lesson plan?')) return;
 
       try {
-        const plan = lessonPlans[planId];
-        if (!plan) {
+        const plan = normalizeLessonPlanRecord(lessonPlans[planId]);
+        if (!plan || !matchesLessonPlanFilters(plan, getCurrentLessonPlanFilters({ fromDate: '', toDate: '' }))) {
           toast('Plan not found', 'error');
           return;
         }
@@ -2676,8 +2837,21 @@ ${plan.reflection || 'N/A'}
       }
 
       const existingPlan = editingPlanId ? lessonPlans[editingPlanId] || null : null;
+      const currentTeacherName = getCurrentTeacherDisplayName();
+      const currentSchoolName = getCurrentSchoolName();
+      const currentSchoolLogoUrl = getEffectiveSchoolLogoUrl(existingPlan);
       const planData = {
+        id: editingPlanId || '',
+        schoolId,
+        schoolName: currentSchoolName,
+        schoolLogoUrl: currentSchoolLogoUrl,
+        academicYear: saveYear,
+        year: saveYear,
+        teacherId: String(workerId || ''),
+        teacherName: currentTeacherName,
+        teacherType: teacherConfig?.teacherType || 'Teacher',
         className: document.getElementById('planClass').value,
+        class: document.getElementById('planClass').value,
         subject: document.getElementById('planSubject').value,
         term: document.getElementById('planTerm').value,
         week: document.getElementById('planWeek').value,
@@ -2702,10 +2876,9 @@ ${plan.reflection || 'N/A'}
         reflection: document.getElementById('planReflection').value || '',
         coverageStatus: planCoverageStatus.value || 'started',
         schemeTracking: schemeValidation.tracking,
-        year: saveYear,
-        recordedBy: teacherName.textContent || workerId,
-        id: editingPlanId || '',
-        createdAt: existingPlan?.createdAt || firebase.database.ServerValue.TIMESTAMP
+        recordedBy: currentTeacherName,
+        createdAt: existingPlan?.createdAt || firebase.database.ServerValue.TIMESTAMP,
+        updatedAt: firebase.database.ServerValue.TIMESTAMP
       };
 
       try {
@@ -2714,7 +2887,6 @@ ${plan.reflection || 'N/A'}
         const date = planData.date;
 
         if (editingPlanId) {
-          planData.updatedAt = firebase.database.ServerValue.TIMESTAMP;
           planData.id = editingPlanId;
           const previousYear = existingPlan?.year || saveYear;
           const previousClass = existingPlan?.className || existingPlan?.class || cls;
@@ -2780,7 +2952,8 @@ ${plan.reflection || 'N/A'}
       return rows.sort((a,b)=> a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
     }
 
-    document.getElementById('lpExportPdf')?.addEventListener('click', async ()=>{
+    document.getElementById('lpExportPdf')?.addEventListener('click', async (event)=>{
+      if (event?.defaultPrevented) return;
       const from = document.getElementById('lpFromDate')?.value, to = document.getElementById('lpToDate')?.value;
       if(!from || !to) return toast('Pick From and To dates.', 'warning');
       
@@ -2808,7 +2981,8 @@ ${plan.reflection || 'N/A'}
       }
     });
 
-    document.getElementById('lpExportCsv')?.addEventListener('click', async ()=>{
+    document.getElementById('lpExportCsv')?.addEventListener('click', async (event)=>{
+      if (event?.defaultPrevented) return;
       const from = document.getElementById('lpFromDate')?.value, to = document.getElementById('lpToDate')?.value;
       if(!from || !to) return toast('Pick From and To dates.', 'warning');
       
@@ -2885,28 +3059,8 @@ ${plan.reflection || 'N/A'}
     }
 
     renderPlans = function() {
-      const year = window.somapYearContext.getSelectedYear();
-      const selectedClass = filterClass.value;
-      const selectedSubject = filterSubject.value;
-      const selectedTerm = filterTerm.value;
-      const allPlans = Object.entries(lessonPlans || {}).filter(([, plan]) => plan && typeof plan === 'object');
-
-      const filtered = allPlans
-        .filter(([, plan]) => {
-          const planYear = plan.year || String(year);
-          const planClass = plan.className || plan.class || '';
-          if (planYear !== String(year)) return false;
-          if (selectedClass && planClass !== selectedClass) return false;
-          if (selectedSubject && plan.subject !== selectedSubject) return false;
-          if (selectedTerm && plan.term !== selectedTerm) return false;
-          return true;
-        })
-        .sort((a, b) => {
-          const dateA = a[1].date || '';
-          const dateB = b[1].date || '';
-          if (dateB !== dateA) return dateB.localeCompare(dateA);
-          return (b[1].createdAt || 0) - (a[1].createdAt || 0);
-        });
+      const filtered = getFilteredLessonPlans(getCurrentLessonPlanFilters({ fromDate: '', toDate: '' }));
+      totalPlans.textContent = filtered.length;
 
       if (!filtered.length) {
         plansList.innerHTML = `
@@ -2918,11 +3072,10 @@ ${plan.reflection || 'N/A'}
         return;
       }
 
-      plansList.innerHTML = filtered.map(([id, plan]) => {
-        const planClass = plan.className || plan.class || 'N/A';
-        const totalStudents = plan.totals?.totalStudents || plan.totalStudents || 0;
-        const present = plan.totals?.present || plan.studentsPresent || 0;
-        const duration = plan.durationMinutes || plan.duration || 0;
+      plansList.innerHTML = filtered.map((plan) => {
+        const totalStudents = plan.totals?.totalStudents || 0;
+        const present = plan.totals?.present || 0;
+        const duration = plan.durationMinutes || 0;
         const schemeStatus = plan.schemeTracking?.scheduleLabel || 'Scheme not linked';
         const coverage = plan.coverageStatus || 'started';
         return `
@@ -2931,10 +3084,11 @@ ${plan.reflection || 'N/A'}
               <div>
                 <div class="plan-title">${plan.topic || 'Untitled'}</div>
                 <div class="plan-meta">
-                  <span class="meta-tag">${planClass}</span>
+                  <span class="meta-tag">${plan.className || 'N/A'}</span>
                   <span class="meta-tag">${plan.subject || 'N/A'}</span>
                   <span class="meta-tag">${plan.term || 'N/A'} - Week ${plan.week || 'N/A'}</span>
                   <span class="meta-tag">${plan.date || 'N/A'}</span>
+                  <span class="meta-tag">Teacher: ${plan.teacherName || plan.recordedBy || 'N/A'}</span>
                   <span class="meta-tag">Scheme: ${schemeStatus}</span>
                   <span class="meta-tag">Coverage: ${coverage}</span>
                 </div>
@@ -2942,13 +3096,14 @@ ${plan.reflection || 'N/A'}
             </div>
             <div class="plan-details">
               <p><strong>Objectives:</strong> ${(plan.objectives || '').substring(0, 150)}${(plan.objectives || '').length > 150 ? '...' : ''}</p>
-              <p><strong>Students:</strong> ${present}/${totalStudents} present | <strong>Duration:</strong> ${duration} mins</p>
+              <p><strong>Students:</strong> ${present}/${totalStudents} present | <strong>Duration:</strong> ${duration} mins | <strong>Recorder:</strong> ${plan.recordedBy || plan.teacherName || 'N/A'}</p>
               ${plan.schemeTracking?.delayExplanation ? `<p><strong>Late-topic explanation:</strong> ${plan.schemeTracking.delayExplanation}</p>` : ''}
             </div>
             <div class="plan-actions">
-              <button class="btn btn-primary" onclick="viewPlan('${id}')">View Full Plan</button>
-              <button class="btn btn-secondary" onclick="editPlan('${id}')">Edit</button>
-              <button class="btn btn-secondary" onclick="deletePlan('${id}')">Delete</button>
+              <button class="btn btn-primary" onclick="viewPlan('${plan.id}')">View Full Plan</button>
+              <button class="btn btn-secondary" onclick="editPlan('${plan.id}')">Edit</button>
+              <button class="btn btn-secondary" onclick="exportSinglePlanPdf('${plan.id}')">Export This Plan PDF</button>
+              <button class="btn btn-secondary" onclick="deletePlan('${plan.id}')">Delete</button>
             </div>
           </div>
         `;
@@ -2956,48 +3111,16 @@ ${plan.reflection || 'N/A'}
     };
 
     window.viewPlan = function(planId) {
-      const plan = lessonPlans[planId];
-      if (!plan) return;
+      const plan = normalizeLessonPlanRecord(lessonPlans[planId]);
+      if (!plan || !matchesLessonPlanFilters(plan, getCurrentLessonPlanFilters({ fromDate: '', toDate: '' }))) {
+        toast('That lesson plan is not available in your current teacher context.', 'warning');
+        return;
+      }
       alert(buildPlanDetailsText(plan));
     };
 
     fetchPlansRange = async function(fromStr, toStr) {
-      const years = datesInYears(fromStr, toStr);
-      const rows = [];
-      const basePath = getLessonPlanBasePath();
-
-      for (const y of years) {
-        try {
-          const snap = await db.ref(`${basePath}/${y}`).once('value');
-          const tree = (snap && snap.val && snap.val()) || {};
-          for (const cls of Object.keys(tree)) {
-            const dates = tree[cls] || {};
-            for (const d of Object.keys(dates)) {
-              if (d < fromStr || d > toStr) continue;
-              const recs = dates[d] || {};
-              for (const k of Object.keys(recs)) {
-                const r = recs[k] || {};
-                rows.push({
-                  ...r,
-                  id: k,
-                  date: d,
-                  className: r.className || r.class || cls,
-                  totalStudents: r.totals?.totalStudents || r.totalStudents || 0,
-                  present: r.totals?.present || r.studentsPresent || 0,
-                  presentBoys: r.totals?.presentBoys || 0,
-                  presentGirls: r.totals?.presentGirls || 0,
-                  absentBoys: r.totals?.absentBoys || 0,
-                  absentGirls: r.totals?.absentGirls || 0
-                });
-              }
-            }
-          }
-        } catch (error) {
-          continue;
-        }
-      }
-
-      return rows.sort((a, b) => a.date.localeCompare(b.date) || (a.className || '').localeCompare(b.className || ''));
+      return getFilteredLessonPlans(getCurrentLessonPlanFilters({ fromDate: fromStr, toDate: toStr }));
     };
 
     function plansToExportRows(plans) {
@@ -3008,19 +3131,16 @@ ${plan.reflection || 'N/A'}
         plan.term || '',
         plan.week || '',
         plan.topic || '',
-        plan.objectives || '',
-        plan.totalStudents || 0,
-        plan.present || 0,
-        plan.presentBoys || 0,
-        plan.presentGirls || 0,
-        plan.absentBoys || 0,
-        plan.absentGirls || 0,
+        plan.teacherName || '',
+        plan.teacherId || '',
+        plan.totals?.totalStudents || 0,
+        plan.totals?.present || 0,
+        plan.totals?.presentBoys || 0,
+        plan.totals?.presentGirls || 0,
+        plan.totals?.absentBoys || 0,
+        plan.totals?.absentGirls || 0,
         plan.durationMinutes || '',
         plan.coverageStatus || '',
-        plan.schemeTracking?.sourceLabel || '',
-        plan.schemeTracking?.scheduleLabel || '',
-        plan.schemeTracking?.lateHandlingMode || '',
-        plan.schemeTracking?.delayExplanation || '',
         plan.recordedBy || ''
       ]);
     }
@@ -3035,53 +3155,313 @@ ${plan.reflection || 'N/A'}
       return y + (lines.length * 4) + 3;
     }
 
+    async function getSchoolLogoDataUrlForPlan(plan) {
+      if (schoolLogoDataUrlPromise) return schoolLogoDataUrlPromise;
+      schoolLogoDataUrlPromise = (async () => {
+        let logoUrl = compactTextBlock(plan?.schoolLogoUrl || '');
+        if (!logoUrl) {
+          try {
+            const snap = await db.ref(`/schools/${schoolId}/profile/logoUrl`).once('value');
+            if (snap.exists() && snap.val()) logoUrl = snap.val();
+          } catch (error) {
+            console.warn('Unable to resolve school logo', error);
+          }
+        }
+        if (!logoUrl) return null;
+        try {
+          const response = await fetch(logoUrl, { credentials: 'omit' });
+          const blob = await response.blob();
+          return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        } catch (error) {
+          console.warn('Unable to load school logo', error);
+          return null;
+        }
+      })();
+      return schoolLogoDataUrlPromise;
+    }
+
+    function formatPlanDate(value) {
+      if (!value) return 'N/A';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('en-GB');
+    }
+
+    function getDurationLabel(plan) {
+      const minutes = Number(plan?.durationMinutes || 0) || 0;
+      return minutes ? `Duration ${minutes} mins` : 'Duration not recorded';
+    }
+
+    function getPeriodLabel(plan) {
+      const minutes = Number(plan?.durationMinutes || 0) || 0;
+      return minutes ? `1 lesson (${minutes} mins)` : '1 lesson';
+    }
+
+    function getMeaningfulLine(text, fallback = 'N/A') {
+      return firstMeaningfulSentence(text) || compactTextBlock(text) || fallback;
+    }
+
+    function getSchemeSnapshot(plan) {
+      return plan?.schemeTracking?.rowSnapshot || {};
+    }
+
+    function getPlanExportMeta(plan) {
+      const snapshot = getSchemeSnapshot(plan);
+      return {
+        mainCompetence: getMeaningfulLine(snapshot.mainCompetence || plan.objectives || `${plan.subject || 'Lesson'} competence`),
+        specificCompetence: getMeaningfulLine(snapshot.specificCompetence || plan.objectives || plan.topic),
+        mainActivity: getMeaningfulLine(snapshot.learningActivities || plan.activities || plan.topic),
+        specificActivity: getMeaningfulLine(snapshot.specificActivities || plan.activities || plan.intro || plan.topic),
+        resources: compactTextBlock(plan.resources || snapshot.tools || 'N/A') || 'N/A',
+        reference: compactTextBlock(snapshot.reference || `Lesson plan record by ${plan.teacherName || plan.recordedBy || 'teacher'}`) || 'N/A',
+        assessment: getMeaningfulLine(plan.assessment || snapshot.assessment || 'Observation and evaluation'),
+        reflection: compactTextBlock(plan.reflection || plan.conclusion || 'N/A') || 'N/A'
+      };
+    }
+
+    function splitLessonDuration(durationMinutes, count) {
+      const minutes = Math.max(Number(durationMinutes || 0) || 0, count * 5);
+      const base = Math.floor(minutes / count);
+      let remainder = minutes % count;
+      return Array.from({ length: count }, () => {
+        const value = base + (remainder > 0 ? 1 : 0);
+        remainder = Math.max(0, remainder - 1);
+        return `${value} mins`;
+      });
+    }
+
+    function buildStageRows(plan, templateType) {
+      const meta = getPlanExportMeta(plan);
+      const times = splitLessonDuration(plan.durationMinutes, 4);
+      const intro = getMeaningfulLine(plan.intro, `Introduce ${String(plan.topic || 'the topic').toLowerCase()}.`);
+      const activities = getMeaningfulLine(plan.activities, meta.mainActivity);
+      const conclusion = getMeaningfulLine(plan.conclusion, 'Summarise key learning points.');
+      const homework = getMeaningfulLine(plan.homework, 'Follow-up task from the lesson.');
+
+      if (templateType === 'early') {
+        return [
+          ['Introduction', times[0], intro, `Pupils respond to ${String(plan.topic || 'the topic').toLowerCase()} prompts.`, meta.assessment],
+          ['New knowledge', times[1], meta.mainActivity, meta.specificActivity, meta.assessment],
+          ['Reinforcement', times[2], activities, `Pupils practise ${String(plan.topic || 'the topic').toLowerCase()} with guidance.`, meta.assessment],
+          ['Consolidation', times[3], conclusion, homework, meta.assessment]
+        ];
+      }
+      if (templateType === 'middle') {
+        return [
+          ['Introduction', times[0], intro, `Learners respond to opening questions on ${String(plan.topic || 'the topic').toLowerCase()}.`, meta.assessment],
+          ['Competence Developing', times[1], meta.mainActivity, meta.specificActivity, meta.assessment],
+          ['Design', times[2], activities, `Learners attempt guided tasks for ${String(plan.topic || 'the topic').toLowerCase()}.`, meta.assessment],
+          ['Realisation', times[3], conclusion, homework, meta.assessment]
+        ];
+      }
+      return [
+        ['Introduction', times[0], intro, `Learners connect prior knowledge to ${String(plan.topic || 'the topic').toLowerCase()}.`, meta.assessment],
+        ['New knowledge', times[1], meta.mainActivity, meta.specificActivity, meta.assessment],
+        ['Reinforcement', times[2], activities, 'Learners demonstrate understanding through guided practice.', meta.assessment],
+        ['Conclusion', times[3], conclusion, homework, meta.assessment]
+      ];
+    }
+
+    function addPdfHeader(doc, plan, logoDataUrl, title) {
+      const pageWidth = doc.internal.pageSize.getWidth();
+      doc.setDrawColor(43, 108, 176);
+      doc.setFillColor(243, 248, 255);
+      doc.roundedRect(12, 10, pageWidth - 24, 24, 3, 3, 'FD');
+      if (logoDataUrl) {
+        try { doc.addImage(logoDataUrl, 'PNG', 16, 13, 16, 16); } catch (_) {}
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(15);
+      doc.text(plan.schoolName || getCurrentSchoolName(), pageWidth / 2, 18, { align: 'center' });
+      doc.setFontSize(11);
+      doc.text(title, pageWidth / 2, 24, { align: 'center' });
+    }
+
+    function addMetaGrid(doc, rows, startY) {
+      doc.autoTable({
+        startY,
+        theme: 'grid',
+        body: rows,
+        styles: { fontSize: 9, cellPadding: 2.2, lineColor: [148, 163, 184], lineWidth: 0.2 },
+        columnStyles: {
+          0: { fontStyle: 'bold', fillColor: [239, 246, 255], cellWidth: 28 },
+          1: { cellWidth: 55 },
+          2: { fontStyle: 'bold', fillColor: [239, 246, 255], cellWidth: 28 },
+          3: { cellWidth: 'auto' }
+        },
+        margin: { left: 12, right: 12 }
+      });
+      return doc.lastAutoTable.finalY + 4;
+    }
+
+    function addLabelValueBlock(doc, label, value, y) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9.5);
+      doc.text(label, 12, y);
+      doc.setFont('helvetica', 'normal');
+      const lines = doc.splitTextToSize(String(value || 'N/A'), 155);
+      doc.text(lines, 52, y);
+      return y + Math.max(6, lines.length * 4.2);
+    }
+
+    function addAttendanceTable(doc, plan, templateType, y) {
+      const totals = plan.totals || {};
+      const boysPresent = totals.presentBoys || 0;
+      const girlsPresent = totals.presentGirls || 0;
+      const boysAbsent = totals.absentBoys || 0;
+      const girlsAbsent = totals.absentGirls || 0;
+      const boysRegistered = boysPresent + boysAbsent;
+      const girlsRegistered = girlsPresent + girlsAbsent;
+      let head;
+      let body;
+
+      if (templateType === 'early') {
+        head = [['Number of children/pupils', 'Boys', 'Girls', 'Total']];
+        body = [
+          ['Registered', boysRegistered, girlsRegistered, totals.totalStudents || 0],
+          ['Present', boysPresent, girlsPresent, totals.present || 0]
+        ];
+      } else if (templateType === 'middle') {
+        head = [['Number of pupils', 'Girls', 'Boys', 'Total']];
+        body = [
+          ['Registered', girlsRegistered, boysRegistered, totals.totalStudents || 0],
+          ['Present', girlsPresent, boysPresent, totals.present || 0]
+        ];
+      } else {
+        head = [['TOTAL NUMBER OF PUPILS', 'Boys', 'Girls', 'Total']];
+        body = [
+          ['Registered', boysRegistered, girlsRegistered, totals.totalStudents || 0],
+          ['Attended', boysPresent, girlsPresent, totals.present || 0],
+          ['Absent', boysAbsent, girlsAbsent, boysAbsent + girlsAbsent]
+        ];
+      }
+
+      doc.autoTable({
+        startY: y,
+        head,
+        body,
+        theme: 'grid',
+        headStyles: { fillColor: [43, 108, 176], textColor: 255, fontSize: 9 },
+        styles: { fontSize: 9, cellPadding: 2.2, halign: 'center', lineColor: [148, 163, 184], lineWidth: 0.2 },
+        columnStyles: { 0: { halign: 'left', fontStyle: 'bold' } },
+        margin: { left: 12, right: 12 }
+      });
+      return doc.lastAutoTable.finalY + 4;
+    }
+
+    function addStageTable(doc, plan, templateType, y) {
+      const rows = buildStageRows(plan, templateType);
+      const head = templateType === 'early'
+        ? [['Stage', 'Time', 'Teaching activity', 'Learning activity', 'Assessment']]
+        : templateType === 'middle'
+          ? [['Stages', 'Muda (Time)', 'Teaching Activities', 'Learning Activities', 'Assessment Criteria']]
+          : [['Stages of lesson development', 'Time', 'Teaching activities', 'Learning activities', 'Learning indicators']];
+      doc.autoTable({
+        startY: y,
+        head,
+        body: rows,
+        theme: 'grid',
+        headStyles: { fillColor: [22, 163, 74], textColor: 255, fontSize: 8.8 },
+        styles: { fontSize: 8.7, cellPadding: 2, lineColor: [148, 163, 184], lineWidth: 0.2, valign: 'top' },
+        margin: { left: 12, right: 12 },
+        columnStyles: {
+          0: { fontStyle: 'bold', cellWidth: 31 },
+          1: { cellWidth: 21, halign: 'center' },
+          2: { cellWidth: 48 },
+          3: { cellWidth: 48 },
+          4: { cellWidth: 'auto' }
+        }
+      });
+      return doc.lastAutoTable.finalY + 4;
+    }
+
+    async function renderPlanPdfPage(doc, rawPlan, index, total) {
+      const plan = normalizeLessonPlanRecord(rawPlan);
+      const templateType = getLessonPlanTemplateType(plan.className);
+      const meta = getPlanExportMeta(plan);
+      const logoDataUrl = await getSchoolLogoDataUrlForPlan(plan);
+      if (index > 0) doc.addPage();
+
+      addPdfHeader(doc, plan, logoDataUrl, `Tanzania Lesson Plan Format (${templateType.toUpperCase()})`);
+      const metaRows = templateType === 'upper'
+        ? [
+            ['Teacher', plan.teacherName || plan.recordedBy || 'N/A', 'Subject', plan.subject || 'N/A'],
+            ['Class', plan.className || 'N/A', 'Date', formatPlanDate(plan.date)],
+            ['Time', getDurationLabel(plan), 'Period', getPeriodLabel(plan)],
+            ['Academic Year', plan.academicYear || plan.year || 'N/A', 'Recorder', `${plan.recordedBy || plan.teacherName || 'N/A'} (${plan.teacherId || 'No ID'})`],
+            ['Term / Week', `${plan.term || 'N/A'} / Week ${plan.week || 'N/A'}`, '', '']
+          ]
+        : templateType === 'middle'
+          ? [
+              ['Teacher', plan.teacherName || plan.recordedBy || 'N/A', 'Class', plan.className || 'N/A'],
+              ['Subject', plan.subject || 'N/A', 'Date', formatPlanDate(plan.date)],
+              ['Time', getDurationLabel(plan), 'Academic Year', plan.academicYear || plan.year || 'N/A'],
+              ['Term / Week', `${plan.term || 'N/A'} / Week ${plan.week || 'N/A'}`, 'Recorder', `${plan.recordedBy || plan.teacherName || 'N/A'} (${plan.teacherId || 'No ID'})`]
+            ]
+          : [
+              ['Teacher', plan.teacherName || plan.recordedBy || 'N/A', 'Class', plan.className || 'N/A'],
+              ['Date', formatPlanDate(plan.date), 'Time', getDurationLabel(plan)],
+              ['Academic Year', plan.academicYear || plan.year || 'N/A', 'Recorder', `${plan.recordedBy || plan.teacherName || 'N/A'} (${plan.teacherId || 'No ID'})`],
+              ['Term / Week', `${plan.term || 'N/A'} / Week ${plan.week || 'N/A'}`, '', '']
+            ];
+
+      let y = addMetaGrid(doc, metaRows, 37);
+      y = addAttendanceTable(doc, plan, templateType, y);
+      y = addLabelValueBlock(doc, 'Lesson Topic', plan.topic || 'N/A', y);
+      y = addLabelValueBlock(doc, 'Main competence', meta.mainCompetence, y);
+      y = addLabelValueBlock(doc, 'Specific competence', meta.specificCompetence, y);
+      y = addLabelValueBlock(doc, 'Main activity', meta.mainActivity, y);
+      y = addLabelValueBlock(doc, templateType === 'middle' ? 'Specific activities' : 'Specific activity', meta.specificActivity, y);
+      y = addLabelValueBlock(doc, templateType === 'middle' ? 'Teaching and learning resources' : templateType === 'upper' ? 'Teaching aids' : 'Teaching and learning aids', meta.resources, y);
+      y = addLabelValueBlock(doc, 'Reference', meta.reference, y);
+      y = addStageTable(doc, plan, templateType, y);
+
+      if (templateType === 'upper') {
+        y = addLabelValueBlock(doc, 'Reflection', plan.reflection || 'N/A', y);
+        y = addLabelValueBlock(doc, 'Learning evaluation', plan.assessment || 'N/A', y);
+        y = addLabelValueBlock(doc, 'Teaching evaluation', plan.conclusion || 'N/A', y);
+        y = addLabelValueBlock(doc, 'Remarks', meta.reflection, y);
+      } else if (templateType === 'middle') {
+        y = addLabelValueBlock(doc, 'Remarks', meta.reflection, y);
+      } else {
+        y = addLabelValueBlock(doc, 'Comment', meta.reflection, y);
+      }
+
+      doc.setFontSize(8);
+      doc.setTextColor(71, 85, 105);
+      doc.text(`School: ${plan.schoolName || getCurrentSchoolName()} | Teacher: ${plan.teacherName || plan.recordedBy || 'N/A'} | Owner ID: ${plan.teacherId || 'N/A'} | Export ${index + 1} of ${total}`, 12, doc.internal.pageSize.getHeight() - 8);
+      doc.setTextColor(0, 0, 0);
+    }
+
+    async function exportPlansToPdf(plans, fileName) {
+      if (!plans.length) {
+        toast('No filtered lesson plans found to export.', 'warning');
+        return;
+      }
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      for (let index = 0; index < plans.length; index += 1) {
+        await renderPlanPdfPage(doc, plans[index], index, plans.length);
+      }
+      doc.save(fileName);
+    }
+
     async function handleDetailedPdfExport(event) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      const from = document.getElementById('lpFromDate')?.value;
-      const to = document.getElementById('lpToDate')?.value;
+      const from = lpFromDate?.value;
+      const to = lpToDate?.value;
       if (!from || !to) return toast('Pick From and To dates.', 'warning');
 
       try {
-        toast('Generating PDF...', 'success');
         const plans = await fetchPlansRange(from, to);
-        if (!plans.length) return toast('No lesson plans found in that date range.', 'warning');
-        const { jsPDF } = window.jspdf;
-        const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-
-        plans.forEach((plan, index) => {
-          if (index > 0) doc.addPage();
-          const margin = 14;
-          const width = doc.internal.pageSize.getWidth() - (margin * 2);
-          let y = 16;
-          const scheme = plan.schemeTracking || {};
-
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(15);
-          doc.text(`Lesson Plan ${index + 1} of ${plans.length}`, margin, y);
-          y += 7;
-
-          doc.setFont('helvetica', 'normal');
-          doc.setFontSize(10);
-          doc.text(`Date: ${plan.date || 'N/A'} | Class: ${plan.className || 'N/A'} | Subject: ${plan.subject || 'N/A'}`, margin, y);
-          y += 5;
-          doc.text(`Term: ${plan.term || 'N/A'} | Week: ${plan.week || 'N/A'} | Duration: ${plan.durationMinutes || 'N/A'} mins | Coverage: ${plan.coverageStatus || 'N/A'}`, margin, y);
-          y += 6;
-
-          y = drawTextBlock(doc, 'Scheme Tracking', `Source: ${scheme.sourceLabel || 'Not linked'}\nPlanned month/week: ${scheme.plannedMonth || 'N/A'} / ${scheme.plannedWeek || 'N/A'}\nLesson month/week: ${scheme.lessonMonth || 'N/A'} / ${scheme.lessonWeek || 'N/A'}\nSchedule: ${scheme.scheduleLabel || 'N/A'}\nLate handling: ${scheme.lateHandlingMode || 'N/A'}\nDelay explanation: ${scheme.delayExplanation || 'N/A'}`, margin, y, width);
-          y = drawTextBlock(doc, 'Topic / Theme', plan.topic, margin, y, width);
-          y = drawTextBlock(doc, 'Learning Objectives', plan.objectives, margin, y, width);
-          y = drawTextBlock(doc, 'Introduction / Set Induction', plan.intro, margin, y, width);
-          y = drawTextBlock(doc, 'Main Activities / Lesson Development', plan.activities, margin, y, width);
-          y = drawTextBlock(doc, 'Teaching Resources / Materials', plan.resources, margin, y, width);
-          y = drawTextBlock(doc, 'Assessment / Evaluation Method', plan.assessment, margin, y, width);
-          y = drawTextBlock(doc, 'Conclusion / Summary', plan.conclusion, margin, y, width);
-          y = drawTextBlock(doc, 'Homework / Assignment', plan.homework, margin, y, width);
-          y = drawTextBlock(doc, 'Reflection / Notes', plan.reflection, margin, y, width);
-          drawTextBlock(doc, 'Attendance Summary', `Total: ${plan.totalStudents || 0} | Present: ${plan.present || 0} | Present Boys/Girls: ${plan.presentBoys || 0}/${plan.presentGirls || 0} | Absent Boys/Girls: ${plan.absentBoys || 0}/${plan.absentGirls || 0}`, margin, y, width);
-        });
-
-        doc.save(`lessonplans_${from}_${to}.pdf`);
+        if (!plans.length) return toast('No lesson plans found for the current filters.', 'warning');
+        const filters = getCurrentLessonPlanFilters({ fromDate: from, toDate: to });
+        await exportPlansToPdf(plans, `lesson_plans_${sanitizeFileSegment(getCurrentTeacherDisplayName())}_${sanitizeFileSegment(filters.subject || 'all')}_${sanitizeFileSegment(filters.className || 'all')}_${filters.year}_${from}_${to}.pdf`);
         toast('PDF exported successfully!', 'success');
       } catch (error) {
         console.error('Export error:', error);
@@ -3092,21 +3472,21 @@ ${plan.reflection || 'N/A'}
     async function handleDetailedCsvExport(event) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      const from = document.getElementById('lpFromDate')?.value;
-      const to = document.getElementById('lpToDate')?.value;
+      const from = lpFromDate?.value;
+      const to = lpToDate?.value;
       if (!from || !to) return toast('Pick From and To dates.', 'warning');
 
       try {
-        toast('Generating CSV...', 'success');
         const plans = await fetchPlansRange(from, to);
-        if (!plans.length) return toast('No lesson plans found in that date range.', 'warning');
+        if (!plans.length) return toast('No lesson plans found for the current filters.', 'warning');
         const ws = XLSX.utils.aoa_to_sheet([[
-          'Date','Class','Subject','Term','Week','Topic','Objectives','Total','Present','Present Boys','Present Girls',
-          'Absent Boys','Absent Girls','Minutes','Coverage','Scheme Source','Schedule','Late Handling','Delay Explanation','By'
+          'Date','Class','Subject','Term','Week','Topic','Teacher Name','Teacher ID','Total','Present','Present Boys','Present Girls',
+          'Absent Boys','Absent Girls','Minutes','Coverage','Recorded By'
         ], ...plansToExportRows(plans)]);
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'LessonPlans');
-        XLSX.writeFile(wb, `lessonplans_${from}_${to}.xlsx`);
+        const filters = getCurrentLessonPlanFilters({ fromDate: from, toDate: to });
+        XLSX.writeFile(wb, `lesson_plans_${sanitizeFileSegment(getCurrentTeacherDisplayName())}_${sanitizeFileSegment(filters.subject || 'all')}_${sanitizeFileSegment(filters.className || 'all')}_${filters.year}_${from}_${to}.xlsx`);
         toast('CSV exported successfully!', 'success');
       } catch (error) {
         console.error('Export error:', error);
@@ -3114,8 +3494,23 @@ ${plan.reflection || 'N/A'}
       }
     }
 
-    document.getElementById('lpExportPdf')?.addEventListener('click', handleDetailedPdfExport, true);
-    document.getElementById('lpExportCsv')?.addEventListener('click', handleDetailedCsvExport, true);
+    window.exportSinglePlanPdf = async function(planId) {
+      const plan = normalizeLessonPlanRecord(lessonPlans[planId]);
+      if (!plan || !matchesLessonPlanFilters(plan, getCurrentLessonPlanFilters({ fromDate: '', toDate: '' }))) {
+        toast('That lesson plan is not available in your current teacher context.', 'warning');
+        return;
+      }
+      try {
+        await exportPlansToPdf([plan], `lesson_plan_${sanitizeFileSegment(plan.teacherName || plan.recordedBy)}_${sanitizeFileSegment(plan.subject)}_${sanitizeFileSegment(plan.className)}_${plan.date || plan.year}.pdf`);
+        toast('Lesson plan PDF exported successfully!', 'success');
+      } catch (error) {
+        console.error('Single-plan export error:', error);
+        toast('Error exporting lesson plan PDF', 'error');
+      }
+    };
+
+    lpExportPdf?.addEventListener('click', handleDetailedPdfExport, true);
+    lpExportCsv?.addEventListener('click', handleDetailedCsvExport, true);
 
     // Filter listeners
     filterClass.addEventListener('change', renderPlans);
