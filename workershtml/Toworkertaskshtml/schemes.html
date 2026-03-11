@@ -293,17 +293,27 @@
 
     .editable-fragment {
       position: absolute;
-      color: #111827;
+      color: transparent;
+      caret-color: #111827;
+      cursor: text;
       outline: none;
       white-space: pre-wrap;
       word-break: break-word;
       line-height: 1.22;
       padding: 1px 2px;
       border-radius: 4px;
-      background: rgba(255, 255, 255, 0.88);
+      background: transparent;
+      box-shadow: none;
     }
 
-    .editable-fragment:focus {
+    .editable-fragment:hover {
+      background: rgba(59, 130, 246, 0.08);
+      box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.16);
+    }
+
+    .editable-fragment:focus,
+    .editable-fragment.changed {
+      color: #111827;
       background: rgba(191, 219, 254, 0.45);
       box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.4);
     }
@@ -653,13 +663,15 @@
         blocks: Array.from(pageNode.querySelectorAll('.editable-fragment')).map((block, blockIndex) => ({
           id: block.dataset.id || `p${pageIndex + 1}_b${blockIndex + 1}`,
           text: block.textContent || '',
+          originalText: block.dataset.originalText || '',
           left: Number(block.dataset.left || 0),
           top: Number(block.dataset.top || 0),
           width: Number(block.dataset.width || 0),
           minHeight: Number(block.dataset.minHeight || 0),
           fontSize: Number(block.dataset.fontSize || 12),
           fontWeight: block.dataset.fontWeight || '400',
-          textAlign: block.dataset.textAlign || 'left'
+          textAlign: block.dataset.textAlign || 'left',
+          changed: block.classList.contains('changed')
         }))
       }));
 
@@ -673,6 +685,7 @@
       div.contentEditable = 'true';
       div.spellcheck = false;
       div.dataset.id = block.id;
+      div.dataset.originalText = block.originalText || '';
       div.dataset.left = block.left;
       div.dataset.top = block.top;
       div.dataset.width = block.width;
@@ -688,8 +701,15 @@
       div.style.fontWeight = block.fontWeight || '400';
       div.style.textAlign = block.textAlign || 'left';
       div.textContent = block.text || '';
+      if ((block.text || '') !== (block.originalText || '') || block.changed) {
+        div.classList.add('changed');
+      }
       div.addEventListener('input', () => {
+        div.classList.toggle('changed', (div.textContent || '') !== (div.dataset.originalText || ''));
         currentEditableDocument = serializeEditableDocument();
+      });
+      div.addEventListener('blur', () => {
+        div.classList.toggle('changed', (div.textContent || '') !== (div.dataset.originalText || ''));
       });
       pageNode.appendChild(div);
     }
@@ -700,7 +720,7 @@
         text = text.replace(/(NAME OF SCHOOL\s*:)\s*\.{3,}/i, `$1 ${schoolName}`);
         text = text.replace(/(TEACHER[’']?S NAME\s*:)\s*\.{3,}/i, `$1 ${teacherNameEl.textContent}`);
         text = text.replace(/(YEAR\s*:)\s*\d{4}/i, `$1 ${academicYear.value || getYear()}`);
-        return { ...block, text };
+        return { ...block, text, originalText: block.text || '', changed: text !== (block.text || '') };
       });
     }
 
@@ -759,66 +779,25 @@
           } else {
             const viewport = page.getViewport({ scale: 1.2 });
             const textContent = await page.getTextContent();
-            const rawItems = (textContent.items || [])
+            const items = (textContent.items || [])
               .map((item, index) => {
                 const tx = window.pdfjsLib.Util.transform(viewport.transform, item.transform);
                 const fontSize = Math.max(Math.sqrt((tx[2] * tx[2]) + (tx[3] * tx[3])), 8);
                 return {
                   id: `p${pageNumber}_i${index + 1}`,
                   text: String(item.str || '').trim(),
+                  originalText: String(item.str || '').trim(),
                   left: tx[4],
                   top: tx[5] - fontSize,
-                  width: Math.max(item.width || (String(item.str || '').length * fontSize * 0.5), 24),
+                  width: Math.max((item.width || (String(item.str || '').length * fontSize * 0.5)) * viewport.scale, 12),
                   minHeight: fontSize + 4,
                   fontSize,
                   fontWeight: item.fontName && /bold/i.test(item.fontName) ? '700' : '400',
-                  textAlign: 'left'
+                  textAlign: 'left',
+                  changed: false
                 };
               })
               .filter((item) => item.text);
-
-            rawItems.sort((a, b) => {
-              const diff = Math.abs(a.top - b.top);
-              if (diff > 4) return a.top - b.top;
-              return a.left - b.left;
-            });
-
-            const lines = [];
-            rawItems.forEach((item) => {
-              const currentLine = lines[lines.length - 1];
-              if (!currentLine || Math.abs(currentLine.top - item.top) > 4) {
-                lines.push({
-                  top: item.top,
-                  left: item.left,
-                  right: item.left + item.width,
-                  fontSize: item.fontSize,
-                  fontWeight: item.fontWeight,
-                  parts: [item]
-                });
-                return;
-              }
-
-              currentLine.left = Math.min(currentLine.left, item.left);
-              currentLine.right = Math.max(currentLine.right, item.left + item.width);
-              currentLine.parts.push(item);
-            });
-
-            const items = lines.map((line, lineIndex) => ({
-              id: `p${pageNumber}_l${lineIndex + 1}`,
-              text: line.parts
-                .sort((a, b) => a.left - b.left)
-                .map((part) => part.text)
-                .join(' ')
-                .replace(/\s{2,}/g, ' ')
-                .trim(),
-              left: line.left,
-              top: line.top,
-              width: Math.max(line.right - line.left + 24, 48),
-              minHeight: line.fontSize + 6,
-              fontSize: line.fontSize,
-              fontWeight: line.fontWeight,
-              textAlign: 'left'
-            }));
 
             const normalizedItems = autoFillEditableBlocks(items);
             const background = await renderPdfPageBackground(page, Math.ceil(viewport.width), Math.ceil(viewport.height));
@@ -964,6 +943,7 @@
 
       currentEditableDocument = serializeEditableDocument();
       const jsPdfLib = window.jspdf;
+      const logoDataUrl = await getSchoolLogoDataUrl();
       const firstNode = pageNodes[0];
       const firstWidth = Number(firstNode.dataset.width || 595);
       const firstHeight = Number(firstNode.dataset.height || 842);
@@ -987,8 +967,21 @@
           doc.addImage(bgData, 'JPEG', 0, 0, pageWidth, pageHeight);
         }
 
+        if (index === 0 && logoDataUrl) {
+          try {
+            const logoWidth = Math.min(58, pageWidth * 0.1);
+            const logoHeight = logoWidth;
+            doc.setFillColor(255, 255, 255);
+            doc.rect(pageWidth - logoWidth - 18, 18, logoWidth + 8, logoHeight + 8, 'F');
+            doc.addImage(logoDataUrl, 'PNG', pageWidth - logoWidth - 14, 22, logoWidth, logoHeight);
+          } catch (error) {
+            console.warn('Logo render failed', error);
+          }
+        }
+
         const blocks = Array.from(pageNode.querySelectorAll('.editable-fragment'));
         blocks.forEach((block) => {
+          if (!block.classList.contains('changed')) return;
           const left = Number(block.dataset.left || 0);
           const top = Number(block.dataset.top || 0);
           const width = Number(block.dataset.width || 0);
