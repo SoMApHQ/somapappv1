@@ -1102,6 +1102,60 @@
         .join('\n\n');
     }
 
+    function firstMeaningfulSentence(text) {
+      const cleaned = compactTextBlock(text);
+      if (!cleaned) return '';
+      const parts = cleaned.split(/(?<=[.!?])\s+/).map((part) => part.trim()).filter(Boolean);
+      return parts.find((part) => part.length >= 16) || parts[0] || '';
+    }
+
+    function extractRecoveredActivity(text) {
+      const source = String(text || '');
+      const patterns = [
+        /to facilitate pupils? to\s+([^.\n]{4,140})/i,
+        /pupils? should be able to\s+([^.\n]{4,140})/i,
+        /\b(demonstrate|develop|apply|acquire|explain|identify|recognize|use|read|write|compare|construct|solve|perform|understand)\b([^.\n]{3,120})/i
+      ];
+      for (const pattern of patterns) {
+        const match = source.match(pattern);
+        if (!match) continue;
+        const value = compactTextBlock(match[0]);
+        if (value && value.length >= 6) return value;
+      }
+      return '';
+    }
+
+    function buildRecoveredRowsMap(sourceData, lessonDate) {
+      if (!sourceData) return null;
+      const lessonMonth = getMonthName(lessonDate);
+      const lessonWeek = getWeekOfMonth(lessonDate);
+      const editableText = editableDocumentToText(sourceData?.editableDocument);
+      const objectiveText = compactTextBlock(sourceData?.generalObjectives || sourceData?.parsedTemplate?.generalObjectives || '');
+      const competenceText = firstMeaningfulSentence(objectiveText || editableText);
+      const activityText = extractRecoveredActivity(editableText || objectiveText);
+      const specificText = stripTeacherLead(activityText) || firstMeaningfulSentence(editableText);
+      const topic = toTitleTopic(specificText || sourceData?.subjectName || sourceData?.subject || 'Scheme item');
+      const row = {
+        sn: 1,
+        mainCompetence: competenceText || `${sourceData?.subjectName || sourceData?.subject || 'Subject'} scheme guidance`,
+        specificCompetence: competenceText || topic,
+        learningActivities: activityText || (topic ? `To facilitate pupil to ${topic.toLowerCase()}` : ''),
+        specificActivities: specificText || topic,
+        month: lessonMonth || '',
+        week: lessonWeek || '',
+        periods: sourceData?.hoursPerWeek || sourceData?.parsedTemplate?.hoursPerWeek || '',
+        methods: compactTextBlock(sourceData?.assessmentMethods || sourceData?.parsedTemplate?.assessmentMethods || ''),
+        tools: compactTextBlock(sourceData?.teachingResources || sourceData?.parsedTemplate?.teachingResources || ''),
+        assessment: compactTextBlock(sourceData?.assessmentMethods || sourceData?.parsedTemplate?.assessmentMethods || ''),
+        reference: sourceData?.sourcePdf?.fileName || sourceData?.pdf?.fileName || '',
+        remarks: 'Recovered from saved editable scheme copy'
+      };
+      if (!row.learningActivities && !row.specificActivities && !row.mainCompetence && !row.tools && !row.assessment) {
+        return null;
+      }
+      return { recovered1: row };
+    }
+
     function normalizeSchemeRows(rowsMap) {
       return Object.entries(rowsMap || {}).map(([rowKey, row]) => {
         const week = parseNumericValue(row?.week);
@@ -1385,8 +1439,11 @@
     }
 
     function buildSchemeBundle(sourceData, sourceType, lessonDate) {
+      const recoveredRowsMap = !hasStructuredRows(sourceData)
+        ? buildRecoveredRowsMap(sourceData, lessonDate)
+        : null;
       const rows = normalizeSchemeRows(
-        getStructuredRowsMap(sourceData)
+        getStructuredRowsMap(sourceData) || recoveredRowsMap
       ).sort((a, b) => {
         const monthDiff = monthOrderIndex(a.row?.month) - monthOrderIndex(b.row?.month);
         if (monthDiff !== 0) return monthDiff;
@@ -1403,7 +1460,8 @@
         rows,
         weekEntries,
         lessonMonth,
-        lessonWeek
+        lessonWeek,
+        recoveredRows: Boolean(recoveredRowsMap && rows.length)
       };
     }
 
@@ -1440,7 +1498,9 @@
 
       schemeSelectionHint.textContent = bundle.weekEntries?.length
         ? `${bundle.weekEntries.length} scheme item(s) are scheduled for ${bundle.lessonMonth} week ${bundle.lessonWeek}.`
-        : `No item is scheduled exactly for ${bundle.lessonMonth} week ${bundle.lessonWeek}; you can still choose another scheme item if needed.`;
+        : bundle.recoveredRows
+          ? 'Structured rows were recovered from the saved document copy for this lesson.'
+          : `No item is scheduled exactly for ${bundle.lessonMonth} week ${bundle.lessonWeek}; you can still choose another scheme item if needed.`;
     }
 
     function renderSelectedSchemeDetails(entry, bundle, statusInfo) {
@@ -1619,9 +1679,11 @@
         return;
       }
 
-      schemeSyncSummary.textContent = cacheEntry.weekEntries.length
-        ? `${cacheEntry.sourceLabel} found. For ${cacheEntry.lessonMonth} week ${cacheEntry.lessonWeek}, the teacher should select one of the recommended scheme items below.`
-        : `${cacheEntry.sourceLabel} found. No exact row was mapped for ${cacheEntry.lessonMonth} week ${cacheEntry.lessonWeek}, so you may choose another scheme item and the plan will track it.`;
+      schemeSyncSummary.textContent = cacheEntry.recoveredRows
+        ? `${cacheEntry.sourceLabel} found. Structured rows were recovered from the saved editable scheme copy for this lesson.`
+        : cacheEntry.weekEntries.length
+          ? `${cacheEntry.sourceLabel} found. For ${cacheEntry.lessonMonth} week ${cacheEntry.lessonWeek}, the teacher should select one of the recommended scheme items below.`
+          : `${cacheEntry.sourceLabel} found. No exact row was mapped for ${cacheEntry.lessonMonth} week ${cacheEntry.lessonWeek}, so you may choose another scheme item and the plan will track it.`;
       schemeSourcePill.textContent = `Source: ${cacheEntry.sourceLabel}`;
       schemeMonthPill.textContent = `Month: ${cacheEntry.lessonMonth || '--'}`;
       schemeWeekPill.textContent = `Scheme Week: ${cacheEntry.lessonWeek || '--'}`;
