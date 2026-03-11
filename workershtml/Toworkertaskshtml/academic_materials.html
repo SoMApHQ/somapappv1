@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Academic Materials | SoMAp</title>
   <link rel="stylesheet" href="../css/workers.css">
+  <script src="../../somapappv1multischool/js/context.js"></script>
+  <script src="../../Todashboardhtml/yearContext.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
@@ -328,7 +330,20 @@
     const db = window.db || firebase.database();
     const workerId = localStorage.getItem('workerId');
     const allowedRoles = ['Academic Teacher', 'Assistant Headteacher'];
-    const schoolId = window.currentSchoolId || localStorage.getItem('currentSchoolId') || localStorage.getItem('schoolId') || 'socrates';
+    const school = (typeof SOMAP !== 'undefined' && SOMAP.getSchool) ? SOMAP.getSchool() : null;
+    const schoolId = (school && school.id) || window.currentSchoolId || localStorage.getItem('somap.currentSchoolId') || localStorage.getItem('currentSchoolId') || localStorage.getItem('schoolId') || 'socrates-school';
+    const schoolRef = (path) => (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') ? db.ref(SOMAP.P(path)) : db.ref(path);
+    const getYear = () => (typeof window !== 'undefined' && window.somapYearContext?.getSelectedYear) ? window.somapYearContext.getSelectedYear() : new Date().getFullYear();
+    const isSocratesSchool = (id) => ['socrates-school', 'default', 'socrates'].includes(String(id || '').toLowerCase());
+
+    async function scopedOrLegacy(scopedPath, legacyPath) {
+      const snap = await schoolRef(scopedPath).once('value');
+      if (snap.exists()) return snap;
+      if (isSocratesSchool(schoolId) && legacyPath) {
+        return db.ref(legacyPath).once('value');
+      }
+      return snap;
+    }
 
     // Full school coverage (all classes and subjects) so academic/assistant headteachers can upload for everyone
     const SUBJECTS_BY_CLASS = {
@@ -400,17 +415,40 @@
         window.location.href = '../../index.html';
         return;
       }
-      const [profileSnap, configSnap] = await Promise.all([
-        db.ref(`workers/${workerId}/profile`).once('value'),
-        db.ref(`teachers_config/${workerId}`).once('value')
+      const currentYear = String(getYear());
+      const previousYear = String(Number(currentYear) - 1);
+
+      const [workerSnap, configSnap] = await Promise.all([
+        scopedOrLegacy(`years/${currentYear}/workers/${workerId}`, `workers/${workerId}`),
+        scopedOrLegacy(`years/${currentYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`)
       ]);
-      currentProfile = profileSnap.val() || {};
+
+      let profile = {};
+      const workerData = workerSnap.val();
+      if (workerData) {
+        const w = workerData.profile ? workerData.profile : workerData;
+        profile = w || {};
+      }
+      if (!profile.fullNameUpper && !profile.firstName) {
+        const legacyProfileSnap = await db.ref(`workers/${workerId}/profile`).once('value');
+        profile = legacyProfileSnap.val() || profile;
+      }
+
+      currentProfile = profile;
       teacherConfig = configSnap.val() || {};
+
+      if (!teacherConfig.teacherType) {
+        const prevConfigSnap = await scopedOrLegacy(`years/${previousYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`);
+        const prevConfig = prevConfigSnap.val();
+        if (prevConfig?.teacherType) {
+          teacherConfig = { ...teacherConfig, ...prevConfig };
+        }
+      }
       const fullName = currentProfile.fullNameUpper || [currentProfile.firstName, currentProfile.middleName, currentProfile.lastName].filter(Boolean).join(' ').toUpperCase();
       preparedByLabel.textContent = `Prepared by: ${fullName || 'Unknown'}`;
       schoolTag.textContent = `School: ${schoolId}`;
 
-      const role = teacherConfig.teacherType || currentProfile.role || '';
+      const role = teacherConfig.teacherType || currentProfile.role || localStorage.getItem('somap_role') || '';
       const canUpload = allowedRoles.includes(role);
       uploadCard.style.display = canUpload ? 'block' : 'none';
       accessNotice.classList.toggle('hidden', canUpload);
