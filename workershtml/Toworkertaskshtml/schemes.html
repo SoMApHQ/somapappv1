@@ -1006,8 +1006,15 @@
       }
     }
 
+    function isDocxSource(source) {
+      const hint = String(source?.url || source?.fileName || source?.name || '').toLowerCase();
+      return hint.includes('.docx') || hint.includes('wordprocessingml');
+    }
+
     function fillSchemeForm(data, options = {}) {
-      const useEditableDocument = options.forceEditableDocument || Boolean(data?.editableDocument?.pages?.length) || Boolean(data?.sourcePdf?.url);
+      const sourceFile = data?.sourcePdf || data?.pdf || null;
+      const hasPdfUrl = sourceFile?.url && !isDocxSource(sourceFile);
+      const useEditableDocument = options.forceEditableDocument || (Boolean(data?.editableDocument?.pages?.length) && hasPdfUrl) || (Boolean(sourceFile?.url) && hasPdfUrl);
       currentTemplateId = data.templateId || data.fromTemplateId || currentTemplateId;
       currentSourcePdf = data.sourcePdf || data.pdf || null;
       currentStructuredRows = data.rows || data.parsedTemplate?.rows || currentStructuredRows || null;
@@ -1434,7 +1441,8 @@
             }
             const template = snap.val();
             const hydratedTemplate = await resolveTemplateForUse(template);
-            fillSchemeForm(hydratedTemplate, { forceEditableDocument: Boolean(template?.pdf?.url) });
+            const src = template?.pdf || template?.sourcePdf;
+            fillSchemeForm(hydratedTemplate, { forceEditableDocument: Boolean(src?.url) && !isDocxSource(src) });
           } catch (err) {
             console.error(err);
             toast(err?.message || 'Failed to load template.');
@@ -1516,7 +1524,8 @@
       const hydratedScheme = scheme.editorMode === 'editable_document' && !Object.keys(scheme.rows || {}).length
         ? await resolveTemplateForUse(scheme)
         : scheme;
-      fillSchemeForm(hydratedScheme, { forceEditableDocument: scheme.editorMode === 'editable_document' });
+      const forceEditable = scheme.editorMode === 'editable_document' && !isDocxSource(scheme?.sourcePdf || scheme?.pdf);
+      fillSchemeForm(hydratedScheme, { forceEditableDocument: forceEditable });
     }
 
     async function saveScheme() {
@@ -1533,9 +1542,16 @@
         toast('Please add at least one row.');
         return;
       }
+      const sourceFile = currentSourcePdf || editingScheme?.sourcePdf || editingScheme?.pdf || null;
+      const parsedTemplateSnapshot = (editingScheme?.parsedTemplate || (currentStructuredRows && {
+        rows: currentStructuredRows,
+        generalObjectives: generalObjectives.value || '',
+        assessmentMethods: assessmentMethods.value || '',
+        teachingResources: teachingResources.value || ''
+      })) || null;
       const payload = {
         schemeId: editingScheme?.schemeId || db.ref().push().key,
-        fromTemplateId: currentTemplateId || null,
+        fromTemplateId: currentTemplateId || editingScheme?.fromTemplateId || null,
         schoolId,
         teacher: {
           uid: workerId,
@@ -1553,10 +1569,11 @@
         generalObjectives: generalObjectives.value || '',
         assessmentMethods: assessmentMethods.value || '',
         teachingResources: teachingResources.value || '',
-        rows: editorMode === 'editable_document' ? (currentStructuredRows || editingScheme?.rows || null) : rows,
-        editableDocument: editorMode === 'editable_document' ? serializeEditableDocument() : null,
+        rows: editorMode === 'editable_document' ? (currentStructuredRows || editingScheme?.rows || editingScheme?.parsedTemplate?.rows || null) : rows,
+        editableDocument: editorMode === 'editable_document' ? serializeEditableDocument() : (editingScheme?.editableDocument || null),
+        parsedTemplate: parsedTemplateSnapshot,
         editorMode,
-        sourcePdf: currentSourcePdf || null,
+        sourcePdf: sourceFile ? { url: sourceFile.url, fileName: sourceFile.fileName || sourceFile.name } : null,
         meta: {
           createdAt: editingScheme?.meta?.createdAt || Date.now(),
           updatedAt: Date.now(),

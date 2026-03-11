@@ -921,6 +921,14 @@
     function safeKey(value) {
       return String(value || '').replace(/[.#$/\[\]]/g, '_');
     }
+
+    function getLessonPlanBasePath(year) {
+      if (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') {
+        return year ? SOMAP.P(`lessonPlans/${year}`) : SOMAP.P('lessonPlans');
+      }
+      const base = (schoolId && schoolId !== 'socrates-school') ? `schools/${schoolId}/lessonPlans` : 'lessonPlans';
+      return year ? `${base}/${year}` : base;
+    }
     // Path-safe key: also normalizes spaces for Firebase lookup (schemes may be stored with either)
     function pathKey(value) {
       return String(value || '').trim().replace(/\s+/g, '_').replace(/[.#$/\[\]]/g, '_');
@@ -1084,7 +1092,7 @@
     }
 
     function getStructuredRowsMap(data) {
-      return data?.rows || data?.parsedTemplate?.rows || null;
+      return data?.rows || data?.parsedTemplate?.rows || data?.parsedTemplate?.rowsMap || null;
     }
 
     function hasStructuredRows(data) {
@@ -1307,13 +1315,18 @@
 
     function buildLookupAliases(value) {
       const raw = String(value || '').trim();
-      return Array.from(new Set([
+      const aliases = [
         raw,
         safeKey(raw),
         pathKey(raw),
         raw.replace(/\s+/g, ''),
-        raw.replace(/[_\s-]+/g, ' ')
-      ].filter(Boolean)));
+        raw.replace(/[_\s-]+/g, ' '),
+        raw.replace(/[\s_-]+/g, ''),
+        raw.replace(/[\s_-]+/g, '_'),
+        raw.replace(/[\s_-]+/g, '-'),
+        normalizeLookupToken(raw)
+      ].filter(Boolean);
+      return Array.from(new Set(aliases));
     }
 
     function matchesLookupValue(value, aliases) {
@@ -1425,6 +1438,15 @@
 
     async function fetchLatestTeacherScheme(year, className, subjectName, termKey) {
       const selection = buildAcademicSelection(className, subjectName, termKey);
+      // Primary: full-tree crawl - source of truth, robust against path/key variations
+      const teacherRootSnap = await db.ref(`schemes/${schoolId}/teacher/${workerId}`).once('value');
+      const teacherData = teacherRootSnap.val() || {};
+      const allSchemes = flattenTeacherSchemesForYear(teacherData, year);
+      let matched = allSchemes.filter((scheme) => matchesAcademicSelection(scheme, selection));
+      if (matched.length) return sortByMostRecent(matched)[0];
+      matched = allSchemes.filter((scheme) => matchesClassSubjectSelection(scheme, selection));
+      if (matched.length) return sortByMostRecent(matched)[0];
+      // Optional fast path: exact-path attempts for common key variants
       const classKey = safeKey(className);
       const subjectKey = safeKey(subjectName);
       const classPathKey = pathKey(className);
@@ -1435,49 +1457,12 @@
         [classPathKey, subjectKey],
         [classKey, subjectPathKey]
       ].filter(([c, s], i, arr) => arr.findIndex(([a, b]) => a === c && b === s) === i);
-
       for (const [cKey, sKey] of pathVariants) {
         const exactPath = `schemes/${schoolId}/teacher/${workerId}/${year}/${cKey}/${sKey}/${termKey}`;
         const exactSnap = await db.ref(exactPath).once('value');
-        let items = Object.values(exactSnap.val() || {});
-        if (items.length) {
-          return sortByMostRecent(items)[0];
-        }
-
-        const subjectPath = `schemes/${schoolId}/teacher/${workerId}/${year}/${cKey}/${sKey}`;
-        const subjectSnap = await db.ref(subjectPath).once('value');
-        const byTerm = subjectSnap.val() || {};
-        const flattened = [];
-        Object.entries(byTerm).forEach(([storedTerm, schemes]) => {
-          Object.values(schemes || {}).forEach((scheme) => {
-            flattened.push({
-              ...scheme,
-              __storedClass: cKey,
-              __storedSubject: sKey,
-              __storedTerm: storedTerm
-            });
-          });
-        });
-        if (flattened.length) {
-          const filtered = flattened.filter((item) => matchesAcademicSelection(item, selection));
-          if (filtered.length) {
-            return sortByMostRecent(filtered)[0];
-          }
-          const classSubjectOnly = flattened.filter((item) => matchesClassSubjectSelection(item, selection));
-          if (classSubjectOnly.length) {
-            return sortByMostRecent(classSubjectOnly)[0];
-          }
-        }
+        const items = Object.values(exactSnap.val() || {});
+        if (items.length) return sortByMostRecent(items)[0];
       }
-
-      // Full crawl fallback: mirror the schemes page tree walk and match using normalized aliases.
-      const teacherRootSnap = await db.ref(`schemes/${schoolId}/teacher/${workerId}`).once('value');
-      const teacherData = teacherRootSnap.val() || {};
-      const allSchemes = flattenTeacherSchemesForYear(teacherData, year);
-      const matched = allSchemes.filter((scheme) => matchesAcademicSelection(scheme, selection));
-      if (matched.length) return sortByMostRecent(matched)[0];
-      const classSubjectOnly = allSchemes.filter((scheme) => matchesClassSubjectSelection(scheme, selection));
-      if (classSubjectOnly.length) return sortByMostRecent(classSubjectOnly)[0];
       return null;
     }
 
@@ -1529,6 +1514,15 @@
 
     async function fetchLatestTemplate(year, className, subjectName, termKey) {
       const selection = buildAcademicSelection(className, subjectName, termKey);
+      // Primary: full-tree crawl - source of truth, robust against path/key variations
+      const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
+      const yearTree = yearSnap.val() || {};
+      const allTemplates = flattenTemplatesForYear(yearTree);
+      let found = allTemplates.filter((template) => matchesAcademicSelection(template, selection));
+      if (found.length) return sortByMostRecent(found)[0];
+      found = allTemplates.filter((template) => matchesClassSubjectSelection(template, selection));
+      if (found.length) return sortByMostRecent(found)[0];
+      // Optional fast path: exact-path attempts
       const classKey = safeKey(className);
       const subjectKey = safeKey(subjectName);
       const classPathKey = pathKey(className);
@@ -1539,100 +1533,92 @@
         [classPathKey, subjectKey],
         [classKey, subjectPathKey]
       ].filter(([c, s], i, arr) => arr.findIndex(([a, b]) => a === c && b === s) === i);
-
       for (const [cKey, sKey] of pathVariants) {
         const exactPath = `schemes/${schoolId}/templates/${year}/${cKey}/${sKey}/${termKey}`;
         const exactSnap = await db.ref(exactPath).once('value');
-        let items = Object.values(exactSnap.val() || {});
-        if (items.length) {
-          return sortByMostRecent(items)[0];
-        }
-
-        const subjectPath = `schemes/${schoolId}/templates/${year}/${cKey}/${sKey}`;
-        const subjectSnap = await db.ref(subjectPath).once('value');
-        const byTerm = subjectSnap.val() || {};
-        const flattened = [];
-        Object.entries(byTerm).forEach(([storedTerm, templates]) => {
-          Object.values(templates || {}).forEach((template) => {
-            flattened.push({
-              ...template,
-              __storedClass: cKey,
-              __storedSubject: sKey,
-              __storedTerm: storedTerm
-            });
-          });
-        });
-        if (flattened.length) {
-          const filtered = flattened.filter((item) => matchesAcademicSelection(item, selection));
-          if (filtered.length) {
-            return sortByMostRecent(filtered)[0];
-          }
-          const classSubjectOnly = flattened.filter((item) => matchesClassSubjectSelection(item, selection));
-          if (classSubjectOnly.length) {
-            return sortByMostRecent(classSubjectOnly)[0];
-          }
-        }
+        const items = Object.values(exactSnap.val() || {});
+        if (items.length) return sortByMostRecent(items)[0];
       }
-
-      // Final fallback: crawl the full year tree and match using stored path metadata.
-      const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
-      const yearTree = yearSnap.val() || {};
-      const allTemplates = flattenTemplatesForYear(yearTree);
-      const found = allTemplates.filter((template) => matchesAcademicSelection(template, selection));
-      if (found.length) return sortByMostRecent(found)[0];
-      const classSubjectOnly = allTemplates.filter((template) => matchesClassSubjectSelection(template, selection));
-      if (classSubjectOnly.length) return sortByMostRecent(classSubjectOnly)[0];
       return null;
     }
 
-    async function ensureStructuredSchemeData(data) {
-      if (!data) return null;
+    async function ensureStructuredSchemeData(data, options = {}) {
+      if (!data) return { data: null, rowsSource: null };
       const hasRows = hasStructuredRows(data);
-      if (hasRows) return data;
+      if (hasRows) return { data, rowsSource: 'rows' };
 
       const parser = window.SomapSchemeTemplateParser;
-      const pdfMeta = data?.pdf || data?.sourcePdf || null;
-      if (!parser) return data;
+      const sourceFile = data?.sourcePdf || data?.pdf || null;
+      const lessonDate = options.lessonDate || null;
 
-      try {
-        const structured = data?.parsedTemplate
-          ? {
-              generalObjectives: data.parsedTemplate.generalObjectives || '',
-              assessmentMethods: data.parsedTemplate.assessmentMethods || '',
-              teachingResources: data.parsedTemplate.teachingResources || '',
-              hoursPerWeek: data.parsedTemplate.hoursPerWeek || null,
-              totalWeeks: data.parsedTemplate.totalWeeks || null,
-              rowsMap: data.parsedTemplate.rows || null,
-              extractionMeta: data.parsedTemplate.extractionMeta || null
-            }
-          : null;
+      // 1. parsedTemplate.rows or parsedTemplate.rowsMap
+      const parsedRows = data?.parsedTemplate?.rows || data?.parsedTemplate?.rowsMap || null;
+      if (parsedRows && Object.keys(parsedRows).length) {
+        const merged = { ...data, rows: parsedRows };
+        return { data: merged, rowsSource: 'parsedTemplate' };
+      }
 
-        const merged = parser.mergeTemplateData(data, structured);
-        if (Object.keys(merged?.rows || {}).length) return merged;
-
+      // 2. editableDocument -> parseStructuredText
+      if (parser) {
         const editableText = editableDocumentToText(data?.editableDocument);
         if (editableText) {
-          const parsedFromDocument = parser.parseStructuredText(editableText);
-          const mergedFromDocument = parser.mergeTemplateData(data, parsedFromDocument);
-          if (hasStructuredRows(mergedFromDocument)) return mergedFromDocument;
+          try {
+            const parsedFromDocument = parser.parseStructuredText(editableText);
+            const merged = parser.mergeTemplateData(data, parsedFromDocument);
+            if (Object.keys(merged?.rows || {}).length) {
+              return { data: merged, rowsSource: 'editableDocument' };
+            }
+          } catch (e) { /* ignore */ }
         }
 
-        if (!pdfMeta?.url) return data;
-
-        const parsed = await parser.parseUrl(pdfMeta.url, {
-          name: pdfMeta.fileName || data.subjectName || data.subject || 'scheme.pdf'
-        });
-        return parser.mergeTemplateData(data, parsed);
-      } catch (error) {
-        console.warn('Failed to parse scheme rows for lesson-plan guidance', error);
-        return data;
+        // 3. source file URL -> parseUrl (PDF or DOCX)
+        if (sourceFile?.url) {
+          try {
+            const parsed = await parser.parseUrl(sourceFile.url, {
+              name: sourceFile.fileName || data.subjectName || data.subject || 'scheme.pdf'
+            });
+            const merged = parser.mergeTemplateData(data, parsed);
+            if (Object.keys(merged?.rows || {}).length) {
+              return { data: merged, rowsSource: 'sourceFile' };
+            }
+          } catch (e) { /* ignore */ }
+        }
       }
+
+      // 4. synthetic fallback from subject/objectives/source metadata
+      const recovered = buildRecoveredRowsMap(data, lessonDate);
+      if (recovered && Object.keys(recovered).length) {
+        return { data: { ...data, rows: recovered }, rowsSource: 'synthetic' };
+      }
+
+      return { data, rowsSource: null };
     }
 
     function buildSchemeBundle(sourceData, sourceType, lessonDate) {
-      const recoveredRowsMap = !hasStructuredRows(sourceData)
+      let recoveredRowsMap = !hasStructuredRows(sourceData)
         ? buildRecoveredRowsMap(sourceData, lessonDate)
         : null;
+      if (!recoveredRowsMap && sourceData && (sourceData.schemeId || sourceData.templateId || sourceData.subjectName || sourceData.subject || sourceData.className)) {
+        const lessonMonth = getMonthName(lessonDate);
+        const lessonWeek = getWeekOfMonth(lessonDate);
+        recoveredRowsMap = {
+          emergency1: {
+            sn: 1,
+            mainCompetence: `${sourceData.subjectName || sourceData.subject || 'Subject'} scheme guidance`,
+            specificCompetence: sourceData.generalObjectives || '',
+            learningActivities: sourceData.generalObjectives ? `To facilitate pupil to ${String(sourceData.generalObjectives).slice(0, 80)}...` : '',
+            specificActivities: sourceData.generalObjectives || '',
+            month: lessonMonth || '',
+            week: lessonWeek || '',
+            periods: sourceData.hoursPerWeek || '',
+            methods: sourceData.assessmentMethods || '',
+            tools: sourceData.teachingResources || '',
+            assessment: sourceData.assessmentMethods || '',
+            reference: sourceData.sourcePdf?.fileName || '',
+            remarks: 'Emergency fallback from scheme metadata'
+          }
+        };
+      }
       const rows = normalizeSchemeRows(
         getStructuredRowsMap(sourceData) || recoveredRowsMap
       ).sort((a, b) => {
@@ -1827,22 +1813,34 @@
 
       if (!cacheEntry || options.force) {
         const teacherSchemeRaw = await fetchLatestTeacherScheme(targetYear, className, subjectName, termKey);
-        const teacherScheme = await ensureStructuredSchemeData(teacherSchemeRaw);
+        const teacherResult = await ensureStructuredSchemeData(teacherSchemeRaw, { lessonDate });
+        const teacherScheme = teacherResult?.data || null;
         let teacherRows = getStructuredRowsMap(teacherScheme);
-        let fallbackTemplate = null;
+        let teacherRowsSource = teacherResult?.rowsSource || null;
+        let fallbackTemplateData = null;
+        let fallbackTemplateRowsSource = null;
 
         if (!teacherRows && teacherScheme?.fromTemplateId) {
-          fallbackTemplate = await ensureStructuredSchemeData(
-            await fetchTemplateById(targetYear, className, subjectName, termKey, teacherScheme.fromTemplateId)
-          );
-          teacherRows = getStructuredRowsMap(fallbackTemplate);
+          const templateRaw = await fetchTemplateById(targetYear, className, subjectName, termKey, teacherScheme.fromTemplateId);
+          const templateResult = await ensureStructuredSchemeData(templateRaw, { lessonDate });
+          fallbackTemplateData = templateResult?.data || null;
+          fallbackTemplateRowsSource = templateResult?.rowsSource || null;
+          teacherRows = getStructuredRowsMap(fallbackTemplateData);
+          if (teacherRows) teacherRowsSource = 'fromTemplateId';
         }
 
-        const templateScheme = hasStructuredRows(fallbackTemplate)
-          ? fallbackTemplate
-          : await ensureStructuredSchemeData(
-              await fetchLatestTemplate(targetYear, className, subjectName, termKey)
-            );
+        let templateScheme = null;
+        let templateRowsSource = null;
+        if (hasStructuredRows(fallbackTemplateData)) {
+          templateScheme = fallbackTemplateData;
+          templateRowsSource = fallbackTemplateRowsSource;
+        } else {
+          const templateRaw = await fetchLatestTemplate(targetYear, className, subjectName, termKey);
+          const templateResult = await ensureStructuredSchemeData(templateRaw, { lessonDate });
+          templateScheme = templateResult?.data || null;
+          templateRowsSource = templateResult?.rowsSource || null;
+        }
+
         const teacherSource = teacherScheme && teacherRows
           ? { ...teacherScheme, rows: teacherRows }
           : null;
@@ -1857,6 +1855,22 @@
               : templateScheme
                 ? 'academic_template'
                 : 'none';
+        const chosenRowsSource = teacherRowsSource || templateRowsSource;
+
+        if (typeof console !== 'undefined' && console.log) {
+          console.log('[LessonPlan Scheme Lookup]', {
+            schoolId,
+            workerId,
+            year: targetYear,
+            class: className,
+            subject: subjectName,
+            term: termKey,
+            teacherSchemeFound: Boolean(teacherSchemeRaw),
+            templateFound: Boolean(templateScheme),
+            chosenSource: sourceType,
+            rowsFrom: chosenRowsSource || (sourceData && hasStructuredRows(sourceData) ? 'rows' : 'none')
+          });
+        }
 
         cacheEntry = buildSchemeBundle(sourceData, sourceType, lessonDate);
         schemeLookupCache.set(cacheKey, cacheEntry);
@@ -1865,8 +1879,12 @@
       }
 
       activeSchemeBundle = cacheEntry;
+      const schemeRecordExists = Boolean(cacheEntry?.sourceData);
       if (!cacheEntry?.rows?.length) {
-        clearSchemeGuidance('No saved teacher scheme or academic base scheme with structured rows was found for this selection.');
+        const msg = schemeRecordExists
+          ? 'Scheme record found, but no structured rows were parsed. Fallback guidance loaded.'
+          : 'No scheme record found for this selection.';
+        clearSchemeGuidance(msg);
         return;
       }
 
@@ -2265,8 +2283,8 @@
     async function loadLessonPlans() {
       try {
         const year = window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
-        const basePath = (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') ? SOMAP.P(`lessonPlans/${year}`) : (schoolId && schoolId !== 'socrates-school' ? `schools/${schoolId}/lessonPlans/${year}` : `lessonPlans/${year}`);
-        
+        const basePath = getLessonPlanBasePath(year);
+
         // Also check legacy path for backward compatibility
         const legacySnap = await db.ref(`lesson_plans/${workerId}`).once('value').catch(()=>({val:()=>null}));
         const legacyData = legacySnap.val() || {};
@@ -2512,8 +2530,7 @@ ${plan.reflection || 'N/A'}
         }
 
         const year = plan.year || window.somapYearContext.getSelectedYear();
-        const schoolId = window.currentSchoolId || null;
-        const basePath = schoolId ? `schools/${schoolId}/lessonPlans` : 'lessonPlans';
+        const basePath = getLessonPlanBasePath();
         const cls = plan.className || plan.class || '';
         const date = plan.date || '';
 
@@ -2692,11 +2709,10 @@ ${plan.reflection || 'N/A'}
       };
 
       try {
-        const schoolId = window.currentSchoolId || null;
-        const basePath = schoolId ? `schools/${schoolId}/lessonPlans` : 'lessonPlans';
+        const basePath = getLessonPlanBasePath();
         const cls = planData.className;
         const date = planData.date;
-        
+
         if (editingPlanId) {
           planData.updatedAt = firebase.database.ServerValue.TIMESTAMP;
           planData.id = editingPlanId;
@@ -2734,8 +2750,7 @@ ${plan.reflection || 'N/A'}
     async function fetchPlansRange(fromStr,toStr){
       const years = datesInYears(fromStr,toStr);
       const rows = [];
-      const schoolId = window.currentSchoolId || null;
-      const basePath = schoolId ? `schools/${schoolId}/lessonPlans` : 'lessonPlans';
+      const basePath = getLessonPlanBasePath();
 
       for(const y of years){
         try {
@@ -2949,8 +2964,7 @@ ${plan.reflection || 'N/A'}
     fetchPlansRange = async function(fromStr, toStr) {
       const years = datesInYears(fromStr, toStr);
       const rows = [];
-      const currentSchoolId = window.currentSchoolId || null;
-      const basePath = currentSchoolId ? `schools/${currentSchoolId}/lessonPlans` : 'lessonPlans';
+      const basePath = getLessonPlanBasePath();
 
       for (const y of years) {
         try {
