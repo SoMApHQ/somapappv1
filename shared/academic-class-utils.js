@@ -141,17 +141,25 @@
 
   function buildAttendancePathCandidates(year, className, dateKey) {
     const canonical = normalizeClassName(className);
+    const monthKey = /^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ''))
+      ? String(dateKey).slice(0, 7)
+      : '';
     const variants = Array.from(new Set([
       String(className || '').trim(),
       canonical,
       canonical.replace(/\s+/g, '_'),
       canonical.replace(/\s+/g, ''),
+      canonical.toUpperCase(),
+      canonical.toUpperCase().replace(/\s+/g, ''),
       canonical.toLowerCase(),
       canonical.toLowerCase().replace(/\s+/g, '_')
     ].filter(Boolean)));
 
     const candidates = [];
     variants.forEach((variant) => {
+      if (monthKey) {
+        candidates.push(`attendance/${variant}/${monthKey}/${dateKey}`);
+      }
       candidates.push(`classAttendance/${year}/${variant}/${dateKey}`);
       candidates.push(`attendance/class/${year}/${variant}/${dateKey}`);
       candidates.push(`attendance/${year}/${variant}/${dateKey}`);

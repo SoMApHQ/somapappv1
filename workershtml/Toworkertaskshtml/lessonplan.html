@@ -2162,6 +2162,27 @@
       return n;
     }
 
+    function countClassRosterStats(targetClass, maps, targetYear){
+      const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(targetClass) : targetClass;
+      const stats = { total: 0, boys: 0, girls: 0 };
+      const students = maps.students || {};
+
+      for (const id of Object.keys(students)) {
+        const studentRecord = students[id];
+        if (!studentRecord || typeof studentRecord !== 'object') continue;
+        const cls = resolveClassForYear(id, studentRecord, maps.enrollAnchor, maps.enrollYear, targetYear);
+        const normalizedClass = L(ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(cls) : cls);
+        if (normalizedClass !== L(canonicalTarget)) continue;
+
+        stats.total += 1;
+        const gender = String(studentRecord.gender || studentRecord.sex || '').trim().toUpperCase();
+        if (['M', 'B', 'BOY', 'MALE'].includes(gender)) stats.boys += 1;
+        else if (['F', 'G', 'GIRL', 'FEMALE'].includes(gender)) stats.girls += 1;
+      }
+
+      return stats;
+    }
+
     async function loadAttendanceCounts(year, className, dateStr, studentsMap){
       const y = String(year);
       const cls = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(className) : String(className || '').trim();
@@ -2254,7 +2275,8 @@
           return;
         }
 
-        const total = countClassForYear(chosenClass, maps, year);
+        const rosterStats = countClassRosterStats(chosenClass, maps, year);
+        const total = rosterStats.total || countClassForYear(chosenClass, maps, year);
         console.log(`Total students for ${chosenClass} in ${year}: ${total}`);
         
         if (totalInp){ 
@@ -2266,17 +2288,21 @@
           if(statNote) statNote.textContent = 'Loading attendance data...';
           const att = await loadAttendanceCounts(year, chosenClass, dateInp.value, maps.students||{});
           console.log('Attendance data:', att);
+          const absentBoys = Math.max(0, (rosterStats.boys || 0) - (att.boysP || 0));
+          const absentGirls = Math.max(0, (rosterStats.girls || 0) - (att.girlsP || 0));
+          const presentTotal = att.present || 0;
+          const absentTotal = Math.max(0, total - presentTotal);
           
-          if (presentInp) presentInp.value = att.present || 0;
+          if (presentInp) presentInp.value = presentTotal;
           if (pbEl) pbEl.value = att.boysP || 0;
           if (pgEl) pgEl.value = att.girlsP || 0;
-          if (abEl) abEl.value = att.boysA || 0;
-          if (agEl) agEl.value = att.girlsA || 0;
+          if (abEl) abEl.value = absentBoys;
+          if (agEl) agEl.value = absentGirls;
           if (statPB) statPB.textContent = att.boysP || 0;
           if (statPG) statPG.textContent = att.girlsP || 0;
-          if (statAB) statAB.textContent = att.boysA || 0;
-          if (statAG) statAG.textContent = att.girlsA || 0;
-          if (statNote) statNote.textContent = `Auto from attendance: ${dateInp.value} (${att.present} present)`;
+          if (statAB) statAB.textContent = absentBoys;
+          if (statAG) statAG.textContent = absentGirls;
+          if (statNote) statNote.textContent = `Auto from attendance: ${dateInp.value} (${presentTotal} present, ${absentTotal} absent)`;
         } else {
           if (presentInp) presentInp.value = '';
           [pbEl,pgEl,abEl,agEl].forEach(el=>{ if(el) el.value = ''; });
