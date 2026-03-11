@@ -1297,7 +1297,117 @@
       resetDelayWorkflow();
     }
 
+    function normalizeLookupToken(value) {
+      return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[_\s-]+/g, '')
+        .replace(/[^a-z0-9]/g, '');
+    }
+
+    function buildLookupAliases(value) {
+      const raw = String(value || '').trim();
+      return Array.from(new Set([
+        raw,
+        safeKey(raw),
+        pathKey(raw),
+        raw.replace(/\s+/g, ''),
+        raw.replace(/[_\s-]+/g, ' ')
+      ].filter(Boolean)));
+    }
+
+    function matchesLookupValue(value, aliases) {
+      const candidate = normalizeLookupToken(value);
+      return Boolean(candidate) && aliases.some((alias) => normalizeLookupToken(alias) === candidate);
+    }
+
+    function sortByMostRecent(items) {
+      return [...(items || [])].sort((a, b) => {
+        const aTime = a?.meta?.updatedAt || a?.meta?.createdAt || 0;
+        const bTime = b?.meta?.updatedAt || b?.meta?.createdAt || 0;
+        return bTime - aTime;
+      });
+    }
+
+    function matchesAcademicSelection(record, selection) {
+      if (!record || !selection) return false;
+      const classCandidates = [
+        record.className,
+        record.classKey,
+        record.__storedClass
+      ];
+      const subjectCandidates = [
+        record.subjectName,
+        record.subjectKey,
+        record.__storedSubject
+      ];
+      const termCandidates = [
+        record.termKey,
+        record.__storedTerm,
+        termLabelFromKey(record.termKey)
+      ];
+
+      const sameClass = classCandidates.some((candidate) => matchesLookupValue(candidate, selection.classAliases));
+      const sameSubject = subjectCandidates.some((candidate) => matchesLookupValue(candidate, selection.subjectAliases));
+      const sameTerm = termCandidates.some((candidate) => matchesLookupValue(candidate, selection.termAliases));
+      return sameClass && sameSubject && sameTerm;
+    }
+
+    function buildAcademicSelection(className, subjectName, termKey) {
+      return {
+        classAliases: buildLookupAliases(className),
+        subjectAliases: buildLookupAliases(subjectName),
+        termAliases: buildLookupAliases(termKey).concat(buildLookupAliases(termLabelFromKey(termKey)))
+      };
+    }
+
+    function flattenTeacherSchemesForYear(teacherData, year) {
+      const results = [];
+      Object.entries(teacherData || {}).forEach(([yr, byClass]) => {
+        if (String(yr) !== String(year)) return;
+        Object.entries(byClass || {}).forEach(([storedClass, bySubj]) => {
+          Object.entries(bySubj || {}).forEach(([storedSubject, byTermNode]) => {
+            Object.entries(byTermNode || {}).forEach(([storedTerm, schemes]) => {
+              Object.values(schemes || {}).forEach((scheme) => {
+                if (scheme && typeof scheme === 'object' && (scheme.schemeId || scheme.meta || scheme.className || scheme.classKey)) {
+                  results.push({
+                    ...scheme,
+                    __storedClass: storedClass,
+                    __storedSubject: storedSubject,
+                    __storedTerm: storedTerm
+                  });
+                }
+              });
+            });
+          });
+        });
+      });
+      return results;
+    }
+
+    function flattenTemplatesForYear(yearTree) {
+      const results = [];
+      Object.entries(yearTree || {}).forEach(([storedClass, bySubj]) => {
+        Object.entries(bySubj || {}).forEach(([storedSubject, byTerm]) => {
+          Object.entries(byTerm || {}).forEach(([storedTerm, templates]) => {
+            Object.values(templates || {}).forEach((template) => {
+              if (template && typeof template === 'object' && (template.templateId || template.meta || template.className || template.classKey)) {
+                results.push({
+                  ...template,
+                  __storedClass: storedClass,
+                  __storedSubject: storedSubject,
+                  __storedTerm: storedTerm
+                });
+              }
+            });
+          });
+        });
+      });
+      return results;
+    }
+
     async function fetchLatestTeacherScheme(year, className, subjectName, termKey) {
+      const selection = buildAcademicSelection(className, subjectName, termKey);
       const classKey = safeKey(className);
       const subjectKey = safeKey(subjectName);
       const classPathKey = pathKey(className);
@@ -1314,8 +1424,7 @@
         const exactSnap = await db.ref(exactPath).once('value');
         let items = Object.values(exactSnap.val() || {});
         if (items.length) {
-          items.sort((a, b) => (b?.meta?.updatedAt || 0) - (a?.meta?.updatedAt || 0));
-          return items[0];
+          return sortByMostRecent(items)[0];
         }
 
         const subjectPath = `schemes/${schoolId}/teacher/${workerId}/${year}/${cKey}/${sKey}`;
@@ -1324,55 +1433,34 @@
         const flattened = [];
         Object.entries(byTerm).forEach(([storedTerm, schemes]) => {
           Object.values(schemes || {}).forEach((scheme) => {
-            flattened.push({ ...scheme, __storedTerm: storedTerm });
-          });
-        });
-        if (flattened.length) {
-          const filtered = flattened.filter((item) => {
-            const sameTerm = item.termKey === termKey || item.__storedTerm === termKey || termLabelFromKey(item.termKey) === termLabelFromKey(termKey);
-            const sameClass = L(item.className) === L(className) || L(item.classKey) === L(classKey) || L(pathKey(item.className)) === L(classPathKey);
-            const sameSubject = L(item.subjectName) === L(subjectName) || L(item.subjectKey) === L(subjectKey) || L(pathKey(item.subjectName)) === L(subjectPathKey);
-            return sameTerm && sameClass && sameSubject;
-          });
-          const pool = filtered.length ? filtered : flattened;
-          pool.sort((a, b) => (b?.meta?.updatedAt || 0) - (a?.meta?.updatedAt || 0));
-          return pool[0];
-        }
-      }
-
-      // Full crawl fallback: load all teacher schemes (same as schemes.html) and match by class/subject/term
-      const teacherRootSnap = await db.ref(`schemes/${schoolId}/teacher/${workerId}`).once('value');
-      const teacherData = teacherRootSnap.val() || {};
-      const allSchemes = [];
-      Object.entries(teacherData).forEach(([yr, byClass]) => {
-        if (String(yr) !== String(year)) return;
-        Object.entries(byClass || {}).forEach(([cls, bySubj]) => {
-          Object.entries(bySubj || {}).forEach(([subj, byTermNode]) => {
-            Object.entries(byTermNode || {}).forEach(([t, schemes]) => {
-              if (schemes && typeof schemes === 'object' && !Array.isArray(schemes)) {
-                Object.values(schemes).forEach((s) => {
-                  if (s && typeof s === 'object' && (s.schemeId || s.meta || s.className)) {
-                    allSchemes.push({ ...s, __storedTerm: t, __storedClass: cls, __storedSubject: subj });
-                  }
-                });
-              }
+            flattened.push({
+              ...scheme,
+              __storedClass: cKey,
+              __storedSubject: sKey,
+              __storedTerm: storedTerm
             });
           });
         });
-      });
-      const matched = allSchemes.filter((s) => {
-        const sameTerm = s.termKey === termKey || s.__storedTerm === termKey || termLabelFromKey(s.termKey) === termLabelFromKey(termKey);
-        const sameClass = L(s.className) === L(className) || L(s.classKey) === L(classKey) || L(pathKey(s.className)) === L(classPathKey) || L(s.__storedClass) === L(classKey) || L(s.__storedClass) === L(classPathKey);
-        const sameSubject = L(s.subjectName) === L(subjectName) || L(s.subjectKey) === L(subjectKey) || L(pathKey(s.subjectName)) === L(subjectPathKey) || L(s.__storedSubject) === L(subjectKey) || L(s.__storedSubject) === L(subjectPathKey);
-        return sameTerm && sameClass && sameSubject;
-      });
+        if (flattened.length) {
+          const filtered = flattened.filter((item) => matchesAcademicSelection(item, selection));
+          if (filtered.length) {
+            return sortByMostRecent(filtered)[0];
+          }
+        }
+      }
+
+      // Full crawl fallback: mirror the schemes page tree walk and match using normalized aliases.
+      const teacherRootSnap = await db.ref(`schemes/${schoolId}/teacher/${workerId}`).once('value');
+      const teacherData = teacherRootSnap.val() || {};
+      const matched = flattenTeacherSchemesForYear(teacherData, year)
+        .filter((scheme) => matchesAcademicSelection(scheme, selection));
       if (!matched.length) return null;
-      matched.sort((a, b) => (b?.meta?.updatedAt || 0) - (a?.meta?.updatedAt || 0));
-      return matched[0];
+      return sortByMostRecent(matched)[0];
     }
 
     async function fetchTemplateById(year, className, subjectName, termKey, templateId) {
       if (!templateId) return null;
+      const selection = buildAcademicSelection(className, subjectName, termKey);
       const classKey = safeKey(className);
       const subjectKey = safeKey(subjectName);
       const classPathKey = pathKey(className);
@@ -1392,24 +1480,32 @@
         const subjectPath = `schemes/${schoolId}/templates/${year}/${cKey}/${sKey}`;
         const subjectSnap = await db.ref(subjectPath).once('value');
         const byTerm = subjectSnap.val() || {};
-        for (const templates of Object.values(byTerm)) {
-          if (templates && templates[templateId]) return templates[templateId];
-        }
-      }
-      // Crawl templates tree to find by templateId
-      const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
-      const yearTree = yearSnap.val() || {};
-      for (const bySubj of Object.values(yearTree)) {
-        for (const byTerm of Object.values(bySubj || {})) {
-          for (const templates of Object.values(byTerm || {})) {
-            if (templates && templates[templateId]) return templates[templateId];
+        for (const [storedTerm, templates] of Object.entries(byTerm)) {
+          if (templates && templates[templateId]) {
+            const candidate = {
+              ...templates[templateId],
+              __storedClass: cKey,
+              __storedSubject: sKey,
+              __storedTerm: storedTerm
+            };
+            if (matchesAcademicSelection(candidate, selection)) {
+              return candidate;
+            }
           }
         }
       }
+      // Crawl templates tree to find the requested template, preserving stored path metadata.
+      const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
+      const yearTree = yearSnap.val() || {};
+      const match = flattenTemplatesForYear(yearTree).find((template) =>
+        template.templateId === templateId && matchesAcademicSelection(template, selection)
+      );
+      if (match) return match;
       return null;
     }
 
     async function fetchLatestTemplate(year, className, subjectName, termKey) {
+      const selection = buildAcademicSelection(className, subjectName, termKey);
       const classKey = safeKey(className);
       const subjectKey = safeKey(subjectName);
       const classPathKey = pathKey(className);
@@ -1426,8 +1522,7 @@
         const exactSnap = await db.ref(exactPath).once('value');
         let items = Object.values(exactSnap.val() || {});
         if (items.length) {
-          items.sort((a, b) => (b?.meta?.updatedAt || b?.meta?.createdAt || 0) - (a?.meta?.updatedAt || a?.meta?.createdAt || 0));
-          return items[0];
+          return sortByMostRecent(items)[0];
         }
 
         const subjectPath = `schemes/${schoolId}/templates/${year}/${cKey}/${sKey}`;
@@ -1436,60 +1531,29 @@
         const flattened = [];
         Object.entries(byTerm).forEach(([storedTerm, templates]) => {
           Object.values(templates || {}).forEach((template) => {
-            flattened.push({ ...template, __storedTerm: storedTerm });
-          });
-        });
-
-        if (!flattened.length) {
-          const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
-          const yearTree = yearSnap.val() || {};
-          Object.values(yearTree || {}).forEach((subjectsNode) => {
-            Object.values(subjectsNode || {}).forEach((termsNode) => {
-              Object.entries(termsNode || {}).forEach(([storedTerm, templates]) => {
-                Object.values(templates || {}).forEach((template) => flattened.push({ ...template, __storedTerm: storedTerm }));
-              });
+            flattened.push({
+              ...template,
+              __storedClass: cKey,
+              __storedSubject: sKey,
+              __storedTerm: storedTerm
             });
           });
-        }
-
+        });
         if (flattened.length) {
-          const filtered = flattened.filter((item) => {
-            const sameTerm = item.termKey === termKey || item.__storedTerm === termKey || termLabelFromKey(item.termKey) === termLabelFromKey(termKey);
-            const sameClass = L(item.className) === L(className) || L(item.classKey) === L(classKey) || L(pathKey(item.className)) === L(classPathKey);
-            const sameSubject = L(item.subjectName) === L(subjectName) || L(item.subjectKey) === L(subjectKey) || L(pathKey(item.subjectName)) === L(subjectPathKey);
-            return sameTerm && sameClass && sameSubject;
-          });
-          const pool = filtered.length ? filtered : flattened.filter((item) => {
-            const sameClass = L(item.className) === L(className) || L(item.classKey) === L(classKey) || L(pathKey(item.className)) === L(classPathKey);
-            const sameSubject = L(item.subjectName) === L(subjectName) || L(item.subjectKey) === L(subjectKey) || L(pathKey(item.subjectName)) === L(subjectPathKey);
-            return sameClass && sameSubject;
-          });
-          if (pool.length) {
-            pool.sort((a, b) => (b?.meta?.updatedAt || b?.meta?.createdAt || 0) - (a?.meta?.updatedAt || a?.meta?.createdAt || 0));
-            return pool[0];
+          const filtered = flattened.filter((item) => matchesAcademicSelection(item, selection));
+          if (filtered.length) {
+            return sortByMostRecent(filtered)[0];
           }
         }
       }
-      // Final fallback: crawl full templates tree for year (year/class/subject/term/templateId)
+
+      // Final fallback: crawl the full year tree and match using stored path metadata.
       const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
       const yearTree = yearSnap.val() || {};
-      const crawled = [];
-      Object.values(yearTree || {}).forEach((bySubj) => {
-        Object.values(bySubj || {}).forEach((byTerm) => {
-          Object.entries(byTerm || {}).forEach(([storedTerm, templates]) => {
-            Object.values(templates || {}).forEach((t) => crawled.push({ ...t, __storedTerm: storedTerm }));
-          });
-        });
-      });
-      const found = crawled.filter((t) => {
-        const sameTerm = t.termKey === termKey || t.__storedTerm === termKey || termLabelFromKey(t.termKey) === termLabelFromKey(termKey);
-        const sameClass = L(t.className) === L(className) || L(t.classKey) === L(classKey) || L(pathKey(t.className)) === L(classPathKey);
-        const sameSubject = L(t.subjectName) === L(subjectName) || L(t.subjectKey) === L(subjectKey) || L(pathKey(t.subjectName)) === L(subjectPathKey);
-        return sameTerm && sameClass && sameSubject;
-      });
+      const found = flattenTemplatesForYear(yearTree)
+        .filter((template) => matchesAcademicSelection(template, selection));
       if (found.length) {
-        found.sort((a, b) => (b?.meta?.updatedAt || b?.meta?.createdAt || 0) - (a?.meta?.updatedAt || a?.meta?.createdAt || 0));
-        return found[0];
+        return sortByMostRecent(found)[0];
       }
       return null;
     }
