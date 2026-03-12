@@ -128,6 +128,7 @@
     teachers: [],
     teacherMap: {},
     subjectCatalog: {},
+    schemeHoursByClass: {},
     settingsByGroup: {},
     generatedByGroup: {},
     previewByGroup: {},
@@ -277,6 +278,7 @@
     state.teachers = source.teachers;
     state.teacherMap = indexBy(source.teachers, 'workerId');
     state.subjectCatalog = source.subjectCatalog;
+    state.schemeHoursByClass = await loadSchemeHoursMap();
     state.sourceConfigHash = buildSourceConfigHash(source);
     await loadTimetableRecords();
     ensureSettingsShape();
@@ -389,6 +391,35 @@
     return { teachers, subjectCatalog };
   }
 
+  async function loadSchemeHoursMap() {
+    const map = {};
+    try {
+      const snap = await state.db.ref(`schemes/${state.schoolId}/templates/${state.year}`).once('value');
+      const raw = snap.val() || {};
+      Object.values(raw).forEach((bySubject) => {
+        Object.values(bySubject || {}).forEach((byTerm) => {
+          Object.values(byTerm || {}).forEach((templates) => {
+            Object.values(templates || {}).forEach((template) => {
+              const className = normalizeClassName(template?.className || template?.classKey || '');
+              const subjectName = normalizeSubjectName(template?.subjectName || template?.subjectKey || '');
+              const hours = Number(template?.hoursPerWeek || 0);
+              const createdAt = Number(template?.meta?.createdAt || 0);
+              if (!className || !subjectName || hours <= 0) return;
+              map[className] = map[className] || {};
+              const existing = map[className][subjectName];
+              if (!existing || createdAt >= existing.createdAt) {
+                map[className][subjectName] = { hours, createdAt };
+              }
+            });
+          });
+        });
+      });
+    } catch (error) {
+      console.warn('Unable to load scheme hours', error);
+    }
+    return map;
+  }
+
   async function loadTimetableRecords() {
     const year = state.year;
     const settingsEntries = {};
@@ -426,6 +457,10 @@
     const catalogHandler = () => scheduleRefresh();
     catalogRef.on('value', catalogHandler);
     state.watchers.push(() => catalogRef.off('value', catalogHandler));
+    const schemeRef = state.db.ref(`schemes/${state.schoolId}/templates/${state.year}`);
+    const schemeHandler = () => scheduleRefresh();
+    schemeRef.on('value', schemeHandler);
+    state.watchers.push(() => schemeRef.off('value', schemeHandler));
   }
 
   function scheduleRefresh() {
@@ -794,7 +829,6 @@
     const summary = preview.validationSummary || blankValidationSummary();
     els.previewStatusChip.textContent = summary.isValid ? 'Valid preview ready' : 'Preview contains issues';
     els.previewStatusChip.className = `tt-inline-status ${summary.isValid ? 'tt-pill--success' : 'tt-pill--warning'}`;
-    const dayTables = DAYS.map((day) => renderDayTable(preview, day)).join('');
     els.previewShell.innerHTML = `
       <article class="tt-preview-document" id="printDocument">
         <div class="tt-preview-document__header">
@@ -813,7 +847,7 @@
             <div><strong>Status:</strong> ${escapeHtml(summary.isValid ? 'Valid - conflict free' : 'Review validation report')}</div>
           </div>
         </div>
-        ${dayTables}
+        ${renderCombinedPreviewTable(preview)}
         <div class="tt-card__eyebrow" style="margin-top:18px;">Teacher Legend</div>
         <div class="tt-legend-grid">
           ${(preview.teacherLegend || []).map((teacher) => `
@@ -833,6 +867,39 @@
           `).join('')}
         </div>
       </article>
+    `;
+  }
+
+  function renderCombinedPreviewTable(preview) {
+    const slots = preview.slots || [];
+    const rows = [];
+    DAYS.forEach((day) => {
+      preview.classes.forEach((className, classIndex) => {
+        const cells = slots.map((slot) => `<td>${renderGridCell(preview.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot))}</td>`).join('');
+        rows.push(`
+          <tr>
+            ${classIndex === 0 ? `<td class="tt-class-cell" rowspan="${preview.classes.length}">${escapeHtml(day)}</td>` : ''}
+            <td class="tt-class-cell">${escapeHtml(className)}</td>
+            ${cells}
+          </tr>
+        `);
+      });
+    });
+    return `
+      <section class="tt-day-card">
+        <div class="tt-day-table-wrap">
+          <table class="tt-day-table">
+            <thead>
+              <tr>
+                <th class="tt-class-cell">Day</th>
+                <th class="tt-class-cell">Class</th>
+                ${slots.map((slot) => `<th class="tt-slot-head"><strong>${escapeHtml(slot.start)} - ${escapeHtml(slot.end)}</strong><span>${escapeHtml(slot.label)}</span></th>`).join('')}
+              </tr>
+            </thead>
+            <tbody>${rows.join('')}</tbody>
+          </table>
+        </div>
+      </section>
     `;
   }
 
@@ -1008,6 +1075,7 @@
       return;
     }
     const settings = normalizeSettings(getActiveSettings(), state.activeGroupId, state.teachers, state.subjectCatalog);
+    settings.seededDefaults = false;
     state.settingsByGroup[state.activeGroupId] = settings;
     await persistSettings(state.activeGroupId, settings, false);
     state.dirtySettings.delete(state.activeGroupId);
@@ -1128,6 +1196,7 @@
     const groupId = state.activeGroupId;
     const draft = deepClone(getSettingsForGroup(groupId));
     mutator(draft);
+    draft.seededDefaults = false;
     state.settingsByGroup[groupId] = normalizeSettings(draft, groupId, state.teachers, state.subjectCatalog);
     state.dirtySettings.add(groupId);
     renderAll();
@@ -1329,12 +1398,14 @@
       });
     });
     if (!entries.length) return null;
-    entries.sort((left, right) => {
+    const schedulable = entries.filter((entry) => entry.placements.length > 0);
+    if (!schedulable.length) return null;
+    schedulable.sort((left, right) => {
       if (left.placements.length !== right.placements.length) return left.placements.length - right.placements.length;
       if (left.remaining !== right.remaining) return right.remaining - left.remaining;
       return `${left.className}:${left.subject}`.localeCompare(`${right.className}:${right.subject}`);
     });
-    return entries[0];
+    return schedulable[0];
   }
 
   function collectPlacements(searchState, className, subject) {
@@ -1552,50 +1623,45 @@
       const timetable = timetables[index];
       if (index > 0) doc.addPage();
       drawPdfHeader(doc, logoData, groupId, timetable);
-      let cursorY = 104;
-      DAYS.forEach((day, dayIndex) => {
-        if (dayIndex > 0 && cursorY > 430) {
-          doc.addPage();
-          drawPdfHeader(doc, logoData, groupId, timetable);
-          cursorY = 104;
-        }
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(12);
-        doc.text(day, 34, cursorY);
-        cursorY += 8;
-        const head = [['Class', ...timetable.slots.map((slot) => `${slot.start}-${slot.end}\n${slot.label}`)]];
-        const body = timetable.classes.map((className) => {
-          const row = [className];
+      const head = [['Day', 'Class', ...timetable.slots.map((slot) => `${slot.start}-${slot.end}\n${slot.label}`)]];
+      const body = [];
+      DAYS.forEach((day) => {
+        timetable.classes.forEach((className, classIndex) => {
+          const row = [classIndex === 0 ? day : '', className];
           timetable.slots.forEach((slot) => {
             const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot);
             row.push(cell.type === 'teaching' ? cell.code : (cell.type === 'fixed' ? (cell.label || 'Fixed') : 'OPEN'));
           });
-          return row;
+          body.push(row);
         });
-        doc.autoTable({
-          startY: cursorY,
-          head,
-          body,
-          theme: 'grid',
-          styles: { font: 'helvetica', fontSize: 7, cellPadding: 5, textColor: [16, 35, 62], lineColor: [146, 163, 184], lineWidth: 0.35 },
-          headStyles: { fillColor: [232, 240, 255], textColor: [36, 64, 100], fontStyle: 'bold' },
-          columnStyles: { 0: { fillColor: [245, 249, 255], fontStyle: 'bold' } },
-          didParseCell(data) {
-            if (data.section !== 'body' || data.column.index === 0) return;
-            const className = timetable.classes[data.row.index];
-            const slot = timetable.slots[data.column.index - 1];
-            const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot);
-            if (cell.type === 'teaching') {
-              data.cell.styles.fillColor = hexToRgbArray(cell.color || '#dbeafe');
-            } else if (cell.type === 'fixed') {
-              data.cell.styles.fillColor = [241, 245, 249];
-            } else {
-              data.cell.styles.fillColor = [248, 250, 252];
-              data.cell.styles.textColor = [148, 163, 184];
-            }
+      });
+      doc.autoTable({
+        startY: 104,
+        head,
+        body,
+        theme: 'grid',
+        styles: { font: 'helvetica', fontSize: 6.6, cellPadding: 4, textColor: [16, 35, 62], lineColor: [146, 163, 184], lineWidth: 0.35 },
+        headStyles: { fillColor: [232, 240, 255], textColor: [36, 64, 100], fontStyle: 'bold' },
+        columnStyles: {
+          0: { fillColor: [245, 249, 255], fontStyle: 'bold', cellWidth: 46 },
+          1: { fillColor: [245, 249, 255], fontStyle: 'bold', cellWidth: 52 }
+        },
+        didParseCell(data) {
+          if (data.section !== 'body' || data.column.index < 2) return;
+          const dayBlockIndex = Math.floor(data.row.index / timetable.classes.length);
+          const day = DAYS[dayBlockIndex];
+          const className = timetable.classes[data.row.index % timetable.classes.length];
+          const slot = timetable.slots[data.column.index - 2];
+          const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot);
+          if (cell.type === 'teaching') {
+            data.cell.styles.fillColor = hexToRgbArray(cell.color || '#dbeafe');
+          } else if (cell.type === 'fixed') {
+            data.cell.styles.fillColor = [241, 245, 249];
+          } else {
+            data.cell.styles.fillColor = [248, 250, 252];
+            data.cell.styles.textColor = [148, 163, 184];
           }
-        });
-        cursorY = (doc.lastAutoTable?.finalY || cursorY + 80) + 18;
+        }
       });
       drawPdfLegend(doc, timetable, Math.min(doc.internal.pageSize.getHeight() - 86, Math.max(470, (doc.lastAutoTable?.finalY || 420) + 20)));
     });
@@ -1817,7 +1883,12 @@
     GROUPS[groupId].classes.forEach((className) => {
       periodRequirements[className] = {};
       getSubjectsForClass(groupId, className, { periodRequirements: input.periodRequirements || defaults.periodRequirements || {} }).forEach((subject) => {
-        const value = Number(input.periodRequirements?.[className]?.[subject] ?? defaults.periodRequirements?.[className]?.[subject] ?? 0);
+        const schemeHours = Number(state.schemeHoursByClass?.[className]?.[subject]?.hours || 0);
+        const shouldPreferSeeded = !raw || Boolean(input.seededDefaults);
+        const fallbackValue = shouldPreferSeeded && schemeHours > 0
+          ? schemeHours
+          : Number(defaults.periodRequirements?.[className]?.[subject] ?? 0);
+        const value = Number(input.periodRequirements?.[className]?.[subject] ?? fallbackValue);
         periodRequirements[className][subject] = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
       });
     });
@@ -1859,7 +1930,8 @@
       const preset = DEFAULT_PERIOD_PRESETS[groupId] || { default: 2, special: {} };
       periodRequirements[className] = {};
       Array.from(subjects).forEach((subject) => {
-        periodRequirements[className][subject] = preset.special?.[subject] ?? preset.default ?? 2;
+        const schemeHours = Number(state.schemeHoursByClass?.[className]?.[subject]?.hours || 0);
+        periodRequirements[className][subject] = schemeHours > 0 ? schemeHours : (preset.special?.[subject] ?? preset.default ?? 2);
         subjectAbbreviations[subject] = DEFAULT_ABBREVIATIONS[subject] || makeSubjectAbbreviation(subject);
         subjectColors[subject] = DEFAULT_SUBJECT_COLORS[subject] || '#dbeafe';
       });
@@ -2035,7 +2107,8 @@
         teacherType: teacher.teacherType,
         mappings: teacher.classSubjectMappings
       })),
-      subjectCatalog: source.subjectCatalog
+      subjectCatalog: source.subjectCatalog,
+      schemeHoursByClass: state.schemeHoursByClass
     }));
   }
 
