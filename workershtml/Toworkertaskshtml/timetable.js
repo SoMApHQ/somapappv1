@@ -1920,7 +1920,10 @@
         const fallbackValue = shouldPreferSeeded && schemeHours > 0
           ? schemeHours
           : Number(defaults.periodRequirements?.[className]?.[subject] ?? 0);
-        const value = Number(input.periodRequirements?.[className]?.[subject] ?? fallbackValue);
+        // Scheme hours (from Academic Materials) take precedence when a scheme exists for this class/subject
+        const value = schemeHours > 0
+          ? schemeHours
+          : Number(input.periodRequirements?.[className]?.[subject] ?? fallbackValue);
         periodRequirements[className][subject] = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
       });
     });
