@@ -1207,6 +1207,14 @@
       const base = (schoolId && schoolId !== 'socrates-school') ? `schools/${schoolId}/lessonPlans` : 'lessonPlans';
       return year ? `${base}/${year}` : base;
     }
+
+    function getLessonNotesBasePath(year) {
+      if (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') {
+        return year ? SOMAP.P(`lessonNotes/${year}`) : SOMAP.P('lessonNotes');
+      }
+      const base = (schoolId && schoolId !== 'socrates-school') ? `schools/${schoolId}/lessonNotes` : 'lessonNotes';
+      return year ? `${base}/${year}` : base;
+    }
     // Path-safe key: also normalizes spaces for Firebase lookup (schemes may be stored with either)
     function pathKey(value) {
       return String(value || '').trim().replace(/\s+/g, '_').replace(/[.#$/\[\]]/g, '_');
@@ -1637,18 +1645,47 @@
       renderHomeworkSyncStatus();
     }
 
-    async function getLessonNotesForTeacher() {
-      const cacheKey = `${workerId || ''}`;
+    function deriveLessonNoteYear(note, fallbackYear) {
+      const explicit = String(note?.year || note?.academicYear || '').trim();
+      if (explicit) return explicit;
+      const stamp = Number(note?.updatedAt || note?.createdAt || 0);
+      if (stamp > 0) {
+        try {
+          const y = new Date(stamp).getFullYear();
+          if (y) return String(y);
+        } catch (error) {}
+      }
+      return String(fallbackYear || getYear());
+    }
+
+    async function getLessonNotesForTeacher(year = '') {
+      const targetYear = String(year || (planDate?.value ? new Date(planDate.value).getFullYear() : getYear()));
+      const cacheKey = `${workerId || ''}::${targetYear}`;
       if (lessonNotesCache.has(cacheKey)) return lessonNotesCache.get(cacheKey);
       if (!workerId) {
         lessonNotesCache.set(cacheKey, {});
         return {};
       }
       try {
-        const snap = await db.ref(`lesson_notes/${workerId}`).once('value');
-        const notes = (snap && snap.val && snap.val()) || {};
-        lessonNotesCache.set(cacheKey, notes);
-        return notes;
+        const [scopedSnap, legacySnap] = await Promise.all([
+          db.ref(`${getLessonNotesBasePath(targetYear)}/${workerId}`).once('value').catch(()=>({val:()=>null})),
+          db.ref(`lesson_notes/${workerId}`).once('value').catch(()=>({val:()=>null}))
+        ]);
+        const scopedNotes = (scopedSnap && scopedSnap.val && scopedSnap.val()) || {};
+        const legacyNotes = (legacySnap && legacySnap.val && legacySnap.val()) || {};
+        const merged = {};
+
+        Object.entries(legacyNotes).forEach(([id, note]) => {
+          if (deriveLessonNoteYear(note, targetYear) === targetYear) {
+            merged[id] = { id, ...(note || {}), year: deriveLessonNoteYear(note, targetYear) };
+          }
+        });
+        Object.entries(scopedNotes).forEach(([id, note]) => {
+          merged[id] = { id, ...(note || {}), year: deriveLessonNoteYear(note, targetYear) };
+        });
+
+        lessonNotesCache.set(cacheKey, merged);
+        return merged;
       } catch (error) {
         console.warn('Failed to load lesson notes for homework sync:', error?.message || error);
         lessonNotesCache.set(cacheKey, {});
@@ -1698,7 +1735,7 @@
         return null;
       }
 
-      const notesMap = await getLessonNotesForTeacher();
+      const notesMap = await getLessonNotesForTeacher(planDate?.value ? new Date(planDate.value).getFullYear() : getYear());
       const matchedNote = findBestLessonNoteMatch(notesMap, selection);
       if (!matchedNote) {
         if (!planHomework?.value.trim()) lessonHomeworkSourceMeta = null;

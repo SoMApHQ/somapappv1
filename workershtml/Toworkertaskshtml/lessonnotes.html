@@ -10,6 +10,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
   <script src="../../shared/academic-class-utils.js"></script>
+  <script src="../../js/scheme-template-parser.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha512-4w2d+Sxgpo1Jpj9V3dJbvt0mv47neVQcYcJJ2ULFuIkt6xl7V2bW77hlUjMt8uokG2ysL0ePkB2USK0lr7qC1A==" crossorigin="anonymous"></script>
   <script>
     if (window.pdfjsLib) {
@@ -223,6 +224,12 @@
       resize: vertical;
       min-height: 120px;
       font-family: inherit;
+    }
+
+    .field-hint {
+      font-size: 0.82rem;
+      color: rgba(255, 255, 255, 0.75);
+      line-height: 1.45;
     }
 
     .notes-form {
@@ -747,11 +754,21 @@
       <div class="form-row">
         <div class="form-group">
           <label>Topic / Unit *</label>
-          <input type="text" id="noteTopic" placeholder="e.g., Photosynthesis" required>
+          <select id="noteTopic" required>
+            <option value="">Select topic</option>
+            <option value="__manual__">Type topic manually</option>
+          </select>
+          <input type="text" id="noteTopicCustom" class="hidden" placeholder="Type topic manually">
+          <div class="field-hint" id="noteTopicHint">Choose class, subject, and term to load today's lesson-plan topic and this week's scheme topics.</div>
         </div>
         <div class="form-group">
           <label>Sub-Topic</label>
-          <input type="text" id="noteSubTopic" placeholder="e.g., Factors Affecting Photosynthesis">
+          <select id="noteSubTopic">
+            <option value="">Select sub-topic</option>
+            <option value="__manual__">Type sub-topic manually</option>
+          </select>
+          <input type="text" id="noteSubTopicCustom" class="hidden" placeholder="Type sub-topic manually">
+          <div class="field-hint" id="noteSubTopicHint">Sub-topics follow the selected topic. If none is found from the plan or scheme, type one manually.</div>
         </div>
         <div class="form-group">
           <label>Term</label>
@@ -974,6 +991,7 @@
     const lessonState = {
       classbooksCache: {},
       currentBook: null,
+      currentTopicBundle: null,
       extractedParagraphs: [],
       selectedParagraphs: new Set(),
       paragraphIndex: {},
@@ -983,7 +1001,10 @@
       pageTextCache: {},
       lastHomeworkMeta: null,
       isRevision: false,
-      revisionCandidate: null
+      revisionCandidate: null,
+      topicCatalog: [],
+      topicIndex: {},
+      topicSourceSummary: ''
     };
 
     const teacherName = document.getElementById('teacherName');
@@ -1004,7 +1025,11 @@
     const noteClassField = document.getElementById('noteClass');
     const noteSubjectField = document.getElementById('noteSubject');
     const noteTopicField = document.getElementById('noteTopic');
+    const noteTopicCustomField = document.getElementById('noteTopicCustom');
+    const noteTopicHint = document.getElementById('noteTopicHint');
     const noteSubTopicField = document.getElementById('noteSubTopic');
+    const noteSubTopicCustomField = document.getElementById('noteSubTopicCustom');
+    const noteSubTopicHint = document.getElementById('noteSubTopicHint');
     const noteTermField = document.getElementById('noteTerm');
     const keyConceptsField = document.getElementById('keyConceptsNotes');
     const detailedContentField = document.getElementById('detailedContent');
@@ -1136,6 +1161,226 @@
       return matches / Math.min(aSet.size, bSet.size);
     }
 
+    function compactTextBlock(text) {
+      return String(text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function normalizeLookupToken(value) {
+      return compactTextBlock(value).toLowerCase().replace(/[^a-z0-9]+/g, '');
+    }
+
+    function pathKey(value) {
+      return String(value || '').trim().replace(/\s+/g, '_').replace(/[.#$/\[\]]/g, '_');
+    }
+
+    function sentenceCase(text) {
+      const clean = compactTextBlock(text);
+      if (!clean) return '';
+      return clean.charAt(0).toUpperCase() + clean.slice(1);
+    }
+
+    function toTitleTopic(text) {
+      const clean = compactTextBlock(text)
+        .replace(/^to facilitate pupils? to\s*/i, '')
+        .replace(/^to facilitate pupil to\s*/i, '')
+        .replace(/^pupils? should be able to\s*/i, '')
+        .replace(/^learners? should be able to\s*/i, '');
+      if (!clean) return '';
+      return clean.replace(/\b\w+/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+    }
+
+    function stripTeacherLead(text) {
+      return compactTextBlock(text)
+        .replace(/^to facilitate pupils? to\s*/i, '')
+        .replace(/^to facilitate pupil to\s*/i, '')
+        .replace(/^pupils? should be able to\s*/i, '')
+        .replace(/^learners? should be able to\s*/i, '');
+    }
+
+    function parseNumericValue(value) {
+      const match = String(value || '').match(/\d+/);
+      return match ? Number(match[0]) : 0;
+    }
+
+    function normalizeSchemeMonth(value) {
+      return compactTextBlock(value).toLowerCase();
+    }
+
+    function monthOrderIndex(value) {
+      const order = {
+        january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+        july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
+      };
+      return order[normalizeSchemeMonth(value)] || 0;
+    }
+
+    function rowMonthMatches(row, lessonMonth) {
+      return normalizeSchemeMonth(row?.month) === normalizeSchemeMonth(lessonMonth);
+    }
+
+    function buildEntryId(rowKey, row) {
+      return `${rowKey || 'row'}::${sanitizeKey(row?.month)}::${sanitizeKey(row?.week)}::${sanitizeKey(row?.learningActivities || row?.specificActivities || row?.mainCompetence)}`;
+    }
+
+    function buildLookupAliases(value) {
+      const raw = String(value || '').trim();
+      const aliases = [
+        raw,
+        sanitizeKey(raw),
+        pathKey(raw),
+        raw.replace(/\s+/g, ''),
+        raw.replace(/[_\s-]+/g, ' '),
+        raw.replace(/[\s_-]+/g, ''),
+        normalizeLookupToken(raw)
+      ].filter(Boolean);
+      return Array.from(new Set(aliases));
+    }
+
+    function matchesLookupValue(value, aliases) {
+      const candidate = normalizeLookupToken(value);
+      return Boolean(candidate) && aliases.some((alias) => normalizeLookupToken(alias) === candidate);
+    }
+
+    function sortByMostRecent(items) {
+      return [...(items || [])].sort((a, b) => {
+        const aTime = a?.meta?.updatedAt || a?.meta?.createdAt || a?.updatedAt || a?.createdAt || 0;
+        const bTime = b?.meta?.updatedAt || b?.meta?.createdAt || b?.updatedAt || b?.createdAt || 0;
+        return bTime - aTime;
+      });
+    }
+
+    function getNairobiDateParts() {
+      const formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Africa/Nairobi',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      });
+      const parts = formatter.formatToParts(new Date());
+      const bucket = {};
+      parts.forEach((part) => {
+        if (part.type !== 'literal') bucket[part.type] = part.value;
+      });
+      return {
+        year: bucket.year || String(new Date().getFullYear()),
+        month: bucket.month || String(new Date().getMonth() + 1).padStart(2, '0'),
+        day: bucket.day || String(new Date().getDate()).padStart(2, '0')
+      };
+    }
+
+    function getLessonContextDate() {
+      const parts = getNairobiDateParts();
+      return `${String(getYear())}-${parts.month}-${parts.day}`;
+    }
+
+    function termToSchemeKey(termLabel) {
+      const normalized = normalizeLookupToken(termLabel);
+      if (normalized === 'term2') return 'term2';
+      if (normalized === 'term3') return 'term3';
+      return 'term1';
+    }
+
+    function getMonthName(dateStr) {
+      if (!dateStr) return '';
+      const [year, month] = String(dateStr).split('-').map(Number);
+      if (!year || !month) return '';
+      return new Date(year, month - 1, 1).toLocaleString('en-US', { month: 'long' });
+    }
+
+    function getWeekOfMonth(dateStr) {
+      if (!dateStr) return null;
+      const [year, month, day] = String(dateStr).split('-').map(Number);
+      if (!year || !month || !day) return null;
+      return Math.ceil(day / 7);
+    }
+
+    function getLessonNotesBasePath(year) {
+      if (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') {
+        return year ? SOMAP.P(`lessonNotes/${year}`) : SOMAP.P('lessonNotes');
+      }
+      const base = (schoolId && schoolId !== 'socrates-school') ? `schools/${schoolId}/lessonNotes` : 'lessonNotes';
+      return year ? `${base}/${year}` : base;
+    }
+
+    function getLessonPlanBasePath(year) {
+      if (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') {
+        return year ? SOMAP.P(`lessonPlans/${year}`) : SOMAP.P('lessonPlans');
+      }
+      const base = (schoolId && schoolId !== 'socrates-school') ? `schools/${schoolId}/lessonPlans` : 'lessonPlans';
+      return year ? `${base}/${year}` : base;
+    }
+
+    function ensureSelectHasOption(selectEl, value, label = value, options = {}) {
+      if (!selectEl || !value) return;
+      const existing = Array.from(selectEl.options).find((option) => option.value === value);
+      if (existing) {
+        if (options.prepend) selectEl.insertBefore(existing, selectEl.options[1] || null);
+        return;
+      }
+      const option = new Option(label, value);
+      option.dataset.injected = 'true';
+      if (options.prepend && selectEl.options.length > 1) {
+        selectEl.insertBefore(option, selectEl.options[1]);
+      } else {
+        selectEl.add(option);
+      }
+    }
+
+    function getResolvedTopicValue() {
+      const pick = compactTextBlock(noteTopicField?.value || '');
+      if (pick === '__manual__') return compactTextBlock(noteTopicCustomField?.value || '');
+      return pick;
+    }
+
+    function getResolvedSubTopicValue() {
+      const pick = compactTextBlock(noteSubTopicField?.value || '');
+      if (pick === '__manual__') return compactTextBlock(noteSubTopicCustomField?.value || '');
+      return pick;
+    }
+
+    function syncManualTopicVisibility() {
+      if (noteTopicCustomField) {
+        const showTopicCustom = noteTopicField?.value === '__manual__';
+        noteTopicCustomField.classList.toggle('hidden', !showTopicCustom);
+        if (!showTopicCustom) noteTopicCustomField.value = '';
+      }
+      if (noteSubTopicCustomField) {
+        const showSubTopicCustom = noteSubTopicField?.value === '__manual__';
+        noteSubTopicCustomField.classList.toggle('hidden', !showSubTopicCustom);
+        if (!showSubTopicCustom) noteSubTopicCustomField.value = '';
+      }
+    }
+
+    function setTopicFieldValue(value) {
+      const nextValue = compactTextBlock(value);
+      if (!noteTopicField) return;
+      if (!nextValue) {
+        noteTopicField.value = '';
+        if (noteTopicCustomField) noteTopicCustomField.value = '';
+        syncManualTopicVisibility();
+        return;
+      }
+      ensureSelectHasOption(noteTopicField, nextValue, nextValue, { prepend: true });
+      noteTopicField.value = nextValue;
+      if (noteTopicCustomField) noteTopicCustomField.value = '';
+      syncManualTopicVisibility();
+    }
+
+    function setSubTopicFieldValue(value) {
+      const nextValue = compactTextBlock(value);
+      if (!noteSubTopicField) return;
+      if (!nextValue) {
+        noteSubTopicField.value = '';
+        if (noteSubTopicCustomField) noteSubTopicCustomField.value = '';
+        syncManualTopicVisibility();
+        return;
+      }
+      ensureSelectHasOption(noteSubTopicField, nextValue, nextValue, { prepend: true });
+      noteSubTopicField.value = nextValue;
+      if (noteSubTopicCustomField) noteSubTopicCustomField.value = '';
+      syncManualTopicVisibility();
+    }
+
     function getAcademicYearKey() {
       let year = null;
       if (teacherConfig) {
@@ -1206,10 +1451,714 @@
       return Math.min(1, score);
     }
 
+    function getCurrentTeacherDisplayName() {
+      return compactTextBlock(
+        teacherName?.textContent ||
+        localStorage.getItem('somap_workerName') ||
+        localStorage.getItem('workerName') ||
+        ''
+      );
+    }
+
+    function planOwnedByCurrentTeacher(plan) {
+      const ownerId = String(plan?.teacherId || plan?.teacher?.uid || plan?.ownerId || '').trim();
+      const ownerName = compactTextBlock(plan?.teacherName || plan?.recordedBy || plan?.teacher?.name || '');
+      const currentName = getCurrentTeacherDisplayName();
+      if (ownerId && workerId && ownerId === String(workerId)) return true;
+      if (!ownerId && ownerName && currentName && normalizeLookupToken(ownerName) === normalizeLookupToken(currentName)) return true;
+      return !ownerId && !ownerName;
+    }
+
+    function deriveNoteYear(note, fallbackYear) {
+      const explicit = String(note?.year || note?.academicYear || '').trim();
+      if (explicit) return explicit;
+      const stamp = Number(note?.updatedAt || note?.createdAt || 0);
+      if (stamp > 0) {
+        try {
+          const y = new Date(stamp).getFullYear();
+          if (y) return String(y);
+        } catch (error) {}
+      }
+      return String(fallbackYear || getYear());
+    }
+
+    function normalizeLessonNoteRecord(note, fallback = {}) {
+      if (!note || typeof note !== 'object') return null;
+      const year = deriveNoteYear(note, fallback.year || getYear());
+      return {
+        ...note,
+        id: note.id || fallback.id || '',
+        year,
+        academicYear: String(note.academicYear || year),
+        lessonDateContext: compactTextBlock(note.lessonDateContext || fallback.lessonDateContext || getLessonContextDate())
+      };
+    }
+
+    function getStructuredRowsMap(data) {
+      return data?.rows || data?.parsedTemplate?.rows || data?.parsedTemplate?.rowsMap || null;
+    }
+
+    function hasStructuredRows(data) {
+      return Boolean(Object.keys(getStructuredRowsMap(data) || {}).length);
+    }
+
+    function editableDocumentToText(editableDocument) {
+      return (editableDocument?.pages || [])
+        .map((page) => (page?.blocks || [])
+          .sort((a, b) => {
+            const topDiff = Math.abs(Number(a?.top || 0) - Number(b?.top || 0));
+            if (topDiff > 4) return Number(a?.top || 0) - Number(b?.top || 0);
+            return Number(a?.left || 0) - Number(b?.left || 0);
+          })
+          .map((block) => String(block?.text || block?.originalText || '').trim())
+          .filter(Boolean)
+          .join('\n'))
+        .filter(Boolean)
+        .join('\n\n');
+    }
+
+    function firstMeaningfulSentence(text) {
+      const cleaned = compactTextBlock(text);
+      if (!cleaned) return '';
+      const parts = cleaned.split(/(?<=[.!?])\s+/).map((part) => part.trim()).filter(Boolean);
+      return parts.find((part) => part.length >= 16) || parts[0] || '';
+    }
+
+    function extractRecoveredActivity(text) {
+      const source = String(text || '');
+      const patterns = [
+        /to facilitate pupils? to\s+([^.\n]{4,140})/i,
+        /pupils? should be able to\s+([^.\n]{4,140})/i,
+        /\b(demonstrate|develop|apply|acquire|explain|identify|recognize|use|read|write|compare|construct|solve|perform|understand)\b([^.\n]{3,120})/i
+      ];
+      for (const pattern of patterns) {
+        const match = source.match(pattern);
+        if (!match) continue;
+        const value = compactTextBlock(match[0]);
+        if (value && value.length >= 6) return value;
+      }
+      return '';
+    }
+
+    function buildRecoveredRowsMap(sourceData, lessonDate) {
+      if (!sourceData) return null;
+      const lessonMonth = getMonthName(lessonDate);
+      const lessonWeek = getWeekOfMonth(lessonDate);
+      const editableText = editableDocumentToText(sourceData?.editableDocument);
+      const objectiveText = compactTextBlock(sourceData?.generalObjectives || sourceData?.parsedTemplate?.generalObjectives || '');
+      const competenceText = firstMeaningfulSentence(objectiveText || editableText);
+      const activityText = extractRecoveredActivity(editableText || objectiveText);
+      const specificText = stripTeacherLead(activityText) || firstMeaningfulSentence(editableText);
+      const topic = toTitleTopic(specificText || sourceData?.subjectName || sourceData?.subject || 'Scheme item');
+      const row = {
+        sn: 1,
+        mainCompetence: competenceText || `${sourceData?.subjectName || sourceData?.subject || 'Subject'} scheme guidance`,
+        specificCompetence: competenceText || topic,
+        learningActivities: activityText || (topic ? `To facilitate pupil to ${topic.toLowerCase()}` : ''),
+        specificActivities: specificText || topic,
+        month: lessonMonth || '',
+        week: lessonWeek || '',
+        periods: sourceData?.hoursPerWeek || sourceData?.parsedTemplate?.hoursPerWeek || '',
+        methods: compactTextBlock(sourceData?.assessmentMethods || sourceData?.parsedTemplate?.assessmentMethods || ''),
+        tools: compactTextBlock(sourceData?.teachingResources || sourceData?.parsedTemplate?.teachingResources || ''),
+        assessment: compactTextBlock(sourceData?.assessmentMethods || sourceData?.parsedTemplate?.assessmentMethods || ''),
+        reference: sourceData?.sourcePdf?.fileName || sourceData?.pdf?.fileName || '',
+        remarks: 'Recovered from saved editable scheme copy'
+      };
+      const hasContent = row.learningActivities || row.specificActivities || row.mainCompetence || row.tools || row.assessment ||
+        (sourceData?.subjectName || sourceData?.subject);
+      if (!hasContent) return null;
+      return { recovered1: row };
+    }
+
+    function normalizeSchemeRows(rowsMap) {
+      return Object.entries(rowsMap || {}).map(([rowKey, row]) => {
+        const week = parseNumericValue(row?.week);
+        return {
+          id: buildEntryId(rowKey, row),
+          rowKey,
+          week,
+          month: normalizeSchemeMonth(row?.month),
+          row: { ...(row || {}) }
+        };
+      }).filter((entry) => Object.keys(entry.row || {}).length > 0);
+    }
+
+    function deriveSchemeTopic(row) {
+      return (
+        toTitleTopic(row?.learningActivities) ||
+        toTitleTopic(row?.specificActivities) ||
+        sentenceCase(row?.specificCompetence) ||
+        sentenceCase(row?.mainCompetence)
+      );
+    }
+
+    function buildAcademicSelection(className, subjectName, termKey) {
+      return {
+        classAliases: buildLookupAliases(className),
+        subjectAliases: buildLookupAliases(subjectName),
+        termAliases: buildLookupAliases(termKey).concat(buildLookupAliases(termKey.replace(/^term/i, 'Term ')))
+      };
+    }
+
+    function matchesAcademicSelection(record, selection) {
+      if (!record || !selection) return false;
+      const classCandidates = [record.className, record.classKey, record.__storedClass];
+      const subjectCandidates = [record.subjectName, record.subjectKey, record.__storedSubject];
+      const termCandidates = [record.termKey, record.__storedTerm];
+      const sameClass = classCandidates.some((candidate) => matchesLookupValue(candidate, selection.classAliases));
+      const sameSubject = subjectCandidates.some((candidate) => matchesLookupValue(candidate, selection.subjectAliases));
+      const sameTerm = termCandidates.some((candidate) => matchesLookupValue(candidate, selection.termAliases));
+      return sameClass && sameSubject && sameTerm;
+    }
+
+    function matchesClassSubjectSelection(record, selection) {
+      if (!record || !selection) return false;
+      const classCandidates = [record.className, record.classKey, record.__storedClass];
+      const subjectCandidates = [record.subjectName, record.subjectKey, record.__storedSubject];
+      const sameClass = classCandidates.some((candidate) => matchesLookupValue(candidate, selection.classAliases));
+      const sameSubject = subjectCandidates.some((candidate) => matchesLookupValue(candidate, selection.subjectAliases));
+      return sameClass && sameSubject;
+    }
+
+    function flattenTeacherSchemesForYear(teacherData, year) {
+      const results = [];
+      Object.entries(teacherData || {}).forEach(([yr, byClass]) => {
+        if (String(yr) !== String(year)) return;
+        Object.entries(byClass || {}).forEach(([storedClass, bySubj]) => {
+          Object.entries(bySubj || {}).forEach(([storedSubject, byTermNode]) => {
+            Object.entries(byTermNode || {}).forEach(([storedTerm, schemes]) => {
+              Object.values(schemes || {}).forEach((scheme) => {
+                if (scheme && typeof scheme === 'object') {
+                  results.push({
+                    ...scheme,
+                    __storedClass: storedClass,
+                    __storedSubject: storedSubject,
+                    __storedTerm: storedTerm
+                  });
+                }
+              });
+            });
+          });
+        });
+      });
+      return results;
+    }
+
+    function flattenTemplatesForYear(yearTree) {
+      const results = [];
+      Object.entries(yearTree || {}).forEach(([storedClass, bySubj]) => {
+        Object.entries(bySubj || {}).forEach(([storedSubject, byTerm]) => {
+          Object.entries(byTerm || {}).forEach(([storedTerm, templates]) => {
+            Object.values(templates || {}).forEach((template) => {
+              if (template && typeof template === 'object') {
+                results.push({
+                  ...template,
+                  __storedClass: storedClass,
+                  __storedSubject: storedSubject,
+                  __storedTerm: storedTerm
+                });
+              }
+            });
+          });
+        });
+      });
+      return results;
+    }
+
+    async function fetchLatestTeacherScheme(year, className, subjectName, termKey) {
+      const selection = buildAcademicSelection(className, subjectName, termKey);
+      const teacherRootSnap = await db.ref(`schemes/${schoolId}/teacher/${workerId}`).once('value');
+      const teacherData = teacherRootSnap.val() || {};
+      const allSchemes = flattenTeacherSchemesForYear(teacherData, year);
+      let matched = allSchemes.filter((scheme) => matchesAcademicSelection(scheme, selection));
+      if (matched.length) return sortByMostRecent(matched)[0];
+      matched = allSchemes.filter((scheme) => matchesClassSubjectSelection(scheme, selection));
+      if (matched.length) return sortByMostRecent(matched)[0];
+
+      const classKey = sanitizeKey(className);
+      const subjectKey = sanitizeKey(subjectName);
+      const classPathKey = pathKey(className);
+      const subjectPathKey = pathKey(subjectName);
+      const pathVariants = [
+        [classKey, subjectKey],
+        [classPathKey, subjectPathKey],
+        [classPathKey, subjectKey],
+        [classKey, subjectPathKey]
+      ].filter(([c, s], index, array) => array.findIndex(([a, b]) => a === c && b === s) === index);
+
+      for (const [cKey, sKey] of pathVariants) {
+        const exactPath = `schemes/${schoolId}/teacher/${workerId}/${year}/${cKey}/${sKey}/${termKey}`;
+        const exactSnap = await db.ref(exactPath).once('value');
+        const items = Object.values(exactSnap.val() || {});
+        if (items.length) return sortByMostRecent(items)[0];
+      }
+      return null;
+    }
+
+    async function fetchTemplateById(year, className, subjectName, termKey, templateId) {
+      if (!templateId) return null;
+      const selection = buildAcademicSelection(className, subjectName, termKey);
+      const classKey = sanitizeKey(className);
+      const subjectKey = sanitizeKey(subjectName);
+      const classPathKey = pathKey(className);
+      const subjectPathKey = pathKey(subjectName);
+      const pathVariants = [
+        [classKey, subjectKey],
+        [classPathKey, subjectPathKey],
+        [classPathKey, subjectKey],
+        [classKey, subjectPathKey]
+      ].filter(([c, s], index, array) => array.findIndex(([a, b]) => a === c && b === s) === index);
+
+      for (const [cKey, sKey] of pathVariants) {
+        const exactPath = `schemes/${schoolId}/templates/${year}/${cKey}/${sKey}/${termKey}/${templateId}`;
+        const exactSnap = await db.ref(exactPath).once('value');
+        if (exactSnap.exists()) return exactSnap.val();
+      }
+
+      const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
+      const yearTree = yearSnap.val() || {};
+      return flattenTemplatesForYear(yearTree).find((template) =>
+        template.templateId === templateId && matchesAcademicSelection(template, selection)
+      ) || null;
+    }
+
+    async function fetchLatestTemplate(year, className, subjectName, termKey) {
+      const selection = buildAcademicSelection(className, subjectName, termKey);
+      const yearSnap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
+      const yearTree = yearSnap.val() || {};
+      const allTemplates = flattenTemplatesForYear(yearTree);
+      let found = allTemplates.filter((template) => matchesAcademicSelection(template, selection));
+      if (found.length) return sortByMostRecent(found)[0];
+      found = allTemplates.filter((template) => matchesClassSubjectSelection(template, selection));
+      if (found.length) return sortByMostRecent(found)[0];
+      return null;
+    }
+
+    async function ensureStructuredSchemeData(data, options = {}) {
+      if (!data) return { data: null, rowsSource: null };
+      if (hasStructuredRows(data)) return { data, rowsSource: 'rows' };
+
+      const parser = window.SomapSchemeTemplateParser;
+      const parsedRows = data?.parsedTemplate?.rows || data?.parsedTemplate?.rowsMap || null;
+      if (parsedRows && Object.keys(parsedRows).length) {
+        return { data: { ...data, rows: parsedRows }, rowsSource: 'parsedTemplate' };
+      }
+
+      if (parser) {
+        const editableText = editableDocumentToText(data?.editableDocument);
+        if (editableText) {
+          try {
+            const parsedFromDocument = parser.parseStructuredText(editableText);
+            const merged = parser.mergeTemplateData(data, parsedFromDocument);
+            if (Object.keys(merged?.rows || {}).length) {
+              return { data: merged, rowsSource: 'editableDocument' };
+            }
+          } catch (error) {}
+        }
+      }
+
+      const recovered = buildRecoveredRowsMap(data, options.lessonDate || getLessonContextDate());
+      if (recovered && Object.keys(recovered).length) {
+        return { data: { ...data, rows: recovered }, rowsSource: 'synthetic' };
+      }
+      return { data, rowsSource: null };
+    }
+
+    function buildSchemeBundle(sourceData, sourceType, lessonDate) {
+      const rows = normalizeSchemeRows(getStructuredRowsMap(sourceData) || buildRecoveredRowsMap(sourceData, lessonDate) || {})
+        .sort((a, b) => {
+          const monthDiff = monthOrderIndex(a.row?.month) - monthOrderIndex(b.row?.month);
+          if (monthDiff !== 0) return monthDiff;
+          return Number(a.week || 0) - Number(b.week || 0);
+        });
+      const lessonMonth = getMonthName(lessonDate);
+      const lessonWeek = getWeekOfMonth(lessonDate);
+      const weekEntries = rows.filter((entry) => rowMonthMatches(entry.row, lessonMonth) && Number(entry.week || 0) === Number(lessonWeek || 0));
+      return {
+        sourceData,
+        sourceType,
+        rows,
+        weekEntries,
+        lessonMonth,
+        lessonWeek
+      };
+    }
+
+    function extractCandidateSubtopics(topicText, preferredText = '') {
+      const candidates = [];
+      const pushIfUseful = (value) => {
+        const clean = compactTextBlock(value);
+        if (!clean) return;
+        if (normalizeLookupToken(clean) === normalizeLookupToken(topicText)) return;
+        if (!candidates.some((item) => normalizeLookupToken(item) === normalizeLookupToken(clean))) {
+          candidates.push(clean);
+        }
+      };
+
+      pushIfUseful(preferredText);
+      const source = compactTextBlock(topicText);
+      if (!source) return candidates;
+
+      source
+        .split(/\b[a-z]\)\s*/i)
+        .map((part) => stripTeacherLead(part))
+        .forEach(pushIfUseful);
+
+      source
+        .split(/[;|]/)
+        .map((part) => stripTeacherLead(part))
+        .forEach(pushIfUseful);
+
+      return candidates;
+    }
+
+    function addTopicBundleEntry(map, payload = {}) {
+      const topic = compactTextBlock(payload.topic);
+      if (!topic) return;
+      const key = normalizeLookupToken(topic);
+      if (!key) return;
+      if (!map[key]) {
+        map[key] = {
+          key,
+          topic,
+          subTopics: [],
+          sources: new Set(),
+          sourceLabels: new Set(),
+          searchTexts: new Set()
+        };
+      }
+      const bundle = map[key];
+      if (payload.sourceType) bundle.sources.add(payload.sourceType);
+      if (payload.sourceLabel) bundle.sourceLabels.add(payload.sourceLabel);
+      [topic, payload.subTopic, ...(payload.subTopics || []), ...(payload.searchTexts || [])]
+        .filter(Boolean)
+        .forEach((text) => bundle.searchTexts.add(compactTextBlock(text)));
+      const candidates = [payload.subTopic, ...(payload.subTopics || [])].filter(Boolean);
+      candidates.forEach((item) => {
+        const clean = compactTextBlock(item);
+        if (!clean) return;
+        if (normalizeLookupToken(clean) === key) return;
+        if (!bundle.subTopics.some((entry) => normalizeLookupToken(entry) === normalizeLookupToken(clean))) {
+          bundle.subTopics.push(clean);
+        }
+      });
+    }
+
+    async function fetchTopicBundlesForSelection() {
+      const className = compactTextBlock(noteClassField?.value || '');
+      const subjectName = compactTextBlock(noteSubjectField?.value || '');
+      const termLabel = compactTextBlock(noteTermField?.value || 'Term 1');
+      const year = String(getYear());
+      const lessonDate = getLessonContextDate();
+      const bundlesByKey = {};
+      const summaryParts = [];
+
+      if (!className || !subjectName) {
+        return { bundles: [], summary: 'Choose class and subject to load topics for the current lesson day.' };
+      }
+
+      try {
+        const lessonPlanPath = `${getLessonPlanBasePath(year)}/${className}/${lessonDate}`;
+        const planSnap = await db.ref(lessonPlanPath).once('value').catch(() => ({ val: () => null }));
+        const planMap = (planSnap && planSnap.val && planSnap.val()) || {};
+        const matchingPlans = Object.entries(planMap)
+          .map(([id, plan]) => ({ id, ...(plan || {}) }))
+          .filter((plan) => compactTextBlock(plan.subject) === subjectName)
+          .filter((plan) => planOwnedByCurrentTeacher(plan));
+
+        if (matchingPlans.length) {
+          summaryParts.push(`${matchingPlans.length} topic${matchingPlans.length === 1 ? '' : 's'} from today's lesson plan`);
+        }
+
+        matchingPlans.forEach((plan) => {
+          const row = plan?.schemeTracking?.rowSnapshot || {};
+          const planTopic = compactTextBlock(plan.topic || deriveSchemeTopic(row));
+          const rowSubtopics = extractCandidateSubtopics(planTopic, stripTeacherLead(row?.specificActivities) || row?.specificCompetence || '');
+          addTopicBundleEntry(bundlesByKey, {
+            topic: planTopic,
+            subTopics: rowSubtopics,
+            sourceType: 'lesson_plan',
+            sourceLabel: 'Today lesson plan',
+            searchTexts: [plan.objectives, plan.activities, row?.specificCompetence, row?.learningActivities, row?.specificActivities]
+          });
+        });
+      } catch (error) {
+        console.warn('Lesson-plan topic lookup failed:', error?.message || error);
+      }
+
+      try {
+        const termKey = termToSchemeKey(termLabel);
+        const teacherSchemeRaw = await fetchLatestTeacherScheme(year, className, subjectName, termKey);
+        let teacherResult = await ensureStructuredSchemeData(teacherSchemeRaw, { lessonDate });
+        let schemeData = teacherResult?.data || null;
+        let schemeType = schemeData ? 'teacher_scheme' : 'academic_template';
+
+        if ((!schemeData || !hasStructuredRows(schemeData)) && teacherSchemeRaw?.fromTemplateId) {
+          const fromTemplate = await fetchTemplateById(year, className, subjectName, termKey, teacherSchemeRaw.fromTemplateId);
+          const templateResult = await ensureStructuredSchemeData(fromTemplate, { lessonDate });
+          if (templateResult?.data) {
+            schemeData = templateResult.data;
+            schemeType = 'academic_template';
+          }
+        }
+
+        if (!schemeData) {
+          const templateRaw = await fetchLatestTemplate(year, className, subjectName, termKey);
+          const templateResult = await ensureStructuredSchemeData(templateRaw, { lessonDate });
+          schemeData = templateResult?.data || null;
+          schemeType = 'academic_template';
+        }
+
+        if (schemeData) {
+          const bundle = buildSchemeBundle(schemeData, schemeType, lessonDate);
+          const rows = bundle.weekEntries.length ? bundle.weekEntries : bundle.rows.filter((entry) =>
+            rowMonthMatches(entry.row, bundle.lessonMonth)
+          );
+
+          if (rows.length) {
+            summaryParts.push(`${rows.length} scheme topic${rows.length === 1 ? '' : 's'} for ${bundle.lessonMonth} week ${bundle.lessonWeek}`);
+          }
+
+          rows.forEach((entry) => {
+            const row = entry.row || {};
+            const topic = deriveSchemeTopic(row);
+            addTopicBundleEntry(bundlesByKey, {
+              topic,
+              subTopics: extractCandidateSubtopics(topic, stripTeacherLead(row?.specificActivities) || row?.specificCompetence || ''),
+              sourceType: schemeType,
+              sourceLabel: schemeType === 'teacher_scheme' ? 'Teacher scheme' : 'Academic scheme',
+              searchTexts: [row?.learningActivities, row?.specificActivities, row?.specificCompetence, row?.mainCompetence, row?.reference]
+            });
+          });
+        }
+      } catch (error) {
+        console.warn('Scheme topic lookup failed:', error?.message || error);
+      }
+
+      const bundles = Object.values(bundlesByKey)
+        .map((bundle) => ({
+          ...bundle,
+          sourceList: Array.from(bundle.sourceLabels),
+          searchTexts: Array.from(bundle.searchTexts),
+          topic: compactTextBlock(bundle.topic),
+          subTopics: bundle.subTopics.sort((a, b) => a.localeCompare(b))
+        }))
+        .sort((a, b) => a.topic.localeCompare(b.topic));
+
+      const formattedDate = new Date(`${lessonDate}T00:00:00`).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+      const summary = summaryParts.length
+        ? `Lesson context: ${formattedDate}. Loaded ${summaryParts.join(' and ')}.`
+        : `Lesson context: ${formattedDate}. No topic was found from today's lesson plan or the current scheme week yet.`;
+
+      return { bundles, summary };
+    }
+
+    function resetTopicSelect(selectEl, placeholderText) {
+      if (!selectEl) return;
+      selectEl.innerHTML = '';
+      selectEl.add(new Option(placeholderText, ''));
+      selectEl.add(new Option(selectEl === noteTopicField ? 'Type topic manually' : 'Type sub-topic manually', '__manual__'));
+    }
+
+    function refreshSubTopicChoices(preferredSubTopic = '') {
+      if (!noteSubTopicField) return;
+      const topicValue = getResolvedTopicValue();
+      const bundle = lessonState.topicIndex[normalizeLookupToken(topicValue)] || null;
+      lessonState.currentTopicBundle = bundle;
+      resetTopicSelect(noteSubTopicField, 'Select sub-topic');
+
+      if (bundle?.subTopics?.length) {
+        bundle.subTopics.forEach((item) => noteSubTopicField.add(new Option(item, item)));
+      }
+
+      const desired = compactTextBlock(preferredSubTopic);
+      if (desired) ensureSelectHasOption(noteSubTopicField, desired, desired, { prepend: true });
+      noteSubTopicField.value = desired || '';
+      if (noteSubTopicHint) {
+        noteSubTopicHint.textContent = bundle?.subTopics?.length
+          ? `Sub-topics for this topic came from ${bundle.sourceList.join(' and ')}.`
+          : 'No saved sub-topic was found for this topic. You can type one manually if needed.';
+      }
+      syncManualTopicVisibility();
+    }
+
+    async function refreshTopicChoices(options = {}) {
+      const preferredTopic = compactTextBlock(options.preferredTopic !== undefined ? options.preferredTopic : getResolvedTopicValue());
+      const preferredSubTopic = compactTextBlock(options.preferredSubTopic !== undefined ? options.preferredSubTopic : getResolvedSubTopicValue());
+
+      if (!noteTopicField) return;
+
+      resetTopicSelect(noteTopicField, 'Select topic');
+      resetTopicSelect(noteSubTopicField, 'Select sub-topic');
+      lessonState.topicCatalog = [];
+      lessonState.topicIndex = {};
+      lessonState.currentTopicBundle = null;
+
+      const result = await fetchTopicBundlesForSelection();
+      lessonState.topicCatalog = result.bundles;
+      lessonState.topicSourceSummary = result.summary;
+      result.bundles.forEach((bundle) => {
+        lessonState.topicIndex[bundle.key] = bundle;
+        noteTopicField.add(new Option(bundle.topic, bundle.topic));
+      });
+
+      if (preferredTopic) {
+        ensureSelectHasOption(noteTopicField, preferredTopic, preferredTopic, { prepend: true });
+      }
+
+      if (noteTopicHint) {
+        noteTopicHint.textContent = result.summary;
+      }
+
+      if (preferredTopic) {
+        noteTopicField.value = preferredTopic;
+      } else if (result.bundles.length === 1) {
+        noteTopicField.value = result.bundles[0].topic;
+      } else {
+        noteTopicField.value = '';
+      }
+
+      refreshSubTopicChoices(preferredSubTopic);
+      syncManualTopicVisibility();
+    }
+
+    async function ensurePdfDocumentReady(bookUrl) {
+      const pdfjs = window.pdfjsLib;
+      if (!pdfjs || !bookUrl) return null;
+      if (!lessonState.pdfDoc || lessonState.pdfDoc.__bookUrl !== bookUrl) {
+        if (lessonState.pdfDoc) {
+          try { lessonState.pdfDoc.destroy(); } catch (error) {}
+        }
+        const loadingTask = pdfjs.getDocument({
+          url: bookUrl,
+          withCredentials: false
+        });
+        lessonState.pdfDoc = await loadingTask.promise;
+        lessonState.pdfDoc.__bookUrl = bookUrl;
+        lessonState.pageTextCache = {};
+      }
+      return lessonState.pdfDoc;
+    }
+
+    async function extractPdfPageText(pageNumber) {
+      if (!lessonState.pdfDoc || pageNumber < 1 || pageNumber > lessonState.pdfDoc.numPages) return '';
+      if (lessonState.pageTextCache[pageNumber]) return lessonState.pageTextCache[pageNumber];
+      const page = await lessonState.pdfDoc.getPage(pageNumber);
+      const textContent = await page.getTextContent().catch(() => null);
+      const text = textContent && textContent.items.length
+        ? textContent.items
+          .sort((a, b) => (a.transform[5] - b.transform[5]) || (a.transform[4] - b.transform[4]))
+          .map((item) => item.str)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+        : '';
+      lessonState.pageTextCache[pageNumber] = text;
+      return text;
+    }
+
+    function buildBookSearchProfile(topicName, subTopicName) {
+      const stopWords = new Set([
+        'the', 'and', 'for', 'with', 'from', 'into', 'this', 'that', 'these', 'those',
+        'should', 'able', 'pupils', 'learner', 'learners', 'teacher', 'lesson',
+        'topic', 'theme', 'unit', 'term', 'week', 'class', 'subject', 'develop',
+        'demonstrate', 'facilitate', 'associate', 'using', 'found', 'different',
+        'contexts', 'appropriate', 'relating', 'relate'
+      ]);
+      const bundle = lessonState.currentTopicBundle || null;
+      const rawPhrases = [
+        subTopicName,
+        topicName,
+        ...(bundle?.subTopics || []),
+        ...(bundle?.searchTexts || [])
+      ].map(compactTextBlock).filter(Boolean);
+
+      const phrases = Array.from(new Set(
+        rawPhrases
+          .flatMap((value) => value.split(/[;|]/))
+          .flatMap((value) => value.split(/\b[a-z]\)\s*/i))
+          .map(stripTeacherLead)
+          .map(compactTextBlock)
+          .filter((value) => value.split(' ').length >= 2)
+      ));
+
+      const tokens = Array.from(new Set(
+        rawPhrases
+          .flatMap((value) => tokenize(value))
+          .filter((token) => token.length >= 4 && !stopWords.has(token))
+      ));
+
+      return { phrases, tokens };
+    }
+
+    function scorePageAgainstProfile(text, profile) {
+      const normalized = normalizeText(text);
+      if (!normalized) return 0;
+      let score = 0;
+      profile.phrases.forEach((phrase, index) => {
+        const normalizedPhrase = normalizeText(phrase);
+        if (normalizedPhrase && normalized.includes(normalizedPhrase)) {
+          score += Math.max(6 - index, 2);
+        }
+      });
+      const words = new Set(normalized.split(' ').filter(Boolean));
+      profile.tokens.forEach((token) => {
+        if (words.has(token)) score += 1;
+      });
+      return score;
+    }
+
+    async function findTopicRangeFromPdf(bookEntry, topicName, subTopicName) {
+      const bookUrl = bookEntry?.cloudinaryUrl || bookEntry?.url;
+      if (!bookUrl) return null;
+      const pdfDoc = await ensurePdfDocumentReady(bookUrl);
+      if (!pdfDoc) return null;
+
+      const profile = buildBookSearchProfile(topicName, subTopicName);
+      if (!profile.phrases.length && !profile.tokens.length) return null;
+
+      const scoredPages = [];
+      for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber++) {
+        const text = await extractPdfPageText(pageNumber);
+        const score = scorePageAgainstProfile(text, profile);
+        if (score > 0) scoredPages.push({ page: pageNumber, score });
+      }
+
+      if (!scoredPages.length) return null;
+
+      scoredPages.sort((a, b) => b.score - a.score);
+      const best = scoredPages[0];
+      if (!best || best.score < 2) return null;
+
+      const threshold = Math.max(2, Math.floor(best.score * 0.55));
+      const clustered = scoredPages
+        .filter((entry) => entry.score >= threshold && Math.abs(entry.page - best.page) <= 3)
+        .sort((a, b) => a.page - b.page);
+
+      const startPage = Math.max(1, (clustered[0]?.page || best.page) - 1);
+      const endPage = Math.min(pdfDoc.numPages, (clustered[clustered.length - 1]?.page || best.page) + 1);
+
+      return {
+        name: subTopicName || topicName,
+        pageStart: startPage,
+        pageEnd: endPage,
+        keywords: profile.tokens.slice(0, 12),
+        matchScore: best.score,
+        matchType: 'pdf_search'
+      };
+    }
+
     async function findTopicInClassbooks() {
-      const className = noteClassField ? noteClassField.value.trim() : '';
-      const subjectName = noteSubjectField ? noteSubjectField.value.trim() : '';
-      const topicName = noteTopicField ? noteTopicField.value.trim() : '';
+      const className = compactTextBlock(noteClassField?.value || '');
+      const subjectName = compactTextBlock(noteSubjectField?.value || '');
+      const topicName = getResolvedTopicValue();
+      const subTopicName = getResolvedSubTopicValue();
 
       if (!className || !subjectName || !topicName) {
         toast('Select class, subject, and topic before searching.', 'warning');
@@ -1217,47 +2166,41 @@
         return;
       }
 
-      updateTopicStatus('warn', 'Searching for a matching book...');
+      updateTopicStatus('warn', 'Searching for a matching book and topic pages...');
 
-      const yearKey = getAcademicYearKey();
+      const yearKey = String(getYear());
       const classKey = sanitizeKey(className).toLowerCase();
       const subjectKey = sanitizeKey(subjectName).toLowerCase();
       const cacheKey = `${yearKey}::${classKey}::${subjectKey}`;
 
-      let bookEntry = null;
+      let bookEntry = lessonState.classbooksCache[cacheKey] || null;
 
-      // Try classbooksIndex first (for indexed books with topics)
-      if (!lessonState.classbooksCache[cacheKey]) {
+      if (!bookEntry) {
         try {
           const indexedSnap = await db.ref(`classbooksIndex/${yearKey}/${classKey}/${subjectKey}`).once('value');
           if (indexedSnap.exists()) {
-            lessonState.classbooksCache[cacheKey] = indexedSnap.val();
             bookEntry = indexedSnap.val();
           }
         } catch (error) {
           console.error('Indexed book lookup error', error);
         }
-      } else {
-        bookEntry = lessonState.classbooksCache[cacheKey];
       }
 
-      // Fallback to class_books structure (actual storage location)
       if (!bookEntry) {
         try {
           const encodedClass = encodeURIComponent(className);
-          const classBooksSnap = await db.ref(`class_books/${encodedClass}`).once('value');
-          
-          if (!classBooksSnap.exists()) {
+          const yearSnap = await db.ref(`class_books/${yearKey}/${encodedClass}`).once('value').catch(() => ({ val: () => null }));
+          const legacySnap = await db.ref(`class_books/${encodedClass}`).once('value').catch(() => ({ val: () => null }));
+          const allBooks = (yearSnap && yearSnap.val && yearSnap.val()) || (legacySnap && legacySnap.val && legacySnap.val()) || {};
+
+          if (!Object.keys(allBooks).length) {
             resetClassbookUi();
             updateTopicStatus('err', 'No books found for this class. Books may need to be uploaded first.');
             toast('No books found for this class.', 'warning');
             return;
           }
 
-          const allBooks = classBooksSnap.val() || {};
           const normalizedSubject = normalizeText(subjectName);
-          
-          // Find books matching the subject
           const matchingBooks = Object.entries(allBooks)
             .map(([bookId, book]) => {
               const bookSubject = normalizeText(book.subject || '');
@@ -1267,28 +2210,24 @@
               );
               return { bookId, book, score };
             })
-            .filter(item => item.score > 0.3 || normalizedSubject === item.book.subject?.toLowerCase())
+            .filter((item) => item.score > 0.3 || normalizeText(item.book.subject || '') === normalizedSubject)
             .sort((a, b) => b.score - a.score);
 
-          if (matchingBooks.length === 0) {
+          if (!matchingBooks.length) {
             resetClassbookUi();
             updateTopicStatus('err', `No ${subjectName} book found for ${className}. Books may need to be uploaded.`);
             toast(`No ${subjectName} book found for ${className}.`, 'warning');
             return;
           }
 
-          // Use the best matching book
           const bestBook = matchingBooks[0];
           bookEntry = {
             title: bestBook.book.title || 'Classbook',
             cloudinaryUrl: bestBook.book.url || bestBook.book.cloudinaryUrl || '',
             subject: bestBook.book.subject || subjectName,
             bookId: bestBook.bookId,
-            topics: [] // Topics not indexed in this structure
+            topics: Array.isArray(bestBook.book.topics) ? bestBook.book.topics : []
           };
-
-          // Cache it for future use
-          lessonState.classbooksCache[cacheKey] = bookEntry;
         } catch (error) {
           console.error('Book lookup error', error);
           updateTopicStatus('err', 'Unable to reach the books database right now.');
@@ -1297,23 +2236,36 @@
         }
       }
 
-      const normalizedTopic = normalizeText(topicName);
-      let bestMatch = null;
+      lessonState.classbooksCache[cacheKey] = bookEntry;
 
-      // Try to match topics if available
-      if (bookEntry.topics && Array.isArray(bookEntry.topics)) {
+      const normalizedTopic = normalizeText(`${topicName} ${subTopicName}`.trim());
+      let bestMatch = null;
+      if (Array.isArray(bookEntry.topics) && bookEntry.topics.length) {
         bestMatch = bookEntry.topics
-          .map(entry => ({ topic: entry, score: scoreTopicMatch(normalizedTopic, entry) }))
+          .map((entry) => ({ topic: entry, score: scoreTopicMatch(normalizedTopic, entry) }))
           .sort((a, b) => b.score - a.score)[0];
+      }
+
+      let matchedTopic = bestMatch && bestMatch.score >= 0.35 ? bestMatch.topic : null;
+      const hasUrl = Boolean(bookEntry.cloudinaryUrl || bookEntry.url);
+
+      if (!matchedTopic && hasUrl) {
+        try {
+          matchedTopic = await findTopicRangeFromPdf(bookEntry, topicName, subTopicName);
+        } catch (error) {
+          console.warn('PDF topic search failed:', error?.message || error);
+        }
       }
 
       lessonState.currentBook = {
         yearKey,
         book: bookEntry,
-        topic: bestMatch && bestMatch.score >= 0.35 ? bestMatch.topic : null
+        topic: matchedTopic ? {
+          ...matchedTopic,
+          name: matchedTopic.name || topicName
+        } : null
       };
 
-      const matchedTopic = lessonState.currentBook.topic;
       const startPage = matchedTopic && matchedTopic.pageStart ? Number(matchedTopic.pageStart) : 1;
       const endPage = matchedTopic && matchedTopic.pageEnd ? Number(matchedTopic.pageEnd) : startPage + 4;
 
@@ -1337,7 +2289,6 @@
         importedPreview.innerHTML = '';
       }
 
-      const hasUrl = Boolean(bookEntry.cloudinaryUrl || bookEntry.url);
       if (openPagesBtn) openPagesBtn.disabled = !hasUrl;
       if (autoImportBtn) autoImportBtn.disabled = !hasUrl;
       if (importToNotesBtn) importToNotesBtn.disabled = !hasUrl;
@@ -1354,21 +2305,21 @@
           openExternalBookLink.removeAttribute('href');
         }
       }
-      
-      if (matchedTopic) {
+
+      if (matchedTopic && matchedTopic.matchType === 'pdf_search') {
+        updateTopicStatus('ok', `Found the topic inside "${bookEntry.title}" around pages ${startPage}-${endPage}. Review and adjust if needed.`);
+      } else if (matchedTopic) {
         updateTopicStatus('ok', `Matched "${matchedTopic.name}" on pages ${startPage}-${endPage}. Adjust if needed.`);
       } else if (hasUrl) {
-        updateTopicStatus('ok', `Found "${bookEntry.title}". Topic not indexed - adjust pages manually or search the book.`);
+        updateTopicStatus('ok', `Found "${bookEntry.title}". Topic pages were not auto-matched, so you can still search the book manually.`);
       } else {
         updateTopicStatus('warn', 'Book found but no PDF URL available. Please check book upload.');
       }
 
-      lessonState.pageTextCache = {};
       lessonState.previousDetailValue = null;
       lessonState.autoTextSnippet = '';
       if (lessonState.selectedParagraphs.size) {
         lessonState.selectedParagraphs.clear();
-        syncDetailedContent();
       }
 
       checkRevisionFlag();
@@ -1395,7 +2346,7 @@
 
       if (pdfModal) pdfModal.classList.remove('hidden');
       if (pdfModalTitle) {
-        const topicLabel = lessonState.currentBook.topic && lessonState.currentBook.topic.name ? lessonState.currentBook.topic.name : (noteTopicField ? noteTopicField.value || 'Topic pages' : 'Topic pages');
+        const topicLabel = lessonState.currentBook.topic && lessonState.currentBook.topic.name ? lessonState.currentBook.topic.name : (getResolvedTopicValue() || 'Topic pages');
         pdfModalTitle.textContent = topicLabel;
       }
       if (pdfModalSummary) {
@@ -1584,7 +2535,7 @@ function splitIntoParagraphs(text) {
       }
       const className = noteClassField.value.trim();
       const subjectName = noteSubjectField.value.trim();
-      const topicName = noteTopicField.value.trim();
+      const topicName = getResolvedTopicValue();
       if (!className || !subjectName || !topicName) {
         setRevisionBanner(false);
         lessonState.isRevision = false;
@@ -1815,7 +2766,7 @@ function splitIntoParagraphs(text) {
       if (!noteClassField || !noteSubjectField || !noteTopicField) return;
       const className = noteClassField.value;
       const subjectName = noteSubjectField.value;
-      const topicName = noteTopicField.value || 'the topic';
+      const topicName = getResolvedTopicValue() || 'the topic';
       if (!className || !subjectName || !topicName) {
         toast('Fill in class, subject, and topic before generating homework.', 'warning');
         return;
@@ -1887,6 +2838,76 @@ function splitIntoParagraphs(text) {
       topicPages.textContent = `${start} to ${end}`;
     }
 
+    function buildAutoConceptLines(sentences, topicName) {
+      const pool = sentences.filter((sentence) => sentence.length >= 20).slice(0, 5);
+      if (!pool.length && topicName) {
+        return `${topicName}: Use the selected textbook pages to define the lesson idea.`;
+      }
+      return pool.map((sentence, index) => `${index + 1}. ${sentence}`).join('\n');
+    }
+
+    function buildAutoExamples(sentences) {
+      const matches = sentences.filter((sentence) => /example|such as|for instance|e\.g\.|\d/.test(sentence.toLowerCase()));
+      const chosen = (matches.length ? matches : sentences).slice(0, 4);
+      return chosen.join('\n');
+    }
+
+    function buildAutoTakeaways(sentences) {
+      return sentences.slice(0, 4).map((sentence) => `- ${sentence}`).join('\n');
+    }
+
+    function buildAutoDiagramNotes(text, bookTitle, startPage, endPage) {
+      const lower = String(text || '').toLowerCase();
+      if (/diagram|picture|chart|table|illustration|map/.test(lower)) {
+        return 'Use the diagrams or illustrations shown in the selected textbook pages and guide pupils to explain what they observe.';
+      }
+      if (bookTitle && startPage && endPage) {
+        return `Use the textbook illustrations from ${bookTitle}, pages ${startPage}-${endPage}, as the main visual aid.`;
+      }
+      return '';
+    }
+
+    function buildAutoMisconceptions(sentences, topicName) {
+      const caution = sentences.find((sentence) => /\bnot\b|\bdifferent\b|\bavoid\b|\bincorrect\b/i.test(sentence));
+      if (caution) return caution;
+      if (topicName) return `Clarify the correct meaning of ${topicName.toLowerCase()} and separate it from similar everyday examples in the book.`;
+      return '';
+    }
+
+    function populateFieldsFromParagraphs(paragraphs) {
+      const selectedText = paragraphs.map((item) => item.text).join(' ').replace(/\s+/g, ' ').trim();
+      if (!selectedText) return;
+
+      const sentences = extractSentences(selectedText);
+      const topicName = getResolvedTopicValue();
+      const startPage = parseInt(pageStartInput?.value || '', 10);
+      const endPage = parseInt(pageEndInput?.value || '', 10);
+      const bookTitle = lessonState.currentBook?.book?.title || '';
+
+      if (keyConceptsField && !keyConceptsField.value.trim()) {
+        keyConceptsField.value = buildAutoConceptLines(sentences, topicName);
+      }
+      if (examplesField && !examplesField.value.trim()) {
+        examplesField.value = buildAutoExamples(sentences);
+      }
+      if (keyTakeawaysField && !keyTakeawaysField.value.trim()) {
+        keyTakeawaysField.value = buildAutoTakeaways(sentences);
+      }
+      if (diagramsField && !diagramsField.value.trim()) {
+        diagramsField.value = buildAutoDiagramNotes(selectedText, bookTitle, startPage, endPage);
+      }
+      if (misconceptionsField && !misconceptionsField.value.trim()) {
+        misconceptionsField.value = buildAutoMisconceptions(sentences, topicName);
+      }
+      if (referencesField && !referencesField.value.trim() && bookTitle && startPage && endPage) {
+        referencesField.value = `${bookTitle}, pages ${startPage}-${endPage}`;
+      }
+
+      if (practiceQuestionsField && !practiceQuestionsField.value.trim()) {
+        generateHomework();
+      }
+    }
+
     function syncDetailedContent() {
       if (!detailedContentField) return;
       const selected = Array.from(lessonState.selectedParagraphs)
@@ -1901,12 +2922,11 @@ function splitIntoParagraphs(text) {
         .join('\n\n');
 
       if (selected) {
-        const current = detailedContentField.value.trim();
-        if (current) {
-          detailedContentField.value = current + '\n\n' + selected;
-        } else {
-          detailedContentField.value = selected;
+        if (lessonState.previousDetailValue === null) {
+          lessonState.previousDetailValue = detailedContentField.value;
         }
+        const base = compactTextBlock(lessonState.previousDetailValue || '');
+        detailedContentField.value = [base, selected].filter(Boolean).join('\n\n');
         lessonState.autoTextSnippet = selected;
         toast('Imported selected paragraphs into Lesson Development.', 'success');
       }
@@ -1997,6 +3017,7 @@ function splitIntoParagraphs(text) {
           }
           lessonState.selectedParagraphs = new Set(paragraphs.map(p => p.id));
           syncDetailedContent();
+          populateFieldsFromParagraphs(paragraphs);
         } else {
           toast(`Extracted ${paragraphs.length} paragraphs. Select which ones to import.`, 'success');
         }
@@ -2103,7 +3124,8 @@ function splitIntoParagraphs(text) {
         if (document.getElementById('lnYearHint')) document.getElementById('lnYearHint').textContent = currentYear;
 
         populateSelects();
-        loadNotes();
+        await loadNotes();
+        await refreshTopicChoices({ preferredTopic: '', preferredSubTopic: '' });
       } catch (error) {
         console.error('Error loading config:', error);
         toast('Error loading teacher configuration', 'error');
@@ -2141,9 +3163,31 @@ function splitIntoParagraphs(text) {
 
     async function loadNotes() {
       try {
-        const snap = await db.ref(`lesson_notes/${workerId}`).once('value');
-        notes = snap.val() || {};
-        totalNotes.textContent = Object.keys(notes).length;
+        const year = String(getYear());
+        const scopedPath = `${getLessonNotesBasePath(year)}/${workerId}`;
+        const [scopedSnap, legacySnap] = await Promise.all([
+          db.ref(scopedPath).once('value').catch(() => ({ val: () => null })),
+          db.ref(`lesson_notes/${workerId}`).once('value').catch(() => ({ val: () => null }))
+        ]);
+
+        const scopedNotes = (scopedSnap && scopedSnap.val && scopedSnap.val()) || {};
+        const legacyNotes = (legacySnap && legacySnap.val && legacySnap.val()) || {};
+        const merged = {};
+
+        Object.entries(legacyNotes).forEach(([id, note]) => {
+          const normalized = normalizeLessonNoteRecord(note, { id, year });
+          if (normalized && normalized.year === year) {
+            merged[id] = normalized;
+          }
+        });
+
+        Object.entries(scopedNotes).forEach(([id, note]) => {
+          const normalized = normalizeLessonNoteRecord(note, { id, year });
+          if (normalized) merged[id] = normalized;
+        });
+
+        notes = merged;
+        if (totalNotes) totalNotes.textContent = String(Object.keys(notes).length);
         renderNotes();
       } catch (error) {
         console.error('Error loading notes:', error);
@@ -2157,7 +3201,9 @@ function splitIntoParagraphs(text) {
       const selectedSubject = filterSubject?.value;
       const topicFilter = (filterTopic?.value || '').toLowerCase();
 
+      const activeYear = String(getYear());
       const entries = Object.entries(notes).filter(([id, note]) => {
+        if (String(note.year || activeYear) !== activeYear) return false;
         if (selectedClass && note.class !== selectedClass) return false;
         if (selectedSubject && note.subject !== selectedSubject) return false;
         if (topicFilter && !(note.topic || '').toLowerCase().includes(topicFilter)) return false;
@@ -2251,7 +3297,7 @@ function splitIntoParagraphs(text) {
       alert(`${header}\n\n${body}`);
     };
 
-        window.editNote = function(noteId) {
+        window.editNote = async function(noteId) {
       const note = notes[noteId];
       if (!note) return;
 
@@ -2259,9 +3305,10 @@ function splitIntoParagraphs(text) {
 
       if (noteClassField) noteClassField.value = note.class || '';
       if (noteSubjectField) noteSubjectField.value = note.subject || '';
-      if (noteTopicField) noteTopicField.value = note.topic || '';
-      if (noteSubTopicField) noteSubTopicField.value = note.subTopic || '';
       if (noteTermField) noteTermField.value = note.term || 'Term 1';
+      await refreshTopicChoices({ preferredTopic: note.topic || '', preferredSubTopic: note.subTopic || '' });
+      setTopicFieldValue(note.topic || '');
+      setSubTopicFieldValue(note.subTopic || '');
       if (keyConceptsField) keyConceptsField.value = note.keyConcepts || '';
       if (detailedContentField) detailedContentField.value = note.detailedContent || '';
       if (examplesField) examplesField.value = note.examples || '';
@@ -2326,10 +3373,13 @@ function splitIntoParagraphs(text) {
       if (!confirm('Are you sure you want to delete these lesson notes?')) return;
 
       try {
-        await db.ref(`lesson_notes/${workerId}/${noteId}`).remove();
+        const note = normalizeLessonNoteRecord(notes[noteId], { id: noteId, year: getYear() });
+        const noteYear = String(note?.year || getYear());
+        await db.ref(`${getLessonNotesBasePath(noteYear)}/${workerId}/${noteId}`).remove().catch(() => null);
+        await db.ref(`lesson_notes/${workerId}/${noteId}`).remove().catch(() => null);
         delete notes[noteId];
         toast('Lesson notes deleted successfully.', 'success');
-        totalNotes.textContent = Object.keys(notes).length;
+        if (totalNotes) totalNotes.textContent = String(Object.keys(notes).length);
         renderNotes();
       } catch (error) {
         console.error('Error deleting note:', error);
@@ -2359,6 +3409,7 @@ function splitIntoParagraphs(text) {
           }
         });
         if (homeworkSummary) homeworkSummary.textContent = '';
+        refreshTopicChoices({ preferredTopic: '', preferredSubTopic: '' });
         if (notesForm) {
           notesForm.classList.remove('hidden');
           notesForm.scrollIntoView({ behavior: 'smooth' });
@@ -2374,11 +3425,14 @@ function splitIntoParagraphs(text) {
         lessonState.revisionCandidate = null;
         setRevisionBanner(false);
         resetClassbookUi(true);
+        refreshTopicChoices({ preferredTopic: '', preferredSubTopic: '' });
       });
     }
     if (saveNoteBtn) {
       saveNoteBtn.addEventListener('click', async () => {
-      const requiredFields = [noteClassField, noteSubjectField, noteTopicField, keyConceptsField, detailedContentField];
+      const topicValue = getResolvedTopicValue();
+      const subTopicValue = getResolvedSubTopicValue();
+      const requiredFields = [noteClassField, noteSubjectField, keyConceptsField, detailedContentField];
       for (const field of requiredFields) {
         if (!field || !field.value || !field.value.trim()) {
           const label = field && field.previousElementSibling ? field.previousElementSibling.textContent : 'this field';
@@ -2387,13 +3441,18 @@ function splitIntoParagraphs(text) {
           return;
         }
       }
+      if (!topicValue) {
+        toast('Please fill in: Topic / Unit *', 'warning');
+        noteTopicField?.focus();
+        return;
+      }
 
       // Auto-generate homework if empty
       let practiceQuestionsValue = practiceQuestionsField ? practiceQuestionsField.value.trim() : '';
       if (!practiceQuestionsValue) {
         const className = noteClassField ? noteClassField.value : '';
         const subjectName = noteSubjectField ? noteSubjectField.value : '';
-        const topicName = noteTopicField ? noteTopicField.value : '';
+        const topicName = topicValue;
         const conceptText = keyConceptsField ? keyConceptsField.value : '';
         const detailText = detailedContentField ? detailedContentField.value : '';
         const takeawayText = keyTakeawaysField ? keyTakeawaysField.value : '';
@@ -2445,12 +3504,20 @@ function splitIntoParagraphs(text) {
         }
       }
 
+      const saveYear = String(getYear());
+      const lessonDateContext = getLessonContextDate();
       const noteData = {
         class: noteClassField ? noteClassField.value : '',
         subject: noteSubjectField ? noteSubjectField.value : '',
-        topic: noteTopicField ? noteTopicField.value : '',
-        subTopic: noteSubTopicField ? noteSubTopicField.value : '',
+        topic: topicValue,
+        subTopic: subTopicValue,
         term: noteTermField ? noteTermField.value : 'Term 1',
+        year: saveYear,
+        academicYear: saveYear,
+        lessonDateContext,
+        schoolId,
+        teacherId: workerId || '',
+        teacherName: teacherName ? teacherName.textContent : '',
         keyConcepts: keyConceptsField ? keyConceptsField.value : '',
         detailedContent: detailedContentField ? detailedContentField.value : '',
         examples: examplesField ? examplesField.value : '',
@@ -2494,17 +3561,17 @@ function splitIntoParagraphs(text) {
       }
 
       try {
+        const scopedPath = `${getLessonNotesBasePath(saveYear)}/${workerId}`;
         if (editingNoteId) {
           noteData.updatedAt = Date.now();
-          await db.ref('lesson_notes/' + workerId + '/' + editingNoteId).update(noteData);
-          notes[editingNoteId] = Object.assign({}, notes[editingNoteId], noteData);
+          await db.ref(`${scopedPath}/${editingNoteId}`).update(noteData);
+          notes[editingNoteId] = normalizeLessonNoteRecord(Object.assign({}, notes[editingNoteId], noteData), { id: editingNoteId, year: saveYear });
           toast('Lesson notes updated successfully.', 'success');
         } else {
           noteData.createdAt = Date.now();
-          noteData.teacherName = teacherName ? teacherName.textContent : '';
-          const newRef = db.ref('lesson_notes/' + workerId).push();
+          const newRef = db.ref(scopedPath).push();
           await newRef.set(noteData);
-          notes[newRef.key] = noteData;
+          notes[newRef.key] = normalizeLessonNoteRecord({ ...noteData, id: newRef.key }, { id: newRef.key, year: saveYear });
           toast('Lesson notes created successfully.', 'success');
         }
 
@@ -2519,6 +3586,7 @@ function splitIntoParagraphs(text) {
         lessonState.autoTextSnippet = '';
         setRevisionBanner(false);
         resetClassbookUi(true);
+        refreshTopicChoices({ preferredTopic: '', preferredSubTopic: '' });
       } catch (error) {
         console.error('Error saving note:', error);
         toast('Error saving lesson notes.', 'error');
@@ -2537,6 +3605,7 @@ function splitIntoParagraphs(text) {
           lessonState.selectedParagraphs = new Set(lessonState.extractedParagraphs.map(p => p.id));
           importedPreview.querySelectorAll('button').forEach(btn => btn.classList.add('active'));
           syncDetailedContent();
+          populateFieldsFromParagraphs(lessonState.extractedParagraphs);
           toast('Imported the current selection into Lesson Development.', 'success');
         } else {
           handleAutoImport(true);
@@ -2580,16 +3649,34 @@ function splitIntoParagraphs(text) {
       setRevisionBanner(false);
     });
 
-    if (noteClassField) noteClassField.addEventListener('change', () => {
+    if (noteClassField) noteClassField.addEventListener('change', async () => {
+      resetClassbookUi(true);
+      await refreshTopicChoices({ preferredTopic: '', preferredSubTopic: '' });
+      checkRevisionFlag();
+    });
+    if (noteSubjectField) noteSubjectField.addEventListener('change', async () => {
+      resetClassbookUi(true);
+      await refreshTopicChoices({ preferredTopic: '', preferredSubTopic: '' });
+      checkRevisionFlag();
+    });
+    if (noteTermField) noteTermField.addEventListener('change', async () => {
+      resetClassbookUi(true);
+      await refreshTopicChoices({ preferredTopic: '', preferredSubTopic: '' });
+      checkRevisionFlag();
+    });
+    if (noteTopicField) noteTopicField.addEventListener('change', () => {
+      syncManualTopicVisibility();
+      refreshSubTopicChoices('');
       resetClassbookUi(true);
       checkRevisionFlag();
     });
-    if (noteSubjectField) noteSubjectField.addEventListener('change', () => {
+    if (noteSubTopicField) noteSubTopicField.addEventListener('change', () => {
+      syncManualTopicVisibility();
       resetClassbookUi(true);
-      checkRevisionFlag();
     });
-    if (noteTopicField) noteTopicField.addEventListener('blur', () => {
-      checkRevisionFlag();
+    if (noteTopicCustomField) noteTopicCustomField.addEventListener('input', checkRevisionFlag);
+    if (noteSubTopicCustomField) noteSubTopicCustomField.addEventListener('input', () => {
+      resetClassbookUi(true);
     });
 
     if (generateHomeworkBtn) generateHomeworkBtn.addEventListener('click', generateHomework);
@@ -2601,19 +3688,13 @@ function splitIntoParagraphs(text) {
       });
     }
 
+    if (window.somapYearContext?.onYearChanged) {
+      window.somapYearContext.onYearChanged(async () => {
+        await loadNotes();
+        await refreshTopicChoices({ preferredTopic: '', preferredSubTopic: '' });
+      });
+    }
+
   </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
