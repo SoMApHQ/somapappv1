@@ -424,7 +424,19 @@
   async function loadStudentsFromDb(year = getSelectedYear()) {
     if (!window.SomapFinance?.getFinanceRoster) return [];
     const roster = await window.SomapFinance.getFinanceRoster(year);
-    return roster.map((row) => {
+    return roster
+      .filter((row) => {
+        const raw = row.rawStudent || {};
+        const status = String(row.status || raw.status || '').trim().toLowerCase();
+        if (row.isGraduated) return false;
+        if (raw.deleted === true || raw.isDeleted === true) return false;
+        if (raw.archived === true || raw.isArchived === true) return false;
+        if (raw.removed === true || raw.isRemoved === true) return false;
+        if (raw.active === false) return false;
+        if (status === 'shifted' || status === 'graduated' || status === 'archived' || status === 'deleted' || status === 'removed') return false;
+        return true;
+      })
+      .map((row) => {
       const raw = row.rawStudent || {};
       const name = row.fullName || [raw.firstName, raw.middleName, raw.lastName].filter(Boolean).join(' ').trim();
       return {
@@ -757,15 +769,7 @@
     students = studentData;
     const studentIndex = {};
     const classNamesSet = new Set();
-    const shiftedIdSet = new Set();
-    const shiftedNameSet = new Set();
     const shiftedByClass = {};
-    const matchedShiftedByClass = {};
-    const normalizeStudentRef = (value) => String(value || '').trim().toLowerCase();
-    const normalizeStudentName = (value) => String(value || '')
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-      .trim();
     const extractYear = (value) => {
       const raw = String(value || '').trim();
       if (!raw) return null;
@@ -784,31 +788,10 @@
         return;
       }
 
-      [
-        entry.key,
-        entry.studentId,
-        entry.id,
-        entry.admissionNo,
-        entry.admissionNumber,
-        entry.admission
-      ].forEach(ref => {
-        const normalized = normalizeStudentRef(ref);
-        if (normalized) shiftedIdSet.add(normalized);
-      });
-      [
-        entry.studentName,
-        entry.name,
-        entry.fullName
-      ].forEach(nameRef => {
-        const normalizedName = normalizeStudentName(nameRef);
-        if (normalizedName) shiftedNameSet.add(normalizedName);
-      });
-
       const rawClass = String(entry.className || entry.classLevel || entry.class || entry.grade || '').trim();
       if (rawClass) {
         const cls = normalizeClassName(rawClass);
         shiftedByClass[cls] = (shiftedByClass[cls] || 0) + 1;
-        classNamesSet.add(cls);
       }
     });
 
@@ -817,19 +800,9 @@
       if (!className) return;
       const gender = normalizeGender(s.gender || s.sex || s.genderType);
       const studentId = s.id || s.studentId || s.studentID || s.admissionNo || s.admissionNumber || s.admission || '';
-      const admissionNo = s.admissionNo || s.admissionNumber || s.admission || '';
       const fullName = [s.firstName, s.middleName, s.lastName]
         .filter(Boolean).join(' ').trim()
         || s.name || s.fullName || studentId || 'Unknown';
-      const isShiftedStudent =
-        shiftedIdSet.has(normalizeStudentRef(studentId)) ||
-        shiftedIdSet.has(normalizeStudentRef(admissionNo)) ||
-        shiftedNameSet.has(normalizeStudentName(fullName));
-      if (isShiftedStudent) {
-        const clsNorm = normalizeClassName(className);
-        matchedShiftedByClass[clsNorm] = (matchedShiftedByClass[clsNorm] || 0) + 1;
-        return;
-      }
       const key = studentId || fullName;
       studentIndex[key] = { name: fullName, gender, className };
       classNamesSet.add(className);
@@ -876,32 +849,12 @@
         schoolTotals.registered.girls += 1;
       }
     });
-    classNames.forEach(cls => {
-      const clsNorm = normalizeClassName(cls);
-      const shiftedTarget = Number(shiftedByClass[clsNorm] || 0);
-      const shiftedMatched = Number(matchedShiftedByClass[clsNorm] || 0);
-      let deficit = Math.max(0, shiftedTarget - shiftedMatched);
-      while (deficit > 0 && perClass[cls].registered.total > 0) {
-        if (perClass[cls].registered.boys >= perClass[cls].registered.girls && perClass[cls].registered.boys > 0) {
-          perClass[cls].registered.boys -= 1;
-          schoolTotals.registered.boys = Math.max(0, schoolTotals.registered.boys - 1);
-        } else if (perClass[cls].registered.girls > 0) {
-          perClass[cls].registered.girls -= 1;
-          schoolTotals.registered.girls = Math.max(0, schoolTotals.registered.girls - 1);
-        }
-        perClass[cls].registered.total -= 1;
-        schoolTotals.registered.total = Math.max(0, schoolTotals.registered.total - 1);
-        deficit -= 1;
-      }
-    });
-
     // Present/Absent
     for (const cls of classNames) {
       try {
         const snap = await schoolRef(`attendance/${cls}/${monthKeyLocal}/${targetDate}`).get();
         const records = snap.exists() ? snap.val() : {};
         Object.keys(records || {}).forEach(stuId => {
-          if (shiftedIdSet.has(normalizeStudentRef(stuId))) return;
           const record = records[stuId] || {};
           const info = studentIndex[stuId] || { name: stuId, gender: null, className: cls };
           const statusRaw = String(record.status || record.daily || '').toUpperCase();
