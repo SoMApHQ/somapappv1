@@ -285,6 +285,7 @@
     const defaultYear = Number(options.defaultYear || new Date().getFullYear());
     const targetYear = Number(options.targetYear || defaultYear);
     const delta = targetYear - defaultYear;
+    const includeShifted = Boolean(options.includeShifted);
     const anchorIndex = buildEnrollmentIndex(anchorEnrollments || {});
     const yearIndex = buildEnrollmentIndex(yearEnrollments || {});
     const shiftRegistry = buildShiftRegistry(shiftEntries || {}, targetYear);
@@ -330,9 +331,12 @@
       const finalClass = normalizeClassName(computedClass || 'Unknown', { allowGraduated: true }) || 'Unknown';
       if (finalClass === 'Graduated') return;
 
-      if (isShiftedStudent) {
+      if (isShiftedStudent && !includeShifted) {
         shiftRegistry.matchedShiftedByClass[finalClass] = (shiftRegistry.matchedShiftedByClass[finalClass] || 0) + 1;
         return;
+      }
+      if (isShiftedStudent && includeShifted) {
+        shiftRegistry.matchedShiftedByClass[finalClass] = (shiftRegistry.matchedShiftedByClass[finalClass] || 0) + 1;
       }
 
       roster.push({

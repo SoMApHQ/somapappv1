@@ -740,7 +740,7 @@
       const enrollYear = (ySnap && ySnap.val && ySnap.val()) || {};
       const shiftReports = (shiftSnap && shiftSnap.val && shiftSnap.val()) || {};
       const rosterBundle = ClassUtils.buildAcademicRoster
-        ? ClassUtils.buildAcademicRoster(students, enrollAnchor, enrollYear, shiftReports, { targetYear: y, defaultYear: SOMAP_DEFAULT_YEAR })
+        ? ClassUtils.buildAcademicRoster(students, enrollAnchor, enrollYear, shiftReports, { targetYear: y, defaultYear: SOMAP_DEFAULT_YEAR, includeShifted: true })
         : { roster: [], shiftRegistry: { shiftedByClass: {}, matchedShiftedByClass: {} } };
       return {
         y,
@@ -776,16 +776,16 @@
 
     function countClassForYear(targetClass, maps, targetYear) {
       const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(targetClass) : targetClass;
+      const yList = maps.studentlistYear?.[canonicalTarget] || maps.studentlistYear?.[targetClass];
+      if (yList && typeof yList === 'object' && Object.keys(yList).length > 0) {
+        return Object.keys(yList).length;
+      }
       if (Array.isArray(maps.roster) && maps.roster.length) {
         let total = maps.roster.filter((student) => String(student.className || '').trim().toLowerCase() === String(canonicalTarget || '').trim().toLowerCase()).length;
         const shiftTarget = Number(maps.shiftRegistry?.shiftedByClass?.[canonicalTarget] || 0);
         const shiftMatched = Number(maps.shiftRegistry?.matchedShiftedByClass?.[canonicalTarget] || 0);
         total = Math.max(0, total - Math.max(0, shiftTarget - shiftMatched));
         return total;
-      }
-      const yList = maps.studentlistYear?.[canonicalTarget] || maps.studentlistYear?.[targetClass];
-      if (yList && typeof yList === 'object' && Object.keys(yList).length > 0) {
-        return Object.keys(yList).length;
       }
 
       let count = 0;
@@ -824,10 +824,29 @@
         }
       }
 
-      if (!node) return { present: 0, absent: 0, boysP: 0, girlsP: 0, boysA: 0, girlsA: 0 };
-      return ClassUtils.summarizeAttendanceNode
+      const empty = { present: 0, absent: 0, boysP: 0, girlsP: 0, boysA: 0, girlsA: 0, absentNames: [] };
+      if (!node) return empty;
+      const summary = ClassUtils.summarizeAttendanceNode
         ? ClassUtils.summarizeAttendanceNode(node, studentsMap)
-        : { present: 0, absent: 0, boysP: 0, girlsP: 0, boysA: 0, girlsA: 0 };
+        : empty;
+      const absentNames = [];
+      const getStudentName = (id) => {
+        const student = (studentsMap || {})[id] || {};
+        return [student.firstName, student.middleName, student.lastName].filter(Boolean).join(' ').trim() || student.name || student.fullName || '';
+      };
+      Object.keys(node || {}).forEach((studentId) => {
+        const rec = node[studentId] || {};
+        const amStatus = String(rec.am || '').trim().toUpperCase();
+        const pmStatus = String(rec.pm || '').trim().toUpperCase();
+        const derivedDaily = rec.daily || rec.status || rec.s || ((amStatus === 'P' && pmStatus === 'P') ? 'P' : `${amStatus}${pmStatus}`);
+        const status = String(derivedDaily || '').trim().toUpperCase();
+        const isPresent = ['P', 'PRESENT', 'PR'].includes(status);
+        if (!isPresent) {
+          const name = getStudentName(studentId) || studentId;
+          if (name) absentNames.push(name);
+        }
+      });
+      return { ...summary, absentNames };
     }
 
     async function recomputeJournalAttendance() {
@@ -845,10 +864,14 @@
         let total = countClassForYear(chosenClass, maps, year);
         const att = await loadAttendanceCounts(year, chosenClass, journalDate.value, maps.students || {});
         const attTotal = (att.present || 0) + (att.absent || 0);
-        if (attTotal > 0) total = attTotal;
+        if (attTotal > 0 && attTotal > total) total = attTotal;
         totalEl.value = total;
         presentEl.value = att.present || 0;
         absentEl.value = Math.max(0, total - (att.present || 0));
+        const absentNamesEl = document.getElementById('absentNames');
+        if (absentNamesEl && Array.isArray(att.absentNames) && att.absentNames.length > 0) {
+          absentNamesEl.value = att.absentNames.join(', ');
+        }
       } catch (error) {
         console.error('Error recomputing journal attendance:', error);
       }
