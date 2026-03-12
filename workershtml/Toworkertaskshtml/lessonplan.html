@@ -10,6 +10,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
   <script src="../../shared/academic-class-utils.js"></script>
+  <script src="../../shared/finance_math.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="../../js/scheme-template-parser.js"></script>
@@ -860,6 +861,7 @@
     let preferredSchemeEntryId = null;
     let applyingSchemeSelection = false;
     const schemeLookupCache = new Map();
+    const financeRosterCache = new Map();
     let schoolLogoDataUrlPromise = null;
 
     // UI Elements
@@ -954,6 +956,100 @@
         localStorage.getItem('somap.currentSchoolName') ||
         (schoolId === 'socrates-school' ? 'Socrates School' : schoolId)
       );
+    }
+
+    function isActiveRosterStudent(row) {
+      const raw = row?.rawStudent || row?.raw || {};
+      const status = String(row?.status || raw.status || '').trim().toLowerCase();
+      if (row?.isGraduated || raw?.isGraduated) return false;
+      if (raw?.deleted === true || raw?.isDeleted === true) return false;
+      if (raw?.archived === true || raw?.isArchived === true) return false;
+      if (raw?.removed === true || raw?.isRemoved === true) return false;
+      if (raw?.active === false) return false;
+      if (['shifted', 'graduated', 'archived', 'deleted', 'removed'].includes(status)) return false;
+      return true;
+    }
+
+    function normalizeRosterStudentName(student, fallbackId = '') {
+      return String(
+        student?.name ||
+        student?.fullName ||
+        [student?.firstName, student?.middleName, student?.lastName].filter(Boolean).join(' ') ||
+        fallbackId
+      ).replace(/\s+/g, ' ').trim();
+    }
+
+    async function getFinanceRoster(year) {
+      const key = String(year || getYear());
+      if (financeRosterCache.has(key)) return financeRosterCache.get(key);
+      if (!window.SomapFinance?.getFinanceRoster) {
+        financeRosterCache.set(key, []);
+        return [];
+      }
+      try {
+        const roster = await window.SomapFinance.getFinanceRoster(key);
+        const active = Array.isArray(roster) ? roster.filter(isActiveRosterStudent) : [];
+        financeRosterCache.set(key, active);
+        return active;
+      } catch (error) {
+        console.warn('Failed to load finance roster:', error?.message || error);
+        financeRosterCache.set(key, []);
+        return [];
+      }
+    }
+
+    async function loadActiveClassRoster(year, className, maps = null) {
+      const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(className) : String(className || '').trim();
+      const financeRoster = await getFinanceRoster(year);
+      if (Array.isArray(financeRoster) && financeRoster.length) {
+        return financeRoster
+          .filter((row) => {
+            const rosterClass = ClassUtils.normalizeClassName
+              ? ClassUtils.normalizeClassName(row.classLevel || row.className || '')
+              : String(row.classLevel || row.className || '').trim();
+            return L(rosterClass) === L(canonicalTarget);
+          })
+          .map((row) => ({
+            id: String(row.id || row.studentId || row.admissionNumber || '').trim(),
+            admissionNo: String(row.admissionNumber || row.admissionNo || '').trim(),
+            name: normalizeRosterStudentName(row, row.id || row.admissionNumber || ''),
+            gender: ClassUtils.normalizeGenderBucket
+              ? ClassUtils.normalizeGenderBucket(row.gender || row.rawStudent?.gender || row.rawStudent?.sex || '')
+              : String(row.gender || row.rawStudent?.gender || row.rawStudent?.sex || '').trim().toLowerCase(),
+            className: canonicalTarget
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+      }
+
+      const fallback = [];
+      const students = maps?.students || {};
+      Object.keys(students).forEach((id) => {
+        const studentRecord = students[id];
+        if (!studentRecord || typeof studentRecord !== 'object') return;
+        if (String(studentRecord.status || '').trim().toLowerCase() === 'shifted') return;
+        const cls = resolveClassForYear(id, studentRecord, maps?.enrollAnchor || {}, maps?.enrollYear || {}, year);
+        const normalizedClass = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(cls) : cls;
+        if (L(normalizedClass) !== L(canonicalTarget)) return;
+        fallback.push({
+          id: String(id || '').trim(),
+          admissionNo: String(studentRecord.admissionNumber || studentRecord.admissionNo || studentRecord.admNo || '').trim(),
+          name: normalizeRosterStudentName(studentRecord, id),
+          gender: ClassUtils.normalizeGenderBucket
+            ? ClassUtils.normalizeGenderBucket(studentRecord.gender || studentRecord.sex || '')
+            : String(studentRecord.gender || studentRecord.sex || '').trim().toLowerCase(),
+          className: canonicalTarget
+        });
+      });
+      return fallback.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    function summarizeClassRoster(classRoster = []) {
+      return classRoster.reduce((acc, student) => {
+        acc.total += 1;
+        if (student.gender === 'boys') acc.boys += 1;
+        else if (student.gender === 'girls') acc.girls += 1;
+        return acc;
+      }, { total: 0, boys: 0, girls: 0 });
     }
 
     function canViewAllLessonPlans() {
@@ -2218,7 +2314,33 @@
       return stats;
     }
 
-    async function loadAttendanceCounts(year, className, dateStr, studentsMap){
+    function attendanceRecordIsPresent(rec = {}) {
+      const amStatus = String(rec.am || '').trim().toUpperCase();
+      const pmStatus = String(rec.pm || '').trim().toUpperCase();
+      const derivedDaily = rec.daily || rec.status || rec.s || ((amStatus === 'P' && pmStatus === 'P') ? 'P' : `${amStatus}${pmStatus}`);
+      return ['P', 'PRESENT', 'PR'].includes(String(derivedDaily || '').trim().toUpperCase());
+    }
+
+    function buildStudentMatchTokens(student = {}, fallbackId = '') {
+      const tokens = new Set();
+      [
+        fallbackId,
+        student.id,
+        student.studentId,
+        student.admissionNo,
+        student.admissionNumber,
+        student.admission,
+        student.admNo
+      ].forEach((value) => {
+        const token = String(value || '').trim().toLowerCase();
+        if (token) tokens.add(token);
+      });
+      const name = normalizeRosterStudentName(student, fallbackId);
+      if (name) tokens.add(`name:${name.toLowerCase()}`);
+      return Array.from(tokens);
+    }
+
+    async function loadAttendanceCounts(year, className, dateStr, studentsMap, classRoster = []){
       const y = String(year);
       const cls = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(className) : String(className || '').trim();
       const key = yyyymmdd(dateStr);
@@ -2251,12 +2373,51 @@
       
       if (!node) {
         console.log(`No attendance data found for ${cls} on ${dateStr}`);
-        return { present:0, absent:0, boysP:0, girlsP:0, boysA:0, girlsA:0 };
+        const rosterStats = summarizeClassRoster(classRoster);
+        return {
+          present: 0,
+          absent: rosterStats.total,
+          boysP: 0,
+          girlsP: 0,
+          boysA: rosterStats.boys,
+          girlsA: rosterStats.girls
+        };
       }
-      
+
       const summary = ClassUtils.summarizeAttendanceNode
         ? ClassUtils.summarizeAttendanceNode(node, studentsMap)
         : { present:0, absent:0, boysP:0, girlsP:0, boysA:0, girlsA:0 };
+
+      if (Array.isArray(classRoster) && classRoster.length) {
+        const presentTokens = new Set();
+        Object.entries(node || {}).forEach(([studentId, rec]) => {
+          if (!attendanceRecordIsPresent(rec)) return;
+          const student = (studentsMap || {})[studentId] || {};
+          buildStudentMatchTokens({
+            id: studentId,
+            admissionNo: student.admissionNumber || student.admissionNo || student.admNo || '',
+            name: normalizeRosterStudentName(student, studentId)
+          }, studentId).forEach((token) => presentTokens.add(token));
+          const recordName = normalizeRosterStudentName(rec, studentId);
+          if (recordName) presentTokens.add(`name:${recordName.toLowerCase()}`);
+        });
+
+        const derived = { present: 0, absent: 0, boysP: 0, girlsP: 0, boysA: 0, girlsA: 0 };
+        classRoster.forEach((student) => {
+          const isPresent = buildStudentMatchTokens(student, student.id).some((token) => presentTokens.has(token));
+          if (isPresent) {
+            derived.present += 1;
+            if (student.gender === 'boys') derived.boysP += 1;
+            else if (student.gender === 'girls') derived.girlsP += 1;
+          } else {
+            derived.absent += 1;
+            if (student.gender === 'boys') derived.boysA += 1;
+            else if (student.gender === 'girls') derived.girlsA += 1;
+          }
+        });
+        return derived;
+      }
+
       const pb = summary.boysP || 0;
       const pg = summary.girlsP || 0;
       const ab = summary.boysA || 0;
@@ -2291,6 +2452,8 @@
         if(statNote) statNote.textContent = 'Loading student data...';
         
         const maps = await getBaseMaps(year);
+        const classRoster = await loadActiveClassRoster(year, chosenClass, maps);
+        const rosterStats = summarizeClassRoster(classRoster);
         console.log('Loaded maps:', {
           studentsCount: Object.keys(maps.students || {}).length,
           enrollAnchorCount: Object.keys(maps.enrollAnchor || {}).length,
@@ -2310,18 +2473,15 @@
           return;
         }
 
-        const rosterStats = countClassRosterStats(chosenClass, maps, year);
         let total = rosterStats.total || countClassForYear(chosenClass, maps, year);
 
         if (dateInp && dateInp.value){
           if(statNote) statNote.textContent = 'Loading attendance data...';
-          const att = await loadAttendanceCounts(year, chosenClass, dateInp.value, maps.students||{});
+          const att = await loadAttendanceCounts(year, chosenClass, dateInp.value, maps.students||{}, classRoster);
           console.log('Attendance data:', att);
           const presentTotal = att.present || 0;
           const attTotal = (att.present || 0) + (att.absent || 0);
-          if (attTotal > 0 && attTotal > total) {
-            total = attTotal;
-          }
+          if (!total && attTotal > 0) total = attTotal;
           const absentTotal = Math.max(0, total - presentTotal);
           const absentBoys = att.boysA ?? Math.max(0, (rosterStats.boys || 0) - (att.boysP || 0));
           const absentGirls = att.girlsA ?? Math.max(0, (rosterStats.girls || 0) - (att.girlsP || 0));
