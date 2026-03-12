@@ -1288,7 +1288,16 @@
     };
 
     const solved = searchSchedule(searchState);
-    const finalGrid = solved ? searchState.grid : (searchState.bestGrid || searchState.grid);
+    const seededBestGrid = deepClone(solved ? searchState.grid : (searchState.bestGrid || searchState.grid));
+    const finalGrid = repairRemainingDemand({
+      groupId,
+      settings,
+      slots,
+      teachers,
+      teacherLegend,
+      subjectLegend,
+      initialGrid: seededBestGrid
+    });
     const validation = validateTimetable({
       settings,
       slots,
@@ -1401,7 +1410,15 @@
     Object.entries(searchState.demand).forEach(([className, bucket]) => {
       Object.entries(bucket || {}).forEach(([subject, remaining]) => {
         if (remaining > 0) {
-          entries.push({ className, subject, remaining, placements: collectPlacements(searchState, className, subject) });
+          const placements = collectPlacements(searchState, className, subject);
+          entries.push({
+            className,
+            subject,
+            remaining,
+            placements,
+            uniqueTeachers: new Set(placements.map((item) => item.teacherId)).size,
+            uniqueDays: new Set(placements.map((item) => item.day)).size
+          });
         }
       });
     });
@@ -1409,8 +1426,20 @@
     const schedulable = entries.filter((entry) => entry.placements.length > 0);
     if (!schedulable.length) return null;
     schedulable.sort((left, right) => {
-      if (left.placements.length !== right.placements.length) return left.placements.length - right.placements.length;
+      const leftTargetDistinctDays = Math.min(left.remaining, DAYS.length);
+      const rightTargetDistinctDays = Math.min(right.remaining, DAYS.length);
+      const leftDaySlack = left.uniqueDays - leftTargetDistinctDays;
+      const rightDaySlack = right.uniqueDays - rightTargetDistinctDays;
+      if (leftDaySlack !== rightDaySlack) return leftDaySlack - rightDaySlack;
+      const leftPlacementSlack = left.placements.length - left.remaining;
+      const rightPlacementSlack = right.placements.length - right.remaining;
+      if (leftPlacementSlack !== rightPlacementSlack) return leftPlacementSlack - rightPlacementSlack;
+      const leftRatio = left.placements.length / Math.max(left.remaining, 1);
+      const rightRatio = right.placements.length / Math.max(right.remaining, 1);
+      if (leftRatio !== rightRatio) return leftRatio - rightRatio;
+      if (left.uniqueTeachers !== right.uniqueTeachers) return left.uniqueTeachers - right.uniqueTeachers;
       if (left.remaining !== right.remaining) return right.remaining - left.remaining;
+      if (left.placements.length !== right.placements.length) return left.placements.length - right.placements.length;
       return `${left.className}:${left.subject}`.localeCompare(`${right.className}:${right.subject}`);
     });
     return schedulable[0];
@@ -1436,7 +1465,9 @@
             ? (searchState.teacherEdgeLoad[teacher.workerId]?.first || 0)
             : (slotIndex === searchState.slots.length - 1 ? (searchState.teacherEdgeLoad[teacher.workerId]?.last || 0) : 0);
           const earlyBias = CORE_SUBJECTS.has(subject) ? slotIndex * 2 : slotIndex;
-          const daySpreadPenalty = sameDayCount > 0 ? 28 : -10;
+          const uncoveredDaysNeeded = Math.min(remainingForSubject, DAYS.length);
+          const uncoveredDayBonus = sameDayCount > 0 ? 34 : -16;
+          const dayCoveragePressure = uncoveredDaysNeeded > unusedSchedulableDays ? -12 : 0;
           const subjectMeta = searchState.subjectLegend.find((item) => item.subject === subject) || { abbreviation: makeSubjectAbbreviation(subject), color: '#dbeafe' };
           placements.push({
             className,
@@ -1447,7 +1478,7 @@
             slotId: slot.id,
             abbreviation: subjectMeta.abbreviation,
             color: subjectMeta.color,
-            score: sameDayCount * 18 + teacherLoad * 4 + edgePenalty * 3 + earlyBias + daySpreadPenalty
+            score: sameDayCount * 24 + teacherLoad * 4 + edgePenalty * 3 + earlyBias + uncoveredDayBonus + dayCoveragePressure
           });
         });
       });
@@ -1481,6 +1512,106 @@
       if (slotIndex === 0) searchState.teacherEdgeLoad[placement.teacherId].first -= 1;
       if (slotIndex === searchState.slots.length - 1) searchState.teacherEdgeLoad[placement.teacherId].last -= 1;
       searchState.demand[className][subject] += 1;
+    };
+  }
+
+  function repairRemainingDemand({ groupId, settings, slots, teachers, teacherLegend, subjectLegend, initialGrid }) {
+    const repairState = rebuildSchedulingStateFromGrid({
+      groupId,
+      settings,
+      slots,
+      teachers,
+      teacherLegend,
+      subjectLegend,
+      grid: initialGrid
+    });
+    let progress = true;
+    while (progress) {
+      progress = false;
+      const nextChoice = chooseMostConstrainedDemand(repairState);
+      if (!nextChoice || !nextChoice.placements.length) break;
+      placeLesson(repairState, nextChoice.className, nextChoice.subject, nextChoice.placements[0]);
+      progress = true;
+    }
+    return repairState.grid;
+  }
+
+  function rebuildSchedulingStateFromGrid({ groupId, settings, slots, teachers, teacherLegend, subjectLegend, grid }) {
+    const demand = cloneRequirementMap(settings.periodRequirements || {});
+    const candidateMap = buildCandidateTeacherMap(groupId, teachers);
+    const teacherNumberMap = Object.fromEntries((teacherLegend || []).map((teacher) => [teacher.workerId, teacher.number]));
+    const classOccupancy = {};
+    const teacherOccupancy = {};
+    const classSubjectDayCount = {};
+    const teacherDayLoad = {};
+    const teacherEdgeLoad = {};
+    const slotIndexMap = Object.fromEntries((slots || []).map((slot, index) => [slot.id, index]));
+
+    GROUPS[groupId].classes.forEach((className) => {
+      classOccupancy[className] = {};
+      classSubjectDayCount[className] = {};
+      DAYS.forEach((day) => {
+        classOccupancy[className][day] = {};
+        classSubjectDayCount[className][day] = {};
+      });
+    });
+
+    (teacherLegend || []).forEach((teacher) => {
+      teacherOccupancy[teacher.workerId] = {};
+      teacherDayLoad[teacher.workerId] = {};
+      teacherEdgeLoad[teacher.workerId] = { first: 0, last: 0 };
+      DAYS.forEach((day) => {
+        teacherOccupancy[teacher.workerId][day] = {};
+        teacherDayLoad[teacher.workerId][day] = 0;
+      });
+    });
+
+    GROUPS[groupId].classes.forEach((className) => {
+      DAYS.forEach((day) => {
+        (slots || []).forEach((slot) => {
+          const cell = grid?.[className]?.[day]?.[slot.id];
+          if (!cell?.type) return;
+          classOccupancy[className][day][slot.id] = true;
+          if (cell.type !== 'teaching') return;
+          const subject = normalizeSubjectName(cell.subject);
+          const teacherId = String(cell.teacherId || '');
+          teacherOccupancy[teacherId] = teacherOccupancy[teacherId] || {};
+          teacherOccupancy[teacherId][day] = teacherOccupancy[teacherId][day] || {};
+          teacherOccupancy[teacherId][day][slot.id] = className;
+          classSubjectDayCount[className][day][subject] = (classSubjectDayCount[className][day][subject] || 0) + 1;
+          teacherDayLoad[teacherId] = teacherDayLoad[teacherId] || {};
+          teacherDayLoad[teacherId][day] = (teacherDayLoad[teacherId][day] || 0) + 1;
+          teacherEdgeLoad[teacherId] = teacherEdgeLoad[teacherId] || { first: 0, last: 0 };
+          if ((slotIndexMap[slot.id] || 0) === 0) teacherEdgeLoad[teacherId].first += 1;
+          if ((slotIndexMap[slot.id] || 0) === (slots.length - 1)) teacherEdgeLoad[teacherId].last += 1;
+          if (demand[className]?.[subject] > 0) {
+            demand[className][subject] -= 1;
+          }
+        });
+      });
+    });
+
+    return {
+      groupId,
+      settings,
+      slots,
+      teachers,
+      groupClasses: GROUPS[groupId].classes,
+      grid,
+      demand,
+      candidateMap,
+      teacherNumberMap,
+      subjectLegend,
+      classOccupancy,
+      teacherOccupancy,
+      classSubjectDayCount,
+      teacherDayLoad,
+      teacherEdgeLoad,
+      nodesVisited: 0,
+      limit: 0,
+      bestGrid: null,
+      bestDemandScore: computeDemandScore(demand),
+      fixedIssues: []
     };
   }
 
