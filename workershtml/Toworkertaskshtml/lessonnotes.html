@@ -1605,13 +1605,120 @@
     }
 
     function countHomeworkQuestionsFromText(text) {
-      const source = String(text || '').trim();
-      if (!source) return 0;
-      const numberedMatches = source.match(/(^|\n)\s*\d+[\).:-]/g);
-      if (numberedMatches?.length) return numberedMatches.length;
-      const blocks = source.split(/\n\s*\n/).map((block) => block.trim()).filter(Boolean);
-      if (blocks.length > 1) return blocks.length;
-      return source.split(/\n+/).map((line) => line.trim()).filter(Boolean).length;
+      return extractHomeworkBlocks(text).length;
+    }
+
+    function normalizeMultilineText(text) {
+      return String(text || '')
+        .replace(/\r/g, '')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+    }
+
+    function uniqueNormalizedBlocks(blocks) {
+      const seen = new Set();
+      return blocks.filter((block) => {
+        const normalized = normalizeLookupToken(block);
+        if (!normalized || seen.has(normalized)) return false;
+        seen.add(normalized);
+        return true;
+      });
+    }
+
+    function extractHomeworkBlocks(text) {
+      const source = normalizeMultilineText(text);
+      if (!source) return [];
+      const normalized = source.replace(/\n+/g, '\n');
+      const typedBlocks = normalized
+        .split(/(?=(?:^|\n)(?:Q\d+[.)]|Multiple Choice:|Matching:|True or False:|Passage Question:|Word Problem:|Reflection:))/gm)
+        .map((block) => block.trim())
+        .filter(Boolean);
+      if (typedBlocks.length > 1) return typedBlocks;
+
+      const numberedBlocks = normalized
+        .split(/(?=(?:^|\n)\s*\d+[\).:-]\s+)/gm)
+        .map((block) => block.trim())
+        .filter(Boolean);
+      if (numberedBlocks.length > 1) return numberedBlocks;
+
+      const paragraphBlocks = normalized
+        .split(/\n\s*\n/)
+        .map((block) => block.trim())
+        .filter(Boolean);
+      if (paragraphBlocks.length > 1) return paragraphBlocks;
+
+      const markers = normalized.match(/(?:Multiple Choice:|Matching:|True or False:|Passage Question:|Word Problem:|Reflection:)/g) || [];
+      if (markers.length > 1) {
+        return normalized
+          .split(/(?=(?:Multiple Choice:|Matching:|True or False:|Passage Question:|Word Problem:|Reflection:))/g)
+          .map((block) => block.trim())
+          .filter(Boolean);
+      }
+
+      return normalized ? [normalized] : [];
+    }
+
+    function formatHomeworkBlocks(blocks) {
+      return (blocks || []).map((block, index) => {
+        const clean = normalizeMultilineText(block).replace(/^Q\d+[.)]\s*/i, '');
+        return `Q${index + 1}. ${clean}`;
+      }).join('\n\n');
+    }
+
+    function getQuestionTopicLabel(topicName) {
+      const topic = compactTextBlock(topicName || '');
+      if (!topic) return 'the topic';
+      const shortPieces = extractCandidateSubtopics(topic);
+      const best = shortPieces.find((piece) => piece.split(' ').length <= 12) || topic;
+      const trimmed = best.split(/\s+/).slice(0, 12).join(' ');
+      return trimmed.length < best.length ? `${trimmed}...` : trimmed;
+    }
+
+    function stripQuestionContent(text) {
+      return normalizeMultilineText(text)
+        .replace(/([.?!])\s*(\d+[\).])/g, '$1\n$2')
+        .replace(/([a-z])(\d+[\).])/gi, '$1\n$2')
+        .split(/(?=(?:^|\n)\s*(?:\d+[\).:-]|Multiple Choice:|Matching:|True or False:|Passage Question:|Word Problem:|Reflection:))/gm)
+        .filter((block) => {
+          const lower = block.toLowerCase();
+          return !/multiple choice:|matching:|true or false:|passage question:|word problem:|reflection:|word power|exercise/.test(lower) &&
+            !/^\s*\d+[\).:-]/.test(block.trim());
+        })
+        .join('\n\n')
+        .trim();
+    }
+
+    function buildOrganizedNoteSections(rawText) {
+      const cleaned = stripQuestionContent(rawText);
+      const paragraphs = uniqueNormalizedBlocks(splitIntoParagraphs(cleaned).map(normalizeMultilineText));
+      const sentences = uniqueNormalizedBlocks(extractSentences(cleaned).map(normalizeMultilineText));
+      const explanatoryParagraphs = paragraphs.filter((paragraph) => {
+        const lower = paragraph.toLowerCase();
+        return !/word power|exercise|homework|question/i.test(lower);
+      });
+      const detailedContent = explanatoryParagraphs.slice(0, 6).join('\n\n');
+      const keyConcepts = sentences.slice(0, 5).map((sentence, index) => `${index + 1}. ${sentence}`).join('\n');
+      const exampleSentences = sentences.filter((sentence) => /for example|such as|e\.g\.|for instance|example/i.test(sentence));
+      const examples = (exampleSentences.length ? exampleSentences : explanatoryParagraphs.slice(0, 3)).join('\n');
+      const keyTakeaways = sentences.slice(0, 4).map((sentence) => `- ${sentence}`).join('\n');
+      return {
+        detailedContent,
+        keyConcepts,
+        examples,
+        keyTakeaways
+      };
+    }
+
+    function formatSectionValueForPdf(title, value) {
+      const source = normalizeMultilineText(value);
+      if (!source) return 'N/A';
+      if (/practice questions? \/ homework/i.test(title)) {
+        const blocks = extractHomeworkBlocks(source);
+        return formatHomeworkBlocks(blocks);
+      }
+      return source;
     }
 
     async function getSchoolLogoDataUrl() {
@@ -1796,9 +1903,11 @@
     function addSectionBlock(doc, title, value, startY) {
       const pageHeight = doc.internal.pageSize.getHeight();
       let y = startY;
-      const text = compactTextBlock(value || '') || 'N/A';
+      const text = formatSectionValueForPdf(title, value);
       const labelHeight = 6;
-      const lines = doc.splitTextToSize(text, 180);
+      const lines = String(text || 'N/A')
+        .split('\n')
+        .flatMap((line) => doc.splitTextToSize(line || ' ', 180));
       const estimatedHeight = labelHeight + Math.max(8, lines.length * 4.3) + 4;
       if (y + estimatedHeight > pageHeight - 14) {
         doc.addPage();
@@ -1821,6 +1930,7 @@
     async function renderLessonNotePdfPage(doc, rawNote, index, total) {
       const note = normalizeLessonNoteRecord(rawNote, { year: getYear() });
       const context = await getPdfContextForNote(note);
+      const organized = buildOrganizedNoteSections(note.detailedContent || '');
       const logoDataUrl = await getSchoolLogoDataUrl();
       if (index > 0) doc.addPage();
 
@@ -1842,10 +1952,10 @@
       ], 40);
 
       y = addAttendanceTable(doc, context, y);
-      y = addSectionBlock(doc, 'Key Concepts & Definitions', note.keyConcepts, y);
-      y = addSectionBlock(doc, 'Detailed Content / Explanation', note.detailedContent, y);
-      y = addSectionBlock(doc, 'Examples & Illustrations', note.examples, y);
-      y = addSectionBlock(doc, 'Important Points / Key Takeaways', note.keyTakeaways, y);
+      y = addSectionBlock(doc, 'Key Concepts & Definitions', note.keyConcepts || organized.keyConcepts, y);
+      y = addSectionBlock(doc, 'Detailed Content / Explanation', organized.detailedContent || note.detailedContent, y);
+      y = addSectionBlock(doc, 'Examples & Illustrations', note.examples || organized.examples, y);
+      y = addSectionBlock(doc, 'Important Points / Key Takeaways', note.keyTakeaways || organized.keyTakeaways, y);
       y = addSectionBlock(doc, 'Diagrams & Visual Aids', note.diagrams, y);
       y = addSectionBlock(doc, 'Common Mistakes / Misconceptions', note.misconceptions, y);
       y = addSectionBlock(doc, `Practice Questions / Homework (${context.homeworkCount || countHomeworkQuestionsFromText(note.practiceQuestions)} question${(context.homeworkCount || countHomeworkQuestionsFromText(note.practiceQuestions)) === 1 ? '' : 's'})`, context.homeworkText || note.practiceQuestions, y);
@@ -2826,11 +2936,17 @@
       }
     }
 function splitIntoParagraphs(text) {
-      return text
+      const normalized = String(text || '')
         .replace(/\r/g, '')
-        .split(/(?:\n{2,}|(?<=\.|\?|!)\s{2,})/)
-        .map(part => part.trim())
-        .filter(part => part.length > 30);
+        .replace(/([.!?])\s+([A-Z])/g, '$1\n$2')
+        .replace(/(\d+[\).])\s*/g, '\n$1 ')
+        .replace(/\n{3,}/g, '\n\n');
+      return uniqueNormalizedBlocks(
+        normalized
+          .split(/\n{2,}|\n(?=[A-Z])|\n(?=\d+[\).])/)
+          .map((part) => normalizeMultilineText(part))
+          .filter((part) => part.length > 30)
+      );
     }
 
     async function runPageOcr(page) {
@@ -3188,6 +3304,7 @@ function splitIntoParagraphs(text) {
       const conceptPairs = parseConcepts(conceptText);
       const sentences = extractSentences(detailText || conceptText);
       const keywords = Array.from(new Set(tokenize(notesText))).filter(word => word.length > 4).slice(0, 12);
+      const promptTopicName = getQuestionTopicLabel(topicName);
 
       const counts = buildHomeworkCounts(HOMEWORK_TOTAL);
       const blocks = [];
@@ -3196,22 +3313,22 @@ function splitIntoParagraphs(text) {
         for (let i = 0; i < item.count; i++) {
           switch (item.type) {
             case 'multiple_choice':
-              blocks.push(buildMultipleChoiceQuestion({ age, subjectName, topicName, conceptPairs, keywords, sentences }));
+              blocks.push(buildMultipleChoiceQuestion({ age, subjectName, topicName: promptTopicName, conceptPairs, keywords, sentences }));
               break;
             case 'matching':
-              blocks.push(buildMatchingQuestion({ age, topicName, conceptPairs }));
+              blocks.push(buildMatchingQuestion({ age, topicName: promptTopicName, conceptPairs }));
               break;
             case 'true_false':
-              blocks.push(buildTrueFalseQuestion({ age, topicName, sentences, conceptPairs, keywords }));
+              blocks.push(buildTrueFalseQuestion({ age, topicName: promptTopicName, sentences, conceptPairs, keywords }));
               break;
             case 'passage':
-              blocks.push(buildPassageQuestion({ age, topicName, sentences, subjectName }));
+              blocks.push(buildPassageQuestion({ age, topicName: promptTopicName, sentences, subjectName }));
               break;
             case 'word_problem':
-              blocks.push(buildWordProblem({ age, topicName, subjectName }));
+              blocks.push(buildWordProblem({ age, topicName: promptTopicName, subjectName }));
               break;
             case 'reflection':
-              blocks.push(buildReflectionQuestion({ age, topicName, subjectName }));
+              blocks.push(buildReflectionQuestion({ age, topicName: promptTopicName, subjectName }));
               break;
             default:
               break;
@@ -3219,7 +3336,7 @@ function splitIntoParagraphs(text) {
         }
       });
 
-      if (practiceQuestionsField) practiceQuestionsField.value = blocks.join('\n\n');
+      if (practiceQuestionsField) practiceQuestionsField.value = formatHomeworkBlocks(blocks);
       if (homeworkSummary) {
         const breakdown = counts.map(c => `${c.label}: ${c.count}`).join(', ');
         homeworkSummary.textContent = `Prepared ${blocks.length} questions (${breakdown}).`;
@@ -3281,20 +3398,24 @@ function splitIntoParagraphs(text) {
       const selectedText = paragraphs.map((item) => item.text).join(' ').replace(/\s+/g, ' ').trim();
       if (!selectedText) return;
 
-      const sentences = extractSentences(selectedText);
+      const organized = buildOrganizedNoteSections(selectedText);
+      const sentences = extractSentences(organized.detailedContent || selectedText);
       const topicName = getResolvedTopicValue();
       const startPage = parseInt(pageStartInput?.value || '', 10);
       const endPage = parseInt(pageEndInput?.value || '', 10);
       const bookTitle = lessonState.currentBook?.book?.title || '';
 
       if (keyConceptsField && !keyConceptsField.value.trim()) {
-        keyConceptsField.value = buildAutoConceptLines(sentences, topicName);
+        keyConceptsField.value = organized.keyConcepts || buildAutoConceptLines(sentences, topicName);
+      }
+      if (detailedContentField && !detailedContentField.value.trim() && organized.detailedContent) {
+        detailedContentField.value = organized.detailedContent;
       }
       if (examplesField && !examplesField.value.trim()) {
-        examplesField.value = buildAutoExamples(sentences);
+        examplesField.value = organized.examples || buildAutoExamples(sentences);
       }
       if (keyTakeawaysField && !keyTakeawaysField.value.trim()) {
-        keyTakeawaysField.value = buildAutoTakeaways(sentences);
+        keyTakeawaysField.value = organized.keyTakeaways || buildAutoTakeaways(sentences);
       }
       if (diagramsField && !diagramsField.value.trim()) {
         diagramsField.value = buildAutoDiagramNotes(selectedText, bookTitle, startPage, endPage);
@@ -3949,6 +4070,7 @@ function splitIntoParagraphs(text) {
           const conceptPairs = parseConcepts(conceptText);
           const sentences = extractSentences(detailText || conceptText);
           const keywords = Array.from(new Set(tokenize(notesText))).filter(word => word.length > 4).slice(0, 12);
+          const promptTopicName = getQuestionTopicLabel(topicName);
           const counts = buildHomeworkCounts(HOMEWORK_TOTAL);
           const blocks = [];
 
@@ -3956,28 +4078,28 @@ function splitIntoParagraphs(text) {
             for (let i = 0; i < item.count; i++) {
               switch (item.type) {
                 case 'multiple_choice':
-                  blocks.push(buildMultipleChoiceQuestion({ age, subjectName, topicName, conceptPairs, keywords, sentences }));
+                  blocks.push(buildMultipleChoiceQuestion({ age, subjectName, topicName: promptTopicName, conceptPairs, keywords, sentences }));
                   break;
                 case 'matching':
-                  blocks.push(buildMatchingQuestion({ age, topicName, conceptPairs }));
+                  blocks.push(buildMatchingQuestion({ age, topicName: promptTopicName, conceptPairs }));
                   break;
                 case 'true_false':
-                  blocks.push(buildTrueFalseQuestion({ age, topicName, sentences, conceptPairs, keywords }));
+                  blocks.push(buildTrueFalseQuestion({ age, topicName: promptTopicName, sentences, conceptPairs, keywords }));
                   break;
                 case 'passage':
-                  blocks.push(buildPassageQuestion({ age, topicName, sentences, subjectName }));
+                  blocks.push(buildPassageQuestion({ age, topicName: promptTopicName, sentences, subjectName }));
                   break;
                 case 'word_problem':
-                  blocks.push(buildWordProblem({ age, topicName, subjectName }));
+                  blocks.push(buildWordProblem({ age, topicName: promptTopicName, subjectName }));
                   break;
                 case 'reflection':
-                  blocks.push(buildReflectionQuestion({ age, topicName, subjectName }));
+                  blocks.push(buildReflectionQuestion({ age, topicName: promptTopicName, subjectName }));
                   break;
               }
             }
           });
 
-          practiceQuestionsValue = blocks.join('\n\n');
+          practiceQuestionsValue = formatHomeworkBlocks(blocks);
           if (practiceQuestionsField) practiceQuestionsField.value = practiceQuestionsValue;
           lessonState.lastHomeworkMeta = {
             generatedAt: Date.now(),
