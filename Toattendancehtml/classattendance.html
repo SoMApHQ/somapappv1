@@ -937,197 +937,38 @@
         };
 
         async function loadStudentsFromDb(year) {
-          if (!db) return [];
-
-          const selectedYear = normalizeYearValue(
-            year ||
-              window.somapYearContext?.getSelectedYear?.() ||
-              SOMAP_DEFAULT_YEAR
+          if (!window.SomapFinance?.getFinanceRoster) return [];
+          const roster = await window.SomapFinance.getFinanceRoster(
+            normalizeYearValue(
+              year ||
+                window.somapYearContext?.getSelectedYear?.() ||
+                SOMAP_DEFAULT_YEAR
+            )
           );
-          const delta = Number(selectedYear) - SOMAP_DEFAULT_YEAR;
-          const tryPaths = ["students", "Students", "StudentsList", "Students_List"];
-
-          const [anchorEnrollSnap, yearEnrollSnap] = await Promise.all([
-            scopedOrSocratesLegacy(
-              `enrollments/${SOMAP_DEFAULT_YEAR}`,
-              `enrollments/${SOMAP_DEFAULT_YEAR}`
-            ).catch(() => null),
-            scopedOrSocratesLegacy(
-              `enrollments/${selectedYear}`,
-              `enrollments/${selectedYear}`
-            ).catch(() => null),
-          ]);
-          const anchorIndex = buildEnrollmentIndex(
-            anchorEnrollSnap?.exists() ? anchorEnrollSnap.val() : {}
-          );
-          const yearIndex = buildEnrollmentIndex(
-            yearEnrollSnap?.exists() ? yearEnrollSnap.val() : {}
-          );
-
-          for (const p of tryPaths) {
-            try {
-              const snap = await scopedOrSocratesLegacy(p, p);
-              if (!snap.exists()) continue;
-
-              const data = snap.val();
-
-              return Object.keys(data)
-                .map((k) => {
-                  const s = data[k] || {};
-
-                  const status = String(s.status || "").toLowerCase();
-                  if (status === "shifted") return null;
-
-                  const name =
-                    [s.firstName, s.middleName, s.lastName]
-                      .filter(Boolean)
-                      .join(" ")
-                      .trim() ||
-                    s.name ||
-                    s.fullName ||
-                    "";
-
-                  const parentName =
-                    s.primaryParentName ||
-                    s.parentName ||
-                    s.guardianName ||
-                    "";
-
-                  const parentContact =
-                    s.primaryParentContact ||
-                    s.parentPhone ||
-                    s.parentContact ||
-                    s.guardianContact ||
-                    "";
-
-                  const admissionNo =
-                    s.admissionNumber || s.admNo || s.admissionNo || "";
-
-                  const anchorEnrollment = lookupEnrollment(
-                    anchorIndex,
-                    k,
-                    admissionNo
-                  );
-                  const yearEnrollment = lookupEnrollment(
-                    yearIndex,
-                    k,
-                    admissionNo
-                  );
-                  const yearClass = getEnrollmentClassFromRecord(yearEnrollment);
-                  const admissionYear = inferAdmissionYear(s);
-                  const anchorClass = getEnrollmentClassFromRecord(anchorEnrollment);
-                  const hasAnchorRecord =
-                    anchorEnrollment &&
-                    typeof anchorEnrollment === "object" &&
-                    Object.keys(anchorEnrollment).length > 0;
-                  const studentClass = getStudentClassFromRecord(s);
-                  const baseClass = anchorClass || studentClass || "Unknown";
-                  const oldAdmission =
-                    Number.isFinite(admissionYear) &&
-                    admissionYear <= SOMAP_DEFAULT_YEAR;
-                  const shouldShift = hasAnchorRecord || oldAdmission;
-
-                  // Prefer lastClassTransfer when promotion was saved but enrollment not yet synced
-                  const lastTransfer = s.lastClassTransfer || s.meta?.lastClassTransfer;
-                  const transferEffectiveYear = lastTransfer?.effectiveDate
-                    ? new Date(String(lastTransfer.effectiveDate) + "T12:00:00").getFullYear()
-                    : null;
-                  const transferClass = lastTransfer?.toClass || "";
-
-                  let computedClass = yearClass;
-                  if (!computedClass && transferClass && Number(transferEffectiveYear) === Number(selectedYear)) {
-                    computedClass = transferClass;
-                  }
-                  if (!computedClass) {
-                    if (shouldShift) {
-                      computedClass = shiftClass(baseClass, delta);
-                    } else {
-                      computedClass = baseClass;
-                    }
-                  }
-                  const finalClass = computedClass || "Unknown";
-                  if (
-                    String(finalClass).trim().toUpperCase() === "GRADUATED"
-                  ) {
-                    return null;
-                  }
-
-                  const rawGender =
-                    s.gender || s.sex || s.Gender || s.Sex || "";
-                  const normalizedGender = normalizeGenderValue(rawGender);
-                  const genderSection = genderSectionLabel(normalizedGender);
-                  return {
-                    id: k,
-                    admissionNo,
-                    name,
-                    class: finalClass,
-                    feeDue: 0,
-                    feePaid: 0,
-                    balance: 0,
-                    gender: normalizedGender,
-                    genderSection,
-                    genderRaw: rawGender,
-                    parentName,
-                    parentContact,
-                    status: status || "active",
-                  };
-                })
-                .filter(Boolean);
-            } catch (e) {
-              console.warn("Failed to load path", p, e.message);
-            }
-          }
-
-          console.error("No students data found");
-          return [];
+          return roster.map((row) => {
+            const raw = row.rawStudent || {};
+            const rawGender = row.gender || raw.gender || raw.sex || "";
+            const normalizedGender = normalizeGenderValue(rawGender);
+            return {
+              id: row.id,
+              admissionNo: row.admissionNumber || "",
+              name: row.fullName || "",
+              class: row.classLevel || "Unknown",
+              feeDue: Number(row.fee || 0),
+              feePaid: Number(row.paid || 0),
+              balance: Number(row.balance || 0),
+              gender: normalizedGender,
+              genderSection: genderSectionLabel(normalizedGender),
+              genderRaw: rawGender,
+              parentName: raw.primaryParentName || raw.parentName || raw.guardianName || "",
+              parentContact: row.parentContact || "",
+              status: row.status || "active",
+            };
+          });
         }
 
         async function attachFinanceDataForYear(year) {
-          const yearKey = normalizeYearValue(year);
-          if (!window.SomapFinance?.getYearFinanceEntries) return;
-          try {
-            if (window.SomapFinance._clearFinanceCaches) {
-              window.SomapFinance._clearFinanceCaches();
-            }
-            const entries = await window.SomapFinance.getYearFinanceEntries(
-              yearKey
-            );
-            const byAdmission = {};
-            Object.entries(entries || {}).forEach(([_, entry]) => {
-              const student = entry?.student || {};
-              const admission =
-                student.admissionNumber ||
-                student.admissionNo ||
-                entry.admissionNumber ||
-                entry.admissionNo ||
-                "";
-              if (admission) byAdmission[String(admission)] = entry;
-            });
-            students = students.map((s) => {
-              const entry =
-                entries?.[s.id] ||
-                (s.admissionNo
-                  ? byAdmission[String(s.admissionNo)]
-                  : null) ||
-                null;
-              if (!entry) return { ...s, feeDue: 0, feePaid: 0, balance: 0 };
-              const due = Number(
-                entry.due ?? entry.finance?.feePerYear ?? 0
-              );
-              const paid = Number(
-                entry.paid ?? entry.finance?.paidAmount ?? 0
-              );
-              const balance = Number(
-                entry.outstanding ??
-                  entry.finance?.balance ??
-                  Math.max(0, due - paid)
-              );
-              return { ...s, feeDue: due, feePaid: paid, balance };
-            });
-            renderTable();
-          } catch (e) {
-            console.warn("Finance summary load failed", e?.message || e);
-          }
+          renderTable();
         }
 
         // ---------- Attendance CRUD ----------

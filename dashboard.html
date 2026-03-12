@@ -2239,31 +2239,37 @@
         const year = getSelectedYear();
         updateYearHint();
         try {
-          const rosterPromise = loadStudentRoster(year);
-          const [entriesMap, payments, rosterData] = await Promise.all([
-            window.SomapFinance.getYearFinanceEntries(year),
+          const [sharedRoster, payments, schoolTotals] = await Promise.all([
+            window.SomapFinance.getFinanceRoster(year),
             window.SomapFinance.listRecentPayments(year, 6),
-            rosterPromise,
+            window.SomapFinance.loadSchoolTotals(year),
           ]);
-          const entries = scopeEntries(
-            entriesMap,
-            currentRole,
-            currentClassScope
-          );
-          const roster = buildActiveStudentRoster(
-            rosterData,
-            year,
-            currentRole,
-            currentClassScope
-          );
-          await renderFinanceStats(entries, year);
+          const scopedRosterRows =
+            currentRole === "teacher" && currentClassScope
+              ? sharedRoster.filter(
+                  (row) =>
+                    L(row.classLevel || row.className || "") ===
+                    L(currentClassScope)
+                )
+              : sharedRoster;
+          const roster = scopedRosterRows.map((row) => ({
+            ...(row.rawStudent || {}),
+            id: row.id,
+            admissionNumber: row.admissionNumber,
+            classLevel: row.classLevel,
+            className: row.classLevel,
+            gender: row.gender,
+            primaryParentContact:
+              row.parentContact || row.rawStudent?.primaryParentContact || "",
+          }));
+          await renderFinanceStats(schoolTotals, year);
           await renderStudentSnapshot(roster);
           await renderAttendanceSummary(roster, year);
           await loadWorkerSnapshot(year);
           await refreshRemedialModule(roster, year);
           renderRecentActivitiesFromPayments(
             payments,
-            new Set(entries.map((entry) => entry.id))
+            new Set(scopedRosterRows.map((row) => row.id))
           );
         } catch (error) {
           console.error("Error loading dashboard:", error);
@@ -2275,30 +2281,24 @@
         }
       }
 
-      async function renderFinanceStats(entries, year) {
-        const totals = entries.reduce(
-          (acc, entry) => {
-            acc.due += Number(entry.due || 0);
-            acc.paid += Number(entry.paid || 0);
-            acc.outstanding += Number(entry.outstanding || 0);
-            return acc;
-          },
-          { due: 0, paid: 0, outstanding: 0 }
-        );
+      async function renderFinanceStats(totals, year) {
+        const due = Number(totals?.due || 0);
+        const collected = Number(totals?.collected || 0);
+        const outstanding = Number(totals?.outstanding || 0);
         const expensesTotal = await window.SomapFinance.loadExpensesTotal(year);
-        document.getElementById("total-due").innerHTML = formatTsh(totals.due);
+        document.getElementById("total-due").innerHTML = formatTsh(due);
         document.getElementById("total-collected").innerHTML = formatTsh(
-          totals.paid
+          collected
         );
         document.getElementById("total-outstanding").innerHTML = formatTsh(
-          totals.outstanding
+          outstanding
         );
         document.getElementById("total-expenses").innerHTML =
           formatTsh(expensesTotal);
         document.getElementById("net-balance").innerHTML = formatTsh(
-          totals.paid - expensesTotal
+          collected - expensesTotal
         );
-        updateFeeChart(totals.paid, totals.due);
+        updateFeeChart(collected, due);
       }
 
       function renderStudentSnapshot(students) {

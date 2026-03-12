@@ -422,107 +422,27 @@
   }
 
   async function loadStudentsFromDb(year = getSelectedYear()) {
-    if (!db) return [];
-
-    // 1) Load base students from the active school (match student list source)
-    const baseMap = {};
-    const tryPaths = ['students', 'Students', 'StudentsList', 'Students_List'];
-    for (const p of tryPaths) {
-      try {
-        const snap = await scopedOrSocratesLegacy(p, p);
-        if (!snap.exists()) continue;
-        const data = snap.val() || {};
-        Object.keys(data).forEach(k => {
-          const s = data[k] || {};
-          const status = String(s.status || '').toLowerCase();
-          if (status === 'shifted') return;
-          const existing = baseMap[k] || {};
-          const source = existing.__source || p;
-          baseMap[k] = Object.assign({}, existing, s, { __source: source });
-        });
-      } catch (e) {
-        // ignore missing paths
-      }
-    }
-
-    const toStudent = (id, raw) => {
-      const s = raw || {};
-      const name = [s.firstName, s.middleName, s.lastName]
-        .filter(Boolean).join(' ').trim()
-        || s.name || s.fullName || '';
-      const gender = s.gender || s.Gender || s.sex || s.Sex || s.genderType || '';
-      const className = s.className || s.classLevel || s.class || s.grade || 'Unknown';
-      const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || 0);
-      const feePaid = Number(s.feesPaid || s.feePaid || s.paidAmount || 0);
-      const balance = Number(s.balance || (feeDue - feePaid) || 0);
-      const status = String(s.status || '').toLowerCase();
-      const parentName = s.primaryParentName || s.parentName || s.guardianName || '';
-      const parentContact = s.primaryParentContact || s.parentPhone || s.parentContact || s.guardianContact || '';
+    if (!window.SomapFinance?.getFinanceRoster) return [];
+    const roster = await window.SomapFinance.getFinanceRoster(year);
+    return roster.map((row) => {
+      const raw = row.rawStudent || {};
+      const name = row.fullName || [raw.firstName, raw.middleName, raw.lastName].filter(Boolean).join(' ').trim();
       return {
-        id: s.id || id,
-        admissionNo: s.admissionNumber || s.admNo || s.admissionNo || '',
-        name,
-        class: className,
-        className,
-        gender,
-        feeDue,
-        feePaid,
-        balance,
-        parentName,
-        parentContact,
-        status: status || 'active',
-        __source: s.__source || ''
+        id: row.id,
+        admissionNo: row.admissionNumber || '',
+        name: name || '',
+        class: row.classLevel || 'Unknown',
+        className: row.classLevel || 'Unknown',
+        classLevel: row.classLevel || 'Unknown',
+        gender: row.gender || raw.gender || raw.sex || '',
+        feeDue: Number(row.fee || 0),
+        feePaid: Number(row.paid || 0),
+        balance: Number(row.balance || 0),
+        parentName: raw.primaryParentName || raw.parentName || raw.guardianName || '',
+        parentContact: row.parentContact || '',
+        status: row.status || 'active',
       };
-    };
-
-    const baseStudents = Object.keys(baseMap).map(k => toStudent(k, baseMap[k])).filter(Boolean);
-    const normalizeAdmission = (value) => String(value || '').trim();
-
-    // 2) Load enrollments for selected year + anchor year
-    let enrollmentIndex = {};
-    let anchorIndex = {};
-    try {
-      const enrollSnap = await scopedOrSocratesLegacy(`enrollments/${year}`, `enrollments/${year}`);
-      if (enrollSnap.exists()) enrollmentIndex = normalizeEnrollments(enrollSnap.val());
-    } catch (e) {
-      // ignore
-    }
-    try {
-      const anchorSnap = await scopedOrSocratesLegacy(`enrollments/${SOMAP_DEFAULT_YEAR}`, `enrollments/${SOMAP_DEFAULT_YEAR}`);
-      if (anchorSnap.exists()) anchorIndex = normalizeEnrollments(anchorSnap.val());
-    } catch (e) {
-      // ignore
-    }
-
-    const deltaYears = Number(year) - SOMAP_DEFAULT_YEAR;
-    const roster = baseStudents.reduce((acc, student) => {
-      const sid = student.id || '';
-      const admissionKey = normalizeAdmission(student.admissionNo);
-      const enroll = enrollmentIndex[sid] || (admissionKey ? enrollmentIndex[admissionKey] : null) || {};
-      let classRaw = enroll.className || enroll.classLevel || enroll.class || enroll.grade || '';
-
-      if (!classRaw) {
-        const anchor = anchorIndex[sid] || (admissionKey ? anchorIndex[admissionKey] : null) || {};
-        const baseClass = anchor.className || anchor.classLevel || anchor.class || anchor.grade ||
-          student.className || student.classLevel || student.class || student.grade || 'Unknown';
-        const shifted = shiftClass(baseClass, deltaYears);
-        if (shifted === 'GRADUATED') return acc;
-        classRaw = shifted;
-      } else if (String(classRaw).trim().toUpperCase() === 'GRADUATED') {
-        return acc;
-      }
-
-      const classLevel = normalizeClassName(classRaw);
-      acc.push({
-        ...student,
-        class: classLevel,
-        className: classLevel,
-        classLevel
-      });
-      return acc;
-    }, []);
-
-    return roster.length ? roster : baseStudents;
+    });
   }
 
   // ---------- Shift reports ----------

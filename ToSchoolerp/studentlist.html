@@ -96,8 +96,14 @@
       </div>
     </div>
 
-    <div class="mb-3 md:flex md:items-center md:gap-3">
-      <select id="student-list-class" class="w-full md:w-1/3 p-2 border rounded-lg mb-2 md:mb-0">
+    <div class="mb-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_240px_auto] lg:items-center">
+      <input
+        id="student-list-search"
+        type="search"
+        placeholder="Search name, admission number, class, or parent contact"
+        class="w-full p-2 border rounded-lg"
+      />
+      <select id="student-list-class" class="w-full p-2 border rounded-lg">
         <option value="">All Classes</option>
         <option>Baby Class</option>
         <option>Middle Class</option>
@@ -111,7 +117,7 @@
         <option>Class 7</option>
       </select>
 
-      <div class="ml-auto flex gap-2">
+      <div class="flex flex-wrap gap-2 lg:justify-end">
         <button id="downloadCsvBtn" class="py-2 px-4 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
           <i class="fa-solid fa-file-csv"></i> Download CSV
         </button>
@@ -120,6 +126,8 @@
         </button>
       </div>
     </div>
+
+    <p id="studentListSummary" class="text-xs text-slate-500 mb-3">Preparing student list...</p>
 
     <div class="overflow-x-auto">
       <table id="student-list-table" class="min-w-full text-sm">
@@ -167,6 +175,8 @@
       </div>
     </div>
 
+    <p id="schoolReportSummary" class="text-xs text-slate-500 mb-3">Preparing school reports...</p>
+
     <div class="overflow-x-auto">
       <table id="school-report-table" class="min-w-full text-sm">
         <thead>
@@ -205,6 +215,8 @@
       </div>
     </div>
 
+    <p id="reportFormSummary" class="text-xs text-slate-500 mb-3">Preparing report forms...</p>
+
     <div class="overflow-x-auto">
       <table id="report-form-table" class="min-w-full text-sm">
         <thead>
@@ -233,6 +245,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="../firebase.js"></script> <!-- Adjusted path to firebase.js in root -->
+  <script src="../shared/finance_math.js"></script>
 
   <!-- Students List Logic -->
  <script type="module">
@@ -282,14 +295,20 @@
       listBody: document.getElementById('studentListBody'),
       schoolReportBody: document.getElementById('schoolReportBody'),
       reportFormBody: document.getElementById('reportFormBody'),
+      searchInput: document.getElementById('student-list-search'),
       classFilter: document.getElementById('student-list-class'),
       bulkIdsPdfBtn: document.getElementById('bulkIdsPdfBtn'),
       downloadCsvBtn: document.getElementById('downloadCsvBtn'),
       downloadPdfBtn: document.getElementById('downloadPdfBtn'),
+      schoolReportType: document.getElementById('school-report-type'),
       schoolDownloadCsv: document.getElementById('schoolDownloadCsv'),
       schoolDownloadPdf: document.getElementById('schoolDownloadPdf'),
+      reportFormType: document.getElementById('report-form-type'),
       reportDownloadCsv: document.getElementById('reportDownloadCsv'),
       reportDownloadPdf: document.getElementById('reportDownloadPdf'),
+      studentListSummary: document.getElementById('studentListSummary'),
+      schoolReportSummary: document.getElementById('schoolReportSummary'),
+      reportFormSummary: document.getElementById('reportFormSummary'),
     };
 
     const currencyFormatter = new Intl.NumberFormat('en-US', { minimumFractionDigits: 0 });
@@ -333,6 +352,11 @@
       planCache: new Map(),
       latestRecords: [],
       latestYear: getWorkingYear(),
+      latestViews: {
+        studentList: null,
+        schoolReports: null,
+        reportForms: null,
+      },
       renderToken: 0,
 
       // listeners
@@ -358,6 +382,98 @@
       if (text === undefined || text === null) return '';
       return String(text).replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
     };
+
+    function getDisplaySearchValue() {
+      return String(elements.searchInput?.value || '').trim().toLowerCase();
+    }
+
+    function monthLabelFromMs(ms) {
+      if (!ms || !Number.isFinite(ms)) return 'Unknown';
+      return new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' }).format(new Date(ms));
+    }
+
+    function getTermMeta(ms) {
+      if (!ms || !Number.isFinite(ms)) {
+        return { key: 'term-unknown', label: 'Unknown Term', order: Number.MAX_SAFE_INTEGER };
+      }
+      const date = new Date(ms);
+      const month = date.getMonth() + 1;
+      const year = date.getFullYear();
+      if (month <= 4) return { key: `term1-${year}`, label: `Term 1 ${year}`, order: year * 10 + 1 };
+      if (month <= 8) return { key: `term2-${year}`, label: `Term 2 ${year}`, order: year * 10 + 2 };
+      return { key: `term3-${year}`, label: `Term 3 ${year}`, order: year * 10 + 3 };
+    }
+
+    function classOrderIndex(label) {
+      const idx = CLASS_ORDER.findIndex((entry) => normalize(entry) === normalize(label));
+      return idx >= 0 ? idx : Number.MAX_SAFE_INTEGER;
+    }
+
+    function getGenderCounts(records) {
+      return records.reduce((acc, rec) => {
+        const g = String(rec.gender || '').trim().toLowerCase();
+        if (g.startsWith('m')) acc.boys += 1;
+        else if (g.startsWith('f')) acc.girls += 1;
+        return acc;
+      }, { boys: 0, girls: 0 });
+    }
+
+    function sumRecordField(records, field) {
+      return records.reduce((sum, rec) => sum + (Number(rec[field]) || 0), 0);
+    }
+
+    function buildGroupRow(label, records, extra = {}) {
+      const genderCounts = getGenderCounts(records);
+      return {
+        label,
+        students: records.length,
+        boys: genderCounts.boys,
+        girls: genderCounts.girls,
+        fee: sumRecordField(records, 'fee'),
+        paid: sumRecordField(records, 'paid'),
+        debt: sumRecordField(records, 'debt'),
+        ...extra,
+      };
+    }
+
+    function groupBy(records, metaBuilder) {
+      const groups = new Map();
+      records.forEach((rec) => {
+        const meta = metaBuilder(rec);
+        const key = meta?.key || 'unknown';
+        if (!groups.has(key)) {
+          groups.set(key, { ...meta, records: [] });
+        }
+        groups.get(key).records.push(rec);
+      });
+      return Array.from(groups.values());
+    }
+
+    function renderGenericTable(tableId, columns, rows, emptyMessage) {
+      const table = document.getElementById(tableId);
+      if (!table) return;
+      const thead = table.querySelector('thead');
+      const tbody = table.querySelector('tbody');
+      if (!thead || !tbody) return;
+
+      thead.innerHTML = `<tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join('')}</tr>`;
+      tbody.innerHTML = '';
+
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="${columns.length}" class="text-center text-sm text-slate-500 py-4">${emptyMessage}</td></tr>`;
+        return;
+      }
+
+      rows.forEach((row) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = columns.map((column) => {
+          const rawValue = typeof column.value === 'function' ? column.value(row) : row[column.key];
+          const displayValue = column.format ? column.format(rawValue, row) : rawValue;
+          return `<td>${escapeHtml(displayValue ?? '')}</td>`;
+        }).join('');
+        tbody.appendChild(tr);
+      });
+    }
 
     function toMs(value) {
       if (value === null || value === undefined) return null;
@@ -652,6 +768,18 @@
       elements.classFilter.addEventListener('change', queueRender);
     }
 
+    if (elements.searchInput) {
+      elements.searchInput.addEventListener('input', queueRender);
+    }
+
+    if (elements.schoolReportType) {
+      elements.schoolReportType.addEventListener('change', queueRender);
+    }
+
+    if (elements.reportFormType) {
+      elements.reportFormType.addEventListener('change', queueRender);
+    }
+
     [
       [elements.bulkIdsPdfBtn, () => downloadBulkIdsPDF()],
       [elements.downloadCsvBtn, () => downloadCSV('student-list')],
@@ -676,7 +804,7 @@
       state.latestYear = year;
 
       // prevent “empty then jump” rendering
-      if (!isReadyToRender()) {
+      if (!window.SomapFinance?.getFinanceRoster) {
         showLoadingRow(year);
         return;
       }
@@ -684,58 +812,27 @@
       const generation = ++state.renderToken;
 
       // ---- KEY FIX: pick students by registration YEAR, not by yearIndex mixing
-      const allStudents = Array.from(state.students.values());
-      const eligibleStudents = allStudents
-        .filter(isCompleteStudent)
-        .filter((stu) => belongsToSelectedYear(stu, year));
-
-      const records = await Promise.all(eligibleStudents.map(async (stu) => {
-        const fallbackClass = stu.classLevel || stu.className || '';
-        const resolvedClass = resolveClassForYear(stu.key, fallbackClass, year, stu) || fallbackClass || 'N/A';
-
-        // Graduated rule: auto-exclude in UI (e.g., Class 7 in 2025 will be GRADUATED in 2026)
-        const isGraduated = resolvedClass === 'GRADUATED';
-
-        let finance = { fee: 0, planId: null, feeOverride: null };
-        try {
-          finance = await resolveEffectiveFinance(stu.key, resolvedClass, { anchorClass: fallbackClass, year });
-        } catch (err) {
-          console.error('resolveEffectiveFinance error', stu.key, err);
-        }
-
-        const planLabel = await planLabelFor(finance.planId, year);
-
-        const ledgerEntry = state.ledger?.[stu.key] || {};
-        const paidAmount = sumPayments(ledgerEntry);
-        const feeValue = Number(finance.fee || 0);
-        const debtAmount = Math.max(0, feeValue - paidAmount);
-
-        const fullName = `${stu.firstName || ''} ${stu.middleName || ''} ${stu.lastName || ''}`.replace(/\s+/g, ' ').trim();
-        const registrationDate = formatRegistrationDate(stu);
-        const photoURL = stu.passportPhotoUrl || stu.passportPhotoURL || 'https://via.placeholder.com/50';
-
-        const isOverrideLocked = finance.feeOverride && (finance.feeOverride.locked !== false);
-        const feeSource = isOverrideLocked ? 'Override' : 'Class default';
-
+      const records = (await window.SomapFinance.getFinanceRoster(year)).map((row) => {
+        const raw = row.rawStudent || {};
         return {
-          key: stu.key,
-          admissionNo: stu.admissionNumber || 'N/A',
-          fullName: fullName || 'N/A',
-          classLabel: isGraduated ? `Graduated (${year})` : resolvedClass,
-          rawClass: resolvedClass,
-          registrationDate,
-          photoURL,
-          contact: stu.primaryParentContact || 'N/A',
-          fee: feeValue,
-          paid: paidAmount,
-          debt: debtAmount,
-          planId: finance.planId || null,
-          planLabel,
-          isGraduated,
-          feeSource,
-          gender: stu.gender || stu.sex || '',
+          key: row.id,
+          admissionNo: row.admissionNumber || 'N/A',
+          fullName: row.fullName || 'N/A',
+          classLabel: row.classLevel || 'N/A',
+          rawClass: row.classLevel || 'N/A',
+          registrationDate: formatRegistrationDate(raw),
+          photoURL: raw.passportPhotoUrl || raw.passportPhotoURL || 'https://via.placeholder.com/50',
+          contact: row.parentContact || 'N/A',
+          fee: Number(row.fee || 0),
+          paid: Number(row.paid || 0),
+          debt: Number(row.balance || 0),
+          planId: null,
+          planLabel: row.paymentPlan || 'Class default',
+          isGraduated: Boolean(row.isGraduated),
+          feeSource: 'Finance roster',
+          gender: row.gender || raw.gender || raw.sex || '',
         };
-      }));
+      });
 
       if (generation !== state.renderToken) return;
 

@@ -43,6 +43,7 @@
   const datasetCache = {};
   const summaryCache = {};
   const expensesCache = {};
+  const approvalsCache = {};
 
   function getDb(){
     if (global.db && typeof global.db.ref === 'function') return global.db;
@@ -439,59 +440,157 @@ function buildFinanceStudents(
   ledgers = {},
   carryForward = {},
   studentFees = {},
+  approvalsByStudent = {},
   year = SOMAP_DEFAULT_YEAR
 ){
     const targetYear = String(year || SOMAP_DEFAULT_YEAR);
-    const deltaYears = Number(targetYear) - SOMAP_DEFAULT_YEAR;
-    const map = {};
-  const ids = new Set([
-    ...Object.keys(baseStudents || {}),
-    ...Object.keys(anchorEnrollments || {}),
-    ...Object.keys(enrollments || {}),
-    ...Object.keys(overrides || {}),
-    ...Object.keys(ledgers || {}),
-    ...Object.keys(carryForward || {}),
-    ...Object.keys(studentFees || {})
-  ]);
+    const targetYearNum = Number(targetYear);
+    const currentSchoolId = String(global.SOMAP?.getSchool?.()?.id || global.currentSchoolId || '').trim();
+    const isNonEmptyObj = (o) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).length > 0;
+    const toMs = (value) => {
+      if (value === null || value === undefined) return null;
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        if (value > 1e12) return value;
+        if (value > 1e10) return value;
+        if (value > 1e9) return value * 1000;
+        return value;
+      }
+      const s = String(value).trim();
+      if (!s) return null;
+      if (/^\d{10,13}$/.test(s)) {
+        const n = Number(s);
+        if (!Number.isFinite(n)) return null;
+        return n > 1e12 ? n : n * 1000;
+      }
+      const parsed = Date.parse(s);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const getRegistrationMs = (stu) => {
+      if (!stu || typeof stu !== 'object') return null;
+      return (
+        toMs(stu.timestamp) ??
+        toMs(stu.createdAt) ??
+        toMs(stu.registeredAt) ??
+        toMs(stu.regTimestamp) ??
+        toMs(stu.dateRegistered) ??
+        toMs(stu.dateOfRegistration) ??
+        null
+      );
+    };
+    const getRegistrationYear = (stu) => {
+      const ms = getRegistrationMs(stu);
+      if (!ms) return null;
+      const d = new Date(ms);
+      const y = d.getFullYear();
+      return Number.isFinite(y) ? y : null;
+    };
+    const looksDeleted = (stu) => {
+      const status = String(stu?.status || '').trim().toLowerCase();
+      return Boolean(
+        stu?.deleted === true ||
+        stu?.isDeleted === true ||
+        stu?.archived === true ||
+        stu?.isArchived === true ||
+        stu?.removed === true ||
+        stu?.isRemoved === true ||
+        stu?.active === false ||
+        status === 'deleted' ||
+        status === 'archived' ||
+        status === 'removed' ||
+        status === 'shifted'
+      );
+    };
+    const isCompleteStudent = (stu) => {
+      if (!stu || typeof stu !== 'object') return false;
+      if (looksDeleted(stu)) return false;
+      const sid = String(stu.schoolId || '').trim();
+      if (sid && currentSchoolId && sid !== currentSchoolId) return false;
+      const admission = String(stu.admissionNumber || '').trim();
+      const first = String(stu.firstName || '').trim();
+      const last = String(stu.lastName || '').trim();
+      if (!admission || L(admission) === 'n/a' || L(admission) === 'na') return false;
+      if (!first || L(first) === 'n/a' || L(first) === 'na') return false;
+      if (!last || L(last) === 'n/a' || L(last) === 'na') return false;
+      return Number.isFinite(getRegistrationYear(stu));
+    };
+    const belongsToSelectedYear = (stu, selectedYear) => {
+      const regYear = getRegistrationYear(stu);
+      if (!regYear || !Number.isFinite(selectedYear)) return false;
+      return regYear >= SOMAP_DEFAULT_YEAR && regYear <= selectedYear;
+    };
+    const hasPaymentsForYear = (paymentsObj, yNum) => {
+      if (!paymentsObj || typeof paymentsObj !== 'object') return false;
+      return Object.values(paymentsObj).some((p) => {
+        if (!p) return false;
+        const ay = Number(p.academicYear ?? p.financeYear ?? p.year);
+        if (Number.isFinite(ay) && ay === yNum) return true;
+        const ts = Number(p.timestamp ?? p.datePaid ?? p.createdAt);
+        if (Number.isFinite(ts)) {
+          const dt = new Date(ts);
+          if (!Number.isNaN(dt.getTime()) && dt.getFullYear() === yNum) return true;
+        }
+        return false;
+      });
+    };
 
+    const ids = new Set([
+      ...Object.keys(anchorEnrollments || {}),
+      ...Object.keys(enrollments || {}),
+      ...Object.keys(overrides || {}),
+      ...Object.keys(ledgers || {}),
+      ...Object.keys(carryForward || {}),
+      ...Object.keys(studentFees || {}),
+      ...Object.keys(baseStudents || {}),
+    ]);
+
+    const map = {};
     ids.forEach((id) => {
       const base = baseStudents[id] || {};
       const anchor = anchorEnrollments[id] || {};
       const enrollment = enrollments[id] || {};
-    const override = overrides[id] || {};
-    const ledgerEntry = ledgers[id] || {};
-    const carry = carryForward[id] || {};
-    let studentFeeOverride = studentFees[id];
-    if (!studentFeeOverride) {
-      const admKey =
-        base.admissionNumber ||
-        base.admissionNo ||
-        anchor.admissionNumber ||
-        anchor.admissionNo ||
-        enrollment.admissionNumber ||
-        enrollment.admissionNo ||
-        '';
-      if (admKey && studentFees[admKey]) {
-        studentFeeOverride = studentFees[admKey];
+      const override = overrides[id] || {};
+      const ledgerEntry = ledgers[id] || {};
+      const carry = carryForward[id] || {};
+      const registrationYear = getRegistrationYear(base);
+
+      if (!isCompleteStudent(base)) return;
+      if (!belongsToSelectedYear(base, targetYearNum)) return;
+
+      const hasTargetEnroll = isNonEmptyObj(enrollment);
+      const carryAmount = Math.max(0, Number(carry.amount ?? carry.balance ?? 0));
+
+      let studentFeeOverride = studentFees[id];
+      if (!studentFeeOverride) {
+        const admKey =
+          base.admissionNumber || base.admissionNo ||
+          anchor.admissionNumber || anchor.admissionNo ||
+          enrollment.admissionNumber || enrollment.admissionNo || '';
+        if (admKey && studentFees[admKey]) studentFeeOverride = studentFees[admKey];
       }
-    }
 
-      const baseClass =
-        anchor.className ||
-        anchor.classLevel ||
-        base.classLevel ||
-        base.class ||
-        enrollment.className ||
-        enrollment.classLevel ||
-        '';
-      const classLevel = shiftClassFn(baseClass, deltaYears);
+      const baseHasYearPayments = hasPaymentsForYear(base.payments, targetYearNum);
+
+      let baseClass = '';
+      if (hasTargetEnroll) {
+        baseClass = enrollment.className || enrollment.classLevel || enrollment.class || '';
+      } else {
+        baseClass = base.classLevel || base.class || anchor.className || anchor.classLevel || anchor.class || '';
+      }
+      baseClass = normalizeClassLabel(baseClass);
+
+      let delta = 0;
+      if (!hasTargetEnroll && Number.isFinite(registrationYear) && Number.isFinite(targetYearNum)) {
+        delta = targetYearNum - registrationYear;
+      }
+      const classLevel = shiftClassFn(baseClass, delta);
       const classDefaults = classFees[classLevel] || classFees[baseClass] || {};
-
       const resolvedPlanId = override.planId || classDefaults.defaultPlanId || null;
       const resolvedPlan = resolvedPlanId ? plans[resolvedPlanId] : null;
+      const classDefaultPlanId = classDefaults.defaultPlanId || classDefaults.defaultPlan || '';
+      const hasPlanOverride = Boolean(override.planId) &&
+        (!classDefaultPlanId || String(override.planId) !== String(classDefaultPlanId));
 
       const isMonthlyPlan = resolvedPlan?.schedule && Array.isArray(resolvedPlan.schedule) &&
-        resolvedPlan.schedule.length > 0 &&
         resolvedPlan.schedule.some((row) => String(row.label || '').includes('Monthly:'));
 
       let paymentPlan =
@@ -503,7 +602,6 @@ function buildFinanceStudents(
         classDefaults.defaultPlan ||
         base.paymentPlan ||
         '6-instalments';
-
       if (isMonthlyPlan) paymentPlan = 'Malipo kwa mwezi';
 
       const admissionNumber =
@@ -512,24 +610,21 @@ function buildFinanceStudents(
         base.admissionNumber ||
         id;
 
-    const explicitStudentFee = coerceFeeValue(studentFeeOverride);
-
-    let baseFeeCandidate =
-      (explicitStudentFee != null ? explicitStudentFee : undefined) ??
-      override.feePerYear ??
-      classDefaults.feePerYear ??
-      base.feePerYear ??
-      base.feeDue ??
-      base.requiredFee ??
-      0;
-
+      const explicitStudentFee = coerceFeeValue(studentFeeOverride);
+      let baseFeeCandidate =
+        (explicitStudentFee != null ? explicitStudentFee : undefined) ??
+        override.feePerYear ??
+        classDefaults.feePerYear ??
+        base.feePerYear ??
+        base.feeDue ??
+        base.requiredFee ??
+        0;
       if (isMonthlyPlan && (!baseFeeCandidate || baseFeeCandidate === 0) && resolvedPlan?.schedule) {
         const totalFromSchedule = resolvedPlan.schedule.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
         if (totalFromSchedule > 0) baseFeeCandidate = totalFromSchedule;
       }
 
       const baseFee = Math.max(0, Math.round(Number(baseFeeCandidate) || 0));
-      const carryAmount = Math.max(0, Number(carry.amount ?? carry.balance ?? 0));
       const effectiveFee = Math.max(0, baseFee + carryAmount);
 
       let paymentsSource = {};
@@ -544,10 +639,7 @@ function buildFinanceStudents(
           else if (yearBucket.records) paymentsSource = yearBucket.records;
           else paymentsSource = yearBucket;
         } else if (ledgerEntry.payments || ledgerEntry.entries || ledgerEntry.records) {
-          paymentsSource =
-            ledgerEntry.payments ||
-            ledgerEntry.entries ||
-            ledgerEntry.records;
+          paymentsSource = ledgerEntry.payments || ledgerEntry.entries || ledgerEntry.records;
         } else {
           paymentsSource = ledgerEntry;
         }
@@ -555,8 +647,33 @@ function buildFinanceStudents(
         paymentsSource = ledgerEntry;
       }
       if (!Object.keys(paymentsSource || {}).length && base.payments) {
-        paymentsSource = base.payments;
+        const approvedFallback = {};
+        Object.entries(base.payments).forEach(([key, entry]) => {
+          if (!entry) return;
+          const approvedMarker = Number(entry.approvedAt || entry.approved || 0);
+          if (approvedMarker > 0) approvedFallback[key] = entry;
+        });
+        if (Object.keys(approvedFallback).length) paymentsSource = approvedFallback;
       }
+      if (!Object.keys(paymentsSource || {}).length) {
+        const fallbackEntries = approvalsByStudent[id] || [];
+        if (fallbackEntries.length) {
+          paymentsSource = {};
+          fallbackEntries.forEach((entry, idx) => {
+            const entryKey = entry.approvalId || `appr-${id}-${idx}`;
+            paymentsSource[entryKey] = {
+              amount: Number(entry.amount || 0),
+              timestamp: Number(entry.timestamp || entry.approvedAt || Date.now()),
+              method: entry.method || '',
+              note: entry.note || '',
+              referenceCode: entry.referenceCode || '',
+              academicYear: Number(targetYear),
+              approvedAt: Number(entry.approvedAt || entry.timestamp || Date.now()),
+            };
+          });
+        }
+      }
+
       const dedupedPayments = dedupePayments(paymentsSource, targetYear, admissionNumber || id);
       const payments = normalizePayments(dedupedPayments, targetYear);
 
@@ -568,14 +685,6 @@ function buildFinanceStudents(
         base.guardianPhone ||
         base.contact ||
         '';
-
-      const hasYearData =
-        (enrollment && Object.keys(enrollment).length > 0) ||
-        (override && Object.keys(override).length > 0) ||
-        (classDefaults && Object.keys(classDefaults).length > 0) ||
-        carryAmount > 0 ||
-        Object.keys(payments || {}).length > 0 ||
-        Object.keys(base.payments || {}).length > 0;
 
       const record = {
         ...base,
@@ -590,7 +699,15 @@ function buildFinanceStudents(
         academicYear: targetYear,
         primaryParentContact: parentContact || base.primaryParentContact,
         admissionNumber: admissionNumber || id,
-        hasYearData,
+        hasYearData: Boolean(
+          isNonEmptyObj(enrollment) ||
+          isNonEmptyObj(override) ||
+          isNonEmptyObj(classDefaults) ||
+          carryAmount > 0 ||
+          effectiveFee > 0 ||
+          Object.keys(payments || {}).length > 0 ||
+          baseHasYearPayments
+        ),
         isGraduated: classLevel === 'GRADUATED',
       };
 
@@ -599,17 +716,71 @@ function buildFinanceStudents(
       } else if (resolvedPlan && Array.isArray(resolvedPlan.schedule)) {
         record._planSchedule = resolvedPlan.schedule;
       }
+      if (classDefaults && classDefaults.installments && typeof classDefaults.installments === 'object') {
+        record._classInstallments = classDefaults.installments;
+      }
 
       record.previousDebt = 0;
       if (!record.firstName && enrollment.firstName) record.firstName = enrollment.firstName;
       if (!record.lastName && enrollment.lastName) record.lastName = enrollment.lastName;
       if (!record.middleName && enrollment.middleName) record.middleName = enrollment.middleName;
       if (override && Object.keys(override).length) record.override = override;
+      record._hasPlanOverride = hasPlanOverride;
       record._classDefaults = classDefaults;
       map[id] = record;
     });
 
     return map;
+  }
+
+  async function loadApprovedFinanceApprovals(year){
+    const y = normalizeYear(year);
+    if (!approvalsCache[y]) {
+      approvalsCache[y] = (async () => {
+        const database = getDb();
+        if (!database) return {};
+        try {
+          const snapshot = await database.ref(pref('approvalsHistory')).once('value');
+          const tree = snapshot.val() || {};
+          const grouped = {};
+          const normalizedTargetYear = Number(y);
+          Object.entries(tree).forEach(([_, months]) => {
+            Object.entries(months || {}).forEach(([__, records]) => {
+              Object.entries(records || {}).forEach(([key, record]) => {
+                if (!record) return;
+                const recordYear = Number(record.forYear ?? record.academicYear ?? record.year);
+                if (!Number.isFinite(recordYear) || recordYear !== normalizedTargetYear) return;
+                const finalStatus = String(record.finalStatus || record.status || '').toLowerCase();
+                if (!['approved', 'completed'].includes(finalStatus)) return;
+                const moduleSource = String(record.sourceModule || record.module || '').toLowerCase();
+                if (!moduleSource.includes('finance')) return;
+                const studentKey = record.studentId || record.modulePayload?.studentKey || record.studentAdm;
+                if (!studentKey) return;
+                const amount = Number(record.amountPaidNow ?? record.amount ?? record.paidAmount ?? 0);
+                if (!(amount > 0)) return;
+                const timestamp = Number(record.approvedAt || record.datePaid || record.createdAt || Date.now());
+                if (!grouped[studentKey]) grouped[studentKey] = [];
+                grouped[studentKey].push({
+                  approvalId: key,
+                  amount,
+                  timestamp,
+                  method: record.method || record.paymentMethod || record.modulePayload?.payment?.method || '',
+                  note: record.note || record.modulePayload?.payment?.note || '',
+                  referenceCode: record.referenceCode || record.paymentReferenceCode || record.modulePayload?.payment?.referenceCode || '',
+                  academicYear: normalizedTargetYear,
+                  approvedAt: timestamp,
+                });
+              });
+            });
+          });
+          return grouped;
+        } catch (err) {
+          console.warn('SomapFinance: approvals history read failed', err?.message || err);
+          return {};
+        }
+      })();
+    }
+    return approvalsCache[y];
   }
 
   async function ensureYearDataset(year){
@@ -627,7 +798,9 @@ function buildFinanceStudents(
           studentFeesSnap,
           plansSnap,
           ledgerSnap,
-          carrySnap
+          carrySnap,
+          studentPlansSnap,
+          financePlansSnap
         ] = await Promise.all([
           database.ref(pref('students')).once('value'),
           database.ref(pref(`enrollments/${SOMAP_DEFAULT_YEAR}`)).once('value'),
@@ -638,6 +811,8 @@ function buildFinanceStudents(
           database.ref(pref(`installmentPlans/${y}`)).once('value'),
           database.ref(pref(`financeLedgers/${y}`)).once('value'),
           database.ref(pref(`financeCarryForward/${y}`)).once('value'),
+          database.ref(pref(`finance/${y}/studentPlans`)).once('value'),
+          database.ref(pref(`finance/${y}/plans`)).once('value'),
         ]);
         let ledgerData = ledgerSnap.val() || {};
         if (!Object.keys(ledgerData || {}).length) {
@@ -669,16 +844,28 @@ function buildFinanceStudents(
           carryForward: carrySnap.val() || {},
           studentFees: studentFeesData,
         };
+        const studentPlansRaw = studentPlansSnap.val() || {};
+        const financePlansRaw = financePlansSnap.val() || {};
+        const mergedOverrides = { ...(dataset.overrides || {}) };
+        Object.keys(studentPlansRaw || {}).forEach((sid) => {
+          const sp = studentPlansRaw[sid];
+          if (sp && (sp.planId || sp.id)) {
+            mergedOverrides[sid] = { ...(mergedOverrides[sid] || {}), planId: sp.planId || sp.id };
+          }
+        });
+        const mergedPlans = { ...(dataset.plans || {}), ...(financePlansRaw || {}) };
+        const approvalsByStudent = await loadApprovedFinanceApprovals(y);
         dataset.students = buildFinanceStudents(
           dataset.baseStudents,
           dataset.anchorEnrollments,
           dataset.yearEnrollments,
           dataset.classFees,
-          dataset.overrides,
-          dataset.plans,
+          mergedOverrides,
+          mergedPlans,
           dataset.ledgers,
           dataset.carryForward,
           dataset.studentFees,
+          approvalsByStudent,
           y
         );
         return dataset;
@@ -918,6 +1105,43 @@ function buildFinanceStudents(
     return dataset.students || {};
   }
 
+  async function getFinanceRoster(year, options = {}){
+    const summary = await ensureYearSummary(year);
+    const includeGraduated = Boolean(options.includeGraduated);
+    const classFilter = String(options.className || options.classLevel || '').trim().toLowerCase();
+    const rows = Object.entries(summary.entries || {}).map(([id, entry]) => {
+      const student = entry?.student || {};
+      const finance = entry?.finance || {};
+      const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`
+        .replace(/\s+/g, ' ')
+        .trim() || student.admissionNumber || id;
+      return {
+        id,
+        studentId: id,
+        admissionNumber: String(student.admissionNumber || student.admissionNo || id || '').trim(),
+        fullName,
+        classLevel: student.classLevel || student.className || '',
+        className: student.classLevel || student.className || '',
+        gender: String(student.gender || student.sex || student.meta?.gender || '').trim(),
+        status: String(student.status || 'active').trim().toLowerCase() || 'active',
+        fee: Math.max(0, Number(finance.feePerYear ?? entry?.due ?? student.feePerYear ?? 0) || 0),
+        paid: Math.max(0, Number(finance.paidAmount ?? entry?.paid ?? 0) || 0),
+        balance: Math.max(0, Number(finance.balance ?? entry?.outstanding ?? 0) || 0),
+        paymentPlan: student.paymentPlan || '',
+        carryForward: Math.max(0, Number(student.carryAmount || 0) || 0),
+        parentContact: String(student.primaryParentContact || student.parentPhone || student.guardianPhone || student.contact || '').trim(),
+        isGraduated: Boolean(student.isGraduated),
+        rawStudent: student,
+        finance,
+      };
+    });
+    return rows.filter((row) => {
+      if (!includeGraduated && row.isGraduated) return false;
+      if (classFilter && String(row.classLevel || '').trim().toLowerCase() !== classFilter) return false;
+      return true;
+    });
+  }
+
   async function getYearFinanceEntries(year){
     const summary = await ensureYearSummary(year);
     return summary.entries || {};
@@ -927,6 +1151,7 @@ function buildFinanceStudents(
     Object.keys(datasetCache).forEach((k) => delete datasetCache[k]);
     Object.keys(summaryCache).forEach((k) => delete summaryCache[k]);
     Object.keys(expensesCache).forEach((k) => delete expensesCache[k]);
+    Object.keys(approvalsCache).forEach((k) => delete approvalsCache[k]);
   }
 
   const api = {
@@ -937,8 +1162,10 @@ function buildFinanceStudents(
     listRecentPayments,
     installmentCompare,
     getYearStudents,
+    getFinanceRoster,
     getYearFinanceEntries,
     getBalanceForYearAdmission,
+    computeStudentFinancials,
     _clearFinanceCaches: clearCaches
   };
 
