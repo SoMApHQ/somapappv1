@@ -1287,6 +1287,7 @@
       fixedIssues
     };
 
+    seedDistinctDayCoverage(searchState);
     const solved = searchSchedule(searchState);
     const seededBestGrid = deepClone(solved ? searchState.grid : (searchState.bestGrid || searchState.grid));
     const finalGrid = repairRemainingDemand({
@@ -1443,6 +1444,62 @@
       return `${left.className}:${left.subject}`.localeCompare(`${right.className}:${right.subject}`);
     });
     return schedulable[0];
+  }
+
+  function seedDistinctDayCoverage(searchState) {
+    let progress = true;
+    let safety = 0;
+    while (progress && safety < 400) {
+      progress = false;
+      safety += 1;
+      const targets = collectDistinctDayTargets(searchState);
+      for (const target of targets) {
+        if (target.coveredDays >= target.targetDays) continue;
+        const uncoveredPlacements = collectPlacements(searchState, target.className, target.subject)
+          .filter((placement) => !target.coveredDaySet.has(placement.day));
+        if (!uncoveredPlacements.length) continue;
+        placeLesson(searchState, target.className, target.subject, uncoveredPlacements[0]);
+        progress = true;
+        break;
+      }
+    }
+  }
+
+  function collectDistinctDayTargets(searchState) {
+    const targets = [];
+    Object.entries(searchState.demand || {}).forEach(([className, bucket]) => {
+      Object.entries(bucket || {}).forEach(([subject, remaining]) => {
+        if (remaining <= 0) return;
+        const coveredDaySet = new Set(DAYS.filter((day) => (searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0) > 0));
+        const schedulableDays = countSchedulableDays(searchState, className, subject);
+        const targetDays = Math.min(
+          Number(searchState.settings?.periodRequirements?.[className]?.[subject] || 0),
+          schedulableDays,
+          DAYS.length
+        );
+        if (targetDays <= 1 || coveredDaySet.size >= targetDays) return;
+        targets.push({
+          className,
+          subject,
+          remaining,
+          targetDays,
+          coveredDays: coveredDaySet.size,
+          coveredDaySet,
+          schedulableDays,
+          candidateTeachers: (searchState.candidateMap?.[className]?.[subject] || []).length
+        });
+      });
+    });
+    targets.sort((left, right) => {
+      const leftSlack = left.schedulableDays - left.targetDays;
+      const rightSlack = right.schedulableDays - right.targetDays;
+      if (leftSlack !== rightSlack) return leftSlack - rightSlack;
+      if (left.candidateTeachers !== right.candidateTeachers) return left.candidateTeachers - right.candidateTeachers;
+      if (left.targetDays !== right.targetDays) return right.targetDays - left.targetDays;
+      if (left.coveredDays !== right.coveredDays) return left.coveredDays - right.coveredDays;
+      return `${left.className}:${left.subject}`.localeCompare(`${right.className}:${right.subject}`);
+    });
+    return targets;
   }
 
   function collectPlacements(searchState, className, subject) {
@@ -2371,6 +2428,14 @@
     let count = 0;
     DAYS.forEach((day) => {
       if ((searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0) > 0) return;
+      if (hasSchedulablePlacementOnDay(searchState, className, subject, day)) count += 1;
+    });
+    return count;
+  }
+
+  function countSchedulableDays(searchState, className, subject) {
+    let count = 0;
+    DAYS.forEach((day) => {
       if (hasSchedulablePlacementOnDay(searchState, className, subject, day)) count += 1;
     });
     return count;
