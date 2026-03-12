@@ -1631,7 +1631,7 @@
       const timetable = timetables[index];
       if (index > 0) doc.addPage();
       drawPdfHeader(doc, logoData, groupId, timetable);
-      const head = [['Day', 'Class', ...timetable.slots.map((slot) => `${slot.start}-${slot.end}\n${slot.label}`)]];
+      const head = [['Day', 'Class', ...timetable.slots.map((slot) => `${slot.start}-${slot.end}`)]];
       const body = [];
       DAYS.forEach((day) => {
         timetable.classes.forEach((className, classIndex) => {
@@ -1644,18 +1644,22 @@
         });
       });
       doc.autoTable({
-        startY: 104,
+        startY: 96,
         head,
         body,
         theme: 'grid',
-        margin: { left: 22, right: 22, bottom: 88 },
-        styles: { font: 'helvetica', fontSize: 6.1, cellPadding: 2.8, textColor: [16, 35, 62], lineColor: [146, 163, 184], lineWidth: 0.35, valign: 'middle' },
-        headStyles: { fillColor: [232, 240, 255], textColor: [36, 64, 100], fontStyle: 'bold', fontSize: 6.2, cellPadding: 3.2 },
+        margin: { left: 18, right: 18, bottom: 78 },
+        styles: { font: 'helvetica', fontSize: 7.15, cellPadding: 3, textColor: [16, 35, 62], lineColor: [100, 116, 139], lineWidth: 0.48, valign: 'middle', halign: 'center' },
+        headStyles: { fillColor: [232, 240, 255], textColor: [36, 64, 100], fontStyle: 'bold', fontSize: 7.2, cellPadding: 3.1, lineWidth: 0.55 },
         columnStyles: {
-          0: { fillColor: [245, 249, 255], fontStyle: 'bold', cellWidth: 46 },
-          1: { fillColor: [245, 249, 255], fontStyle: 'bold', cellWidth: 52 }
+          0: { fillColor: [245, 249, 255], fontStyle: 'bold', cellWidth: 42, halign: 'left' },
+          1: { fillColor: [245, 249, 255], fontStyle: 'bold', cellWidth: 50, halign: 'left' }
         },
         didParseCell(data) {
+          if (data.section === 'head') {
+            data.cell.styles.valign = 'middle';
+            return;
+          }
           if (data.section !== 'body' || data.column.index < 2) return;
           const dayBlockIndex = Math.floor(data.row.index / timetable.classes.length);
           const day = DAYS[dayBlockIndex];
@@ -1664,15 +1668,17 @@
           const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot);
           if (cell.type === 'teaching') {
             data.cell.styles.fillColor = hexToRgbArray(cell.color || '#dbeafe');
+            data.cell.styles.fontStyle = 'bold';
           } else if (cell.type === 'fixed') {
             data.cell.styles.fillColor = [241, 245, 249];
+            data.cell.styles.fontStyle = 'bold';
           } else {
             data.cell.styles.fillColor = [248, 250, 252];
             data.cell.styles.textColor = [148, 163, 184];
           }
         }
       });
-      drawPdfLegend(doc, timetable, doc.internal.pageSize.getHeight() - 68);
+      drawPdfLegend(doc, timetable, doc.internal.pageSize.getHeight() - 58);
     });
     doc.save(`${slugify(state.school?.name || state.schoolId || 'school')}_general_timetable_${state.year}.pdf`);
     noteExportAction('PDF downloaded');
@@ -1681,49 +1687,49 @@
   function drawPdfHeader(doc, logoData, groupId, timetable) {
     const pageWidth = doc.internal.pageSize.getWidth();
     doc.setFillColor(248, 251, 255);
-    doc.roundedRect(22, 20, pageWidth - 44, 68, 14, 14, 'F');
+    doc.roundedRect(18, 16, pageWidth - 36, 60, 12, 12, 'F');
     if (logoData) {
-      try { doc.addImage(logoData, 'PNG', 34, 30, 40, 40); } catch (error) {}
+      try { doc.addImage(logoData, 'PNG', 28, 24, 34, 34); } catch (error) {}
     }
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(16);
-    doc.text(String(state.school?.name || state.schoolId || 'School'), 86, 42);
-    doc.setFontSize(13);
-    doc.text('GENERAL SCHOOL TIMETABLE', 86, 60);
+    doc.setFontSize(15);
+    doc.text(String(state.school?.name || state.schoolId || 'School'), 74, 36);
+    doc.setFontSize(12);
+    doc.text('GENERAL SCHOOL TIMETABLE', 74, 52);
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9);
-    doc.text(`Year ${state.year} | ${GROUPS[groupId].title}`, 86, 76);
-    doc.text(`Generated ${formatDateTime(timetable.generatedAt)} | Downloaded ${formatDateTime(Date.now())}`, pageWidth - 270, 42);
-    doc.text(`Validation: ${timetable.validationSummary.isValid ? 'Valid / Conflict free' : 'Contains issues'}`, pageWidth - 270, 58);
+    doc.setFontSize(8.5);
+    doc.text(`Year ${state.year} | ${GROUPS[groupId].title}`, 74, 67);
+    doc.text(`Generated ${formatDateTime(timetable.generatedAt)} | Downloaded ${formatDateTime(Date.now())}`, pageWidth - 278, 36);
+    doc.text(`Validation: ${timetable.validationSummary.isValid ? 'Valid / Conflict free' : 'Contains issues'}`, pageWidth - 278, 52);
   }
 
   function drawPdfLegend(doc, timetable, startY) {
     const pageWidth = doc.internal.pageSize.getWidth();
     const pageHeight = doc.internal.pageSize.getHeight();
-    let cursorY = Math.min(startY, pageHeight - 68);
+    let cursorY = Math.min(startY, pageHeight - 58);
     doc.setDrawColor(203, 213, 225);
     doc.setLineWidth(0.5);
-    doc.line(26, cursorY - 8, pageWidth - 26, cursorY - 8);
+    doc.line(22, cursorY - 6, pageWidth - 22, cursorY - 6);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    doc.text('Teacher Legend', 34, cursorY);
-    cursorY += 11;
+    doc.setFontSize(8.5);
+    doc.text('Teacher Legend', 26, cursorY);
+    cursorY += 9;
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7);
+    doc.setFontSize(6.2);
     timetable.teacherLegend.forEach((teacher, index) => {
       const column = index % 3;
       const row = Math.floor(index / 3);
-      const x = 34 + column * 248;
-      const y = cursorY + row * 10;
-      if (y <= pageHeight - 28) doc.text(`${teacher.number}. ${teacher.name} (${teacher.teacherType})`, x, y, { maxWidth: 225 });
+      const x = 26 + column * 262;
+      const y = cursorY + row * 8;
+      if (y <= pageHeight - 22) doc.text(`${teacher.number}. ${teacher.name} (${teacher.teacherType})`, x, y, { maxWidth: 232 });
     });
-    const subjectY = Math.min(pageHeight - 18, cursorY + Math.ceil(timetable.teacherLegend.length / 3) * 10 + 14);
+    const subjectY = Math.min(pageHeight - 12, cursorY + Math.ceil(timetable.teacherLegend.length / 3) * 8 + 10);
     doc.setFont('helvetica', 'bold');
-    doc.text('Subject Legend', 34, subjectY);
+    doc.text('Subject Legend', 26, subjectY);
     doc.setFont('helvetica', 'normal');
     const subjectLegendText = timetable.subjectLegend.map((item) => `${item.abbreviation}=${item.subject}`).join(' | ');
-    const wrappedLegend = doc.splitTextToSize(subjectLegendText, pageWidth - 154).slice(0, 2);
-    doc.text(wrappedLegend, 120, subjectY);
+    const wrappedLegend = doc.splitTextToSize(subjectLegendText, pageWidth - 144).slice(0, 2);
+    doc.text(wrappedLegend, 102, subjectY);
   }
 
   function printCurrentPreview() {
