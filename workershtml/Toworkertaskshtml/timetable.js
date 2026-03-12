@@ -876,7 +876,7 @@
     const rows = [];
     DAYS.forEach((day) => {
       preview.classes.forEach((className, classIndex) => {
-        const cells = slots.map((slot) => `<td>${renderGridCell(preview.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot))}</td>`).join('');
+        const cells = slots.map((slot) => `<td>${renderGridCell(preview.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day))}</td>`).join('');
         rows.push(`
           <tr>
             ${classIndex === 0 ? `<td class="tt-class-cell" rowspan="${preview.classes.length}">${escapeHtml(day)}</td>` : ''}
@@ -907,7 +907,7 @@
   function renderDayTable(preview, day) {
     const slots = preview.slots || [];
     const rows = preview.classes.map((className) => {
-      const rowCells = slots.map((slot) => `<td>${renderGridCell(preview.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot))}</td>`).join('');
+      const rowCells = slots.map((slot) => `<td>${renderGridCell(preview.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day))}</td>`).join('');
       return `<tr><td class="tt-class-cell">${escapeHtml(className)}</td>${rowCells}</tr>`;
     }).join('');
     return `
@@ -1324,6 +1324,10 @@
         fixedIssues.push({ title: 'Locked placement points to an unknown slot', body: `${cell.className} / ${cell.day} / ${cell.slotId}` });
         return;
       }
+      if (getAutoFixedCell(slot, cell.day) && cell.type !== 'fixed') {
+        fixedIssues.push({ title: 'Locked teaching cell is inside a fixed timetable block', body: `${cell.className} / ${cell.day} / ${getSlotLabel(cell.slotId, slots)}` });
+        return;
+      }
       if (cell.type === 'fixed' || !slot.isTeaching) {
         grid[cell.className][cell.day][cell.slotId] = { type: 'fixed', label: cell.label || slot.label || 'Fixed Block', note: cell.type === 'fixed' ? 'Locked placement' : 'Fixed slot template', slotId: cell.slotId };
         classOccupancy[cell.className][cell.day][cell.slotId] = true;
@@ -1415,6 +1419,8 @@
   function collectPlacements(searchState, className, subject) {
     const placements = [];
     const slotIndexMap = Object.fromEntries(searchState.slots.map((slot, index) => [slot.id, index]));
+    const remainingForSubject = Number(searchState.demand?.[className]?.[subject] || 0);
+    const unusedSchedulableDays = countUnusedSchedulableDays(searchState, className, subject);
     (searchState.candidateMap[className]?.[subject] || []).forEach((teacher) => {
       DAYS.forEach((day) => {
         searchState.slots.forEach((slot) => {
@@ -1424,11 +1430,13 @@
           if (searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id]) return;
           const slotIndex = slotIndexMap[slot.id];
           const sameDayCount = searchState.classSubjectDayCount[className][day][subject] || 0;
+          if (sameDayCount > 0 && remainingForSubject <= unusedSchedulableDays) return;
           const teacherLoad = searchState.teacherDayLoad[teacher.workerId]?.[day] || 0;
           const edgePenalty = slotIndex === 0
             ? (searchState.teacherEdgeLoad[teacher.workerId]?.first || 0)
             : (slotIndex === searchState.slots.length - 1 ? (searchState.teacherEdgeLoad[teacher.workerId]?.last || 0) : 0);
           const earlyBias = CORE_SUBJECTS.has(subject) ? slotIndex * 2 : slotIndex;
+          const daySpreadPenalty = sameDayCount > 0 ? 28 : -10;
           const subjectMeta = searchState.subjectLegend.find((item) => item.subject === subject) || { abbreviation: makeSubjectAbbreviation(subject), color: '#dbeafe' };
           placements.push({
             className,
@@ -1439,7 +1447,7 @@
             slotId: slot.id,
             abbreviation: subjectMeta.abbreviation,
             color: subjectMeta.color,
-            score: sameDayCount * 18 + teacherLoad * 4 + edgePenalty * 3 + earlyBias
+            score: sameDayCount * 18 + teacherLoad * 4 + edgePenalty * 3 + earlyBias + daySpreadPenalty
           });
         });
       });
@@ -1499,6 +1507,9 @@
           if (cell.type === 'teaching') {
             if (!slot.isTeaching) {
               lockedViolations.push({ title: 'Teaching cell placed in a fixed block', body: `${className} / ${day} / ${getSlotLabel(slot.id, slots)}` });
+            }
+            if (isFridayAfternoonClosure(day, slot)) {
+              lockedViolations.push({ title: 'Friday afternoon block was used for teaching', body: `${className} / ${day} / ${getSlotLabel(slot.id, slots)}` });
             }
             if (isMorningPrioritySubject(cell.subject) && !slotEndsByNoon(slot)) {
               invalidPlacements.push({ title: 'Morning-core subject placed after 12:00 PM', body: `${className} / ${cell.subject} is scheduled on ${day} at ${getSlotLabel(slot.id, slots)}.` });
@@ -1637,7 +1648,7 @@
         timetable.classes.forEach((className, classIndex) => {
           const row = [classIndex === 0 ? day : '', className];
           timetable.slots.forEach((slot) => {
-            const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot);
+            const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day);
             row.push(cell.type === 'teaching' ? cell.code : (cell.type === 'fixed' ? (cell.label || 'Fixed') : 'OPEN'));
           });
           body.push(row);
@@ -1665,7 +1676,7 @@
           const day = DAYS[dayBlockIndex];
           const className = timetable.classes[data.row.index % timetable.classes.length];
           const slot = timetable.slots[data.column.index - 2];
-          const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot);
+          const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day);
           if (cell.type === 'teaching') {
             data.cell.styles.fillColor = hexToRgbArray(cell.color || '#dbeafe');
             data.cell.styles.fontStyle = 'bold';
@@ -2035,8 +2046,9 @@
       DAYS.forEach((day) => {
         grid[className][day] = {};
         slots.forEach((slot) => {
-          if (!slot.isTeaching) {
-            grid[className][day][slot.id] = { type: 'fixed', label: slot.label, note: `${slot.start}-${slot.end}`, slotId: slot.id };
+          const fixedCell = getAutoFixedCell(slot, day);
+          if (fixedCell) {
+            grid[className][day][slot.id] = { ...fixedCell, slotId: slot.id };
           }
         });
       });
@@ -2221,6 +2233,26 @@
     return slot ? `${slot.start}-${slot.end} | ${slot.label}` : slotId;
   }
 
+  function countUnusedSchedulableDays(searchState, className, subject) {
+    let count = 0;
+    DAYS.forEach((day) => {
+      if ((searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0) > 0) return;
+      if (hasSchedulablePlacementOnDay(searchState, className, subject, day)) count += 1;
+    });
+    return count;
+  }
+
+  function hasSchedulablePlacementOnDay(searchState, className, subject, day) {
+    return (searchState.candidateMap[className]?.[subject] || []).some((teacher) =>
+      searchState.slots.some((slot) =>
+        slot.isTeaching &&
+        !searchState.grid[className][day][slot.id]?.type &&
+        !searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id] &&
+        (!isMorningPrioritySubject(subject) || slotEndsByNoon(slot))
+      )
+    );
+  }
+
   function isMorningPrioritySubject(subject) {
     return MORNING_PRIORITY_SUBJECTS.has(normalizeSubjectName(subject));
   }
@@ -2229,14 +2261,25 @@
     return parseTimeToMinutes(slot?.end) <= 12 * 60;
   }
 
+  function isFridayAfternoonClosure(day, slot) {
+    return day === 'Friday' && parseTimeToMinutes(slot?.start) >= 12 * 60 + 30;
+  }
+
   function parseTimeToMinutes(value) {
     const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
     if (!match) return Number.POSITIVE_INFINITY;
     return Number(match[1]) * 60 + Number(match[2]);
   }
 
-  function createEmptyCell(slot) {
-    return slot.isTeaching ? { type: 'empty', label: 'Open' } : { type: 'fixed', label: slot.label, note: `${slot.start}-${slot.end}` };
+  function getAutoFixedCell(slot, day) {
+    if (!slot) return null;
+    if (!slot.isTeaching) return { type: 'fixed', label: slot.label, note: `${slot.start}-${slot.end}` };
+    if (isFridayAfternoonClosure(day, slot)) return { type: 'fixed', label: 'Games / Talents', note: 'Friday afternoon' };
+    return null;
+  }
+
+  function createEmptyCell(slot, day) {
+    return getAutoFixedCell(slot, day) || { type: 'empty', label: 'Open' };
   }
 
   function stableStringify(value) {
