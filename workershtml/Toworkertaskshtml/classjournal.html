@@ -895,6 +895,53 @@
       lessonPlanSyncStatus.style.color = theme.color;
     }
 
+    function getLessonPlanJournalDraftStorageKey() {
+      return 'somap.lessonPlanJournalDrafts';
+    }
+
+    function readLessonPlanJournalDraftStore() {
+      try {
+        return JSON.parse(localStorage.getItem(getLessonPlanJournalDraftStorageKey()) || '{}') || {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function readMatchingLessonPlanDraft(selection = {}) {
+      const teacherToken = normalizeLookupToken(getCurrentTeacherName());
+      const targetClass = normalizeLookupToken(selection.className || '');
+      const targetDate = compactTextBlock(selection.date || '');
+      const targetYear = String(selection.year || getYear());
+      const targetSchool = normalizeLookupToken(selection.schoolId || schoolId || '');
+
+      return Object.values(readLessonPlanJournalDraftStore() || {})
+        .filter((draft) => {
+          const sameSchool = normalizeLookupToken(draft.schoolId || '') === targetSchool;
+          const sameYear = String(draft.year || '') === targetYear;
+          const sameClass = normalizeLookupToken(draft.className || '') === targetClass;
+          const sameDate = compactTextBlock(draft.date || '') === targetDate;
+          const sameTeacher = (draft.teacherId && String(draft.teacherId) === String(workerId || ''))
+            || normalizeLookupToken(draft.teacherName || '') === teacherToken;
+          return sameSchool && sameYear && sameClass && sameDate && sameTeacher;
+        })
+        .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null;
+    }
+
+    function buildJournalSummaryFromDraft(draft) {
+      if (!draft) return null;
+      return {
+        topicsCovered: [draft.subject || 'Subject', draft.topic ? `Topic: ${compactTextBlock(draft.topic)}` : '', draft.objectives ? `Objective: ${compactTextBlock(draft.objectives)}` : '']
+          .filter(Boolean)
+          .join(' | '),
+        keyActivities: [draft.subject || 'Subject', compactTextBlock(draft.activities || '')]
+          .filter(Boolean)
+          .join(': '),
+        materialsUsed: [draft.subject || 'Subject', compactTextBlock(draft.resources || '')]
+          .filter(Boolean)
+          .join(': ')
+      };
+    }
+
     async function loadLessonPlansForClassDate(year, className, dateKey) {
       const normalizedClass = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(className) : compactTextBlock(className);
       const cacheKey = `${year}::${normalizedClass}::${dateKey}`;
@@ -1010,17 +1057,38 @@
       setLessonPlanSyncStatus('Loading saved lesson plan details for this class and date...', 'info');
       const year = String(getYear());
       const plans = await loadLessonPlansForClassDate(year, chosenClass, chosenDate);
+      const liveDraft = readMatchingLessonPlanDraft({ schoolId, year, className: chosenClass, date: chosenDate });
+      const liveDraftSummary = buildJournalSummaryFromDraft(liveDraft);
       journalLessonPlanContext = { plans, status: plans.length ? 'ready' : 'missing' };
 
       if (!plans.length) {
-        applyJournalLessonPlanSummary({ topicsCovered: '', keyActivities: '', materialsUsed: '', challenges: '', homeworkGiven: '' });
-        setLessonPlanSyncStatus('No saved lesson plan was found for this class, date, and teacher. Save the lesson plan first before saving the class journal.', 'warning');
+        applyJournalLessonPlanSummary({
+          topicsCovered: liveDraftSummary?.topicsCovered || '',
+          keyActivities: liveDraftSummary?.keyActivities || '',
+          materialsUsed: liveDraftSummary?.materialsUsed || '',
+          challenges: '',
+          homeworkGiven: ''
+        });
+        if (liveDraftSummary) {
+          setLessonPlanSyncStatus('Live lesson-plan edits are showing here already. Save the lesson plan first before saving the class journal.', 'warning');
+        } else {
+          setLessonPlanSyncStatus('No saved lesson plan was found for this class, date, and teacher. Save the lesson plan first before saving the class journal.', 'warning');
+        }
         return [];
       }
 
       const summary = buildJournalLessonPlanSummary(plans);
+      if (liveDraftSummary) {
+        summary.topicsCovered = liveDraftSummary.topicsCovered || summary.topicsCovered;
+        summary.keyActivities = liveDraftSummary.keyActivities || summary.keyActivities;
+        summary.materialsUsed = liveDraftSummary.materialsUsed || summary.materialsUsed;
+      }
       applyJournalLessonPlanSummary(summary);
-      setLessonPlanSyncStatus(`Linked ${plans.length} saved lesson plan(s): ${summary.linkedSubjects.join(', ')}. Class journal fields were filled from the saved lesson plan record(s).`, 'success');
+      if (liveDraftSummary) {
+        setLessonPlanSyncStatus(`Linked ${plans.length} saved lesson plan(s): ${summary.linkedSubjects.join(', ')}. Live lesson-plan edits are also showing here immediately.`, 'success');
+      } else {
+        setLessonPlanSyncStatus(`Linked ${plans.length} saved lesson plan(s): ${summary.linkedSubjects.join(', ')}. Class journal fields were filled from the saved lesson plan record(s).`, 'success');
+      }
       return plans;
     }
 
@@ -1533,6 +1601,15 @@
 
     filterClass.addEventListener('change', renderJournals);
     filterDateRange.addEventListener('change', renderJournals);
+    window.addEventListener('storage', (event) => {
+      if (event.key && event.key !== getLessonPlanJournalDraftStorageKey()) return;
+      if (!document.getElementById('journalClass')?.value || !document.getElementById('journalDate')?.value) return;
+      syncJournalLessonPlanDetails().catch(() => []);
+    });
+    window.addEventListener('focus', () => {
+      if (!document.getElementById('journalClass')?.value || !document.getElementById('journalDate')?.value) return;
+      syncJournalLessonPlanDetails().catch(() => []);
+    });
 
     loadTeacherConfig();
   </script>

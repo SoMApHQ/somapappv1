@@ -871,6 +871,7 @@
     const lessonNotesCache = new Map();
     let homeworkGivenMeta = null;
     let lessonHomeworkSourceMeta = null;
+    let activeLessonPlanDraftKey = '';
     let schoolLogoDataUrlPromise = null;
 
     // UI Elements
@@ -1721,6 +1722,78 @@
       return matchedNote;
     }
 
+    function getLessonPlanJournalDraftStorageKey() {
+      return 'somap.lessonPlanJournalDrafts';
+    }
+
+    function readLessonPlanJournalDraftStore() {
+      try {
+        return JSON.parse(localStorage.getItem(getLessonPlanJournalDraftStorageKey()) || '{}') || {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function writeLessonPlanJournalDraftStore(store) {
+      localStorage.setItem(getLessonPlanJournalDraftStorageKey(), JSON.stringify(store || {}));
+    }
+
+    function buildLessonPlanJournalDraftId(payload = {}) {
+      return [
+        payload.schoolId || '',
+        payload.year || '',
+        payload.teacherId || payload.teacherName || '',
+        payload.className || '',
+        payload.date || ''
+      ].map((value) => normalizeLookupToken(value)).join('__');
+    }
+
+    function buildLessonPlanJournalDraftPayload() {
+      const dateValue = compactTextBlock(planDate?.value || '');
+      const yearValue = dateValue ? String(new Date(dateValue).getFullYear()) : String(getYear());
+      return {
+        schoolId,
+        year: yearValue,
+        teacherId: String(workerId || ''),
+        teacherName: getCurrentTeacherDisplayName(),
+        className: compactTextBlock(planClass?.value || ''),
+        date: dateValue,
+        subject: compactTextBlock(planSubject?.value || ''),
+        topic: compactTextBlock(planTopic?.value || ''),
+        objectives: compactTextBlock(planObjectives?.value || ''),
+        activities: compactTextBlock(planActivities?.value || ''),
+        resources: compactTextBlock(planResources?.value || ''),
+        updatedAt: Date.now()
+      };
+    }
+
+    function clearLessonPlanJournalDraft() {
+      if (!activeLessonPlanDraftKey) return;
+      const store = readLessonPlanJournalDraftStore();
+      delete store[activeLessonPlanDraftKey];
+      writeLessonPlanJournalDraftStore(store);
+      activeLessonPlanDraftKey = '';
+    }
+
+    function publishLessonPlanJournalDraft() {
+      const payload = buildLessonPlanJournalDraftPayload();
+      const hasMinimumContext = payload.className && payload.date && payload.subject && payload.teacherName;
+      const hasTeachingContent = payload.topic || payload.objectives || payload.activities || payload.resources;
+      if (!hasMinimumContext || !hasTeachingContent) {
+        clearLessonPlanJournalDraft();
+        return;
+      }
+
+      const nextKey = buildLessonPlanJournalDraftId(payload);
+      const store = readLessonPlanJournalDraftStore();
+      if (activeLessonPlanDraftKey && activeLessonPlanDraftKey !== nextKey) {
+        delete store[activeLessonPlanDraftKey];
+      }
+      store[nextKey] = payload;
+      writeLessonPlanJournalDraftStore(store);
+      activeLessonPlanDraftKey = nextKey;
+    }
+
     function buildLookupAliases(value) {
       const raw = String(value || '').trim();
       const aliases = [
@@ -2198,6 +2271,7 @@
       maybeSyncWeekFromDate();
       applyingSchemeSelection = false;
       maybeSyncHomeworkFromNotes({ force: false });
+      publishLessonPlanJournalDraft();
 
       toast('Scheme guidance applied. You can still edit the lesson plan.', 'success');
     }
@@ -2656,6 +2730,7 @@
         if (statTotal) statTotal.textContent = total || 0;
         await loadSchemeGuidance();
         await maybeSyncHomeworkFromNotes({ force: false });
+        publishLessonPlanJournalDraft();
       } catch(error) {
         console.error('Error in recomputeForSelection:', error);
         if(statNote) statNote.textContent = 'Error loading data: ' + error.message;
@@ -2744,6 +2819,17 @@
         renderHomeworkSyncStatus();
       });
     }
+    ['planClass', 'planDate', 'planSubject'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', publishLessonPlanJournalDraft);
+    });
+    ['planTopic', 'planObjectives', 'planActivities', 'planResources'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.addEventListener('input', publishLessonPlanJournalDraft);
+        el.addEventListener('change', publishLessonPlanJournalDraft);
+      }
+    });
     schemeLessonItem.addEventListener('change', () => {
       if (!activeSchemeBundle?.rows?.length) return;
       const previousEntry = selectedSchemeEntry;
@@ -3117,6 +3203,7 @@ ${plan.reflection || 'N/A'}
       homeworkGivenMeta = plan.homeworkGivenMeta || null;
       lessonHomeworkSourceMeta = plan.homeworkSourceMeta || null;
       renderHomeworkSyncStatus();
+      publishLessonPlanJournalDraft();
       document.getElementById('planReflection').value = plan.reflection || '';
       if (planCoverageStatus) planCoverageStatus.value = plan.coverageStatus || 'started';
       preferredSchemeEntryId = plan.schemeTracking?.entryId || null;
@@ -3196,6 +3283,7 @@ ${plan.reflection || 'N/A'}
       if (document.getElementById('statAG')) document.getElementById('statAG').textContent = '0';
       if (document.getElementById('statNote')) document.getElementById('statNote').textContent = '—';
       if (planCoverageStatus) planCoverageStatus.value = 'started';
+      clearLessonPlanJournalDraft();
       resetHomeworkPlanState();
       resetDelayWorkflow();
       clearSchemeGuidance();
@@ -3217,6 +3305,7 @@ ${plan.reflection || 'N/A'}
       lessonForm.classList.add('hidden');
       editingPlanId = null;
       preferredSchemeEntryId = null;
+      clearLessonPlanJournalDraft();
       resetHomeworkPlanState();
     });
 
@@ -3364,6 +3453,7 @@ ${plan.reflection || 'N/A'}
 
         editingPlanId = null;
         lessonForm.classList.add('hidden');
+        clearLessonPlanJournalDraft();
         loadLessonPlans();
       } catch (error) {
         console.error('Error saving plan:', error);
