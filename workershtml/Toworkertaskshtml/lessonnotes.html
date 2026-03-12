@@ -560,6 +560,55 @@
       color: #cbd5f5;
     }
 
+    .full-book-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
+      gap: 18px;
+      min-height: 70vh;
+    }
+
+    .full-book-viewer {
+      background: rgba(15, 23, 42, 0.92);
+      border: 1px solid rgba(96, 165, 250, 0.2);
+      border-radius: 14px;
+      overflow: hidden;
+      min-height: 70vh;
+    }
+
+    .full-book-viewer iframe {
+      width: 100%;
+      height: 70vh;
+      border: 0;
+      background: #0f172a;
+    }
+
+    .selection-workspace {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: rgba(15, 23, 42, 0.82);
+      border: 1px solid rgba(96, 165, 250, 0.22);
+      border-radius: 14px;
+      padding: 16px;
+    }
+
+    .selection-workspace textarea {
+      min-height: 260px;
+      resize: vertical;
+    }
+
+    .selection-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .selection-status {
+      font-size: 0.84rem;
+      color: rgba(191, 219, 254, 0.82);
+      line-height: 1.5;
+    }
+
     .homework-toolbar {
       display: flex;
       flex-wrap: wrap;
@@ -649,6 +698,14 @@
 
       .note-header {
         flex-direction: column;
+      }
+
+      .full-book-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .full-book-viewer iframe {
+        height: 52vh;
       }
     }
   </style>
@@ -795,7 +852,7 @@
           <div><strong>Book:</strong> <span id="topicBookTitle"></span></div>
           <div><strong>Pages:</strong> <span id="topicPages"></span></div>
           <div><strong>Keywords:</strong> <span id="topicKeywords"></span></div>
-          <a class="btn btn-secondary" id="openExternalBookLink" href="#" target="_blank" rel="noopener">Open Full Book</a>
+          <button class="btn btn-secondary" type="button" id="openExternalBookLink">Open Full Book Here</button>
         </div>
         <div class="range-controls hidden" id="rangeControls">
           <div class="form-group">
@@ -899,6 +956,35 @@
           <div class="loading" id="pdfLoadingState">
             <div class="spinner" style="margin-bottom: 8px;"></div>
             Loading topic pages...
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pdf-modal hidden" id="fullBookModal">
+      <div class="pdf-modal-content">
+        <div class="pdf-toolbar">
+          <div>
+            <h4 id="fullBookModalTitle">Full Book Workspace</h4>
+            <div id="fullBookModalSummary" style="font-size: 0.85rem; color: rgba(224, 231, 255, 0.75);"></div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <button class="btn btn-secondary" type="button" id="closeFullBookBtn">Close</button>
+          </div>
+        </div>
+        <div class="full-book-layout">
+          <div class="full-book-viewer">
+            <iframe id="fullBookFrame" title="Full class book viewer"></iframe>
+          </div>
+          <div class="selection-workspace">
+            <div class="field-hint">Search inside the embedded PDF, copy the part you want, paste it here, then let the page analyse it into lesson notes.</div>
+            <textarea id="selectedBookText" placeholder="Paste the selected textbook text here..."></textarea>
+            <div class="selection-actions">
+              <button class="btn btn-success" type="button" id="analyzeSelectedBookTextBtn">Analyze Into Lesson Notes</button>
+              <button class="btn btn-secondary" type="button" id="appendSelectedBookTextBtn">Append To Detailed Content</button>
+              <button class="btn btn-secondary" type="button" id="clearSelectedBookTextBtn">Clear Selection Text</button>
+            </div>
+            <div class="selection-status" id="selectedBookStatus">When a topic is not auto-matched, use this workspace to inspect the whole book and paste the exact passage you want analysed.</div>
           </div>
         </div>
       </div>
@@ -1075,6 +1161,16 @@
     const pdfLoadingState = document.getElementById('pdfLoadingState');
     const appendVisibleBtn = document.getElementById('appendVisibleBtn');
     const closePdfBtn = document.getElementById('closePdfBtn');
+    const fullBookModal = document.getElementById('fullBookModal');
+    const fullBookModalTitle = document.getElementById('fullBookModalTitle');
+    const fullBookModalSummary = document.getElementById('fullBookModalSummary');
+    const fullBookFrame = document.getElementById('fullBookFrame');
+    const selectedBookTextField = document.getElementById('selectedBookText');
+    const selectedBookStatus = document.getElementById('selectedBookStatus');
+    const analyzeSelectedBookTextBtn = document.getElementById('analyzeSelectedBookTextBtn');
+    const appendSelectedBookTextBtn = document.getElementById('appendSelectedBookTextBtn');
+    const clearSelectedBookTextBtn = document.getElementById('clearSelectedBookTextBtn');
+    const closeFullBookBtn = document.getElementById('closeFullBookBtn');
 
     const generateHomeworkBtn = document.getElementById('generateHomeworkBtn');
     const clearHomeworkBtn = document.getElementById('clearHomeworkBtn');
@@ -1418,7 +1514,7 @@
       if (enableOcrToggle) enableOcrToggle.checked = false;
       if (openExternalBookLink) {
         openExternalBookLink.classList.add('hidden');
-        openExternalBookLink.removeAttribute('href');
+        delete openExternalBookLink.dataset.bookUrl;
       }
       lessonState.currentBook = null;
       lessonState.pageTextCache = {};
@@ -1427,6 +1523,12 @@
       lessonState.paragraphIndex = {};
       lessonState.previousDetailValue = null;
       lessonState.autoTextSnippet = '';
+      if (selectedBookTextField) selectedBookTextField.value = '';
+      if (selectedBookStatus) {
+        selectedBookStatus.textContent = 'When a topic is not auto-matched, use this workspace to inspect the whole book and paste the exact passage you want analysed.';
+      }
+      if (fullBookFrame) fullBookFrame.removeAttribute('src');
+      closeFullBookReader();
       if (fullReset && pageStartInput && pageEndInput) {
         pageStartInput.value = '';
         pageEndInput.value = '';
@@ -2299,10 +2401,10 @@
       if (openExternalBookLink) {
         if (hasUrl) {
           openExternalBookLink.classList.remove('hidden');
-          openExternalBookLink.href = bookEntry.cloudinaryUrl || bookEntry.url || '';
+          openExternalBookLink.dataset.bookUrl = bookEntry.cloudinaryUrl || bookEntry.url || '';
         } else {
           openExternalBookLink.classList.add('hidden');
-          openExternalBookLink.removeAttribute('href');
+          delete openExternalBookLink.dataset.bookUrl;
         }
       }
 
@@ -2311,7 +2413,8 @@
       } else if (matchedTopic) {
         updateTopicStatus('ok', `Matched "${matchedTopic.name}" on pages ${startPage}-${endPage}. Adjust if needed.`);
       } else if (hasUrl) {
-        updateTopicStatus('ok', `Found "${bookEntry.title}". Topic pages were not auto-matched, so you can still search the book manually.`);
+        updateTopicStatus('ok', `Found "${bookEntry.title}". Topic pages were not auto-matched, so open the full book here, paste the exact passage into the workspace, and let the page analyse it.`);
+        openFullBookReader();
       } else {
         updateTopicStatus('warn', 'Book found but no PDF URL available. Please check book upload.');
       }
@@ -2908,6 +3011,66 @@ function splitIntoParagraphs(text) {
       }
     }
 
+    function appendManualTextToDetailedContent(rawText) {
+      const clean = compactTextBlock(rawText);
+      if (!clean || !detailedContentField) return;
+      detailedContentField.value = [detailedContentField.value.trim(), clean].filter(Boolean).join('\n\n');
+      lessonState.autoTextSnippet = clean;
+    }
+
+    function analyzeSelectedBookTextIntoNotes(options = {}) {
+      const rawText = compactTextBlock(selectedBookTextField?.value || '');
+      if (!rawText) {
+        toast('Paste selected textbook text first.', 'warning');
+        return;
+      }
+
+      const paragraphs = splitIntoParagraphs(rawText);
+      const normalizedParagraphs = (paragraphs.length ? paragraphs : [rawText]).map((text, index) => ({
+        id: `manual_${Date.now()}_${index}`,
+        page: parseInt(pageStartInput?.value || '0', 10) || 0,
+        text
+      }));
+
+      if (options.appendOnly) {
+        appendManualTextToDetailedContent(rawText);
+      } else {
+        appendManualTextToDetailedContent(rawText);
+        populateFieldsFromParagraphs(normalizedParagraphs);
+      }
+
+      if (selectedBookStatus) {
+        selectedBookStatus.textContent = options.appendOnly
+          ? 'Selected text was appended to Detailed Content.'
+          : 'Selected text was analysed and mapped into the lesson-notes fields.';
+      }
+      toast(options.appendOnly ? 'Selected textbook text appended.' : 'Selected textbook text analysed into lesson notes.', 'success');
+    }
+
+    function openFullBookReader() {
+      const bookUrl = lessonState.currentBook?.book?.cloudinaryUrl || lessonState.currentBook?.book?.url || openExternalBookLink?.dataset?.bookUrl || '';
+      if (!bookUrl) {
+        toast('No book URL available.', 'warning');
+        return;
+      }
+      if (fullBookModalTitle) {
+        fullBookModalTitle.textContent = lessonState.currentBook?.book?.title || 'Full Book Workspace';
+      }
+      if (fullBookModalSummary) {
+        fullBookModalSummary.textContent = `Use the embedded book to inspect the topic, then paste the selected passage into the analysis space.`;
+      }
+      if (fullBookFrame) {
+        fullBookFrame.src = `${bookUrl}#view=FitH`;
+      }
+      if (fullBookModal) {
+        fullBookModal.classList.remove('hidden');
+      }
+    }
+
+    function closeFullBookReader() {
+      if (fullBookModal) fullBookModal.classList.add('hidden');
+    }
+
     function syncDetailedContent() {
       if (!detailedContentField) return;
       const selected = Array.from(lessonState.selectedParagraphs)
@@ -3358,7 +3521,7 @@ function splitIntoParagraphs(text) {
         if (clearImportBtn) clearImportBtn.disabled = false;
         if (hasUrl && openExternalBookLink) {
           openExternalBookLink.classList.remove('hidden');
-          openExternalBookLink.href = note.bookUrl;
+          openExternalBookLink.dataset.bookUrl = note.bookUrl;
         }
         updateTopicStatus('ok', 'Using the saved book settings for this note.');
       }
@@ -3599,6 +3762,7 @@ function splitIntoParagraphs(text) {
 
     if (findTopicBtn) findTopicBtn.addEventListener('click', findTopicInClassbooks);
     if (openPagesBtn) openPagesBtn.addEventListener('click', openPdfModalForRange);
+    if (openExternalBookLink) openExternalBookLink.addEventListener('click', openFullBookReader);
     if (appendVisibleBtn) {
       appendVisibleBtn.addEventListener('click', () => {
         if (lessonState.extractedParagraphs.length && importedPreview) {
@@ -3613,9 +3777,29 @@ function splitIntoParagraphs(text) {
       });
     }
     if (closePdfBtn) closePdfBtn.addEventListener('click', closePdfModal);
+    if (closeFullBookBtn) closeFullBookBtn.addEventListener('click', closeFullBookReader);
     if (pdfModal) {
       pdfModal.addEventListener('click', event => {
         if (event.target === pdfModal) closePdfModal();
+      });
+    }
+    if (fullBookModal) {
+      fullBookModal.addEventListener('click', event => {
+        if (event.target === fullBookModal) closeFullBookReader();
+      });
+    }
+    if (analyzeSelectedBookTextBtn) {
+      analyzeSelectedBookTextBtn.addEventListener('click', () => analyzeSelectedBookTextIntoNotes());
+    }
+    if (appendSelectedBookTextBtn) {
+      appendSelectedBookTextBtn.addEventListener('click', () => analyzeSelectedBookTextIntoNotes({ appendOnly: true }));
+    }
+    if (clearSelectedBookTextBtn) {
+      clearSelectedBookTextBtn.addEventListener('click', () => {
+        if (selectedBookTextField) selectedBookTextField.value = '';
+        if (selectedBookStatus) {
+          selectedBookStatus.textContent = 'Paste the selected textbook text here, then analyse it into the lesson-note fields.';
+        }
       });
     }
 
