@@ -749,6 +749,12 @@
       <div class="form-group">
         <label>Homework / Assignment</label>
         <textarea id="planHomework" placeholder="Any homework or follow-up tasks?"></textarea>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
+          <button class="btn btn-secondary" type="button" id="loadHomeworkFromNotesBtn">Use Lesson Notes Homework</button>
+          <button class="btn btn-success" type="button" id="markHomeworkGivenBtn">Mark GIVEN</button>
+          <button class="btn btn-secondary" type="button" id="clearHomeworkGivenBtn">Clear GIVEN</button>
+        </div>
+        <div id="homeworkSyncNote" style="margin-top: 8px; font-size: 0.85rem; color: rgba(255,255,255,0.8);">Waiting for matching lesson notes or homework action.</div>
       </div>
 
       <div class="form-group">
@@ -862,6 +868,9 @@
     let applyingSchemeSelection = false;
     const schemeLookupCache = new Map();
     const financeRosterCache = new Map();
+    const lessonNotesCache = new Map();
+    let homeworkGivenMeta = null;
+    let lessonHomeworkSourceMeta = null;
     let schoolLogoDataUrlPromise = null;
 
     // UI Elements
@@ -892,6 +901,10 @@
     const planConclusion = document.getElementById('planConclusion');
     const planHomework = document.getElementById('planHomework');
     const planReflection = document.getElementById('planReflection');
+    const loadHomeworkFromNotesBtn = document.getElementById('loadHomeworkFromNotesBtn');
+    const markHomeworkGivenBtn = document.getElementById('markHomeworkGivenBtn');
+    const clearHomeworkGivenBtn = document.getElementById('clearHomeworkGivenBtn');
+    const homeworkSyncNote = document.getElementById('homeworkSyncNote');
     const planCoverageStatus = document.getElementById('planCoverageStatus');
     const schemeSyncSummary = document.getElementById('schemeSyncSummary');
     const schemeSourcePill = document.getElementById('schemeSourcePill');
@@ -1120,6 +1133,8 @@
         assessment: plan.assessment || '',
         conclusion: plan.conclusion || '',
         homework: plan.homework || '',
+        homeworkGivenMeta: plan.homeworkGivenMeta || null,
+        homeworkSourceMeta: plan.homeworkSourceMeta || null,
         reflection: plan.reflection || '',
         totals: {
           totalStudents: Number(plan?.totals?.totalStudents || plan.totalStudents || 0) || 0,
@@ -1564,6 +1579,7 @@
       schemeDetailsBox.textContent = 'No scheme item selected yet.';
       scheduleInfoCard.classList.add('hidden');
       scheduleWarningCard.classList.add('hidden');
+      resetHomeworkPlanState();
       resetDelayWorkflow();
     }
 
@@ -1573,6 +1589,136 @@
         .toLowerCase()
         .replace(/[_\s-]+/g, '')
         .replace(/[^a-z0-9]/g, '');
+    }
+
+    function countHomeworkQuestions(text, meta = null) {
+      const countFromMeta = Array.isArray(meta?.counts)
+        ? meta.counts.reduce((sum, item) => sum + (Number(item?.count || 0) || 0), 0)
+        : 0;
+      if (countFromMeta > 0) return countFromMeta;
+
+      const source = String(text || '').trim();
+      if (!source) return 0;
+      const numberedMatches = source.match(/(^|\n)\s*\d+[\).:-]/g);
+      if (numberedMatches?.length) return numberedMatches.length;
+      const blocks = source.split(/\n\s*\n/).map((block) => block.trim()).filter(Boolean);
+      if (blocks.length > 1) return blocks.length;
+      return source.split(/\n+/).map((line) => line.trim()).filter(Boolean).length;
+    }
+
+    function buildHomeworkGivenJournalText(meta = {}) {
+      const count = Number(meta.questionCount || 0) || 0;
+      const sourceTopic = compactTextBlock(meta.sourceTopic || planTopic?.value || 'Lesson topic');
+      const scope = compactTextBlock(meta.scope || 'same topic');
+      const countText = count > 0 ? `${count} question${count === 1 ? '' : 's'}` : 'homework';
+      return `GIVEN - ${countText} from ${sourceTopic} (${scope}).`;
+    }
+
+    function renderHomeworkSyncStatus() {
+      if (!homeworkSyncNote) return;
+      const notesLabel = lessonHomeworkSourceMeta?.topic
+        ? `Lesson notes homework loaded from "${lessonHomeworkSourceMeta.topic}" (${lessonHomeworkSourceMeta.questionCount || 0} question${lessonHomeworkSourceMeta.questionCount === 1 ? '' : 's'}).`
+        : '';
+      const givenLabel = homeworkGivenMeta?.given
+        ? ` Homework status: ${homeworkGivenMeta.journalText || buildHomeworkGivenJournalText(homeworkGivenMeta)}`
+        : '';
+      homeworkSyncNote.textContent = notesLabel || givenLabel
+        ? `${notesLabel}${givenLabel}`.trim()
+        : 'Waiting for matching lesson notes or homework action.';
+      if (markHomeworkGivenBtn) {
+        markHomeworkGivenBtn.textContent = homeworkGivenMeta?.given ? 'GIVEN Marked' : 'Mark GIVEN';
+      }
+    }
+
+    function resetHomeworkPlanState() {
+      homeworkGivenMeta = null;
+      lessonHomeworkSourceMeta = null;
+      renderHomeworkSyncStatus();
+    }
+
+    async function getLessonNotesForTeacher() {
+      const cacheKey = `${workerId || ''}`;
+      if (lessonNotesCache.has(cacheKey)) return lessonNotesCache.get(cacheKey);
+      if (!workerId) {
+        lessonNotesCache.set(cacheKey, {});
+        return {};
+      }
+      try {
+        const snap = await db.ref(`lesson_notes/${workerId}`).once('value');
+        const notes = (snap && snap.val && snap.val()) || {};
+        lessonNotesCache.set(cacheKey, notes);
+        return notes;
+      } catch (error) {
+        console.warn('Failed to load lesson notes for homework sync:', error?.message || error);
+        lessonNotesCache.set(cacheKey, {});
+        return {};
+      }
+    }
+
+    function findBestLessonNoteMatch(notesMap, selection = {}) {
+      const targetClass = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(selection.className || '') : compactTextBlock(selection.className || '');
+      const targetSubject = normalizeLookupToken(selection.subject || '');
+      const targetTerm = normalizeLookupToken(selection.term || '');
+      const targetTopic = normalizeLookupToken(selection.topic || '');
+      const candidates = Object.entries(notesMap || {}).map(([id, note]) => ({ id, ...(note || {}) }));
+
+      const ranked = candidates.map((note) => {
+        const noteClass = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(note.class || note.className || '') : compactTextBlock(note.class || note.className || '');
+        const noteSubject = normalizeLookupToken(note.subject || '');
+        const noteTerm = normalizeLookupToken(note.term || '');
+        const noteTopic = normalizeLookupToken(note.topic || '');
+        let score = 0;
+        if (targetClass && normalizeLookupToken(noteClass) === normalizeLookupToken(targetClass)) score += 5;
+        if (targetSubject && noteSubject === targetSubject) score += 5;
+        if (targetTerm && noteTerm === targetTerm) score += 3;
+        if (targetTopic && noteTopic && noteTopic === targetTopic) score += 8;
+        else if (targetTopic && noteTopic && (targetTopic.includes(noteTopic) || noteTopic.includes(targetTopic))) score += 4;
+        if (note.practiceQuestions) score += 2;
+        return { note, score, updatedAt: Number(note.updatedAt || note.createdAt || 0) || 0 };
+      }).filter((entry) => entry.score >= 12 && compactTextBlock(entry.note.practiceQuestions));
+
+      ranked.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return b.updatedAt - a.updatedAt;
+      });
+      return ranked[0]?.note || null;
+    }
+
+    async function maybeSyncHomeworkFromNotes(options = {}) {
+      const selection = {
+        className: planClass?.value || '',
+        subject: planSubject?.value || '',
+        term: planTerm?.value || '',
+        topic: planTopic?.value || ''
+      };
+      if (!selection.className || !selection.subject || !selection.topic) {
+        if (!planHomework?.value.trim()) lessonHomeworkSourceMeta = null;
+        renderHomeworkSyncStatus();
+        return null;
+      }
+
+      const notesMap = await getLessonNotesForTeacher();
+      const matchedNote = findBestLessonNoteMatch(notesMap, selection);
+      if (!matchedNote) {
+        if (!planHomework?.value.trim()) lessonHomeworkSourceMeta = null;
+        renderHomeworkSyncStatus();
+        return null;
+      }
+
+      const questionCount = countHomeworkQuestions(matchedNote.practiceQuestions, matchedNote.homeworkMeta);
+      lessonHomeworkSourceMeta = {
+        noteId: matchedNote.id || '',
+        topic: compactTextBlock(matchedNote.topic || selection.topic),
+        questionCount,
+        syncedAt: Date.now()
+      };
+
+      const shouldFill = Boolean(options.force || !compactTextBlock(planHomework?.value));
+      if (shouldFill && planHomework) {
+        planHomework.value = matchedNote.practiceQuestions || '';
+      }
+      renderHomeworkSyncStatus();
+      return matchedNote;
     }
 
     function buildLookupAliases(value) {
@@ -2051,6 +2197,7 @@
       planAssessment.value = buildAssessmentFromRow(row);
       maybeSyncWeekFromDate();
       applyingSchemeSelection = false;
+      maybeSyncHomeworkFromNotes({ force: false });
 
       toast('Scheme guidance applied. You can still edit the lesson plan.', 'success');
     }
@@ -2508,6 +2655,7 @@
         if (totalInp) totalInp.value = total || 0;
         if (statTotal) statTotal.textContent = total || 0;
         await loadSchemeGuidance();
+        await maybeSyncHomeworkFromNotes({ force: false });
       } catch(error) {
         console.error('Error in recomputeForSelection:', error);
         if(statNote) statNote.textContent = 'Error loading data: ' + error.message;
@@ -2521,8 +2669,81 @@
     });
     ['planSubject', 'planTerm'].forEach((id) => {
       const el = document.getElementById(id);
-      if (el) el.addEventListener('change', () => loadSchemeGuidance({ force: true }));
+      if (el) el.addEventListener('change', () => {
+        loadSchemeGuidance({ force: true });
+        maybeSyncHomeworkFromNotes({ force: false });
+      });
     });
+    ['planClass', 'planTopic'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('change', () => maybeSyncHomeworkFromNotes({ force: false }));
+      if (id === 'planTopic') {
+        el.addEventListener('blur', () => maybeSyncHomeworkFromNotes({ force: false }));
+      }
+    });
+    if (loadHomeworkFromNotesBtn) {
+      loadHomeworkFromNotesBtn.addEventListener('click', async () => {
+        const note = await maybeSyncHomeworkFromNotes({ force: true });
+        if (note) toast('Homework loaded from matching lesson notes.', 'success');
+        else toast('No matching lesson notes homework was found for this class, subject, term, and topic.', 'warning');
+      });
+    }
+    if (markHomeworkGivenBtn) {
+      markHomeworkGivenBtn.addEventListener('click', () => {
+        const homeworkText = compactTextBlock(planHomework?.value);
+        if (!homeworkText) {
+          toast('Load or write homework in the lesson plan before marking it as given.', 'warning');
+          planHomework?.focus();
+          return;
+        }
+
+        const detectedCount = lessonHomeworkSourceMeta?.questionCount || countHomeworkQuestions(homeworkText);
+        const countInput = window.prompt('How many question(s) were given?', detectedCount ? String(detectedCount) : '');
+        if (countInput === null) return;
+        const questionCount = Math.max(0, parseInt(String(countInput).trim(), 10) || 0);
+        if (!questionCount) {
+          toast('Enter a valid number of homework questions.', 'warning');
+          return;
+        }
+
+        const topicInput = window.prompt('From which topic were the questions given?', compactTextBlock(planTopic?.value || lessonHomeworkSourceMeta?.topic || ''));
+        if (topicInput === null) return;
+        const sourceTopic = compactTextBlock(topicInput || planTopic?.value || lessonHomeworkSourceMeta?.topic || '');
+        if (!sourceTopic) {
+          toast('Enter the topic used for the homework.', 'warning');
+          return;
+        }
+
+        const scopeInput = window.prompt('Type "same topic" or "revision".', homeworkGivenMeta?.scope || 'same topic');
+        if (scopeInput === null) return;
+        const normalizedScope = L(scopeInput).includes('revision') ? 'revision' : 'same topic';
+        homeworkGivenMeta = {
+          given: true,
+          questionCount,
+          sourceTopic,
+          scope: normalizedScope,
+          markedAt: Date.now()
+        };
+        homeworkGivenMeta.journalText = buildHomeworkGivenJournalText(homeworkGivenMeta);
+        renderHomeworkSyncStatus();
+        toast('Homework marked as GIVEN for class journal sync.', 'success');
+      });
+    }
+    if (clearHomeworkGivenBtn) {
+      clearHomeworkGivenBtn.addEventListener('click', () => {
+        homeworkGivenMeta = null;
+        renderHomeworkSyncStatus();
+      });
+    }
+    if (planHomework) {
+      planHomework.addEventListener('input', () => {
+        if (!compactTextBlock(planHomework.value)) {
+          homeworkGivenMeta = null;
+        }
+        renderHomeworkSyncStatus();
+      });
+    }
     schemeLessonItem.addEventListener('change', () => {
       if (!activeSchemeBundle?.rows?.length) return;
       const previousEntry = selectedSchemeEntry;
@@ -2893,6 +3114,9 @@ ${plan.reflection || 'N/A'}
       document.getElementById('planAssessment').value = plan.assessment || '';
       document.getElementById('planConclusion').value = plan.conclusion || '';
       document.getElementById('planHomework').value = plan.homework || '';
+      homeworkGivenMeta = plan.homeworkGivenMeta || null;
+      lessonHomeworkSourceMeta = plan.homeworkSourceMeta || null;
+      renderHomeworkSyncStatus();
       document.getElementById('planReflection').value = plan.reflection || '';
       if (planCoverageStatus) planCoverageStatus.value = plan.coverageStatus || 'started';
       preferredSchemeEntryId = plan.schemeTracking?.entryId || null;
@@ -2972,6 +3196,7 @@ ${plan.reflection || 'N/A'}
       if (document.getElementById('statAG')) document.getElementById('statAG').textContent = '0';
       if (document.getElementById('statNote')) document.getElementById('statNote').textContent = '—';
       if (planCoverageStatus) planCoverageStatus.value = 'started';
+      resetHomeworkPlanState();
       resetDelayWorkflow();
       clearSchemeGuidance();
 
@@ -2992,6 +3217,7 @@ ${plan.reflection || 'N/A'}
       lessonForm.classList.add('hidden');
       editingPlanId = null;
       preferredSchemeEntryId = null;
+      resetHomeworkPlanState();
     });
 
     function validateSchemeTrackingBeforeSave() {
@@ -3103,6 +3329,8 @@ ${plan.reflection || 'N/A'}
         assessment: document.getElementById('planAssessment').value,
         conclusion: document.getElementById('planConclusion').value,
         homework: document.getElementById('planHomework').value || '',
+        homeworkGivenMeta: homeworkGivenMeta?.given ? { ...homeworkGivenMeta, journalText: buildHomeworkGivenJournalText(homeworkGivenMeta) } : null,
+        homeworkSourceMeta: lessonHomeworkSourceMeta || null,
         reflection: document.getElementById('planReflection').value || '',
         coverageStatus: planCoverageStatus.value || 'started',
         schemeTracking: schemeValidation.tracking,

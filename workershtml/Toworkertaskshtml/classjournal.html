@@ -470,6 +470,10 @@
         </div>
       </div>
 
+      <div id="lessonPlanSyncStatus" style="margin-bottom: 16px; padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14); font-size: 0.92rem; color: rgba(255,255,255,0.92);">
+        Select a class and date to load saved lesson-plan teaching details.
+      </div>
+
       <div class="attendance-section">
         <h4>📊 Class Attendance</h4>
         <div class="form-row">
@@ -626,6 +630,8 @@
     const ClassUtils = window.SomapAcademicClassUtils || {};
     const SOMAP_DEFAULT_YEAR = 2025;
     const financeRosterCache = new Map();
+    const lessonPlanCache = new Map();
+    let journalLessonPlanContext = { plans: [], status: 'idle' };
 
     const teacherName = document.getElementById('teacherName');
     const teacherType = document.getElementById('teacherType');
@@ -637,6 +643,7 @@
     const journalsList = document.getElementById('journalsList');
     const filterClass = document.getElementById('filterClass');
     const filterDateRange = document.getElementById('filterDateRange');
+    const lessonPlanSyncStatus = document.getElementById('lessonPlanSyncStatus');
 
     function toast(message, type = 'success') {
       const container = document.getElementById('toastContainer');
@@ -811,6 +818,210 @@
         else if (student.gender === 'girls') acc.girls += 1;
         return acc;
       }, { total: 0, boys: 0, girls: 0 });
+    }
+
+    function compactTextBlock(text) {
+      return String(text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function normalizeLookupToken(value) {
+      return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[_\s-]+/g, '')
+        .replace(/[^a-z0-9]/g, '');
+    }
+
+    function uniqueTextBlocks(blocks = []) {
+      const seen = new Set();
+      return blocks.filter((block) => {
+        const normalized = normalizeLookupToken(block);
+        if (!normalized || seen.has(normalized)) return false;
+        seen.add(normalized);
+        return true;
+      });
+    }
+
+    function getCurrentTeacherName() {
+      return compactTextBlock(teacherName?.textContent || localStorage.getItem('somap_workerName') || '');
+    }
+
+    function getLessonPlanBasePath(year) {
+      if (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') {
+        return year ? SOMAP.P(`lessonPlans/${year}`) : SOMAP.P('lessonPlans');
+      }
+      const base = (schoolId && schoolId !== 'socrates-school') ? `schools/${schoolId}/lessonPlans` : 'lessonPlans';
+      return year ? `${base}/${year}` : base;
+    }
+
+    function normalizeLessonPlanRecord(plan, fallback = {}) {
+      if (!plan || typeof plan !== 'object') return null;
+      const className = ClassUtils.normalizeClassName
+        ? ClassUtils.normalizeClassName(plan.className || plan.class || fallback.className || '')
+        : compactTextBlock(plan.className || plan.class || fallback.className || '');
+      return {
+        ...plan,
+        id: String(plan.id || fallback.id || '').trim(),
+        year: String(plan.year || plan.academicYear || fallback.year || getYear()),
+        className,
+        class: className,
+        subject: compactTextBlock(plan.subject || ''),
+        term: compactTextBlock(plan.term || ''),
+        date: compactTextBlock(plan.date || fallback.date || ''),
+        teacherId: String(plan.teacherId || plan.teacher?.uid || '').trim(),
+        teacherName: compactTextBlock(plan.teacherName || plan.teacher?.name || plan.recordedBy || ''),
+        topic: compactTextBlock(plan.topic || ''),
+        objectives: compactTextBlock(plan.objectives || ''),
+        activities: compactTextBlock(plan.activities || ''),
+        resources: compactTextBlock(plan.resources || ''),
+        conclusion: compactTextBlock(plan.conclusion || ''),
+        homework: compactTextBlock(plan.homework || ''),
+        homeworkGivenMeta: plan.homeworkGivenMeta || null,
+        updatedAt: Number(plan.updatedAt || plan.createdAt || 0) || 0
+      };
+    }
+
+    function setLessonPlanSyncStatus(message, tone = 'info') {
+      if (!lessonPlanSyncStatus) return;
+      const palette = {
+        info: { background: 'rgba(255,255,255,0.08)', border: 'rgba(255,255,255,0.14)', color: 'rgba(255,255,255,0.92)' },
+        success: { background: 'rgba(16,185,129,0.18)', border: 'rgba(16,185,129,0.38)', color: '#d1fae5' },
+        warning: { background: 'rgba(245,158,11,0.16)', border: 'rgba(245,158,11,0.32)', color: '#fef3c7' }
+      };
+      const theme = palette[tone] || palette.info;
+      lessonPlanSyncStatus.textContent = message;
+      lessonPlanSyncStatus.style.background = theme.background;
+      lessonPlanSyncStatus.style.borderColor = theme.border;
+      lessonPlanSyncStatus.style.color = theme.color;
+    }
+
+    async function loadLessonPlansForClassDate(year, className, dateKey) {
+      const normalizedClass = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(className) : compactTextBlock(className);
+      const cacheKey = `${year}::${normalizedClass}::${dateKey}`;
+      if (lessonPlanCache.has(cacheKey)) return lessonPlanCache.get(cacheKey);
+
+      const basePath = getLessonPlanBasePath(year);
+      const currentTeacherName = getCurrentTeacherName();
+      const teacherToken = normalizeLookupToken(currentTeacherName);
+      const ownedPlans = [];
+
+      try {
+        const scopedSnap = await db.ref(`${basePath}/${normalizedClass}/${dateKey}`).once('value').catch(() => ({ val: () => null }));
+        const scopedData = (scopedSnap && scopedSnap.val && scopedSnap.val()) || {};
+        Object.entries(scopedData).forEach(([id, plan]) => {
+          const normalized = normalizeLessonPlanRecord(plan, { id, year, className: normalizedClass, date: dateKey });
+          if (!normalized) return;
+          const sameTeacher = (normalized.teacherId && normalized.teacherId === String(workerId || ''))
+            || (!normalized.teacherId && normalizeLookupToken(normalized.teacherName) === teacherToken);
+          if (!sameTeacher) return;
+          ownedPlans.push(normalized);
+        });
+      } catch (error) {
+        console.warn('Failed to read scoped lesson plans for journal sync:', error?.message || error);
+      }
+
+      try {
+        const legacySnap = await db.ref(`lesson_plans/${workerId}`).once('value').catch(() => ({ val: () => null }));
+        const legacyData = (legacySnap && legacySnap.val && legacySnap.val()) || {};
+        Object.entries(legacyData).forEach(([id, plan]) => {
+          const normalized = normalizeLessonPlanRecord(plan, { id, year });
+          if (!normalized) return;
+          if (normalized.date !== dateKey) return;
+          if (normalizeLookupToken(normalized.className) !== normalizeLookupToken(normalizedClass)) return;
+          if (normalized.year !== String(year)) return;
+          if (!ownedPlans.some((entry) => entry.id === normalized.id)) ownedPlans.push(normalized);
+        });
+      } catch (error) {
+        console.warn('Failed to read legacy lesson plans for journal sync:', error?.message || error);
+      }
+
+      ownedPlans.sort((a, b) => {
+        const subjectDiff = String(a.subject || '').localeCompare(String(b.subject || ''));
+        if (subjectDiff !== 0) return subjectDiff;
+        return (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+      if (ownedPlans.length) lessonPlanCache.set(cacheKey, ownedPlans);
+      else lessonPlanCache.delete(cacheKey);
+      return ownedPlans;
+    }
+
+    function buildJournalLessonPlanSummary(plans = []) {
+      const orderedPlans = [...plans].sort((a, b) => {
+        const subjectDiff = String(a.subject || '').localeCompare(String(b.subject || ''));
+        if (subjectDiff !== 0) return subjectDiff;
+        return (b.updatedAt || 0) - (a.updatedAt || 0);
+      });
+
+      const topicsCovered = uniqueTextBlocks(orderedPlans.map((plan) => {
+        const topicPart = plan.topic ? `Topic: ${plan.topic}` : '';
+        const objectivePart = plan.objectives ? `Objective: ${plan.objectives}` : '';
+        return [plan.subject || 'Subject', topicPart, objectivePart].filter(Boolean).join(' | ');
+      })).join('\n\n');
+
+      const keyActivities = uniqueTextBlocks(orderedPlans.map((plan) =>
+        [plan.subject || 'Subject', plan.activities].filter(Boolean).join(': ')
+      )).join('\n\n');
+
+      const materialsUsed = uniqueTextBlocks(orderedPlans.map((plan) =>
+        [plan.subject || 'Subject', plan.resources].filter(Boolean).join(': ')
+      )).join('\n\n');
+
+      const challenges = uniqueTextBlocks(orderedPlans.map((plan) =>
+        [plan.subject || 'Subject', plan.conclusion].filter(Boolean).join(': ')
+      )).join('\n\n');
+
+      const homeworkGiven = uniqueTextBlocks(orderedPlans
+        .filter((plan) => plan.homeworkGivenMeta?.given)
+        .map((plan) => `${plan.subject || 'Subject'}: ${compactTextBlock(plan.homeworkGivenMeta?.journalText || 'GIVEN')}`))
+        .join('\n');
+
+      return {
+        topicsCovered,
+        keyActivities,
+        materialsUsed,
+        challenges,
+        homeworkGiven,
+        linkedLessonPlanIds: orderedPlans.map((plan) => plan.id).filter(Boolean),
+        linkedSubjects: uniqueTextBlocks(orderedPlans.map((plan) => plan.subject).filter(Boolean))
+      };
+    }
+
+    function applyJournalLessonPlanSummary(summary) {
+      document.getElementById('topicsCovered').value = summary.topicsCovered || '';
+      document.getElementById('keyActivities').value = summary.keyActivities || '';
+      document.getElementById('materialsUsed').value = summary.materialsUsed || '';
+      document.getElementById('challenges').value = summary.challenges || '';
+      document.getElementById('homeworkGiven').value = summary.homeworkGiven || '';
+    }
+
+    async function syncJournalLessonPlanDetails() {
+      const journalClassEl = document.getElementById('journalClass');
+      const journalDateEl = document.getElementById('journalDate');
+      const chosenClass = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(journalClassEl?.value || '') : compactTextBlock(journalClassEl?.value || '');
+      const chosenDate = journalDateEl?.value || '';
+
+      journalLessonPlanContext = { plans: [], status: 'idle' };
+      if (!chosenClass || !chosenDate) {
+        applyJournalLessonPlanSummary({ topicsCovered: '', keyActivities: '', materialsUsed: '', challenges: '', homeworkGiven: '' });
+        setLessonPlanSyncStatus('Select a class and date to load saved lesson-plan teaching details.', 'info');
+        return [];
+      }
+
+      setLessonPlanSyncStatus('Loading saved lesson plan details for this class and date...', 'info');
+      const year = String(getYear());
+      const plans = await loadLessonPlansForClassDate(year, chosenClass, chosenDate);
+      journalLessonPlanContext = { plans, status: plans.length ? 'ready' : 'missing' };
+
+      if (!plans.length) {
+        applyJournalLessonPlanSummary({ topicsCovered: '', keyActivities: '', materialsUsed: '', challenges: '', homeworkGiven: '' });
+        setLessonPlanSyncStatus('No saved lesson plan was found for this class, date, and teacher. Save the lesson plan first before saving the class journal.', 'warning');
+        return [];
+      }
+
+      const summary = buildJournalLessonPlanSummary(plans);
+      applyJournalLessonPlanSummary(summary);
+      setLessonPlanSyncStatus(`Linked ${plans.length} saved lesson plan(s): ${summary.linkedSubjects.join(', ')}. Class journal fields were filled from the saved lesson plan record(s).`, 'success');
+      return plans;
     }
 
     function yyyymmdd(dateStr) {
@@ -1031,8 +1242,11 @@
         if (absentNamesEl) {
           absentNamesEl.value = Array.isArray(att.absentNames) ? att.absentNames.join(', ') : '';
         }
+        await syncJournalLessonPlanDetails();
       } catch (error) {
         console.error('Error recomputing journal attendance:', error);
+        setLessonPlanSyncStatus('Could not load lesson-plan details for this class and date.', 'warning');
+        await syncJournalLessonPlanDetails().catch(() => []);
       }
     }
 
@@ -1245,6 +1459,17 @@
         return;
       }
 
+      let linkedPlans = journalLessonPlanContext.plans || [];
+      if (!linkedPlans.length || journalLessonPlanContext.status !== 'ready') {
+        linkedPlans = await syncJournalLessonPlanDetails();
+      }
+      if (!linkedPlans.length) {
+        toast('Save the corresponding lesson plan first. Class journal can only be saved after a matching lesson plan exists.', 'warning');
+        return;
+      }
+
+      const linkedSummary = buildJournalLessonPlanSummary(linkedPlans);
+
       const journalData = {
         class: journalClass,
         className: journalClass,
@@ -1265,6 +1490,8 @@
         materialsUsed: document.getElementById('materialsUsed').value,
         challenges: document.getElementById('challenges').value,
         reminders: document.getElementById('reminders').value,
+        linkedLessonPlanIds: linkedSummary.linkedLessonPlanIds,
+        linkedSubjects: linkedSummary.linkedSubjects,
         timestamp: Date.now(),
         teacherId: workerId,
         teacherName: teacherName.textContent
@@ -1292,6 +1519,8 @@
         document.getElementById('materialsUsed').value = '';
         document.getElementById('challenges').value = '';
         document.getElementById('reminders').value = '';
+        journalLessonPlanContext = { plans: [], status: 'idle' };
+        setLessonPlanSyncStatus('Select a class and date to load saved lesson-plan teaching details.', 'info');
 
         totalEntries.textContent = Object.keys(journals).length;
         renderJournals();
