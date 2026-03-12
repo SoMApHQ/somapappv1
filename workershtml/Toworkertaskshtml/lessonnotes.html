@@ -11,6 +11,8 @@
   <script src="../../firebase.js"></script>
   <script src="../../shared/academic-class-utils.js"></script>
   <script src="../../js/scheme-template-parser.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.0/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" integrity="sha512-4w2d+Sxgpo1Jpj9V3dJbvt0mv47neVQcYcJJ2ULFuIkt6xl7V2bW77hlUjMt8uokG2ysL0ePkB2USK0lr7qC1A==" crossorigin="anonymous"></script>
   <script>
     if (window.pdfjsLib) {
@@ -783,6 +785,10 @@
       </button>
     </div>
 
+    <div style="display: flex; justify-content: flex-end; margin: -6px 0 18px 0;">
+      <button class="btn btn-secondary" id="exportNotesPdfBtn" type="button">📄 Export Filtered Notes PDF</button>
+    </div>
+
     <div class="notes-form hidden" id="notesForm">
       <h3>✍️ New Lesson Notes</h3>
       <div class="revision-banner hidden" id="revisionBanner">
@@ -1031,6 +1037,8 @@
     let teacherConfig = null;
     let notes = {};
     let editingNoteId = null;
+    let schoolLogoDataUrlPromise = null;
+    const lessonPlanYearCache = new Map();
 
     const HOMEWORK_TOTAL = 15;
     const HOMEWORK_BLUEPRINT = [
@@ -1102,6 +1110,7 @@
     const filterClass = document.getElementById('filterClass');
     const filterSubject = document.getElementById('filterSubject');
     const filterTopic = document.getElementById('filterTopic');
+    const exportNotesPdfBtn = document.getElementById('exportNotesPdfBtn');
     const newNoteBtn = document.getElementById('newNoteBtn');
     const notesForm = document.getElementById('notesForm');
     const cancelNoteBtn = document.getElementById('cancelNoteBtn');
@@ -1569,6 +1578,297 @@
       if (ownerId && workerId && ownerId === String(workerId)) return true;
       if (!ownerId && ownerName && currentName && normalizeLookupToken(ownerName) === normalizeLookupToken(currentName)) return true;
       return !ownerId && !ownerName;
+    }
+
+    function getCurrentSchoolName() {
+      return compactTextBlock(
+        schoolNameEl?.textContent ||
+        school?.name ||
+        localStorage.getItem('somap.currentSchoolName') ||
+        (schoolId === 'socrates-school' ? 'Socrates School' : schoolId)
+      );
+    }
+
+    function sanitizeFileSegment(value) {
+      return String(value || 'item')
+        .trim()
+        .replace(/[<>:"/\\|?*\x00-\x1F]+/g, '_')
+        .replace(/\s+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_+|_+$/g, '') || 'item';
+    }
+
+    function formatDisplayDate(value) {
+      if (!value) return 'N/A';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString('en-GB');
+    }
+
+    function countHomeworkQuestionsFromText(text) {
+      const source = String(text || '').trim();
+      if (!source) return 0;
+      const numberedMatches = source.match(/(^|\n)\s*\d+[\).:-]/g);
+      if (numberedMatches?.length) return numberedMatches.length;
+      const blocks = source.split(/\n\s*\n/).map((block) => block.trim()).filter(Boolean);
+      if (blocks.length > 1) return blocks.length;
+      return source.split(/\n+/).map((line) => line.trim()).filter(Boolean).length;
+    }
+
+    async function getSchoolLogoDataUrl() {
+      if (schoolLogoDataUrlPromise) return schoolLogoDataUrlPromise;
+      schoolLogoDataUrlPromise = (async () => {
+        let logoUrl = compactTextBlock(
+          localStorage.getItem('somap.currentSchoolLogoUrl') ||
+          school?.logoUrl ||
+          ''
+        );
+        if (!logoUrl) {
+          try {
+            const snap = await db.ref(`/schools/${schoolId}/profile/logoUrl`).once('value');
+            if (snap.exists() && snap.val()) logoUrl = snap.val();
+          } catch (error) {
+            console.warn('Unable to resolve school logo', error);
+          }
+        }
+        if (!logoUrl) return null;
+        try {
+          const response = await fetch(logoUrl, { credentials: 'omit' });
+          const blob = await response.blob();
+          return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        } catch (error) {
+          console.warn('Unable to load school logo', error);
+          return null;
+        }
+      })();
+      return schoolLogoDataUrlPromise;
+    }
+
+    async function getLessonPlansForYear(year) {
+      const targetYear = String(year || getYear());
+      if (lessonPlanYearCache.has(targetYear)) return lessonPlanYearCache.get(targetYear);
+      const basePath = getLessonPlanBasePath(targetYear);
+      const treeSnap = await db.ref(basePath).once('value').catch(() => ({ val: () => null }));
+      const tree = (treeSnap && treeSnap.val && treeSnap.val()) || {};
+      const flattened = [];
+
+      Object.keys(tree).forEach((className) => {
+        const dates = tree[className] || {};
+        Object.keys(dates).forEach((date) => {
+          const ids = dates[date] || {};
+          Object.keys(ids).forEach((id) => {
+            const plan = ids[id];
+            if (!plan || typeof plan !== 'object') return;
+            flattened.push({
+              id,
+              ...plan,
+              className: compactTextBlock(plan.className || plan.class || className),
+              class: compactTextBlock(plan.className || plan.class || className),
+              date: compactTextBlock(plan.date || date),
+              year: String(plan.year || plan.academicYear || targetYear)
+            });
+          });
+        });
+      });
+
+      const filtered = flattened.filter((plan) => planOwnedByCurrentTeacher(plan));
+      lessonPlanYearCache.set(targetYear, filtered);
+      return filtered;
+    }
+
+    function findMatchingLessonPlanForNote(note, plans) {
+      const targetClass = compactTextBlock(note.class || note.className || '');
+      const targetSubject = compactTextBlock(note.subject || '');
+      const targetTerm = compactTextBlock(note.term || '');
+      const targetTopic = normalizeLookupToken(note.topic || '');
+      const targetDate = compactTextBlock(note.lessonDateContext || '');
+
+      const ranked = (plans || []).map((plan) => {
+        let score = 0;
+        if (compactTextBlock(plan.className || plan.class || '') === targetClass) score += 6;
+        if (compactTextBlock(plan.subject || '') === targetSubject) score += 6;
+        if (compactTextBlock(plan.term || '') === targetTerm) score += 3;
+        const planTopic = normalizeLookupToken(plan.topic || '');
+        if (targetTopic && planTopic && planTopic === targetTopic) score += 10;
+        else if (targetTopic && planTopic && (targetTopic.includes(planTopic) || planTopic.includes(targetTopic))) score += 5;
+        if (targetDate && compactTextBlock(plan.date || '') === targetDate) score += 8;
+        const planTime = Number(plan.updatedAt || plan.createdAt || 0) || 0;
+        return { plan, score, planTime };
+      }).filter((entry) => entry.score >= 12);
+
+      ranked.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return b.planTime - a.planTime;
+      });
+
+      return ranked[0]?.plan || null;
+    }
+
+    async function getPdfContextForNote(note) {
+      const year = String(note?.year || getYear());
+      const plans = await getLessonPlansForYear(year);
+      const matchedPlan = findMatchingLessonPlanForNote(note, plans);
+      const totals = matchedPlan?.totals || {};
+      const homeworkText = compactTextBlock(matchedPlan?.homework || note?.practiceQuestions || '');
+      const homeworkGivenMeta = matchedPlan?.homeworkGivenMeta || null;
+      const homeworkCount = countHomeworkQuestionsFromText(homeworkText);
+
+      return {
+        note,
+        plan: matchedPlan,
+        attendance: {
+          total: Number(totals.totalStudents || matchedPlan?.totalStudents || 0) || 0,
+          present: Number(totals.present || matchedPlan?.studentsPresent || 0) || 0,
+          presentBoys: Number(totals.presentBoys || 0) || 0,
+          presentGirls: Number(totals.presentGirls || 0) || 0,
+          absentBoys: Number(totals.absentBoys || 0) || 0,
+          absentGirls: Number(totals.absentGirls || 0) || 0
+        },
+        week: compactTextBlock(matchedPlan?.week || ''),
+        date: compactTextBlock(note?.lessonDateContext || matchedPlan?.date || ''),
+        teacherName: compactTextBlock(note?.teacherName || matchedPlan?.teacherName || matchedPlan?.recordedBy || getCurrentTeacherDisplayName()),
+        schoolName: compactTextBlock(note?.schoolName || matchedPlan?.schoolName || getCurrentSchoolName()),
+        schoolLogoUrl: compactTextBlock(note?.schoolLogoUrl || matchedPlan?.schoolLogoUrl || ''),
+        homeworkText: homeworkText || 'N/A',
+        homeworkGivenMeta,
+        homeworkCount
+      };
+    }
+
+    function addPdfHeader(doc, schoolName, title, subtitle, logoDataUrl) {
+      const pageWidth = doc.internal.pageSize.getWidth();
+      doc.setDrawColor(37, 99, 235);
+      doc.setFillColor(239, 246, 255);
+      doc.roundedRect(12, 10, pageWidth - 24, 26, 3, 3, 'FD');
+      if (logoDataUrl) {
+        try { doc.addImage(logoDataUrl, 'PNG', 16, 13, 15, 15); } catch (_) {}
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(15);
+      doc.text(schoolName || getCurrentSchoolName(), pageWidth / 2, 18, { align: 'center' });
+      doc.setFontSize(11);
+      doc.text(title, pageWidth / 2, 24, { align: 'center' });
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.text(subtitle, pageWidth / 2, 29.5, { align: 'center' });
+    }
+
+    function addMetaTable(doc, rows, startY) {
+      doc.autoTable({
+        startY,
+        body: rows,
+        theme: 'grid',
+        styles: { fontSize: 9, cellPadding: 2.4, lineColor: [148, 163, 184], lineWidth: 0.2 },
+        columnStyles: {
+          0: { fontStyle: 'bold', fillColor: [241, 245, 249], cellWidth: 34 },
+          1: { cellWidth: 56 },
+          2: { fontStyle: 'bold', fillColor: [241, 245, 249], cellWidth: 34 },
+          3: { cellWidth: 'auto' }
+        },
+        margin: { left: 12, right: 12 }
+      });
+      return doc.lastAutoTable.finalY + 4;
+    }
+
+    function addAttendanceTable(doc, context, startY) {
+      const attendance = context.attendance || {};
+      doc.autoTable({
+        startY,
+        head: [['Attendance', 'Boys', 'Girls', 'Total']],
+        body: [
+          ['Present', attendance.presentBoys || 0, attendance.presentGirls || 0, attendance.present || 0],
+          ['Absent', attendance.absentBoys || 0, attendance.absentGirls || 0, (attendance.absentBoys || 0) + (attendance.absentGirls || 0)],
+          ['Registered', (attendance.presentBoys || 0) + (attendance.absentBoys || 0), (attendance.presentGirls || 0) + (attendance.absentGirls || 0), attendance.total || 0]
+        ],
+        theme: 'grid',
+        headStyles: { fillColor: [22, 163, 74], textColor: 255, fontSize: 9 },
+        styles: { fontSize: 9, cellPadding: 2.2, lineColor: [148, 163, 184], lineWidth: 0.2, halign: 'center' },
+        columnStyles: { 0: { halign: 'left', fontStyle: 'bold' } },
+        margin: { left: 12, right: 12 }
+      });
+      return doc.lastAutoTable.finalY + 4;
+    }
+
+    function addSectionBlock(doc, title, value, startY) {
+      const pageHeight = doc.internal.pageSize.getHeight();
+      let y = startY;
+      const text = compactTextBlock(value || '') || 'N/A';
+      const labelHeight = 6;
+      const lines = doc.splitTextToSize(text, 180);
+      const estimatedHeight = labelHeight + Math.max(8, lines.length * 4.3) + 4;
+      if (y + estimatedHeight > pageHeight - 14) {
+        doc.addPage();
+        y = 18;
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.text(title, 12, y);
+      y += 4.5;
+      doc.setDrawColor(226, 232, 240);
+      doc.setFillColor(248, 250, 252);
+      const blockHeight = Math.max(10, lines.length * 4.3 + 4);
+      doc.roundedRect(12, y - 2.5, 186, blockHeight, 2, 2, 'FD');
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.2);
+      doc.text(lines, 15, y + 1);
+      return y + blockHeight + 4;
+    }
+
+    async function renderLessonNotePdfPage(doc, rawNote, index, total) {
+      const note = normalizeLessonNoteRecord(rawNote, { year: getYear() });
+      const context = await getPdfContextForNote(note);
+      const logoDataUrl = await getSchoolLogoDataUrl();
+      if (index > 0) doc.addPage();
+
+      addPdfHeader(
+        doc,
+        context.schoolName,
+        'Lesson Notes',
+        `${context.schoolName} • ${context.teacherName} • ${context.date ? formatDisplayDate(context.date) : 'No lesson date'}`,
+        logoDataUrl
+      );
+
+      let y = addMetaTable(doc, [
+        ['Teacher', context.teacherName || 'N/A', 'School', context.schoolName || 'N/A'],
+        ['Class', note.class || 'N/A', 'Subject', note.subject || 'N/A'],
+        ['Topic', note.topic || 'N/A', 'Sub-topic', note.subTopic || 'N/A'],
+        ['Academic Year', note.academicYear || note.year || 'N/A', 'Term / Week', `${note.term || 'N/A'} / Week ${context.week || 'N/A'}`],
+        ['Lesson Date', formatDisplayDate(context.date), 'Book Pages', note.pageStart && note.pageEnd ? `${note.pageStart}-${note.pageEnd}` : 'N/A'],
+        ['Book', note.bookTitle || 'N/A', 'Homework Given', context.homeworkGivenMeta?.given ? (context.homeworkGivenMeta.journalText || 'Yes') : 'Not marked']
+      ], 40);
+
+      y = addAttendanceTable(doc, context, y);
+      y = addSectionBlock(doc, 'Key Concepts & Definitions', note.keyConcepts, y);
+      y = addSectionBlock(doc, 'Detailed Content / Explanation', note.detailedContent, y);
+      y = addSectionBlock(doc, 'Examples & Illustrations', note.examples, y);
+      y = addSectionBlock(doc, 'Important Points / Key Takeaways', note.keyTakeaways, y);
+      y = addSectionBlock(doc, 'Diagrams & Visual Aids', note.diagrams, y);
+      y = addSectionBlock(doc, 'Common Mistakes / Misconceptions', note.misconceptions, y);
+      y = addSectionBlock(doc, `Practice Questions / Homework (${context.homeworkCount || countHomeworkQuestionsFromText(note.practiceQuestions)} question${(context.homeworkCount || countHomeworkQuestionsFromText(note.practiceQuestions)) === 1 ? '' : 's'})`, context.homeworkText || note.practiceQuestions, y);
+      y = addSectionBlock(doc, 'Reference Materials / Sources', note.references, y);
+      y = addSectionBlock(doc, 'Teaching Tips / Notes for Self', note.teachingTips, y);
+
+      doc.setFontSize(8);
+      doc.setTextColor(71, 85, 105);
+      doc.text(`Export ${index + 1} of ${total} • Teacher ${context.teacherName || 'N/A'} • Present ${context.attendance.present || 0}/${context.attendance.total || 0}`, 12, doc.internal.pageSize.getHeight() - 8);
+      doc.setTextColor(0, 0, 0);
+    }
+
+    async function exportNotesToPdf(noteList, fileName) {
+      if (!noteList.length) {
+        toast('No lesson notes found for export.', 'warning');
+        return;
+      }
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      for (let index = 0; index < noteList.length; index += 1) {
+        await renderLessonNotePdfPage(doc, noteList[index], index, noteList.length);
+      }
+      doc.save(fileName);
     }
 
     function deriveNoteYear(note, fallbackYear) {
@@ -3358,20 +3658,24 @@ function splitIntoParagraphs(text) {
       }
     }
 
-        function renderNotes() {
-      if (!notesList) return;
+    function getFilteredNotes() {
       const selectedClass = filterClass?.value;
       const selectedSubject = filterSubject?.value;
       const topicFilter = (filterTopic?.value || '').toLowerCase();
 
       const activeYear = String(getYear());
-      const entries = Object.entries(notes).filter(([id, note]) => {
+      return Object.entries(notes).filter(([id, note]) => {
         if (String(note.year || activeYear) !== activeYear) return false;
         if (selectedClass && note.class !== selectedClass) return false;
         if (selectedSubject && note.subject !== selectedSubject) return false;
         if (topicFilter && !(note.topic || '').toLowerCase().includes(topicFilter)) return false;
         return true;
       }).sort((a, b) => (b[1].createdAt || 0) - (a[1].createdAt || 0));
+    }
+
+        function renderNotes() {
+      if (!notesList) return;
+      const entries = getFilteredNotes();
 
       if (!entries.length) {
         notesList.innerHTML = `
@@ -3408,6 +3712,7 @@ function splitIntoParagraphs(text) {
             </div>
             <div class="note-actions">
               <button class="btn btn-primary" type="button" onclick="event.stopPropagation(); viewNote('${id}')">View Full Notes</button>
+              <button class="btn btn-secondary" type="button" onclick="event.stopPropagation(); exportSingleNotePdf('${id}')">Export PDF</button>
               <button class="btn btn-secondary" type="button" onclick="event.stopPropagation(); editNote('${id}')">Edit</button>
               <button class="btn btn-secondary" type="button" onclick="event.stopPropagation(); deleteNote('${id}')">Delete</button>
             </div>
@@ -3458,6 +3763,24 @@ function splitIntoParagraphs(text) {
       ].join('\n');
 
       alert(`${header}\n\n${body}`);
+    };
+
+    window.exportSingleNotePdf = async function(noteId) {
+      const note = notes[noteId];
+      if (!note) {
+        toast('That lesson note is not available.', 'warning');
+        return;
+      }
+      try {
+        await exportNotesToPdf(
+          [note],
+          `lesson_note_${sanitizeFileSegment(note.teacherName || getCurrentTeacherDisplayName())}_${sanitizeFileSegment(note.subject || 'subject')}_${sanitizeFileSegment(note.class || 'class')}_${sanitizeFileSegment(note.topic || 'topic')}_${sanitizeFileSegment(note.lessonDateContext || note.year || getYear())}.pdf`
+        );
+        toast('Lesson note PDF exported successfully.', 'success');
+      } catch (error) {
+        console.error('Single note export error:', error);
+        toast('Error exporting lesson note PDF.', 'error');
+      }
     };
 
         window.editNote = async function(noteId) {
@@ -3679,6 +4002,8 @@ function splitIntoParagraphs(text) {
         academicYear: saveYear,
         lessonDateContext,
         schoolId,
+        schoolName: getCurrentSchoolName(),
+        schoolLogoUrl: compactTextBlock(localStorage.getItem('somap.currentSchoolLogoUrl') || school?.logoUrl || ''),
         teacherId: workerId || '',
         teacherName: teacherName ? teacherName.textContent : '',
         keyConcepts: keyConceptsField ? keyConceptsField.value : '',
@@ -3759,6 +4084,25 @@ function splitIntoParagraphs(text) {
     if (filterClass) filterClass.addEventListener('change', renderNotes);
     if (filterSubject) filterSubject.addEventListener('change', renderNotes);
     if (filterTopic) filterTopic.addEventListener('input', renderNotes);
+    if (exportNotesPdfBtn) {
+      exportNotesPdfBtn.addEventListener('click', async () => {
+        const entries = getFilteredNotes();
+        if (!entries.length) {
+          toast('No lesson notes found for the current filters.', 'warning');
+          return;
+        }
+        try {
+          await exportNotesToPdf(
+            entries.map(([, note]) => note),
+            `lesson_notes_${sanitizeFileSegment(getCurrentTeacherDisplayName())}_${sanitizeFileSegment(filterSubject?.value || 'all_subjects')}_${sanitizeFileSegment(filterClass?.value || 'all_classes')}_${String(getYear())}.pdf`
+          );
+          toast('Lesson notes PDF exported successfully.', 'success');
+        } catch (error) {
+          console.error('Filtered lesson notes export error:', error);
+          toast('Error exporting lesson notes PDF.', 'error');
+        }
+      });
+    }
 
     if (findTopicBtn) findTopicBtn.addEventListener('click', findTopicInClassbooks);
     if (openPagesBtn) openPagesBtn.addEventListener('click', openPdfModalForRange);
