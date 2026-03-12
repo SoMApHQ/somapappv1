@@ -80,6 +80,7 @@
     'Developing Sports & Arts': '#ffedd5'
   };
   const CORE_SUBJECTS = new Set(['Math', 'English', 'Kiswahili', 'Science', 'Arithmetic', 'Writing Skills', 'Reading Skills', 'Communication', 'Kusoma']);
+  const MORNING_PRIORITY_SUBJECTS = new Set(['Math', 'English', 'Science']);
   const DEFAULT_SLOT_PRESETS = {
     nursery_group: [
       { id: 'nursery_1', start: '08:00', end: '08:40', label: 'Teaching 1', isTeaching: true },
@@ -1334,6 +1335,9 @@
       if (!candidateTeachers.some((teacher) => teacher.workerId === teacherId)) {
         fixedIssues.push({ title: 'Locked teaching cell uses an invalid teacher assignment', body: `${cell.className} / ${cell.day} / ${getSlotLabel(cell.slotId, slots)} / ${subject || 'Unknown subject'}` });
       }
+      if (isMorningPrioritySubject(subject) && !slotEndsByNoon(slot)) {
+        fixedIssues.push({ title: 'Locked morning-core subject is placed after 12:00 PM', body: `${cell.className} / ${subject} is locked on ${cell.day} at ${getSlotLabel(cell.slotId, slots)}.` });
+      }
       const subjectMeta = subjectLegend.find((item) => item.subject === subject) || {
         subject,
         abbreviation: makeSubjectAbbreviation(subject),
@@ -1415,6 +1419,7 @@
       DAYS.forEach((day) => {
         searchState.slots.forEach((slot) => {
           if (!slot.isTeaching) return;
+          if (isMorningPrioritySubject(subject) && !slotEndsByNoon(slot)) return;
           if (searchState.grid[className][day][slot.id]?.type) return;
           if (searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id]) return;
           const slotIndex = slotIndexMap[slot.id];
@@ -1494,6 +1499,9 @@
           if (cell.type === 'teaching') {
             if (!slot.isTeaching) {
               lockedViolations.push({ title: 'Teaching cell placed in a fixed block', body: `${className} / ${day} / ${getSlotLabel(slot.id, slots)}` });
+            }
+            if (isMorningPrioritySubject(cell.subject) && !slotEndsByNoon(slot)) {
+              invalidPlacements.push({ title: 'Morning-core subject placed after 12:00 PM', body: `${className} / ${cell.subject} is scheduled on ${day} at ${getSlotLabel(slot.id, slots)}.` });
             }
             if (!cell.teacherId) {
               invalidPlacements.push({ title: 'Teaching cell is missing a teacher', body: `${className} / ${day} / ${getSlotLabel(slot.id, slots)} / ${cell.subject || 'Unknown subject'}` });
@@ -1640,8 +1648,9 @@
         head,
         body,
         theme: 'grid',
-        styles: { font: 'helvetica', fontSize: 6.6, cellPadding: 4, textColor: [16, 35, 62], lineColor: [146, 163, 184], lineWidth: 0.35 },
-        headStyles: { fillColor: [232, 240, 255], textColor: [36, 64, 100], fontStyle: 'bold' },
+        margin: { left: 22, right: 22, bottom: 88 },
+        styles: { font: 'helvetica', fontSize: 6.1, cellPadding: 2.8, textColor: [16, 35, 62], lineColor: [146, 163, 184], lineWidth: 0.35, valign: 'middle' },
+        headStyles: { fillColor: [232, 240, 255], textColor: [36, 64, 100], fontStyle: 'bold', fontSize: 6.2, cellPadding: 3.2 },
         columnStyles: {
           0: { fillColor: [245, 249, 255], fontStyle: 'bold', cellWidth: 46 },
           1: { fillColor: [245, 249, 255], fontStyle: 'bold', cellWidth: 52 }
@@ -1663,7 +1672,7 @@
           }
         }
       });
-      drawPdfLegend(doc, timetable, Math.min(doc.internal.pageSize.getHeight() - 86, Math.max(470, (doc.lastAutoTable?.finalY || 420) + 20)));
+      drawPdfLegend(doc, timetable, doc.internal.pageSize.getHeight() - 68);
     });
     doc.save(`${slugify(state.school?.name || state.schoolId || 'school')}_general_timetable_${state.year}.pdf`);
     noteExportAction('PDF downloaded');
@@ -1689,26 +1698,32 @@
   }
 
   function drawPdfLegend(doc, timetable, startY) {
+    const pageWidth = doc.internal.pageSize.getWidth();
     const pageHeight = doc.internal.pageSize.getHeight();
-    let cursorY = Math.min(startY, pageHeight - 88);
+    let cursorY = Math.min(startY, pageHeight - 68);
+    doc.setDrawColor(203, 213, 225);
+    doc.setLineWidth(0.5);
+    doc.line(26, cursorY - 8, pageWidth - 26, cursorY - 8);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
+    doc.setFontSize(10);
     doc.text('Teacher Legend', 34, cursorY);
-    cursorY += 12;
+    cursorY += 11;
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
+    doc.setFontSize(7);
     timetable.teacherLegend.forEach((teacher, index) => {
       const column = index % 3;
       const row = Math.floor(index / 3);
-      const x = 34 + column * 240;
-      const y = cursorY + row * 14;
-      if (y <= pageHeight - 36) doc.text(`${teacher.number}. ${teacher.name} (${teacher.teacherType})`, x, y);
+      const x = 34 + column * 248;
+      const y = cursorY + row * 10;
+      if (y <= pageHeight - 28) doc.text(`${teacher.number}. ${teacher.name} (${teacher.teacherType})`, x, y, { maxWidth: 225 });
     });
-    const subjectY = Math.min(pageHeight - 20, cursorY + Math.ceil(timetable.teacherLegend.length / 3) * 14 + 18);
+    const subjectY = Math.min(pageHeight - 18, cursorY + Math.ceil(timetable.teacherLegend.length / 3) * 10 + 14);
     doc.setFont('helvetica', 'bold');
     doc.text('Subject Legend', 34, subjectY);
     doc.setFont('helvetica', 'normal');
-    doc.text(timetable.subjectLegend.map((item) => `${item.abbreviation}=${item.subject}`).join(' | ').slice(0, 300), 120, subjectY);
+    const subjectLegendText = timetable.subjectLegend.map((item) => `${item.abbreviation}=${item.subject}`).join(' | ');
+    const wrappedLegend = doc.splitTextToSize(subjectLegendText, pageWidth - 154).slice(0, 2);
+    doc.text(wrappedLegend, 120, subjectY);
   }
 
   function printCurrentPreview() {
@@ -2198,6 +2213,20 @@
   function getSlotLabel(slotId, slots) {
     const slot = (slots || []).find((entry) => entry.id === slotId);
     return slot ? `${slot.start}-${slot.end} | ${slot.label}` : slotId;
+  }
+
+  function isMorningPrioritySubject(subject) {
+    return MORNING_PRIORITY_SUBJECTS.has(normalizeSubjectName(subject));
+  }
+
+  function slotEndsByNoon(slot) {
+    return parseTimeToMinutes(slot?.end) <= 12 * 60;
+  }
+
+  function parseTimeToMinutes(value) {
+    const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return Number.POSITIVE_INFINITY;
+    return Number(match[1]) * 60 + Number(match[2]);
   }
 
   function createEmptyCell(slot) {
