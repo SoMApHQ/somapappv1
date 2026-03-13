@@ -1478,8 +1478,8 @@
       if (!candidateTeachers.some((teacher) => teacher.workerId === teacherId)) {
         fixedIssues.push({ category: 'locked', title: 'Locked teaching cell uses an invalid teacher assignment', body: `${cell.className} / ${cell.day} / ${getSlotLabel(cell.slotId, slots)} / ${subject || 'Unknown subject'}` });
       }
-      if (isMorningPrioritySubject(subject) && !slotEndsByNoon(slot)) {
-        fixedIssues.push({ category: 'locked', title: 'Locked morning-core subject is placed after 12:00 PM', body: `${cell.className} / ${subject} is locked on ${cell.day} at ${getSlotLabel(cell.slotId, slots)}.` });
+      if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot)) {
+        fixedIssues.push({ category: 'locked', title: 'Locked morning-core subject is placed after lunch', body: `${cell.className} / ${subject} is locked on ${cell.day} at ${getSlotLabel(cell.slotId, slots)}.` });
       }
       const subjectMeta = subjectLegend.find((item) => item.subject === subject) || {
         subject,
@@ -1639,7 +1639,7 @@
       DAYS.forEach((day) => {
         searchState.slots.forEach((slot) => {
           if (!slot.isTeaching) return;
-          if (isMorningPrioritySubject(subject) && !slotEndsByNoon(slot)) return;
+          if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot)) return;
           if (searchState.grid[className][day][slot.id]?.type) return;
           if (searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id]) return;
           const slotIndex = slotIndexMap[slot.id];
@@ -1845,8 +1845,8 @@
             if (isFridayAfternoonClosure(day, slot)) {
               lockedViolations.push({ title: 'Friday afternoon block was used for teaching', body: `${className} / ${day} / ${getSlotLabel(slot.id, slots)}` });
             }
-            if (isMorningPrioritySubject(cell.subject) && !slotEndsByNoon(slot)) {
-              invalidPlacements.push({ title: 'Morning-core subject placed after 12:00 PM', body: `${className} / ${cell.subject} is scheduled on ${day} at ${getSlotLabel(slot.id, slots)}.` });
+            if (isMorningPrioritySubject(cell.subject) && !slotEndsBeforeLunch(slot)) {
+              invalidPlacements.push({ title: 'Morning-core subject placed after lunch', body: `${className} / ${cell.subject} is scheduled on ${day} at ${getSlotLabel(slot.id, slots)}.` });
             }
             if (!cell.teacherId) {
               invalidPlacements.push({ title: 'Teaching cell is missing a teacher', body: `${className} / ${day} / ${getSlotLabel(slot.id, slots)} / ${cell.subject || 'Unknown subject'}` });
@@ -2499,7 +2499,7 @@
     DAYS.forEach((day) => {
       (searchState.slots || []).forEach((slot) => {
         if (!slot.isTeaching) return;
-        if (isMorningPrioritySubject(subject) && !slotEndsByNoon(slot)) return;
+        if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot)) return;
         const existing = searchState.grid?.[className]?.[day]?.[slot.id] || null;
         const sameDayCount = searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0;
         if (sameDayCount >= distribution.dailyMax) return;
@@ -2984,7 +2984,7 @@
         slot.isTeaching &&
         !searchState.grid[className][day][slot.id]?.type &&
         !searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id] &&
-        (!isMorningPrioritySubject(subject) || slotEndsByNoon(slot))
+        (!isMorningPrioritySubject(subject) || slotEndsBeforeLunch(slot))
       )
     );
   }
@@ -2993,8 +2993,8 @@
     return MORNING_PRIORITY_SUBJECTS.has(normalizeSubjectName(subject));
   }
 
-  function slotEndsByNoon(slot) {
-    return parseTimeToMinutes(slot?.end) <= 12 * 60;
+  function slotEndsBeforeLunch(slot) {
+    return parseTimeToMinutes(slot?.end) <= 12 * 60 + 30;
   }
 
   function isFridayAfternoonClosure(day, slot) {
