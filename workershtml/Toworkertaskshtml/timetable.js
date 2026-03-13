@@ -4,6 +4,11 @@
   const TZ = 'Africa/Nairobi';
   const FALLBACK_LOGO = '../../images/somap-logo.png.jpg';
   const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+  const TERM_OPTIONS = [
+    { value: 'term1', label: 'Term 1' },
+    { value: 'term2', label: 'Term 2' },
+    { value: 'term3', label: 'Term 3' }
+  ];
   const GROUPS = {
     nursery_group: {
       id: 'nursery_group',
@@ -134,6 +139,7 @@
     generatedByGroup: {},
     previewByGroup: {},
     sourceConfigHash: '',
+    activeTerm: 'term1',
     activeGroupId: GROUP_ORDER[0],
     activeTab: 'overview',
     lastDownloadedAt: '',
@@ -157,10 +163,13 @@
     state.school = window.SOMAP.getSchool();
     state.schoolId = state.school?.id || 'socrates-school';
     state.year = normalizeYear(window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear());
+    state.activeTerm = resolveActiveTerm();
     state.workerId = resolveWorkerId();
     populateGroupSelector();
+    populateTermSelector();
     initBackLink();
     initYearBinding();
+    updateLocationContext();
     reloadAll({ reason: 'init', withAutoGenerate: true }).catch((error) => {
       console.error('Timetable init failed', error);
       toast('Unable to load timetable module.', 'error');
@@ -170,12 +179,12 @@
   function cacheElements() {
     [
       'backToTasks', 'schoolNameDisplay', 'currentYearLabel', 'school-logo-display', 'generatedStatusBadge',
-      'collisionStatusBadge', 'accessBadge', 'lastGeneratedValue', 'lastDownloadedValue', 'groupSelect', 'yearSelect',
+      'collisionStatusBadge', 'requirementSourceBadge', 'accessBadge', 'lastGeneratedValue', 'lastDownloadedValue', 'groupSelect', 'yearSelect', 'termSelect',
       'refreshButton', 'regenerateButton', 'generateAllButton', 'downloadPdfButton', 'downloadAllPdfButton',
       'printButton', 'alertStack', 'summaryTeachers', 'summaryTeachersFoot', 'summaryClasses', 'summaryClassesFoot',
       'summarySubjects', 'summarySubjectsFoot', 'summaryPeriods', 'summaryPeriodsFoot', 'summaryCollisions',
       'summaryCollisionsFoot', 'summaryValidation', 'summaryValidationFoot', 'overviewStatusChip', 'overviewHighlights',
-      'validationSummaryPanel', 'validationDetails', 'teacherClassFilter', 'teacherTableBody', 'settingsStatusChip',
+      'validationSummaryPanel', 'validationDetails', 'requirementAuditTableBody', 'classLoadAuditTableBody', 'teacherClassFilter', 'teacherTableBody', 'settingsStatusChip',
       'saveSettingsButton', 'addSlotButton', 'resetSlotsButton', 'slotEditor', 'periodRequirementsEditor',
       'subjectOptionsEditor', 'lockedCellsEditor', 'previewStatusChip', 'previewGenerateButton', 'saveDraftInvalidButton',
       'previewShell', 'pdfMetaPanel', 'printNotesPanel', 'pdfCurrentButton', 'pdfAllButton', 'pdfPrintButton'
@@ -190,8 +199,20 @@
     });
     els.groupSelect?.addEventListener('change', () => {
       state.activeGroupId = els.groupSelect.value || GROUP_ORDER[0];
+      updateLocationContext();
       renderAll();
       maybeAutoRegenerateCurrent('group-switch').catch((error) => console.warn('Auto-regeneration on group switch failed', error));
+    });
+    els.termSelect?.addEventListener('change', () => {
+      const nextTerm = normalizeTermKey(els.termSelect.value);
+      if (nextTerm === state.activeTerm) return;
+      state.activeTerm = nextTerm;
+      persistActiveTerm(nextTerm);
+      updateLocationContext();
+      reloadAll({ reason: 'term-change', withAutoGenerate: true }).catch((error) => {
+        console.error('Term reload failed', error);
+        toast('Unable to reload timetable for the selected term.', 'error');
+      });
     });
     els.teacherClassFilter?.addEventListener('change', renderTeacherTable);
     els.refreshButton?.addEventListener('click', () => reloadAll({ reason: 'manual-refresh', withAutoGenerate: true }));
@@ -222,7 +243,7 @@
     const schoolId = state.schoolId || (window.SOMAP?.getSchoolId?.() || 'socrates-school');
     const year = normalizeYear(window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear());
     if (els.backToTasks) {
-      els.backToTasks.href = `../workertasks.html?school=${encodeURIComponent(schoolId)}&year=${encodeURIComponent(year)}`;
+      els.backToTasks.href = `../workertasks.html?school=${encodeURIComponent(schoolId)}&year=${encodeURIComponent(year)}&term=${encodeURIComponent(state.activeTerm || 'term1')}`;
     }
   }
 
@@ -236,6 +257,8 @@
         const nextYear = normalizeYear(selectedYear);
         if (nextYear === state.year) return;
         state.year = nextYear;
+        persistActiveTerm(state.activeTerm);
+        updateLocationContext();
         reloadAll({ reason: 'year-change', withAutoGenerate: true }).catch((error) => {
           console.error('Year reload failed', error);
           toast('Unable to reload timetable for the selected year.', 'error');
@@ -266,6 +289,56 @@
     if (year && window.somapYearContext?.setSelectedYear) {
       window.somapYearContext.setSelectedYear(normalizeYear(year), { manual: false, forceDispatch: true });
     }
+  }
+
+  function populateTermSelector() {
+    if (!els.termSelect) return;
+    els.termSelect.innerHTML = TERM_OPTIONS.map((option) => `<option value="${escapeAttr(option.value)}">${escapeHtml(option.label)}</option>`).join('');
+    els.termSelect.value = normalizeTermKey(state.activeTerm);
+  }
+
+  function resolveActiveTerm() {
+    const params = new URLSearchParams(window.location.search || '');
+    const scopedKey = getTermPreferenceKey();
+    const candidates = [
+      params.get('term'),
+      sessionStorage.getItem(scopedKey),
+      localStorage.getItem(scopedKey),
+      sessionStorage.getItem('somap.activeTerm'),
+      localStorage.getItem('somap.activeTerm')
+    ];
+    const valid = candidates.find((value) => /^(term\s*[123]|[123])$/i.test(String(value || '').trim()));
+    return normalizeTermKey(valid);
+  }
+
+  function persistActiveTerm(termKey) {
+    const normalized = normalizeTermKey(termKey);
+    try {
+      localStorage.setItem('somap.activeTerm', normalized);
+      sessionStorage.setItem('somap.activeTerm', normalized);
+      localStorage.setItem(getTermPreferenceKey(), normalized);
+      sessionStorage.setItem(getTermPreferenceKey(), normalized);
+    } catch (error) {
+      console.warn('Unable to persist active term', error);
+    }
+  }
+
+  function updateLocationContext() {
+    persistActiveTerm(state.activeTerm);
+    if (!window.history?.replaceState) return;
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('school', state.schoolId || 'socrates-school');
+      url.searchParams.set('year', state.year || normalizeYear(new Date().getFullYear()));
+      url.searchParams.set('term', normalizeTermKey(state.activeTerm));
+      window.history.replaceState({}, '', url.toString());
+    } catch (error) {
+      console.warn('Unable to update timetable URL context', error);
+    }
+  }
+
+  function getTermPreferenceKey() {
+    return `somap.timetable.activeTerm.${state.schoolId || 'default'}.${state.year || 'current'}`;
   }
 
   async function reloadAll({ reason = 'refresh', withAutoGenerate = false } = {}) {
@@ -399,19 +472,24 @@
       const raw = snap.val() || {};
       Object.values(raw).forEach((bySubject) => {
         Object.values(bySubject || {}).forEach((byTerm) => {
-          Object.values(byTerm || {}).forEach((templates) => {
-            Object.values(templates || {}).forEach((template) => {
-              const className = normalizeClassName(template?.className || template?.classKey || '');
-              const subjectName = normalizeSubjectName(template?.subjectName || template?.subjectKey || '');
-              const hours = Number(template?.hoursPerWeek || 0);
-              const createdAt = Number(template?.meta?.createdAt || 0);
-              if (!className || !subjectName || hours <= 0) return;
-              map[className] = map[className] || {};
-              const existing = map[className][subjectName];
-              if (!existing || createdAt >= existing.createdAt) {
-                map[className][subjectName] = { hours, createdAt };
-              }
-            });
+          const templates = byTerm?.[state.activeTerm] || {};
+          Object.values(templates || {}).forEach((template) => {
+            const className = normalizeClassName(template?.className || template?.classKey || '');
+            const subjectName = normalizeSubjectName(template?.subjectName || template?.subjectKey || '');
+            const hours = Number(template?.hoursPerWeek || 0);
+            const createdAt = Number(template?.meta?.createdAt || 0);
+            if (!className || !subjectName || hours <= 0) return;
+            map[className] = map[className] || {};
+            const existing = map[className][subjectName];
+            if (!existing || createdAt >= existing.createdAt) {
+              map[className][subjectName] = {
+                hours,
+                createdAt,
+                termKey: state.activeTerm,
+                templateId: template?.templateId || '',
+                source: 'scheme'
+              };
+            }
           });
         });
       });
@@ -426,11 +504,18 @@
     const settingsEntries = {};
     const generatedEntries = {};
     await Promise.all(GROUP_ORDER.map(async (groupId) => {
+      const settingsPath = window.SOMAP.P(`years/${year}/timetable/settings/${state.activeTerm}/${groupId}`);
+      const generatedPath = window.SOMAP.P(`years/${year}/timetable/generated/${state.activeTerm}/${groupId}`);
       const [settingsSnap, generatedSnap] = await Promise.all([
-        state.db.ref(window.SOMAP.P(`years/${year}/timetable/settings/${groupId}`)).once('value'),
-        state.db.ref(window.SOMAP.P(`years/${year}/timetable/generated/${groupId}`)).once('value')
+        state.db.ref(settingsPath).once('value'),
+        state.db.ref(generatedPath).once('value')
       ]);
-      settingsEntries[groupId] = settingsSnap.exists() ? settingsSnap.val() : null;
+      if (settingsSnap.exists()) {
+        settingsEntries[groupId] = settingsSnap.val();
+      } else {
+        const legacySettingsSnap = await state.db.ref(window.SOMAP.P(`years/${year}/timetable/settings/${groupId}`)).once('value').catch(() => null);
+        settingsEntries[groupId] = legacySettingsSnap?.exists?.() ? legacySettingsSnap.val() : null;
+      }
       generatedEntries[groupId] = generatedSnap.exists() ? generatedSnap.val() : null;
     }));
     state.settingsByGroup = settingsEntries;
@@ -504,6 +589,8 @@
     const groupTeachers = getTeachersForGroup(groupId);
     if (els.groupSelect && els.groupSelect.value !== groupId) els.groupSelect.value = groupId;
     if (els.yearSelect && els.yearSelect.value !== state.year) els.yearSelect.value = state.year;
+    if (els.termSelect && els.termSelect.value !== state.activeTerm) els.termSelect.value = state.activeTerm;
+    initBackLink();
     renderAccessState();
     renderAlerts();
     renderSummary(settings, displayTimetable, groupTeachers);
@@ -543,6 +630,9 @@
     const groupId = state.activeGroupId;
     const settings = getActiveSettings();
     const generated = state.generatedByGroup[groupId];
+    const requirementRows = getRequirementAuditRows(groupId, settings, getDisplayTimetable(groupId));
+    const requirementSummary = summarizeRequirementSources(requirementRows);
+    const classLoadAudit = buildClassLoadAudit(groupId, settings, settings.slots || []);
     const alerts = [];
     if (generated && generated.sourceConfigHash && generated.sourceConfigHash !== state.sourceConfigHash) {
       alerts.push({
@@ -551,13 +641,20 @@
         body: 'Saved timetable data is older than the current teacher class and subject setup. The module is regenerating a fresh preview.'
       });
     }
-    if (settings.seededDefaults) {
+    if (requirementSummary.fallbackCount > 0) {
       alerts.push({
         type: 'warning',
-        title: 'Seeded default period requirements are active',
-        body: 'Review the weekly period counts before relying on the timetable as the final academic schedule.'
+        title: 'Default fallback requirements are still in use',
+        body: `${requirementSummary.fallbackCount} subject requirement(s) in ${termLabel(state.activeTerm)} are using default fallback values because no Scheme of Work hours were found for them.`
       });
     }
+    classLoadAudit.filter((row) => row.isOverloaded).forEach((row) => {
+      alerts.push({
+        type: 'danger',
+        title: `${row.className} is overloaded`,
+        body: `${row.className} requires ${row.requiredTotal} weekly periods, but only ${row.availableSlots} teaching slots exist. Subjects: ${row.subjectSummary}.`
+      });
+    });
     buildStaffingWarnings(groupId, settings).forEach((warning) => alerts.push({ type: 'danger', title: warning.title, body: warning.body }));
     if (!alerts.length) {
       alerts.push({
@@ -585,17 +682,20 @@
     setText(els.summaryPeriodsFoot, `${totalPeriods} required teaching periods this week`);
     setText(els.summaryCollisions, String(summary.collisions || 0));
     setText(els.summaryCollisionsFoot, summary.collisions ? 'Conflicts must be resolved before a valid save.' : 'Zero teacher collisions detected.');
-    const validationLabel = summary.isValid ? 'Valid' : (summary.unscheduled || summary.missingTeachers || summary.invalidPlacements || summary.lockedViolations ? 'Attention' : 'Draft');
+    const validationLabel = summary.isValid ? 'Valid' : (summary.requirementMismatches || summary.missingTeachers || summary.capacityIssues || summary.invalidPlacements || summary.lockedViolations ? 'Attention' : 'Draft');
     setText(els.summaryValidation, validationLabel);
-    setText(els.summaryValidationFoot, `Unscheduled ${summary.unscheduled || 0} | Missing teachers ${summary.missingTeachers || 0} | Invalid ${summary.invalidPlacements || 0}`);
+    setText(els.summaryValidationFoot, `Mismatches ${summary.requirementMismatches || 0} | Overloaded ${summary.capacityIssues || 0} | Missing teachers ${summary.missingTeachers || 0}`);
   }
 
   function renderOverview(settings, displayTimetable, groupTeachers) {
     const totalTeacherLoad = groupTeachers.reduce((sum, teacher) => sum + computeTeacherPotentialLoad(teacher, settings), 0);
+    const requirementRows = getRequirementAuditRows(state.activeGroupId, settings, displayTimetable);
+    const requirementSummary = summarizeRequirementSources(requirementRows);
     const overviewItems = [
       { title: 'Teacher workload', body: `${groupTeachers.length} active teachers are contributing a combined ${totalTeacherLoad} weekly periods in this group.` },
       { title: 'Teaching slots', body: `${countTeachingSlots(settings.slots)} teaching slots per day are available after fixed blocks are applied.` },
       { title: 'Manual locks', body: `${(settings.lockedCells || []).length} locked placements are preserved during regeneration.` },
+      { title: 'Requirement source', body: requirementSummary.fallbackCount ? `${requirementSummary.schemeCount} scheme-driven row(s), ${requirementSummary.fallbackCount} default fallback row(s) for ${termLabel(state.activeTerm)}.` : `All ${requirementSummary.schemeCount} requirement row(s) are scheme-driven for ${termLabel(state.activeTerm)}.` },
       { title: 'Source freshness', body: describeGeneratedFreshness(displayTimetable) }
     ];
     if (els.overviewHighlights) {
@@ -609,15 +709,19 @@
       els.overviewStatusChip.className = `tt-inline-status ${summary.isValid ? 'tt-pill--success' : 'tt-pill--warning'}`;
     }
     renderValidationReport(displayTimetable?.validation || buildEmptyValidation());
+    renderRequirementSourceAudit(requirementRows);
+    renderClassLoadAudit(displayTimetable?.validation?.classLoadAudit || buildClassLoadAudit(state.activeGroupId, settings, settings.slots || []));
+    renderRequirementSourceBadge(requirementSummary);
   }
 
   function renderValidationReport(validation) {
     if (!els.validationSummaryPanel || !els.validationDetails) return;
     const summaryCards = [
       ['Collisions', validation.summary.collisions],
-      ['Unscheduled', validation.summary.unscheduled],
+      ['Mismatches', validation.summary.requirementMismatches],
       ['Missing Teachers', validation.summary.missingTeachers],
-      ['Invalid Placements', validation.summary.invalidPlacements + validation.summary.lockedViolations]
+      ['Class Overload', validation.summary.capacityIssues],
+      ['Locked / Invalid', validation.summary.invalidPlacements + validation.summary.lockedViolations]
     ];
     els.validationSummaryPanel.innerHTML = summaryCards
       .map(([label, value]) => `<div class="tt-validation-card"><div>${escapeHtml(label)}</div><strong>${escapeHtml(String(value))}</strong></div>`)
@@ -830,6 +934,7 @@
     const summary = preview.validationSummary || blankValidationSummary();
     els.previewStatusChip.textContent = summary.isValid ? 'Valid preview ready' : 'Preview contains issues';
     els.previewStatusChip.className = `tt-inline-status ${summary.isValid ? 'tt-pill--success' : 'tt-pill--warning'}`;
+    const requirementRows = preview.validation?.requirementRows || getRequirementAuditRows(state.activeGroupId, getActiveSettings(), preview);
     els.previewShell.innerHTML = `
       <article class="tt-preview-document" id="printDocument">
         <div class="tt-preview-document__header">
@@ -843,12 +948,16 @@
           </div>
           <div class="tt-preview-document__meta">
             <div><strong>Academic Year:</strong> ${escapeHtml(state.year)}</div>
+            <div><strong>Active Term:</strong> ${escapeHtml(termLabel(preview.termKey || state.activeTerm))}</div>
             <div><strong>Generated:</strong> ${escapeHtml(formatDateTime(preview.generatedAt))}</div>
             <div><strong>Downloaded / Printed:</strong> ${escapeHtml(state.lastDownloadedAt || 'Not yet')}</div>
-            <div><strong>Status:</strong> ${escapeHtml(summary.isValid ? 'Valid - conflict free' : 'Review validation report')}</div>
+            <div><strong>Status:</strong> ${escapeHtml(summary.isValid ? 'VALID' : 'INVALID')}</div>
           </div>
         </div>
+        ${renderPreviewValidationBanner(preview.validation)}
         ${renderCombinedPreviewTable(preview)}
+        <div class="tt-card__eyebrow" style="margin-top:18px;">Requirement Source Audit</div>
+        ${renderAuditTableMarkup(requirementRows)}
         <div class="tt-card__eyebrow" style="margin-top:18px;">Teacher Legend</div>
         <div class="tt-legend-grid">
           ${(preview.teacherLegend || []).map((teacher) => `
@@ -944,8 +1053,9 @@
     const summary = display?.validationSummary || blankValidationSummary();
     els.pdfMetaPanel.innerHTML = `
       <div class="tt-inline-item"><strong>Current group</strong><div>${escapeHtml(GROUPS[state.activeGroupId].title)}</div></div>
+      <div class="tt-inline-item"><strong>Active term</strong><div>${escapeHtml(termLabel(state.activeTerm))}</div></div>
       <div class="tt-inline-item"><strong>Generated status</strong><div>${escapeHtml(describeGeneratedFreshness(display))}</div></div>
-      <div class="tt-inline-item"><strong>Validation</strong><div>${escapeHtml(summary.isValid ? 'Ready for official export' : 'PDF will include issue report')}</div></div>
+      <div class="tt-inline-item"><strong>Validation</strong><div>${escapeHtml(summary.isValid ? 'VALID - ready for official export' : 'INVALID - PDF will show exact issue rows')}</div></div>
     `;
     els.printNotesPanel.innerHTML = [
       'PDF exports use A4 landscape layout with school branding, group title, year, generation timestamp, teacher legend, and subject legend.',
@@ -1060,10 +1170,13 @@
     }
     renderAll();
     if (!silent) {
+      const overloadCount = payload.validation?.classLoadAudit?.filter((row) => row.isOverloaded).length || 0;
       toast(
         payload.validationSummary.isValid
           ? `${GROUPS[groupId].title} generated successfully without collisions.`
-          : `${GROUPS[groupId].title} generated with issues. Review the conflict report.`,
+          : overloadCount
+            ? `${GROUPS[groupId].title} is invalid. ${overloadCount} class load overload(s) were detected.`
+            : `${GROUPS[groupId].title} generated with issues. Review the exact requirement mismatch report.`,
         payload.validationSummary.isValid ? 'success' : 'warning'
       );
     }
@@ -1106,16 +1219,18 @@
     const payload = {
       ...normalized,
       groupId,
+      termKey: state.activeTerm,
+      termLabel: termLabel(state.activeTerm),
       classes: GROUPS[groupId].classes,
       fixedBlocks: (normalized.slots || []).filter((slot) => !slot.isTeaching).map((slot) => ({ slotId: slot.id, label: slot.label, start: slot.start, end: slot.end })),
       updatedAt: Date.now(),
       updatedBy: buildActor()
     };
-    await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/settings/${groupId}`)).set(payload);
+    await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/settings/${state.activeTerm}/${groupId}`)).set(payload);
   }
 
   async function persistGenerated(groupId, payload) {
-    await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/generated/${groupId}`)).set({
+    await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/generated/${state.activeTerm}/${groupId}`)).set({
       ...payload,
       isSaved: undefined
     });
@@ -1209,7 +1324,7 @@
     const teacherLegend = buildTeacherLegend(groupId, settings, teachers);
     const subjectLegend = buildSubjectLegend(groupId, settings);
     const teacherNumberMap = Object.fromEntries(teacherLegend.map((teacher) => [teacher.workerId, teacher.number]));
-    const candidateMap = buildCandidateTeacherMap(groupId, teachers);
+    const candidateMap = buildCandidateTeacherMap(groupId, teachers, settings);
     const initialGrid = createBaseGrid(group.classes, slots);
     const classOccupancy = {};
     const teacherOccupancy = {};
@@ -1218,6 +1333,7 @@
     const teacherEdgeLoad = {};
     const demand = cloneRequirementMap(settings.periodRequirements || {});
     const fixedIssues = [];
+    const classLoadAudit = buildClassLoadAudit(groupId, settings, slots);
 
     group.classes.forEach((className) => {
       classOccupancy[className] = {};
@@ -1234,6 +1350,14 @@
       DAYS.forEach((day) => {
         teacherOccupancy[teacher.workerId][day] = {};
         teacherDayLoad[teacher.workerId][day] = 0;
+      });
+    });
+
+    classLoadAudit.filter((row) => row.isOverloaded).forEach((row) => {
+      fixedIssues.push({
+        category: 'capacity',
+        title: 'Class weekly demand exceeds timetable capacity',
+        body: `${row.className} requires ${row.requiredTotal} weekly periods, but only ${row.availableSlots} teaching slots exist in the current timetable template. Subjects: ${row.subjectSummary}.`
       });
     });
 
@@ -1258,6 +1382,7 @@
       const openTeachingSlots = DAYS.reduce((sum, day) => sum + slots.filter((slot) => slot.isTeaching && !initialGrid[className][day][slot.id]?.type).length, 0);
       if (required > openTeachingSlots) {
         fixedIssues.push({
+          category: 'capacity',
           title: 'Weekly periods exceed available teaching slots',
           body: `${className} still needs ${required} periods, but only ${openTeachingSlots} teaching slots are open after fixed blocks and locked placements.`
         });
@@ -1281,7 +1406,7 @@
       teacherDayLoad,
       teacherEdgeLoad,
       nodesVisited: 0,
-      limit: 40000,
+      limit: Math.max(90000, computeDemandScore(demand) * 2200),
       bestGrid: null,
       bestDemandScore: Infinity,
       fixedIssues
@@ -1304,10 +1429,14 @@
       slots,
       classes: group.classes,
       grid: finalGrid,
+      groupId,
+      teachers,
       teacherLegend,
+      subjectLegend,
       candidateMap,
       lockedCells: settings.lockedCells || [],
-      fixedIssues
+      fixedIssues,
+      classLoadAudit
     });
 
     return {
@@ -1326,16 +1455,16 @@
     const slotIndexMap = Object.fromEntries(slots.map((slot, index) => [slot.id, index]));
     (settings.lockedCells || []).forEach((cell) => {
       if (!grid[cell.className] || !grid[cell.className][cell.day]) {
-        fixedIssues.push({ title: 'Locked placement points to an unknown class/day', body: `${cell.className} / ${cell.day} / ${cell.slotId}` });
+        fixedIssues.push({ category: 'locked', title: 'Locked placement points to an unknown class/day', body: `${cell.className} / ${cell.day} / ${cell.slotId}` });
         return;
       }
       const slot = slots.find((entry) => entry.id === cell.slotId);
       if (!slot) {
-        fixedIssues.push({ title: 'Locked placement points to an unknown slot', body: `${cell.className} / ${cell.day} / ${cell.slotId}` });
+        fixedIssues.push({ category: 'locked', title: 'Locked placement points to an unknown slot', body: `${cell.className} / ${cell.day} / ${cell.slotId}` });
         return;
       }
       if (getAutoFixedCell(slot, cell.day) && cell.type !== 'fixed') {
-        fixedIssues.push({ title: 'Locked teaching cell is inside a fixed timetable block', body: `${cell.className} / ${cell.day} / ${getSlotLabel(cell.slotId, slots)}` });
+        fixedIssues.push({ category: 'locked', title: 'Locked teaching cell is inside a fixed timetable block', body: `${cell.className} / ${cell.day} / ${getSlotLabel(cell.slotId, slots)}` });
         return;
       }
       if (cell.type === 'fixed' || !slot.isTeaching) {
@@ -1347,10 +1476,10 @@
       const teacherId = String(cell.teacherId || '').trim();
       const candidateTeachers = candidateMap[cell.className]?.[subject] || [];
       if (!candidateTeachers.some((teacher) => teacher.workerId === teacherId)) {
-        fixedIssues.push({ title: 'Locked teaching cell uses an invalid teacher assignment', body: `${cell.className} / ${cell.day} / ${getSlotLabel(cell.slotId, slots)} / ${subject || 'Unknown subject'}` });
+        fixedIssues.push({ category: 'locked', title: 'Locked teaching cell uses an invalid teacher assignment', body: `${cell.className} / ${cell.day} / ${getSlotLabel(cell.slotId, slots)} / ${subject || 'Unknown subject'}` });
       }
       if (isMorningPrioritySubject(subject) && !slotEndsByNoon(slot)) {
-        fixedIssues.push({ title: 'Locked morning-core subject is placed after 12:00 PM', body: `${cell.className} / ${subject} is locked on ${cell.day} at ${getSlotLabel(cell.slotId, slots)}.` });
+        fixedIssues.push({ category: 'locked', title: 'Locked morning-core subject is placed after 12:00 PM', body: `${cell.className} / ${subject} is locked on ${cell.day} at ${getSlotLabel(cell.slotId, slots)}.` });
       }
       const subjectMeta = subjectLegend.find((item) => item.subject === subject) || {
         subject,
@@ -1381,7 +1510,7 @@
       if (demand[cell.className]?.[subject] > 0) {
         demand[cell.className][subject] -= 1;
       } else {
-        fixedIssues.push({ title: 'Locked teaching cell exceeds configured weekly requirement', body: `${cell.className} / ${subject} is locked more times than required.` });
+        fixedIssues.push({ category: 'locked', title: 'Locked teaching cell exceeds configured weekly requirement', body: `${cell.className} / ${subject} is locked more times than required.` });
       }
     });
   }
@@ -1470,13 +1599,10 @@
     Object.entries(searchState.demand || {}).forEach(([className, bucket]) => {
       Object.entries(bucket || {}).forEach(([subject, remaining]) => {
         if (remaining <= 0) return;
-        const coveredDaySet = new Set(DAYS.filter((day) => (searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0) > 0));
-        const schedulableDays = countSchedulableDays(searchState, className, subject);
-        const targetDays = Math.min(
-          Number(searchState.settings?.periodRequirements?.[className]?.[subject] || 0),
-          schedulableDays,
-          DAYS.length
-        );
+        const distribution = getSubjectDistributionConfig(searchState, className, subject);
+        const coveredDaySet = distribution.coveredDaySet;
+        const schedulableDays = distribution.availableDaySet.size;
+        const targetDays = distribution.targetDistinctDays;
         if (targetDays <= 1 || coveredDaySet.size >= targetDays) return;
         targets.push({
           className,
@@ -1507,6 +1633,8 @@
     const slotIndexMap = Object.fromEntries(searchState.slots.map((slot, index) => [slot.id, index]));
     const remainingForSubject = Number(searchState.demand?.[className]?.[subject] || 0);
     const unusedSchedulableDays = countUnusedSchedulableDays(searchState, className, subject);
+    const distribution = getSubjectDistributionConfig(searchState, className, subject);
+    const needsAdditionalCoverage = distribution.coveredDaySet.size < distribution.targetDistinctDays;
     (searchState.candidateMap[className]?.[subject] || []).forEach((teacher) => {
       DAYS.forEach((day) => {
         searchState.slots.forEach((slot) => {
@@ -1516,15 +1644,15 @@
           if (searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id]) return;
           const slotIndex = slotIndexMap[slot.id];
           const sameDayCount = searchState.classSubjectDayCount[className][day][subject] || 0;
+          if (sameDayCount >= distribution.dailyMax) return;
           if (sameDayCount > 0 && remainingForSubject <= unusedSchedulableDays) return;
           const teacherLoad = searchState.teacherDayLoad[teacher.workerId]?.[day] || 0;
           const edgePenalty = slotIndex === 0
             ? (searchState.teacherEdgeLoad[teacher.workerId]?.first || 0)
             : (slotIndex === searchState.slots.length - 1 ? (searchState.teacherEdgeLoad[teacher.workerId]?.last || 0) : 0);
           const earlyBias = CORE_SUBJECTS.has(subject) ? slotIndex * 2 : slotIndex;
-          const uncoveredDaysNeeded = Math.min(remainingForSubject, DAYS.length);
-          const uncoveredDayBonus = sameDayCount > 0 ? 34 : -16;
-          const dayCoveragePressure = uncoveredDaysNeeded > unusedSchedulableDays ? -12 : 0;
+          const uncoveredDayBonus = needsAdditionalCoverage && sameDayCount === 0 ? -30 : (sameDayCount > 0 ? 28 : -6);
+          const dayCoveragePressure = needsAdditionalCoverage && sameDayCount > 0 ? 26 : 0;
           const subjectMeta = searchState.subjectLegend.find((item) => item.subject === subject) || { abbreviation: makeSubjectAbbreviation(subject), color: '#dbeafe' };
           placements.push({
             className,
@@ -1535,7 +1663,7 @@
             slotId: slot.id,
             abbreviation: subjectMeta.abbreviation,
             color: subjectMeta.color,
-            score: sameDayCount * 24 + teacherLoad * 4 + edgePenalty * 3 + earlyBias + uncoveredDayBonus + dayCoveragePressure
+            score: sameDayCount * 20 + teacherLoad * 4 + edgePenalty * 3 + earlyBias + uncoveredDayBonus + dayCoveragePressure
           });
         });
       });
@@ -1573,7 +1701,7 @@
   }
 
   function repairRemainingDemand({ groupId, settings, slots, teachers, teacherLegend, subjectLegend, initialGrid }) {
-    const repairState = rebuildSchedulingStateFromGrid({
+    let repairState = rebuildSchedulingStateFromGrid({
       groupId,
       settings,
       slots,
@@ -1582,6 +1710,22 @@
       subjectLegend,
       grid: initialGrid
     });
+    repairState.limit = Math.max(25000, computeDemandScore(repairState.demand) * 1400);
+    repairState.bestGrid = deepClone(repairState.grid);
+    repairState.bestDemandScore = computeDemandScore(repairState.demand);
+    seedDistinctDayCoverage(repairState);
+    const repaired = searchSchedule(repairState);
+    if (!repaired && repairState.bestGrid) {
+      repairState = rebuildSchedulingStateFromGrid({
+        groupId,
+        settings,
+        slots,
+        teachers,
+        teacherLegend,
+        subjectLegend,
+        grid: deepClone(repairState.bestGrid)
+      });
+    }
     let progress = true;
     while (progress) {
       progress = false;
@@ -1595,7 +1739,7 @@
 
   function rebuildSchedulingStateFromGrid({ groupId, settings, slots, teachers, teacherLegend, subjectLegend, grid }) {
     const demand = cloneRequirementMap(settings.periodRequirements || {});
-    const candidateMap = buildCandidateTeacherMap(groupId, teachers);
+    const candidateMap = buildCandidateTeacherMap(groupId, teachers, settings);
     const teacherNumberMap = Object.fromEntries((teacherLegend || []).map((teacher) => [teacher.workerId, teacher.number]));
     const classOccupancy = {};
     const teacherOccupancy = {};
@@ -1672,12 +1816,14 @@
     };
   }
 
-  function validateTimetable({ settings, slots, classes, grid, teacherLegend, candidateMap, lockedCells, fixedIssues }) {
+  function validateTimetable({ settings, slots, classes, grid, groupId, teachers, teacherLegend, subjectLegend, candidateMap, lockedCells, fixedIssues, classLoadAudit }) {
     const collisions = [];
     const missingTeachers = [];
     const unscheduled = [];
     const invalidPlacements = [];
     const lockedViolations = [];
+    const capacityIssues = [];
+    const requirementRows = [];
     const teacherSeen = {};
     const actualCounts = {};
     const lockedMap = {};
@@ -1714,7 +1860,8 @@
             if (!(candidateMap[className]?.[normalizeSubjectName(cell.subject)] || []).some((teacher) => teacher.workerId === cell.teacherId)) {
               invalidPlacements.push({ title: 'Teacher is not assigned to this class + subject', body: `${className} / ${cell.subject} / ${state.teacherMap[cell.teacherId]?.name || cell.teacherId || 'Unknown teacher'}` });
             }
-            actualCounts[className][cell.subject] = (actualCounts[className][cell.subject] || 0) + 1;
+            const normalizedSubject = normalizeSubjectName(cell.subject);
+            actualCounts[className][normalizedSubject] = (actualCounts[className][normalizedSubject] || 0) + 1;
           }
           const lock = lockedMap[`${className}|${day}|${slot.id}`];
           if (lock) {
@@ -1729,18 +1876,75 @@
       });
     });
 
-    fixedIssues.forEach((issue) => lockedViolations.push(issue));
+    (classLoadAudit || []).filter((row) => row.isOverloaded).forEach((row) => {
+      capacityIssues.push({
+        title: 'Class load is impossible under the current template',
+        body: `${row.className} requires ${row.requiredTotal} weekly periods, but only ${row.availableSlots} teaching slots exist in this timetable template. Subjects: ${row.subjectSummary}.`
+      });
+    });
+
+    const analysisState = rebuildSchedulingStateFromGrid({
+      groupId,
+      settings,
+      slots,
+      teachers,
+      teacherLegend,
+      subjectLegend,
+      grid: deepClone(grid)
+    });
+
+    fixedIssues.forEach((issue) => {
+      if (issue?.category === 'capacity') {
+        capacityIssues.push({ title: issue.title, body: issue.body });
+        return;
+      }
+      if (issue?.category === 'invalid') {
+        invalidPlacements.push({ title: issue.title, body: issue.body });
+        return;
+      }
+      lockedViolations.push({ title: issue.title, body: issue.body });
+    });
+
     Object.entries(settings.periodRequirements || {}).forEach(([className, bucket]) => {
       Object.entries(bucket || {}).forEach(([subject, required]) => {
-        const actual = actualCounts[className]?.[subject] || 0;
-        if (!(candidateMap[className]?.[subject] || []).length && required > 0) {
-          missingTeachers.push({ title: 'No teacher can staff a required subject', body: `${className} / ${subject} requires ${required} period(s), but no configured teacher is assigned.` });
+        const normalizedSubject = normalizeSubjectName(subject);
+        const actual = actualCounts[className]?.[normalizedSubject] || 0;
+        const candidateTeachersForSubject = candidateMap[className]?.[normalizedSubject] || [];
+        const loadAuditRow = (classLoadAudit || []).find((row) => row.className === className) || null;
+        const blocker = classifyRequirementGap({
+          analysisState,
+          settings,
+          className,
+          subject: normalizedSubject,
+          required,
+          scheduled: actual,
+          candidateTeachers: candidateTeachersForSubject,
+          classLoadAudit: loadAuditRow
+        });
+
+        if (!candidateTeachersForSubject.length && required > 0) {
+          missingTeachers.push({ title: 'No teacher can staff a required subject', body: `${className} / ${normalizedSubject}: required ${required}, scheduled ${actual}, missing ${Math.max(required - actual, 0)}. Blocker: No teacher assigned.` });
         }
         if (actual < required) {
-          unscheduled.push({ title: 'Required periods are not fully scheduled', body: `${className} / ${subject}: scheduled ${actual} of ${required}.` });
+          unscheduled.push({
+            title: 'Required periods are not fully scheduled',
+            body: `${className} / ${normalizedSubject}: required ${required}, scheduled ${actual}, missing ${required - actual}. Blocker: ${blocker.detail}`
+          });
         } else if (actual > required) {
-          invalidPlacements.push({ title: 'Scheduled periods exceed requirement', body: `${className} / ${subject}: scheduled ${actual} of ${required}.` });
+          invalidPlacements.push({
+            title: 'Scheduled periods exceed requirement',
+            body: `${className} / ${normalizedSubject}: required ${required}, scheduled ${actual}, extra ${actual - required}.`
+          });
         }
+        requirementRows.push(buildRequirementRow({
+          settings,
+          className,
+          subject: normalizedSubject,
+          required,
+          scheduled: actual,
+          candidateTeachers: candidateTeachersForSubject,
+          blocker
+        }));
       });
     });
     const summary = {
@@ -1749,9 +1953,11 @@
       missingTeachers: missingTeachers.length,
       invalidPlacements: invalidPlacements.length,
       lockedViolations: lockedViolations.length,
-      isValid: !(collisions.length || unscheduled.length || missingTeachers.length || invalidPlacements.length || lockedViolations.length)
+      capacityIssues: capacityIssues.length,
+      requirementMismatches: requirementRows.filter((row) => row.delta !== 0).length,
+      isValid: !(collisions.length || unscheduled.length || missingTeachers.length || invalidPlacements.length || lockedViolations.length || capacityIssues.length)
     };
-    return { summary, collisions, unscheduled, missingTeachers, invalidPlacements, lockedViolations };
+    return { summary, collisions, unscheduled, missingTeachers, invalidPlacements, lockedViolations, capacityIssues, requirementRows, classLoadAudit: classLoadAudit || [] };
   }
 
   function buildGeneratedPayload(groupId, settings, teachers, engineResult, isSaved) {
@@ -1759,6 +1965,8 @@
     return {
       groupId,
       year: state.year,
+      termKey: state.activeTerm,
+      termLabel: termLabel(state.activeTerm),
       schoolId: state.schoolId,
       schoolName: state.school?.name || state.schoolId,
       groupTitle: GROUPS[groupId].title,
@@ -1778,6 +1986,9 @@
       unscheduled: engineResult.validation.unscheduled,
       invalidPlacements: engineResult.validation.invalidPlacements,
       lockedViolations: engineResult.validation.lockedViolations,
+      capacityIssues: engineResult.validation.capacityIssues,
+      requirementAudit: engineResult.validation.requirementRows,
+      classLoadAudit: engineResult.validation.classLoadAudit,
       sourceTeacherCount: teachers.length,
       sourceConfigHash: state.sourceConfigHash,
       status: validationSummary.isValid ? 'valid' : 'draft-invalid',
@@ -1809,12 +2020,13 @@
 
   async function ensureTimetableForExport(groupId) {
     let timetable = getDisplayTimetable(groupId);
-    if (timetable) return timetable;
+    if (timetable && timetable.termKey === state.activeTerm && timetable.sourceConfigHash === state.sourceConfigHash) return timetable;
     if (state.viewer.canManage) {
       timetable = await generateGroup(groupId, { saveMode: 'validOnly', silent: true, openPreview: false });
       return timetable;
     }
-    toast(`${GROUPS[groupId].title} has no generated timetable yet.`, 'warning');
+    if (timetable) return timetable;
+    toast(`${GROUPS[groupId].title} has no current ${termLabel(state.activeTerm)} timetable yet.`, 'warning');
     return null;
   }
 
@@ -1829,7 +2041,7 @@
     groupIds.forEach((groupId, index) => {
       const timetable = timetables[index];
       if (index > 0) doc.addPage();
-      drawPdfHeader(doc, logoData, groupId, timetable);
+      const tableStartY = drawPdfHeader(doc, logoData, groupId, timetable);
       const head = [['Day', 'Class', ...timetable.slots.map((slot) => `${slot.start}-${slot.end}`)]];
       const body = [];
       DAYS.forEach((day) => {
@@ -1843,7 +2055,7 @@
         });
       });
       doc.autoTable({
-        startY: 96,
+        startY: tableStartY,
         head,
         body,
         theme: 'grid',
@@ -1879,14 +2091,16 @@
       });
       drawPdfLegend(doc, timetable, doc.internal.pageSize.getHeight() - 58);
     });
-    doc.save(`${slugify(state.school?.name || state.schoolId || 'school')}_general_timetable_${state.year}.pdf`);
+    doc.save(`${slugify(state.school?.name || state.schoolId || 'school')}_general_timetable_${state.year}_${normalizeTermKey(state.activeTerm)}.pdf`);
     noteExportAction('PDF downloaded');
   }
 
   function drawPdfHeader(doc, logoData, groupId, timetable) {
     const pageWidth = doc.internal.pageSize.getWidth();
+    const validationLines = buildPdfValidationLines(timetable);
+    const headerHeight = 60 + (validationLines.length ? 16 + validationLines.length * 9 : 0);
     doc.setFillColor(248, 251, 255);
-    doc.roundedRect(18, 16, pageWidth - 36, 60, 12, 12, 'F');
+    doc.roundedRect(18, 16, pageWidth - 36, headerHeight, 12, 12, 'F');
     if (logoData) {
       try { doc.addImage(logoData, 'PNG', 28, 24, 34, 34); } catch (error) {}
     }
@@ -1897,9 +2111,22 @@
     doc.text('GENERAL SCHOOL TIMETABLE', 74, 52);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8.5);
-    doc.text(`Year ${state.year} | ${GROUPS[groupId].title}`, 74, 67);
+    doc.text(`Year ${state.year} | ${termLabel(timetable.termKey || state.activeTerm)} | ${GROUPS[groupId].title}`, 74, 67);
     doc.text(`Generated ${formatDateTime(timetable.generatedAt)} | Downloaded ${formatDateTime(Date.now())}`, pageWidth - 278, 36);
-    doc.text(`Validation: ${timetable.validationSummary.isValid ? 'Valid / Conflict free' : 'Contains issues'}`, pageWidth - 278, 52);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`VALIDATION: ${timetable.validationSummary.isValid ? 'VALID' : 'INVALID'}`, pageWidth - 278, 52);
+    doc.setFont('helvetica', 'normal');
+    let cursorY = 67;
+    if (validationLines.length) {
+      doc.setFontSize(7.4);
+      doc.text('Requirement summary:', pageWidth - 278, cursorY);
+      cursorY += 10;
+      validationLines.forEach((line) => {
+        doc.text(line, pageWidth - 278, cursorY, { maxWidth: 250 });
+        cursorY += 9;
+      });
+    }
+    return 96 + (validationLines.length ? validationLines.length * 8 + 10 : 0);
   }
 
   function drawPdfLegend(doc, timetable, startY) {
@@ -2017,11 +2244,11 @@
     }));
   }
 
-  function buildCandidateTeacherMap(groupId, teachers) {
+  function buildCandidateTeacherMap(groupId, teachers, settings = getSettingsForGroup(groupId)) {
     const map = {};
     GROUPS[groupId].classes.forEach((className) => {
       map[className] = {};
-      getSubjectsForClass(groupId, className, getSettingsForGroup(groupId)).forEach((subject) => {
+      getSubjectsForClass(groupId, className, settings).forEach((subject) => {
         map[className][subject] = teachers.filter((teacher) =>
           teacher.classSubjectMappings.some((mapping) =>
             normalizeClassName(mapping.class) === className &&
@@ -2047,6 +2274,270 @@
       });
     });
     return warnings;
+  }
+
+  function renderRequirementSourceBadge(summary) {
+    if (!els.requirementSourceBadge) return;
+    if (summary.fallbackCount > 0) {
+      els.requirementSourceBadge.textContent = `Default fallback requirements active for ${summary.fallbackCount} subject(s)`;
+      els.requirementSourceBadge.className = 'tt-pill tt-pill--warning';
+      return;
+    }
+    els.requirementSourceBadge.textContent = 'Scheme-driven requirements active';
+    els.requirementSourceBadge.className = 'tt-pill tt-pill--success';
+  }
+
+  function renderRequirementSourceAudit(rows) {
+    if (!els.requirementAuditTableBody) return;
+    els.requirementAuditTableBody.innerHTML = rows.length
+      ? rows.map((row) => renderRequirementAuditRow(row)).join('')
+      : '<tr><td colspan="8" class="tt-table__empty">No requirement rows are available for this group.</td></tr>';
+  }
+
+  function renderClassLoadAudit(rows) {
+    if (!els.classLoadAuditTableBody) return;
+    els.classLoadAuditTableBody.innerHTML = rows.length
+      ? rows.map((row) => `
+          <tr>
+            <td>${escapeHtml(row.className)}</td>
+            <td>${escapeHtml(String(row.requiredTotal))}</td>
+            <td>${escapeHtml(String(row.availableSlots))}</td>
+            <td>${escapeHtml(row.difference > 0 ? `+${row.difference}` : String(row.difference))}</td>
+            <td>${renderStatusBadge(row.isOverloaded ? 'danger' : 'success', row.isOverloaded ? 'OVERLOADED' : 'OK')}</td>
+            <td>${escapeHtml(row.subjectSummary || '-')}</td>
+          </tr>
+        `).join('')
+      : '<tr><td colspan="6" class="tt-table__empty">No class load audit is available for this group.</td></tr>';
+  }
+
+  function renderRequirementAuditRow(row) {
+    const status = formatRequirementStatus(row);
+    return `
+      <tr>
+        <td>${escapeHtml(row.className)}</td>
+        <td>${escapeHtml(row.subject)}</td>
+        <td>${escapeHtml(row.termLabel)}</td>
+        <td>${escapeHtml(String(row.required))}</td>
+        <td>${escapeHtml(row.sourceLabel)}</td>
+        <td>${escapeHtml(row.assignedTeachers.length ? row.assignedTeachers.join(', ') : 'No teacher')}</td>
+        <td>${escapeHtml(String(row.scheduled))}</td>
+        <td>${renderStatusBadge(status.tone, status.label)}</td>
+      </tr>
+    `;
+  }
+
+  function renderAuditTableMarkup(rows) {
+    if (!rows.length) return '<div class="tt-preview-empty">No requirement audit rows are available.</div>';
+    return `
+      <div class="tt-table-wrap">
+        <table class="tt-table tt-table--compact">
+          <thead>
+            <tr>
+              <th>Class</th>
+              <th>Subject</th>
+              <th>Term</th>
+              <th>Required</th>
+              <th>Source</th>
+              <th>Teacher(s)</th>
+              <th>Scheduled</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => renderRequirementAuditRow(row)).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderPreviewValidationBanner(validation) {
+    const lines = buildPdfValidationLines({ validation });
+    if (!lines.length) {
+      return '<div class="tt-validation-banner tt-validation-banner--valid">VALIDATION: VALID</div>';
+    }
+    return `
+      <div class="tt-validation-banner tt-validation-banner--invalid">
+        <strong>VALIDATION: INVALID</strong>
+        <div>${escapeHtml(lines.join(' | '))}</div>
+      </div>
+    `;
+  }
+
+  function renderStatusBadge(tone, label) {
+    const toneClass = tone === 'danger' ? 'tt-pill--danger' : (tone === 'warning' ? 'tt-pill--warning' : 'tt-pill--success');
+    return `<span class="tt-pill ${toneClass} tt-pill--dense">${escapeHtml(label)}</span>`;
+  }
+
+  function getRequirementAuditRows(groupId, settings, timetable) {
+    const rows = timetable?.validation?.requirementRows;
+    if (Array.isArray(rows) && rows.length) return rows.slice().sort(compareRequirementRows);
+    const candidateMap = buildCandidateTeacherMap(groupId, getTeachersForGroup(groupId), settings);
+    const fallbackRows = [];
+    Object.entries(settings.periodRequirements || {}).forEach(([className, bucket]) => {
+      Object.entries(bucket || {}).forEach(([subject, required]) => {
+        fallbackRows.push(buildRequirementRow({
+          settings,
+          className,
+          subject,
+          required,
+          scheduled: 0,
+          candidateTeachers: candidateMap[className]?.[subject] || [],
+          blocker: { code: required > 0 ? 'not_generated' : 'ok', detail: required > 0 ? 'No current timetable has been generated yet.' : 'No required periods.' }
+        }));
+      });
+    });
+    return fallbackRows.sort(compareRequirementRows);
+  }
+
+  function summarizeRequirementSources(rows) {
+    return rows.reduce((acc, row) => {
+      if (row.source === 'scheme') acc.schemeCount += 1;
+      else acc.fallbackCount += 1;
+      return acc;
+    }, { schemeCount: 0, fallbackCount: 0 });
+  }
+
+  function buildClassLoadAudit(groupId, settings, slots) {
+    return GROUPS[groupId].classes.map((className) => {
+      const subjectEntries = Object.entries(settings.periodRequirements?.[className] || {})
+        .map(([subject, count]) => [subject, Math.max(0, Number(count) || 0)])
+        .filter(([, count]) => count > 0)
+        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+      const requiredTotal = subjectEntries.reduce((sum, [, count]) => sum + count, 0);
+      const availableSlots = countClassWeeklyTeachingCapacity(className, settings, slots);
+      const difference = availableSlots - requiredTotal;
+      return {
+        className,
+        requiredTotal,
+        availableSlots,
+        difference,
+        isOverloaded: requiredTotal > availableSlots,
+        subjectSummary: subjectEntries.map(([subject, count]) => `${subject} ${count}`).join(', ')
+      };
+    });
+  }
+
+  function countClassWeeklyTeachingCapacity(className, settings, slots) {
+    const lockedFixed = new Set((settings.lockedCells || [])
+      .filter((cell) => cell.className === className && cell.type === 'fixed')
+      .map((cell) => `${cell.day}|${cell.slotId}`));
+    let count = 0;
+    DAYS.forEach((day) => {
+      (slots || []).forEach((slot) => {
+        if (!slot?.isTeaching) return;
+        if (getAutoFixedCell(slot, day)) return;
+        if (lockedFixed.has(`${day}|${slot.id}`)) return;
+        count += 1;
+      });
+    });
+    return count;
+  }
+
+  function buildRequirementRow({ settings, className, subject, required, scheduled, candidateTeachers, blocker }) {
+    const sourceMeta = settings.requirementSources?.[className]?.[subject] || { source: 'default', label: 'Default fallback', termKey: state.activeTerm };
+    return {
+      className,
+      subject,
+      termKey: sourceMeta.termKey || state.activeTerm,
+      termLabel: termLabel(sourceMeta.termKey || state.activeTerm),
+      required: Math.max(0, Number(required) || 0),
+      scheduled: Math.max(0, Number(scheduled) || 0),
+      delta: Math.max(0, Number(scheduled) || 0) - Math.max(0, Number(required) || 0),
+      source: sourceMeta.source || 'default',
+      sourceLabel: sourceMeta.label || 'Default fallback',
+      assignedTeachers: (candidateTeachers || []).map((teacher) => teacher.name).filter(Boolean),
+      blockerCode: blocker?.code || 'ok',
+      blockerDetail: blocker?.detail || 'Requirement fully scheduled.'
+    };
+  }
+
+  function formatRequirementStatus(row) {
+    if (row.delta === 0) return { tone: 'success', label: 'OK' };
+    if (row.delta > 0) return { tone: 'warning', label: `Extra ${row.delta}` };
+    const missing = Math.abs(row.delta);
+    const labelByCode = {
+      no_teacher: `Missing ${missing} | No teacher`,
+      class_overload: `Missing ${missing} | Class overloaded`,
+      teacher_collision: `Missing ${missing} | Teacher collision`,
+      manual_lock_conflict: `Missing ${missing} | Manual lock conflict`,
+      solver_incomplete: `Missing ${missing} | Solver incomplete`,
+      not_generated: `Missing ${missing} | Not generated`,
+      no_free_valid_slot: `Missing ${missing} | No free valid slot`
+    };
+    return { tone: 'danger', label: labelByCode[row.blockerCode] || `Missing ${missing}` };
+  }
+
+  function classifyRequirementGap({ analysisState, settings, className, subject, required, scheduled, candidateTeachers, classLoadAudit }) {
+    if (scheduled === required) return { code: 'ok', detail: 'Requirement fully scheduled.' };
+    if (scheduled > required) return { code: 'overscheduled', detail: 'More periods were scheduled than required.' };
+    if (!(candidateTeachers || []).length) return { code: 'no_teacher', detail: 'No teacher is assigned to this class and subject.' };
+    if (classLoadAudit?.isOverloaded) {
+      return {
+        code: 'class_overload',
+        detail: `${className} requires ${classLoadAudit.requiredTotal} weekly periods, but only ${classLoadAudit.availableSlots} teaching slots exist in the current timetable template.`
+      };
+    }
+    const placements = collectPlacements(analysisState, className, subject);
+    if (placements.length) {
+      return { code: 'solver_incomplete', detail: 'Valid placements still exist, so the solver stopped before meeting the full weekly requirement.' };
+    }
+    const diagnostics = collectPlacementDiagnostics(analysisState, settings, className, subject);
+    if (diagnostics.openClassSlotsIgnoringTeacher > 0) {
+      return { code: 'teacher_collision', detail: 'Open class slots exist, but the assigned teachers are already occupied in those times.' };
+    }
+    if (diagnostics.lockedOrFixedBlocks > 0) {
+      return { code: 'manual_lock_conflict', detail: 'Locked placements or fixed blocks consume the remaining valid slots.' };
+    }
+    return { code: 'no_free_valid_slot', detail: 'No free valid slot remains under the current timetable rules.' };
+  }
+
+  function collectPlacementDiagnostics(searchState, settings, className, subject) {
+    const distribution = getSubjectDistributionConfig(searchState, className, subject);
+    let openClassSlotsIgnoringTeacher = 0;
+    let lockedOrFixedBlocks = 0;
+    DAYS.forEach((day) => {
+      (searchState.slots || []).forEach((slot) => {
+        if (!slot.isTeaching) return;
+        if (isMorningPrioritySubject(subject) && !slotEndsByNoon(slot)) return;
+        const existing = searchState.grid?.[className]?.[day]?.[slot.id] || null;
+        const sameDayCount = searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0;
+        if (sameDayCount >= distribution.dailyMax) return;
+        if (existing?.type) {
+          if (existing.type === 'fixed' || existing.locked || (settings.lockedCells || []).some((cell) => cell.className === className && cell.day === day && cell.slotId === slot.id)) {
+            lockedOrFixedBlocks += 1;
+          }
+          return;
+        }
+        openClassSlotsIgnoringTeacher += 1;
+      });
+    });
+    return { openClassSlotsIgnoringTeacher, lockedOrFixedBlocks };
+  }
+
+  function compareRequirementRows(left, right) {
+    const byClass = normalizeClassSortKey(left.className).localeCompare(normalizeClassSortKey(right.className), 'en', { sensitivity: 'base' });
+    if (byClass !== 0) return byClass;
+    return `${left.subject}`.localeCompare(`${right.subject}`, 'en', { sensitivity: 'base' });
+  }
+
+  function buildPdfValidationLines(timetable) {
+    const validation = timetable?.validation || {};
+    const lines = [];
+    (validation.requirementRows || [])
+      .filter((row) => row.delta !== 0)
+      .slice(0, 4)
+      .forEach((row) => {
+        if (row.delta < 0) {
+          lines.push(`${row.className} / ${row.subject}: required ${row.required}, scheduled ${row.scheduled}, missing ${Math.abs(row.delta)}`);
+        } else {
+          lines.push(`${row.className} / ${row.subject}: required ${row.required}, scheduled ${row.scheduled}, extra ${row.delta}`);
+        }
+      });
+    if (!lines.length) {
+      (validation.capacityIssues || []).slice(0, 2).forEach((issue) => lines.push(issue.body));
+    }
+    return lines.slice(0, 4);
   }
 
   function getTeacherSubjectsInGroup(teacher, groupId) {
@@ -2100,10 +2591,13 @@
       isTeaching: slot.isTeaching !== false
     })));
     const periodRequirements = {};
+    const requirementSources = {};
     GROUPS[groupId].classes.forEach((className) => {
       periodRequirements[className] = {};
+      requirementSources[className] = {};
       getSubjectsForClass(groupId, className, { periodRequirements: input.periodRequirements || defaults.periodRequirements || {} }).forEach((subject) => {
-        const schemeHours = Number(state.schemeHoursByClass?.[className]?.[subject]?.hours || 0);
+        const schemeMeta = state.schemeHoursByClass?.[className]?.[subject] || null;
+        const schemeHours = Number(schemeMeta?.hours || 0);
         const shouldPreferSeeded = !raw || Boolean(input.seededDefaults);
         const fallbackValue = shouldPreferSeeded && schemeHours > 0
           ? schemeHours
@@ -2113,6 +2607,9 @@
           ? schemeHours
           : Number(input.periodRequirements?.[className]?.[subject] ?? fallbackValue);
         periodRequirements[className][subject] = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+        requirementSources[className][subject] = schemeHours > 0
+          ? { source: 'scheme', label: 'Scheme of Work', termKey: schemeMeta?.termKey || state.activeTerm, templateId: schemeMeta?.templateId || '' }
+          : { source: 'default', label: 'Default fallback', termKey: state.activeTerm, templateId: '' };
       });
     });
     const subjectAbbreviations = {};
@@ -2127,6 +2624,7 @@
       slots,
       fixedBlocks: slots.filter((slot) => !slot.isTeaching).map((slot) => ({ slotId: slot.id, label: slot.label })),
       periodRequirements,
+      requirementSources,
       subjectAbbreviations,
       subjectColors,
       lockedCells: normalizeLockedCells(input.lockedCells || []),
@@ -2139,6 +2637,7 @@
   function buildDefaultSettings(groupId, teachers, subjectCatalog) {
     const slots = deepClone(DEFAULT_SLOT_PRESETS[groupId] || []);
     const periodRequirements = {};
+    const requirementSources = {};
     const subjectAbbreviations = {};
     const subjectColors = {};
     GROUPS[groupId].classes.forEach((className) => {
@@ -2152,14 +2651,19 @@
       });
       const preset = DEFAULT_PERIOD_PRESETS[groupId] || { default: 2, special: {} };
       periodRequirements[className] = {};
+      requirementSources[className] = {};
       Array.from(subjects).forEach((subject) => {
-        const schemeHours = Number(state.schemeHoursByClass?.[className]?.[subject]?.hours || 0);
+        const schemeMeta = state.schemeHoursByClass?.[className]?.[subject] || null;
+        const schemeHours = Number(schemeMeta?.hours || 0);
         periodRequirements[className][subject] = schemeHours > 0 ? schemeHours : (preset.special?.[subject] ?? preset.default ?? 2);
+        requirementSources[className][subject] = schemeHours > 0
+          ? { source: 'scheme', label: 'Scheme of Work', termKey: schemeMeta?.termKey || state.activeTerm, templateId: schemeMeta?.templateId || '' }
+          : { source: 'default', label: 'Default fallback', termKey: state.activeTerm, templateId: '' };
         subjectAbbreviations[subject] = DEFAULT_ABBREVIATIONS[subject] || makeSubjectAbbreviation(subject);
         subjectColors[subject] = DEFAULT_SUBJECT_COLORS[subject] || '#dbeafe';
       });
     });
-    return { groupId, classes: GROUPS[groupId].classes, slots, periodRequirements, subjectAbbreviations, subjectColors, lockedCells: [], seededDefaults: true };
+    return { groupId, classes: GROUPS[groupId].classes, slots, periodRequirements, requirementSources, subjectAbbreviations, subjectColors, lockedCells: [], seededDefaults: true };
   }
 
   function normalizeGeneratedPayload(raw, groupId) {
@@ -2167,10 +2671,18 @@
     return {
       ...raw,
       groupId,
+      termKey: normalizeTermKey(raw.termKey || state.activeTerm),
+      termLabel: raw.termLabel || termLabel(raw.termKey || state.activeTerm),
       isSaved: true,
       slots: normalizeSlots(raw.slots || getSettingsForGroup(groupId).slots || []),
-      validation: raw.validation || buildEmptyValidation(),
-      validationSummary: raw.validationSummary || raw.validation?.summary || blankValidationSummary()
+      validation: {
+        ...buildEmptyValidation(),
+        ...(raw.validation || {})
+      },
+      validationSummary: {
+        ...blankValidationSummary(),
+        ...(raw.validationSummary || raw.validation?.summary || {})
+      }
     };
   }
 
@@ -2304,11 +2816,11 @@
   }
 
   function blankValidationSummary() {
-    return { collisions: 0, unscheduled: 0, missingTeachers: 0, invalidPlacements: 0, lockedViolations: 0, isValid: false };
+    return { collisions: 0, unscheduled: 0, missingTeachers: 0, invalidPlacements: 0, lockedViolations: 0, capacityIssues: 0, requirementMismatches: 0, isValid: false };
   }
 
   function buildEmptyValidation() {
-    return { summary: blankValidationSummary(), collisions: [], unscheduled: [], missingTeachers: [], invalidPlacements: [], lockedViolations: [] };
+    return { summary: blankValidationSummary(), collisions: [], unscheduled: [], missingTeachers: [], invalidPlacements: [], lockedViolations: [], capacityIssues: [], requirementRows: [], classLoadAudit: [] };
   }
 
   function flattenValidationIssues(validation) {
@@ -2316,6 +2828,7 @@
     (validation.collisions || []).forEach((item) => issues.push({ level: 'danger', title: item.title, body: item.body }));
     (validation.unscheduled || []).forEach((item) => issues.push({ level: 'warning', title: item.title, body: item.body }));
     (validation.missingTeachers || []).forEach((item) => issues.push({ level: 'danger', title: item.title, body: item.body }));
+    (validation.capacityIssues || []).forEach((item) => issues.push({ level: 'danger', title: item.title, body: item.body }));
     (validation.invalidPlacements || []).forEach((item) => issues.push({ level: 'warning', title: item.title, body: item.body }));
     (validation.lockedViolations || []).forEach((item) => issues.push({ level: 'warning', title: item.title, body: item.body }));
     return issues;
@@ -2325,6 +2838,7 @@
     return hashString(stableStringify({
       schoolId: state.schoolId,
       year: state.year,
+      termKey: state.activeTerm,
       teachers: source.teachers.map((teacher) => ({
         workerId: teacher.workerId,
         name: teacher.name,
@@ -2400,6 +2914,17 @@
     return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
   }
 
+  function normalizeTermKey(value) {
+    const normalized = String(value || '').trim().toLowerCase().replace(/\s+/g, '');
+    if (normalized === 'term2' || normalized === '2') return 'term2';
+    if (normalized === 'term3' || normalized === '3') return 'term3';
+    return 'term1';
+  }
+
+  function termLabel(value) {
+    return TERM_OPTIONS.find((option) => option.value === normalizeTermKey(value))?.label || 'Term 1';
+  }
+
   function normalizeYear(value) {
     const year = Number(value);
     if (!Number.isFinite(year)) return String(new Date().getFullYear());
@@ -2422,6 +2947,18 @@
   function getSlotLabel(slotId, slots) {
     const slot = (slots || []).find((entry) => entry.id === slotId);
     return slot ? `${slot.start}-${slot.end} | ${slot.label}` : slotId;
+  }
+
+  function getSubjectDistributionConfig(searchState, className, subject) {
+    const required = Math.max(0, Number(searchState.settings?.periodRequirements?.[className]?.[subject] || 0));
+    const coveredDaySet = new Set(DAYS.filter((day) => (searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0) > 0));
+    const availableDaySet = new Set(coveredDaySet);
+    DAYS.forEach((day) => {
+      if (hasSchedulablePlacementOnDay(searchState, className, subject, day)) availableDaySet.add(day);
+    });
+    const targetDistinctDays = Math.max(1, Math.min(required || 1, availableDaySet.size || 1, DAYS.length));
+    const dailyMax = Math.max(1, Math.ceil((required || 1) / targetDistinctDays));
+    return { required, coveredDaySet, availableDaySet, targetDistinctDays, dailyMax };
   }
 
   function countUnusedSchedulableDays(searchState, className, subject) {
@@ -2537,6 +3074,13 @@
 
   function slugify(value) {
     return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'item';
+  }
+
+  function normalizeClassSortKey(value) {
+    const className = normalizeClassName(value);
+    const order = ['Baby Class', 'Middle Class', 'Pre-Unit', 'Class 1', 'Class 2', 'Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7'];
+    const index = order.indexOf(className);
+    return `${String(index >= 0 ? index : 99).padStart(2, '0')}_${className}`;
   }
 
   function toColorHex(value) {
