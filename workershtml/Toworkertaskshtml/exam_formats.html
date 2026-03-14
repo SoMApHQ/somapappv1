@@ -215,11 +215,8 @@
           </div>
           <div class="field">
             <label for="templateTerm">Term</label>
-            <select id="templateTerm">
-              <option>Term 1</option>
-              <option>Term 2</option>
-              <option>Term 3</option>
-            </select>
+            <input id="templateTerm" list="templateTermOptions" placeholder="Use the term/session label used by this school">
+            <datalist id="templateTermOptions"></datalist>
           </div>
           <div class="field">
             <label for="templateClass">Class</label>
@@ -430,14 +427,15 @@
     const resolvedYear = String(yearParam || window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear());
 
     const state = {
-      workerId: safeStorageGet('workerId') || '',
+      workerId: '',
       role: resolveStoredRole(),
       schoolId: resolvedSchoolId,
       year: resolvedYear,
       templates: [],
       activeTemplateId: '',
       referenceUpload: null,
-      teacherConfig: null
+      teacherConfig: null,
+      termOptions: []
     };
 
     const schoolBadge = document.getElementById('schoolBadge');
@@ -452,6 +450,8 @@
     const listSubject = document.getElementById('listSubject');
     const templateClass = document.getElementById('templateClass');
     const templateSubject = document.getElementById('templateSubject');
+    const templateTerm = document.getElementById('templateTerm');
+    const templateTermOptions = document.getElementById('templateTermOptions');
     const templateList = document.getElementById('templateList');
     const builderRows = document.getElementById('builderRows');
     const referenceStatus = document.getElementById('referenceStatus');
@@ -462,6 +462,45 @@
         return state.schoolId === 'socrates-school' ? path : `schools/${state.schoolId}/${path}`;
       }
       return Shared.scopedPath(path, state.schoolId);
+    }
+
+    function isLegacyFriendlySchool(schoolId) {
+      return ['socrates-school', 'socrates', 'default'].includes(compactText(schoolId).toLowerCase());
+    }
+
+    function resolveWorkerId() {
+      const candidates = [
+        safeStorageGet('workerId'),
+        safeSessionGet('workerId'),
+        params.get('workerId'),
+        params.get('id')
+      ];
+      const workerId = candidates.map((value) => compactText(value)).find(Boolean) || '';
+      if (workerId) {
+        safeStorageSet('workerId', workerId);
+        try {
+          if (window.sessionStorage) sessionStorage.setItem('workerId', workerId);
+        } catch (_) {
+          // Ignore sessionStorage failures and continue with localStorage fallback.
+        }
+      }
+      return workerId;
+    }
+
+    async function readFirstValue(paths) {
+      if (!db) return null;
+      const seen = new Set();
+      for (const rawPath of (paths || [])) {
+        const path = compactText(rawPath);
+        if (!path || seen.has(path)) continue;
+        seen.add(path);
+        const snap = await db.ref(path).once('value').catch(() => ({ val: () => null }));
+        const value = (snap && typeof snap.val === 'function' && snap.val()) || null;
+        if (value && (typeof value !== 'object' || Object.keys(value).length)) {
+          return value;
+        }
+      }
+      return null;
     }
 
     function showNotice(message, locked) {
@@ -484,10 +523,30 @@
     }
 
     async function readTeacherConfig() {
-      if (!db) return null;
-      if (!state.workerId) return null;
-      const snap = await db.ref(schoolPath(`years/${state.year}/teachers_config/${state.workerId}`)).once('value').catch(() => ({ val: () => null }));
-      return (snap && typeof snap.val === 'function' && snap.val()) || null;
+      if (!db || !state.workerId) return null;
+      const currentYear = String(state.year);
+      const previousYear = String(Number(currentYear) - 1);
+      const currentConfig = await readFirstValue([
+        schoolPath(`years/${currentYear}/teachers_config/${state.workerId}`),
+        `years/${currentYear}/teachers_config/${state.workerId}`,
+        `teachers_config/${state.workerId}`
+      ]);
+      const previousConfig = await readFirstValue([
+        schoolPath(`years/${previousYear}/teachers_config/${state.workerId}`),
+        `years/${previousYear}/teachers_config/${state.workerId}`
+      ]);
+      const merged = {
+        ...(previousConfig && typeof previousConfig === 'object' ? previousConfig : {}),
+        ...(currentConfig && typeof currentConfig === 'object' ? currentConfig : {})
+      };
+      if (isLegacyFriendlySchool(state.schoolId) && !merged.teacherType) {
+        const rootConfig = await readFirstValue([`years/${currentYear}/teachers_config/${state.workerId}`]);
+        if (rootConfig && typeof rootConfig === 'object') Object.assign(merged, rootConfig);
+      }
+      if (ClassUtils?.normalizeTeacherConfig) {
+        return ClassUtils.normalizeTeacherConfig(merged, { includeGraduated: false });
+      }
+      return merged;
     }
 
     function populateSelect(selectEl, values, allLabel) {
@@ -513,6 +572,51 @@
         return ClassUtils.buildSubjectListForClasses(className ? [className] : resolveClassOptions(), state.teacherConfig?.subjects || []);
       }
       return Array.from(new Set(state.teacherConfig?.subjects || []));
+    }
+
+    function preferredTermLabel() {
+      return compactText(
+        Shared?.formatAcademicTermLabel?.(params.get('term') || safeSessionGet('somap.activeTerm') || safeStorageGet('somap.activeTerm') || '')
+        || state.termOptions[0]
+        || ''
+      );
+    }
+
+    function setTermOptions(values) {
+      const unique = [];
+      const seen = new Set();
+      (values || []).forEach((value) => {
+        const label = compactText(Shared?.formatAcademicTermLabel?.(value) || value);
+        if (!label) return;
+        const key = compactText(Shared?.normalizeAcademicTermToken?.(label) || label.toLowerCase());
+        if (seen.has(key)) return;
+        seen.add(key);
+        unique.push(label);
+      });
+      state.termOptions = unique;
+      templateTermOptions.innerHTML = unique.map((label) => `<option value="${Shared.escHtml(label)}"></option>`).join('');
+      if (!compactText(templateTerm.value)) templateTerm.value = preferredTermLabel();
+    }
+
+    async function loadAcademicTermOptions() {
+      const derived = new Set();
+      const activeTerm = preferredTermLabel();
+      if (activeTerm) derived.add(activeTerm);
+      state.templates.forEach((template) => {
+        const label = Shared?.formatAcademicTermLabel?.(template.term) || template.term;
+        if (compactText(label)) derived.add(label);
+      });
+      const templateSnap = await db.ref(`schemes/${state.schoolId}/templates/${state.year}`).once('value').catch(() => ({ val: () => null }));
+      const templateTree = (templateSnap && typeof templateSnap.val === 'function' && templateSnap.val()) || {};
+      Object.values(templateTree || {}).forEach((bySubject) => {
+        Object.values(bySubject || {}).forEach((byTerm) => {
+          Object.keys(byTerm || {}).forEach((termKey) => {
+            const label = Shared?.formatAcademicTermLabel?.(termKey) || termKey;
+            if (compactText(label)) derived.add(label);
+          });
+        });
+      });
+      setTermOptions(Array.from(derived));
     }
 
     function rowTemplate(row, index) {
@@ -585,7 +689,7 @@
       templateList.innerHTML = filtered.map((template) => `
         <div class="template-item ${state.activeTemplateId === template.id ? 'active' : ''}" data-template-id="${template.id}">
           <h4>${Shared.escHtml(template.title)}</h4>
-          <p>${Shared.escHtml(template.className)} | ${Shared.escHtml(template.subject)} | ${Shared.escHtml(template.term)}</p>
+          <p>${Shared.escHtml(template.className)} | ${Shared.escHtml(template.subject)} | ${Shared.escHtml(template.term || 'All terms')}</p>
           <p>${template.rows.length} sections | ${Shared.summarizeTemplate(template).totalMarks} marks</p>
         </div>
       `).join('');
@@ -611,7 +715,7 @@
       state.activeTemplateId = normalized.id;
       document.getElementById('templateTitle').value = normalized.title;
       document.getElementById('templateInstructions').value = normalized.instructions;
-      document.getElementById('templateTerm').value = normalized.term;
+      templateTerm.value = normalized.term || '';
       templateClass.value = normalized.className;
       repopulateSubjects(normalized.className, normalized.subject);
       document.getElementById('scheduleMode').value = normalized.settings.schedule.mode;
@@ -630,7 +734,7 @@
       state.activeTemplateId = '';
       document.getElementById('templateTitle').value = '';
       document.getElementById('templateInstructions').value = 'Answer all questions.';
-      document.getElementById('templateTerm').value = 'Term 1';
+      templateTerm.value = preferredTermLabel();
       templateClass.value = resolveClassOptions()[0] || '';
       repopulateSubjects(templateClass.value);
       document.getElementById('scheduleMode').value = 'day_of_month';
@@ -674,7 +778,7 @@
         year: state.year,
         className: templateClass.value,
         subject: templateSubject.value,
-        term: document.getElementById('templateTerm').value,
+        term: templateTerm.value || '',
         title: document.getElementById('templateTitle').value || `${templateSubject.value} Monthly Exam`,
         instructions: document.getElementById('templateInstructions').value,
         rows: getRowsFromUi(),
@@ -722,6 +826,7 @@
         });
       }
       await loadTemplates();
+      await loadAcademicTermOptions();
       fillForm(template);
       referenceStatus.textContent = 'Exam format saved successfully.';
     }
@@ -800,11 +905,13 @@
       populateSelect(listClass, classes, 'All classes');
       repopulateSubjects(classes[0] || '');
       await loadTemplates();
+      await loadAcademicTermOptions();
       populateSelect(listClass, Array.from(new Set(resolveClassOptions().concat(state.templates.map((template) => template.className)).filter(Boolean))), 'All classes');
       populateSelect(listSubject, Array.from(new Set(state.templates.map((template) => template.subject).filter(Boolean))), 'All subjects');
       resetForm();
     }
 
+    state.workerId = resolveWorkerId();
     setBadgeValues();
     window.setInterval(setBadgeValues, 1000);
     init().catch((error) => showNotice(error?.message || 'Failed to load exam format workspace.', false));

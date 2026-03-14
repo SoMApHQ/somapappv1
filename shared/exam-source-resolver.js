@@ -152,7 +152,13 @@
     if (filters.year && String(record.year || '') !== String(filters.year)) return false;
     if (filters.className && normalizeLookupToken(record.className || '') !== normalizeLookupToken(filters.className)) return false;
     if (filters.subject && normalizeLookupToken(record.subject || '') !== normalizeLookupToken(filters.subject)) return false;
-    if (filters.term && compactText(record.term || '') && normalizeLookupToken(record.term || '') !== normalizeLookupToken(filters.term)) return false;
+    if (
+      filters.term
+      && compactText(record.term || '')
+      && !(Shared?.academicTermsMatch
+        ? Shared.academicTermsMatch(record.term || '', filters.term)
+        : normalizeLookupToken(record.term || '') === normalizeLookupToken(filters.term))
+    ) return false;
     if (filters.monthKey && compactText(record.monthKey || '') && compactText(record.monthKey || '') !== compactText(filters.monthKey)) return false;
     return true;
   }

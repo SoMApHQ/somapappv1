@@ -104,6 +104,53 @@
     return clean.charAt(0).toUpperCase() + clean.slice(1);
   }
 
+  function romanToArabic(value) {
+    const clean = compactText(value).toLowerCase();
+    const table = {
+      i: 1,
+      ii: 2,
+      iii: 3,
+      iv: 4,
+      v: 5,
+      vi: 6
+    };
+    return table[clean] || null;
+  }
+
+  function normalizeAcademicTermToken(value) {
+    const clean = compactText(value).toLowerCase();
+    if (!clean) return '';
+    let token = clean.replace(/[\s_-]+/g, '');
+    token = token.replace(/\b(term|semester|trimester)(i{1,3}|iv|v|vi)\b/g, (_, prefix, roman) => {
+      const numeric = romanToArabic(roman);
+      return numeric ? `${prefix}${numeric}` : `${prefix}${roman}`;
+    });
+    token = token.replace(/^t(\d+)$/, 'term$1');
+    return token;
+  }
+
+  function formatAcademicTermLabel(value) {
+    const raw = compactText(value);
+    const token = normalizeAcademicTermToken(raw);
+    if (!token) return '';
+    const match = token.match(/^(term|semester|trimester)(\d+)$/);
+    if (!match) return raw;
+    const prefixLabel = {
+      term: 'Term',
+      semester: 'Semester',
+      trimester: 'Trimester'
+    }[match[1]] || raw;
+    return `${prefixLabel} ${match[2]}`;
+  }
+
+  function academicTermsMatch(left, right) {
+    const leftRaw = compactText(left);
+    const rightRaw = compactText(right);
+    if (!leftRaw || !rightRaw) return leftRaw === rightRaw;
+    return normalizeAcademicTermToken(leftRaw) === normalizeAcademicTermToken(rightRaw)
+      || normalizeLookupToken(leftRaw) === normalizeLookupToken(rightRaw);
+  }
+
   function normalizeQuestionType(type) {
     const clean = compactText(type || '').toLowerCase().replace(/[\s-]+/g, '_');
     if (!QUESTION_TYPES.includes(clean)) return 'short_answer';
@@ -179,7 +226,7 @@
       classKey: compactText(raw.classKey || sanitizeKey(className)),
       subject,
       subjectKey: compactText(raw.subjectKey || sanitizeKey(subject)),
-      term: compactText(raw.term || 'Term 1'),
+      term: formatAcademicTermLabel(Object.prototype.hasOwnProperty.call(raw, 'term') ? raw.term : ''),
       title: compactText(raw.title || `${subject || 'Subject'} Monthly Exam`),
       instructions: compactText(raw.instructions || 'Answer all questions.'),
       builderMode: compactText(raw.builderMode || raw.mode || 'builder') || 'builder',
@@ -447,7 +494,10 @@
     inferSectionsFromText,
     prepareReferenceUpload,
     normalizeSchedule,
-    uniqueBy
+    uniqueBy,
+    normalizeAcademicTermToken,
+    formatAcademicTermLabel,
+    academicTermsMatch
   };
 
   global.SoMApExamTemplateEngine = api;
