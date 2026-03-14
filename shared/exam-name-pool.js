@@ -27,11 +27,30 @@
     return Shared ? Shared.getDb() : (global.db || global.firebase?.database?.() || null);
   }
 
+  function buildCandidatePaths(relativePath, schoolId) {
+    const paths = [];
+    const seen = new Set();
+    function push(pathValue) {
+      const path = compactText(pathValue);
+      if (!path || seen.has(path)) return;
+      seen.add(path);
+      paths.push(path);
+    }
+    if (Shared?.scopedPath) push(Shared.scopedPath(relativePath, schoolId));
+    push(relativePath);
+    if (schoolId && !relativePath.startsWith('schools/')) push(`schools/${schoolId}/${relativePath}`);
+    return paths;
+  }
+
   async function readSchoolNode(path, schoolId) {
     const db = getDb();
     if (!db) return {};
-    const snap = await db.ref(scopedPath(path, schoolId)).once('value').catch(() => ({ val: () => null }));
-    return (snap && typeof snap.val === 'function' && snap.val()) || {};
+    for (const candidate of buildCandidatePaths(path, schoolId)) {
+      const snap = await db.ref(candidate).once('value').catch(() => ({ val: () => null }));
+      const value = (snap && typeof snap.val === 'function' && snap.val()) || null;
+      if (value && (typeof value !== 'object' || Object.keys(value).length)) return value;
+    }
+    return {};
   }
 
   function extractFullName(record) {
@@ -73,23 +92,66 @@
     });
   }
 
+  function buildNearbyYears(year) {
+    const numericYear = Number(year);
+    if (!Number.isFinite(numericYear)) return [String(year || '')].filter(Boolean);
+    const candidates = [];
+    const seen = new Set();
+    function push(candidate) {
+      const value = String(candidate);
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      candidates.push(value);
+    }
+    push(numericYear);
+    for (let offset = 1; offset <= 3; offset += 1) {
+      push(numericYear - offset);
+      push(numericYear + offset);
+    }
+    return candidates;
+  }
+
+  function mergeEnrollmentRecords(target, source) {
+    Object.entries(source || {}).forEach(([key, value]) => {
+      if (!value || typeof value !== 'object') return;
+      if (!target[key]) target[key] = value;
+      const admission = compactText(value.admissionNumber || value.admissionNo || value.admNo || '');
+      if (admission && !target[admission]) target[admission] = value;
+    });
+    return target;
+  }
+
   async function loadPool(options) {
     const settings = options && typeof options === 'object' ? options : {};
     const schoolId = compactText(settings.schoolId || currentSchoolId());
     const year = String(settings.year || (Shared ? Shared.currentYear() : new Date().getFullYear()));
-    const anchorYear = '2026';
-    const [studentsMap, anchorEnrollments, yearEnrollments, schoolProfile] = await Promise.all([
+    const nearbyYears = buildNearbyYears(year);
+    const [studentsMap, admittedStudentsMap, schoolProfile, studentlistYear] = await Promise.all([
       readSchoolNode('students', schoolId),
-      readSchoolNode(`enrollments/${anchorYear}`, schoolId),
-      readSchoolNode(`enrollments/${year}`, schoolId),
-      readSchoolNode('profile', schoolId)
+      readSchoolNode('admittedStudents', schoolId),
+      readSchoolNode('profile', schoolId),
+      readSchoolNode(`studentlist/${year}`, schoolId)
     ]);
+    const enrollmentMaps = await Promise.all(nearbyYears.map(async (candidateYear) => {
+      const [rootEnrollments, yearScopedEnrollments] = await Promise.all([
+        readSchoolNode(`enrollments/${candidateYear}`, schoolId),
+        readSchoolNode(`years/${candidateYear}/enrollments`, schoolId)
+      ]);
+      return {
+        ...(rootEnrollments && typeof rootEnrollments === 'object' ? rootEnrollments : {}),
+        ...(yearScopedEnrollments && typeof yearScopedEnrollments === 'object' ? yearScopedEnrollments : {})
+      };
+    }));
+    const mergedEnrollments = enrollmentMaps.reduce((acc, entry) => mergeEnrollmentRecords(acc, entry), {});
+    const rootStudents = {
+      ...(studentsMap && typeof studentsMap === 'object' ? studentsMap : {}),
+      ...(admittedStudentsMap && typeof admittedStudentsMap === 'object' ? admittedStudentsMap : {})
+    };
 
-    const records = Object.entries(studentsMap || {}).map(([id, record]) => {
-      const enrollment = yearEnrollments?.[id]
-        || anchorEnrollments?.[id]
-        || yearEnrollments?.[record?.admissionNumber]
-        || anchorEnrollments?.[record?.admissionNumber]
+    const records = Object.entries(rootStudents || {}).map(([id, record]) => {
+      const admission = compactText(record?.admissionNumber || record?.admissionNo || record?.admNo || '');
+      const enrollment = mergedEnrollments?.[id]
+        || mergedEnrollments?.[admission]
         || {};
       return {
         id,
@@ -110,7 +172,8 @@
       compactText(schoolProfile?.village || schoolProfile?.location || ''),
       compactText(schoolProfile?.ward || ''),
       compactText(schoolProfile?.area || schoolProfile?.region || ''),
-      compactText(settings.className || '')
+      compactText(settings.className || ''),
+      ...Object.keys(studentlistYear || {}).map((className) => compactText(className))
     ].filter(Boolean)));
 
     return {

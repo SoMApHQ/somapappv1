@@ -11,6 +11,7 @@
   <script src="../../firebase.js"></script>
   <script src="../../shared/academic-class-utils.js"></script>
   <script src="../../shared/exam-template-engine.js"></script>
+  <script src="../../shared/exam-school-registry.js"></script>
   <script src="../../shared/exam-diagram-engine.js"></script>
   <script src="../../shared/exam-name-pool.js"></script>
   <script src="../../shared/exam-answer-gate.js"></script>
@@ -199,6 +200,7 @@
   </div>
   <script>
     const Shared = window.SoMApExamShared;
+    const Registry = window.SoMApExamSchoolRegistry || null;
     const Scheduler = window.SoMApExamScheduler;
     const Generator = window.SoMApExamGenerator;
     const AnswerGate = window.SoMApExamAnswerGate;
@@ -281,7 +283,9 @@
       exams: [],
       selectedExamId: '',
       selectedAnswerKey: null,
-      teacherConfig: null
+      teacherConfig: null,
+      registry: null,
+      schoolProfile: null
     };
 
     const notice = document.getElementById('notice');
@@ -333,7 +337,7 @@
     }
 
     function setBadges() {
-      document.getElementById('schoolBadge').textContent = `School: ${safeStorageGet('somap.currentSchoolName') || schoolMeta.name || prettifySchoolName(state.schoolId)}`;
+      document.getElementById('schoolBadge').textContent = `School: ${state.schoolProfile?.name || safeStorageGet('somap.currentSchoolName') || schoolMeta.name || prettifySchoolName(state.schoolId)}`;
       document.getElementById('yearBadge').textContent = `Year: ${state.year}`;
       document.getElementById('roleBadge').textContent = `Role: ${state.role || 'Teacher'}`;
       document.getElementById('backLink').href = `../workertasks.html?school=${encodeURIComponent(state.schoolId)}&year=${encodeURIComponent(state.year)}`;
@@ -366,7 +370,8 @@
 
     function populateSelect(selectEl, values) {
       selectEl.innerHTML = '<option value="">All</option>';
-      values.forEach((value) => selectEl.add(new Option(value, value)));
+      Array.from(new Set((values || []).map((value) => compactText(value)).filter(Boolean)))
+        .forEach((value) => selectEl.add(new Option(value, value)));
     }
 
     function refreshFilterOptions() {
@@ -375,14 +380,16 @@
       const currentClass = classSelect.value;
       const currentSubject = subjectSelect.value;
       const classValues = Array.from(new Set([
+        ...(state.registry?.classes || []),
         ...(state.teacherConfig?.classes || []),
         ...state.templates.map((template) => template.className).filter(Boolean),
         ...state.exams.map((paper) => paper.className).filter(Boolean)
       ]));
       const subjectValues = Array.from(new Set([
+        ...(currentClass && state.registry?.subjectsByClass?.[currentClass] ? state.registry.subjectsByClass[currentClass] : (state.registry?.allSubjects || [])),
         ...(state.teacherConfig?.subjects || []),
-        ...state.templates.map((template) => template.subject).filter(Boolean),
-        ...state.exams.map((paper) => paper.subject).filter(Boolean)
+        ...state.templates.filter((template) => !currentClass || template.className === currentClass).map((template) => template.subject).filter(Boolean),
+        ...state.exams.filter((paper) => !currentClass || paper.className === currentClass).map((paper) => paper.subject).filter(Boolean)
       ]));
       populateSelect(classSelect, classValues);
       populateSelect(subjectSelect, subjectValues);
@@ -391,37 +398,50 @@
     }
 
     async function loadTemplatesAndSettings() {
-      const [templateSnap, settingsSnap] = await Promise.all([
-        db.ref(schoolPath(`years/${state.year}/examFormats`)).once('value').catch(() => ({ val: () => null })),
-        db.ref(schoolPath(`years/${state.year}/examSettings/general`)).once('value').catch(() => ({ val: () => null }))
-      ]);
-      const templateTree = (templateSnap && typeof templateSnap.val === 'function' && templateSnap.val()) || {};
-      state.templates = [];
-      Object.values(templateTree || {}).forEach((bySubject) => {
-        Object.values(bySubject || {}).forEach((byId) => {
-          Object.values(byId || {}).forEach((template) => state.templates.push(Shared.normalizeTemplate(template)));
-        });
-      });
-      state.generalSettings = (settingsSnap && typeof settingsSnap.val === 'function' && settingsSnap.val()) || {};
+      if (Registry?.loadExamTemplates) state.templates = await Registry.loadExamTemplates(state);
+      else {
+        const templateSnap = await db.ref(schoolPath(`years/${state.year}/examFormats`)).once('value').catch(() => ({ val: () => null }));
+        const templateTree = (templateSnap && typeof templateSnap.val === 'function' && templateSnap.val()) || {};
+        state.templates = Shared?.flattenExamFormatsTree ? Shared.flattenExamFormatsTree(templateTree, state) : [];
+      }
+      if (Registry?.loadExamSettings) {
+        state.generalSettings = await Registry.loadExamSettings(state);
+      } else {
+        const settingsSnap = await db.ref(schoolPath(`years/${state.year}/examSettings/general`)).once('value').catch(() => ({ val: () => null }));
+        state.generalSettings = (settingsSnap && typeof settingsSnap.val === 'function' && settingsSnap.val()) || {};
+      }
       refreshFilterOptions();
     }
 
     async function loadExams() {
-      const snap = await db.ref(schoolPath(`years/${state.year}/generatedExams`)).once('value').catch(() => ({ val: () => null }));
-      const tree = (snap && typeof snap.val === 'function' && snap.val()) || {};
-      state.exams = [];
-      Object.values(tree || {}).forEach((byClass) => {
-        Object.values(byClass || {}).forEach((bySubject) => {
-          Object.values(bySubject || {}).forEach((byMonth) => {
-            Object.values(byMonth || {}).forEach((paper) => state.exams.push(paper));
+      if (Registry?.loadGeneratedExams) state.exams = await Registry.loadGeneratedExams(state);
+      else {
+        const snap = await db.ref(schoolPath(`years/${state.year}/generatedExams`)).once('value').catch(() => ({ val: () => null }));
+        const tree = (snap && typeof snap.val === 'function' && snap.val()) || {};
+        state.exams = [];
+        Object.values(tree || {}).forEach((byClass) => {
+          Object.values(byClass || {}).forEach((bySubject) => {
+            Object.values(bySubject || {}).forEach((byMonth) => {
+              Object.values(byMonth || {}).forEach((paper) => state.exams.push(paper));
+            });
           });
         });
-      });
+      }
       refreshFilterOptions();
       renderExamList();
       if (!state.selectedExamId && filteredExams().length) {
         await selectExam(filteredExams()[0].id);
       }
+    }
+
+    async function refreshRegistry() {
+      if (!Registry?.buildSchoolRegistry) return;
+      state.registry = await Registry.buildSchoolRegistry({
+        context: state,
+        role: state.role,
+        teacherConfig: state.teacherConfig,
+        templates: state.templates
+      });
     }
 
     function filteredExams() {
@@ -441,14 +461,17 @@
     function renderExamList() {
       const exams = filteredExams();
       if (!exams.length) {
+        state.selectedExamId = '';
         examList.innerHTML = '<div class="empty">No generated exams match the current filters.</div>';
+        renderSourceTopics(null);
+        renderQuestions(null);
         return;
       }
       examList.innerHTML = exams.map((paper) => `
         <div class="exam-card ${state.selectedExamId === paper.id ? 'active' : ''}" data-paper-id="${paper.id}">
           <h4>${Shared.escHtml(paper.title || 'Draft exam')}</h4>
           <p>${Shared.escHtml(paper.className)} | ${Shared.escHtml(paper.subject)}</p>
-          <p>${Shared.escHtml(paper.monthKey)} | ${Shared.escHtml(paper.status)} | ${new Date(Number(paper.generatedAt || 0)).toLocaleString()}</p>
+          <p>${Shared.escHtml(paper.monthLabel || Shared.formatMonthLabel?.(paper.monthKey, { includeYear: false }) || paper.monthKey)} | ${Shared.escHtml(paper.status)} | ${new Date(Number(paper.generatedAt || 0)).toLocaleString()}</p>
         </div>
       `).join('');
     }
@@ -467,6 +490,7 @@
           <strong>${Shared.escHtml(topic.topic || 'Topic')}</strong>
           <div>Confidence: ${topic.confidenceScore || 0}</div>
           <div>Lesson plan: ${Shared.escHtml(topic.sourceRefs?.lessonPlanId || '-')}</div>
+          <div>Dates: ${Shared.escHtml((topic.dates || []).join(', ') || '-')}</div>
         </div>
       `).join('') || '<div class="empty">No source topics stored.</div>';
     }
@@ -645,10 +669,15 @@
       const doc = new jsPdfLib.jsPDF({ unit: 'pt', format: 'a4' });
       let y = 40;
       doc.setFontSize(18);
+      doc.text(paper.schoolName || 'School', 40, y);
+      y += 22;
+      doc.setFontSize(16);
       doc.text(paper.title || 'Exam', 40, y);
       y += 22;
       doc.setFontSize(11);
-      doc.text(`${paper.className || ''} | ${paper.subject || ''} | ${paper.monthKey || ''}`, 40, y);
+      doc.text(`${paper.className || ''} | ${paper.subject || ''} | ${paper.monthLabel || Shared.formatMonthLabel?.(paper.monthKey) || paper.monthKey || ''}`, 40, y);
+      y += 18;
+      doc.text(`Year: ${paper.year || ''} | Term: ${paper.term || 'All Terms'} | Total Marks: ${paper.totalMarks || 0}`, 40, y);
       y += 22;
       doc.text(paper.instructions || '', 40, y, { maxWidth: 520 });
       y += 30;
@@ -671,13 +700,26 @@
         return;
       }
       const monthKey = document.getElementById('filterMonth').value || Scheduler.buildMonthKey(new Date());
+      const selectedClass = document.getElementById('filterClass').value || '';
+      const selectedSubject = document.getElementById('filterSubject').value || '';
+      const candidateTemplates = state.templates.filter((template) => {
+        if (selectedClass && template.className !== selectedClass) return false;
+        if (selectedSubject && template.subject !== selectedSubject) return false;
+        return true;
+      });
+      if (!candidateTemplates.length) {
+        setNotice('No saved exam formats match the current class and subject filters.');
+        return;
+      }
       const failures = [];
       const generated = await Scheduler.runPendingGeneration({
         schoolId: state.schoolId,
         year: state.year,
         monthKey,
-        templates: state.templates,
+        templates: candidateTemplates,
         generalSettings: state.generalSettings,
+        forceEligible: true,
+        resolveMonthKey: (template, fallbackMonthKey) => template.monthKey || fallbackMonthKey,
         generateDraft: async (template, resolvedMonthKey) => {
           try {
             return await Generator.generateDraftExam({
@@ -705,7 +747,10 @@
     }
 
     function bindEvents() {
-      document.getElementById('filterClass').addEventListener('change', renderExamList);
+      document.getElementById('filterClass').addEventListener('change', () => {
+        refreshFilterOptions();
+        renderExamList();
+      });
       document.getElementById('filterSubject').addEventListener('change', renderExamList);
       document.getElementById('filterMonth').addEventListener('change', renderExamList);
       document.getElementById('filterStatus').addEventListener('change', renderExamList);
@@ -724,13 +769,21 @@
     }
 
     async function init() {
+      if (Registry?.resolveExamContext) {
+        const context = Registry.resolveExamContext({ params });
+        state.schoolId = context.schoolId;
+        state.year = context.year;
+        state.workerId = context.workerId || state.workerId;
+        state.role = context.role || state.role;
+      }
       setBadges();
       if (!Shared || !AnswerGate || !db) {
         setNotice('Exam review tools did not finish loading. Refresh the page and try again.');
         return;
       }
-      state.teacherConfig = await readTeacherConfig();
+      state.teacherConfig = Registry?.readTeacherConfig ? await Registry.readTeacherConfig(state) : await readTeacherConfig();
       if (state.teacherConfig?.teacherType) state.role = state.teacherConfig.teacherType;
+      if (Registry?.loadSchoolProfile) state.schoolProfile = await Registry.loadSchoolProfile(state);
       setBadges();
       if (!AnswerGate.isAuthorizedRole(state.role)) {
         setNotice('Check Exams is restricted to Academic Teacher, Head Teacher, Assistant Headteacher, or authorized academic management.');
@@ -739,6 +792,8 @@
       }
       bindEvents();
       await loadTemplatesAndSettings();
+      await refreshRegistry();
+      refreshFilterOptions();
       await loadExams();
     }
 

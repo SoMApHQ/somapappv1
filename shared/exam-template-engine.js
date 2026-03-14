@@ -3,6 +3,20 @@
 
   const INLINE_FILE_LIMIT = 2.5 * 1024 * 1024;
   const DEFAULT_SECTION_TITLE = 'Section';
+  const MONTH_LABELS = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December'
+  ];
   const QUESTION_TYPES = [
     'multiple_choice',
     'true_false',
@@ -209,12 +223,87 @@
     };
   }
 
+  function prettifySchoolName(value) {
+    const clean = compactText(value);
+    if (!clean) return 'School';
+    if (clean === 'socrates-school') return 'Socrates School';
+    return clean
+      .split(/[-_]/g)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+  }
+
+  function normalizeMonthKey(value, fallbackYear) {
+    const clean = compactText(value);
+    const normalizedYear = compactText(fallbackYear);
+    if (!clean) return '';
+    if (/^\d{4}-\d{2}$/.test(clean)) return clean;
+    if (/^\d{6}$/.test(clean)) return `${clean.slice(0, 4)}-${clean.slice(4, 6)}`;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean.slice(0, 7);
+    const numericMonthMatch = clean.match(/^(?:\d{4}[-/])?(\d{1,2})$/);
+    if (numericMonthMatch) {
+      const monthNumber = Math.max(1, Math.min(12, safeNumber(numericMonthMatch[1], 0)));
+      if (!monthNumber || !normalizedYear) return '';
+      return `${normalizedYear}-${String(monthNumber).padStart(2, '0')}`;
+    }
+    const monthToken = lower(clean).replace(/[^a-z0-9]+/g, ' ');
+    const monthIndex = MONTH_LABELS.findIndex((label) => {
+      const candidate = lower(label);
+      return monthToken.includes(candidate) || monthToken.includes(candidate.slice(0, 3));
+    });
+    const embeddedYearMatch = clean.match(/\b(20\d{2})\b/);
+    const resolvedYear = compactText(embeddedYearMatch?.[1] || normalizedYear);
+    if (monthIndex >= 0 && resolvedYear) {
+      return `${resolvedYear}-${String(monthIndex + 1).padStart(2, '0')}`;
+    }
+    const parsedDate = Date.parse(clean);
+    if (!Number.isNaN(parsedDate)) {
+      const parsed = new Date(parsedDate);
+      return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}`;
+    }
+    return '';
+  }
+
+  function formatMonthLabel(value, options) {
+    const settings = options && typeof options === 'object' ? options : {};
+    const monthKey = normalizeMonthKey(value, settings.fallbackYear);
+    if (!monthKey) return compactText(value);
+    const parts = monthKey.split('-');
+    const monthIndex = Math.max(0, Math.min(11, safeNumber(parts[1], 1) - 1));
+    const monthLabel = MONTH_LABELS[monthIndex] || compactText(value);
+    return settings.includeYear === false ? monthLabel : `${monthLabel} ${parts[0]}`;
+  }
+
+  function decodeStorageLabel(value) {
+    return compactText(value).replace(/_/g, ' ');
+  }
+
+  function looksLikeTemplateObject(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    return Boolean(
+      Object.prototype.hasOwnProperty.call(value, 'rows')
+      || Object.prototype.hasOwnProperty.call(value, 'parsedTemplate')
+      || Object.prototype.hasOwnProperty.call(value, 'formatId')
+      || Object.prototype.hasOwnProperty.call(value, 'title')
+      || Object.prototype.hasOwnProperty.call(value, 'instructions')
+      || Object.prototype.hasOwnProperty.call(value, 'subject')
+      || Object.prototype.hasOwnProperty.call(value, 'subjectName')
+      || Object.prototype.hasOwnProperty.call(value, 'className')
+      || Object.prototype.hasOwnProperty.call(value, 'class')
+    );
+  }
+
   function normalizeTemplate(rawTemplate) {
     const raw = rawTemplate && typeof rawTemplate === 'object' ? rawTemplate : {};
     const schoolId = compactText(raw.schoolId || currentSchoolId());
     const year = String(raw.year || raw.academicYear || currentYear());
     const className = compactText(raw.className || raw.class || '');
     const subject = compactText(raw.subject || raw.subjectName || '');
+    const monthKey = normalizeMonthKey(
+      raw.monthKey || raw.generationMonthKey || raw.generationMonth || raw.month || raw.targetMonth || '',
+      year
+    );
     const rows = (Array.isArray(raw.rows) ? raw.rows : Object.values(raw.rows || {})).map(normalizeRow).filter(Boolean);
     const settings = raw.settings && typeof raw.settings === 'object' ? raw.settings : {};
     return {
@@ -226,6 +315,8 @@
       classKey: compactText(raw.classKey || sanitizeKey(className)),
       subject,
       subjectKey: compactText(raw.subjectKey || sanitizeKey(subject)),
+      monthKey,
+      monthLabel: compactText(raw.monthLabel || formatMonthLabel(monthKey, { includeYear: false }) || ''),
       term: formatAcademicTermLabel(Object.prototype.hasOwnProperty.call(raw, 'term') ? raw.term : ''),
       title: compactText(raw.title || `${subject || 'Subject'} Monthly Exam`),
       instructions: compactText(raw.instructions || 'Answer all questions.'),
@@ -248,6 +339,50 @@
       version: safeNumber(raw.version, 1) || 1,
       status: compactText(raw.status || 'active') || 'active'
     };
+  }
+
+  function flattenExamFormatsTree(tree, fallbackMeta) {
+    const base = fallbackMeta && typeof fallbackMeta === 'object' ? fallbackMeta : {};
+    const templates = [];
+    Object.entries(tree || {}).forEach(([storedClass, bySubject]) => {
+      if (looksLikeTemplateObject(bySubject)) {
+        templates.push(normalizeTemplate({
+          ...base,
+          ...bySubject,
+          className: bySubject.className || bySubject.class || decodeStorageLabel(storedClass),
+          classKey: bySubject.classKey || storedClass
+        }));
+        return;
+      }
+      Object.entries(bySubject || {}).forEach(([storedSubject, byTemplate]) => {
+        if (looksLikeTemplateObject(byTemplate)) {
+          templates.push(normalizeTemplate({
+            ...base,
+            ...byTemplate,
+            className: byTemplate.className || byTemplate.class || decodeStorageLabel(storedClass),
+            classKey: byTemplate.classKey || storedClass,
+            subject: byTemplate.subject || byTemplate.subjectName || decodeStorageLabel(storedSubject),
+            subjectKey: byTemplate.subjectKey || storedSubject
+          }));
+          return;
+        }
+        Object.entries(byTemplate || {}).forEach(([templateId, templateObject]) => {
+          if (looksLikeTemplateObject(templateObject)) {
+            templates.push(normalizeTemplate({
+              ...base,
+              ...templateObject,
+              id: templateObject.id || templateObject.formatId || templateId,
+              formatId: templateObject.formatId || templateObject.id || templateId,
+              className: templateObject.className || templateObject.class || decodeStorageLabel(storedClass),
+              classKey: templateObject.classKey || storedClass,
+              subject: templateObject.subject || templateObject.subjectName || decodeStorageLabel(storedSubject),
+              subjectKey: templateObject.subjectKey || storedSubject
+            }));
+          }
+        });
+      });
+    });
+    return uniqueBy(templates, (template) => compactText(template.formatId || template.id || ''));
   }
 
   function resolveRowItemCount(row) {
@@ -479,6 +614,7 @@
     normalizeLookupToken,
     sanitizeKey,
     escHtml,
+    prettifySchoolName,
     currentSchoolId,
     currentYear,
     scopedPath,
@@ -497,7 +633,11 @@
     uniqueBy,
     normalizeAcademicTermToken,
     formatAcademicTermLabel,
-    academicTermsMatch
+    academicTermsMatch,
+    normalizeMonthKey,
+    formatMonthLabel,
+    looksLikeTemplateObject,
+    flattenExamFormatsTree
   };
 
   global.SoMApExamTemplateEngine = api;

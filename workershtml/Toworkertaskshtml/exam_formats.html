@@ -11,6 +11,7 @@
   <script src="../../firebase.js"></script>
   <script src="../../shared/academic-class-utils.js"></script>
   <script src="../../shared/exam-template-engine.js"></script>
+  <script src="../../shared/exam-school-registry.js"></script>
   <script src="../../shared/exam-name-pool.js"></script>
   <script src="../../shared/exam-answer-gate.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous"></script>
@@ -219,6 +220,10 @@
             <datalist id="templateTermOptions"></datalist>
           </div>
           <div class="field">
+            <label for="templateMonth">Generation Month</label>
+            <input id="templateMonth" type="month">
+          </div>
+          <div class="field">
             <label for="templateClass">Class</label>
             <select id="templateClass"></select>
           </div>
@@ -415,6 +420,7 @@
     }
 
     const Shared = window.SoMApExamShared || null;
+    const Registry = window.SoMApExamSchoolRegistry || null;
     const AnswerGate = window.SoMApExamAnswerGate || null;
     const db = window.db || window.firebase?.database?.() || null;
     const params = new URLSearchParams(window.location.search);
@@ -435,7 +441,10 @@
       activeTemplateId: '',
       referenceUpload: null,
       teacherConfig: null,
-      termOptions: []
+      termOptions: [],
+      registry: null,
+      generalSettings: {},
+      schoolProfile: null
     };
 
     const schoolBadge = document.getElementById('schoolBadge');
@@ -451,6 +460,7 @@
     const templateClass = document.getElementById('templateClass');
     const templateSubject = document.getElementById('templateSubject');
     const templateTerm = document.getElementById('templateTerm');
+    const templateMonth = document.getElementById('templateMonth');
     const templateTermOptions = document.getElementById('templateTermOptions');
     const templateList = document.getElementById('templateList');
     const builderRows = document.getElementById('builderRows');
@@ -510,7 +520,7 @@
     }
 
     function setBadgeValues() {
-      const schoolName = compactText(safeStorageGet('somap.currentSchoolName') || schoolMeta.name || prettifySchoolName(state.schoolId));
+      const schoolName = compactText(state.schoolProfile?.name || safeStorageGet('somap.currentSchoolName') || schoolMeta.name || prettifySchoolName(state.schoolId));
       const roleName = compactText(state.role || resolveStoredRole() || 'Teacher');
       const nowInfo = formatNow();
       schoolBadge.textContent = `School: ${schoolName}`;
@@ -552,12 +562,18 @@
     function populateSelect(selectEl, values, allLabel) {
       selectEl.innerHTML = '';
       if (allLabel) selectEl.add(new Option(allLabel, ''));
-      values.forEach((value) => selectEl.add(new Option(value, value)));
+      const uniqueValues = Array.from(new Set((values || []).map((value) => compactText(value)).filter(Boolean)));
+      if (!uniqueValues.length && !allLabel) {
+        selectEl.add(new Option('No options available yet', ''));
+        return;
+      }
+      uniqueValues.forEach((value) => selectEl.add(new Option(value, value)));
     }
 
     const ClassUtils = window.SomapAcademicClassUtils || window.ClassUtils || null;
 
     function resolveClassOptions() {
+      if (state.registry?.classes?.length) return state.registry.classes.slice();
       const teacherClasses = state.teacherConfig?.classes || state.teacherConfig?.classSubjectMappings?.map((item) => item.class) || [];
       const fallbackClasses = (ClassUtils?.CLASS_OPTIONS || []).filter((name) => name !== 'Graduated');
       const classes = teacherClasses.length ? teacherClasses : fallbackClasses;
@@ -565,6 +581,10 @@
     }
 
     function resolveSubjectOptions(className) {
+      if (className && state.registry?.subjectsByClass?.[className]?.length) {
+        return state.registry.subjectsByClass[className].slice();
+      }
+      if (state.registry?.allSubjects?.length) return state.registry.allSubjects.slice();
       const mappings = state.teacherConfig?.classSubjectMappings || [];
       const mapped = mappings.find((entry) => entry.class === className);
       if (mapped?.subjects?.length) return Array.from(new Set(mapped.subjects));
@@ -602,19 +622,13 @@
       const derived = new Set();
       const activeTerm = preferredTermLabel();
       if (activeTerm) derived.add(activeTerm);
+      (state.registry?.terms || []).forEach((term) => {
+        const label = Shared?.formatAcademicTermLabel?.(term) || term;
+        if (compactText(label)) derived.add(label);
+      });
       state.templates.forEach((template) => {
         const label = Shared?.formatAcademicTermLabel?.(template.term) || template.term;
         if (compactText(label)) derived.add(label);
-      });
-      const templateSnap = await db.ref(`schemes/${state.schoolId}/templates/${state.year}`).once('value').catch(() => ({ val: () => null }));
-      const templateTree = (templateSnap && typeof templateSnap.val === 'function' && templateSnap.val()) || {};
-      Object.values(templateTree || {}).forEach((bySubject) => {
-        Object.values(bySubject || {}).forEach((byTerm) => {
-          Object.keys(byTerm || {}).forEach((termKey) => {
-            const label = Shared?.formatAcademicTermLabel?.(termKey) || termKey;
-            if (compactText(label)) derived.add(label);
-          });
-        });
       });
       setTermOptions(Array.from(derived));
     }
@@ -667,15 +681,50 @@
     }
 
     async function loadTemplates() {
-      const snap = await db.ref(schoolPath(`years/${state.year}/examFormats`)).once('value').catch(() => ({ val: () => null }));
-      const tree = (snap && typeof snap.val === 'function' && snap.val()) || {};
-      state.templates = [];
-      Object.values(tree || {}).forEach((bySubject) => {
-        Object.values(bySubject || {}).forEach((byId) => {
-          Object.values(byId || {}).forEach((template) => state.templates.push(Shared.normalizeTemplate(template)));
-        });
-      });
+      if (Registry?.loadExamTemplates) {
+        state.templates = await Registry.loadExamTemplates(state);
+      } else {
+        const snap = await db.ref(schoolPath(`years/${state.year}/examFormats`)).once('value').catch(() => ({ val: () => null }));
+        const tree = (snap && typeof snap.val === 'function' && snap.val()) || {};
+        state.templates = Shared?.flattenExamFormatsTree ? Shared.flattenExamFormatsTree(tree, state) : [];
+      }
       renderTemplateList();
+    }
+
+    async function refreshRegistry() {
+      if (!Registry?.buildSchoolRegistry) {
+        state.registry = null;
+        return;
+      }
+      state.registry = await Registry.buildSchoolRegistry({
+        context: state,
+        role: state.role,
+        teacherConfig: state.teacherConfig,
+        templates: state.templates
+      });
+    }
+
+    function refreshClassAndSubjectSelectors() {
+      const classValues = Array.from(new Set([
+        ...resolveClassOptions(),
+        ...state.templates.map((template) => template.className).filter(Boolean)
+      ]));
+      const currentTemplateClass = templateClass.value;
+      const currentListClass = listClass.value;
+      populateSelect(templateClass, classValues, null);
+      populateSelect(listClass, classValues, 'All classes');
+      if (currentTemplateClass && classValues.includes(currentTemplateClass)) templateClass.value = currentTemplateClass;
+      else templateClass.value = classValues[0] || '';
+      if (currentListClass && classValues.includes(currentListClass)) listClass.value = currentListClass;
+      repopulateSubjects(templateClass.value, templateSubject.value);
+      const listSubjects = Array.from(new Set([
+        ...(state.registry?.allSubjects || []),
+        ...state.templates
+          .filter((template) => !listClass.value || template.className === listClass.value)
+          .map((template) => template.subject)
+          .filter(Boolean)
+      ]));
+      populateSelect(listSubject, listSubjects, 'All subjects');
     }
 
     function renderTemplateList() {
@@ -689,14 +738,21 @@
       templateList.innerHTML = filtered.map((template) => `
         <div class="template-item ${state.activeTemplateId === template.id ? 'active' : ''}" data-template-id="${template.id}">
           <h4>${Shared.escHtml(template.title)}</h4>
-          <p>${Shared.escHtml(template.className)} | ${Shared.escHtml(template.subject)} | ${Shared.escHtml(template.term || 'All terms')}</p>
+          <p>${Shared.escHtml(template.className)} | ${Shared.escHtml(template.subject)} | ${Shared.escHtml(template.monthLabel || 'Any month')}</p>
+          <p>${Shared.escHtml(template.term || 'All terms')}</p>
           <p>${template.rows.length} sections | ${Shared.summarizeTemplate(template).totalMarks} marks</p>
         </div>
       `).join('');
     }
 
     function repopulateSubjects(className, selected) {
-      const subjects = resolveSubjectOptions(className);
+      const subjects = Array.from(new Set([
+        ...resolveSubjectOptions(className),
+        ...state.templates
+          .filter((template) => !className || template.className === className)
+          .map((template) => template.subject)
+          .filter(Boolean)
+      ]));
       populateSelect(templateSubject, subjects, null);
       if (selected && subjects.includes(selected)) templateSubject.value = selected;
       else templateSubject.value = subjects[0] || '';
@@ -716,6 +772,7 @@
       document.getElementById('templateTitle').value = normalized.title;
       document.getElementById('templateInstructions').value = normalized.instructions;
       templateTerm.value = normalized.term || '';
+      templateMonth.value = normalized.monthKey || '';
       templateClass.value = normalized.className;
       repopulateSubjects(normalized.className, normalized.subject);
       document.getElementById('scheduleMode').value = normalized.settings.schedule.mode;
@@ -735,6 +792,7 @@
       document.getElementById('templateTitle').value = '';
       document.getElementById('templateInstructions').value = 'Answer all questions.';
       templateTerm.value = preferredTermLabel();
+      templateMonth.value = `${state.year}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
       templateClass.value = resolveClassOptions()[0] || '';
       repopulateSubjects(templateClass.value);
       document.getElementById('scheduleMode').value = 'day_of_month';
@@ -776,10 +834,11 @@
         formatId,
         schoolId: state.schoolId,
         year: state.year,
+        monthKey: templateMonth.value,
         className: templateClass.value,
         subject: templateSubject.value,
         term: templateTerm.value || '',
-        title: document.getElementById('templateTitle').value || `${templateSubject.value} Monthly Exam`,
+        title: document.getElementById('templateTitle').value || `${templateSubject.value} ${Shared.formatMonthLabel?.(templateMonth.value, { includeYear: false }) || 'Monthly'} Exam`,
         instructions: document.getElementById('templateInstructions').value,
         rows: getRowsFromUi(),
         settings: {
@@ -818,6 +877,7 @@
           ...state.referenceUpload,
           schoolId: state.schoolId,
           year: state.year,
+          monthKey: template.monthKey,
           className: template.className,
           subject: template.subject,
           formatId: template.id,
@@ -826,6 +886,8 @@
         });
       }
       await loadTemplates();
+      await refreshRegistry();
+      refreshClassAndSubjectSelectors();
       await loadAcademicTermOptions();
       fillForm(template);
       referenceStatus.textContent = 'Exam format saved successfully.';
@@ -865,7 +927,10 @@
         refreshSummary();
       });
       listClass.addEventListener('change', () => {
-        const subjects = Array.from(new Set(state.templates.filter((template) => !listClass.value || template.className === listClass.value).map((template) => template.subject).filter(Boolean)));
+        const subjects = Array.from(new Set([
+          ...(listClass.value && state.registry?.subjectsByClass?.[listClass.value] ? state.registry.subjectsByClass[listClass.value] : (state.registry?.allSubjects || [])),
+          ...state.templates.filter((template) => !listClass.value || template.className === listClass.value).map((template) => template.subject).filter(Boolean)
+        ]));
         populateSelect(listSubject, subjects, 'All subjects');
         renderTemplateList();
       });
@@ -879,6 +944,13 @@
     }
 
     async function init() {
+      if (Registry?.resolveExamContext) {
+        const context = Registry.resolveExamContext({ params });
+        state.schoolId = context.schoolId;
+        state.year = context.year;
+        state.workerId = context.workerId || state.workerId;
+        state.role = context.role || state.role;
+      }
       setBadgeValues();
       if (!Shared) {
         showNotice('Exam format builder did not finish loading. Refresh the page and try again.', false);
@@ -892,22 +964,20 @@
         showNotice('Database connection is not available yet. Refresh the page and try again.', false);
         return;
       }
-      state.teacherConfig = await readTeacherConfig();
+      state.teacherConfig = Registry?.readTeacherConfig ? await Registry.readTeacherConfig(state) : await readTeacherConfig();
       if (state.teacherConfig?.teacherType) state.role = state.teacherConfig.teacherType;
+      if (Registry?.loadExamSettings) state.generalSettings = await Registry.loadExamSettings(state);
+      if (Registry?.loadSchoolProfile) state.schoolProfile = await Registry.loadSchoolProfile(state);
       setBadgeValues();
       if (!AnswerGate.isAuthorizedRole(state.role)) {
         showNotice('Exam formats are restricted to Academic Teacher, Head Teacher, Assistant Headteacher, or authorized academic management.', true);
         return;
       }
       bindEvents();
-      const classes = resolveClassOptions();
-      populateSelect(templateClass, classes, null);
-      populateSelect(listClass, classes, 'All classes');
-      repopulateSubjects(classes[0] || '');
       await loadTemplates();
+      await refreshRegistry();
+      refreshClassAndSubjectSelectors();
       await loadAcademicTermOptions();
-      populateSelect(listClass, Array.from(new Set(resolveClassOptions().concat(state.templates.map((template) => template.className)).filter(Boolean))), 'All classes');
-      populateSelect(listSubject, Array.from(new Set(state.templates.map((template) => template.subject).filter(Boolean))), 'All subjects');
       resetForm();
     }
 

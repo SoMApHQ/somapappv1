@@ -47,6 +47,70 @@
     return compactText(monthKey).replace('-', '');
   }
 
+  function formatMonthLabel(value, includeYear) {
+    if (Shared?.formatMonthLabel) {
+      return Shared.formatMonthLabel(value, { includeYear: includeYear !== false });
+    }
+    return compactText(value);
+  }
+
+  function resolveDefaultLogoUrl() {
+    if (!global.location?.href) return 'images/socrates_logo.png';
+    try {
+      return new URL('../../images/socrates_logo.png', global.location.href).href;
+    } catch (_) {
+      return 'images/socrates_logo.png';
+    }
+  }
+
+  async function loadSchoolProfile(options) {
+    const db = getDb();
+    const schoolId = compactText(options?.schoolId || currentSchoolId());
+    const defaultProfile = {
+      id: schoolId,
+      name: Shared?.prettifySchoolName ? Shared.prettifySchoolName(schoolId) : schoolId,
+      logoUrl: resolveDefaultLogoUrl()
+    };
+    if (!db) return defaultProfile;
+    const paths = [
+      scopedPath('profile', schoolId),
+      `schools/${schoolId}/profile`,
+      'profile'
+    ];
+    for (const path of paths) {
+      if (!path) continue;
+      const snap = await db.ref(path).once('value').catch(() => ({ val: () => null }));
+      const profile = (snap && typeof snap.val === 'function' && snap.val()) || null;
+      if (profile && typeof profile === 'object' && Object.keys(profile).length) {
+        return {
+          id: schoolId,
+          name: compactText(profile.name || defaultProfile.name),
+          logoUrl: compactText(profile.logoUrl || profile.logo || defaultProfile.logoUrl),
+          ...profile
+        };
+      }
+    }
+    return defaultProfile;
+  }
+
+  function buildPaperHeaderMeta(paper) {
+    const monthLabel = compactText(paper.monthLabel || formatMonthLabel(paper.monthKey, false));
+    return {
+      schoolName: compactText(paper.schoolName || Shared?.prettifySchoolName?.(paper.schoolId) || paper.schoolId),
+      logoUrl: compactText(paper.schoolLogoUrl || resolveDefaultLogoUrl()),
+      examTitle: compactText(paper.title || 'Exam'),
+      className: compactText(paper.className || ''),
+      subject: compactText(paper.subject || ''),
+      term: compactText(paper.term || ''),
+      monthLabel,
+      academicYear: String(paper.year || ''),
+      examDate: compactText(paper.examDate || ''),
+      generatedDate: Number(paper.generatedAt || 0) ? new Date(Number(paper.generatedAt || 0)).toLocaleDateString() : '',
+      instructions: compactText(paper.instructions || ''),
+      totalMarks: Number(paper.totalMarks || 0) || 0
+    };
+  }
+
   function commonTerm(subjectText) {
     if (/(math|arithmetic|fraction|addition|subtraction|multiplication|division|money|time|measurement)/.test(normalizeLookupToken(subjectText))) {
       return 'math';
@@ -303,6 +367,7 @@
   }
 
   function buildPrintableHtml(paper) {
+    const header = buildPaperHeaderMeta(paper);
     const sections = paper.sections.map((section) => {
       const questions = paper.questions.filter((question) => question.sectionKey === section.sectionKey).map((question) => `
         <li class="exam-question">
@@ -327,8 +392,14 @@
       <div class="exam-paper">
         <style>
           .exam-paper { font-family: Arial, sans-serif; color: #0f172a; line-height: 1.45; }
-          .exam-paper h1 { margin: 0 0 8px; font-size: 24px; }
-          .exam-paper h2 { margin: 0 0 16px; font-size: 14px; font-weight: normal; color: #475569; }
+          .paper-header { display: grid; grid-template-columns: 72px 1fr; gap: 16px; align-items: center; border-bottom: 2px solid #cbd5e1; padding-bottom: 14px; margin-bottom: 18px; }
+          .paper-logo { width: 72px; height: 72px; object-fit: contain; border-radius: 12px; border: 1px solid #cbd5e1; padding: 6px; background: #fff; }
+          .paper-header h1 { margin: 0 0 4px; font-size: 24px; }
+          .paper-header h2 { margin: 0 0 8px; font-size: 14px; font-weight: normal; color: #475569; }
+          .paper-school { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+          .paper-meta-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; margin-top: 10px; font-size: 12px; }
+          .paper-meta-grid strong { display: block; font-size: 11px; color: #475569; text-transform: uppercase; letter-spacing: 0.04em; }
+          .instructions-box { margin-top: 12px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 10px; background: #f8fafc; }
           .paper-section { margin-top: 24px; }
           .paper-section h3 { margin: 0 0 6px; font-size: 18px; }
           .section-meta { margin: 0 0 12px; color: #64748b; font-size: 13px; }
@@ -336,10 +407,30 @@
           .question-head { display: flex; justify-content: space-between; gap: 12px; font-weight: 600; }
           .diagram-wrap { margin-top: 10px; }
           ol { padding-left: 20px; }
+          @media print {
+            .exam-paper { padding: 0; }
+          }
         </style>
-        <h1>${escHtml(paper.title)}</h1>
-        <h2>${escHtml(paper.schoolId)} | ${escHtml(paper.className)} | ${escHtml(paper.subject)} | ${escHtml(paper.monthKey)}</h2>
-        <p>${escHtml(paper.instructions)}</p>
+        <header class="paper-header">
+          <img class="paper-logo" src="${escHtml(header.logoUrl)}" alt="${escHtml(header.schoolName)} logo">
+          <div>
+            <div class="paper-school">${escHtml(header.schoolName)}</div>
+            <h1>${escHtml(header.examTitle)}</h1>
+            <h2>${escHtml([header.className, header.subject, header.monthLabel || paper.monthKey].filter(Boolean).join(' | '))}</h2>
+            <div class="paper-meta-grid">
+              <div><strong>Class</strong>${escHtml(header.className || '--')}</div>
+              <div><strong>Subject</strong>${escHtml(header.subject || '--')}</div>
+              <div><strong>Term</strong>${escHtml(header.term || 'All Terms')}</div>
+              <div><strong>Month</strong>${escHtml(header.monthLabel || '--')}</div>
+              <div><strong>Academic Year</strong>${escHtml(header.academicYear || '--')}</div>
+              <div><strong>Total Marks</strong>${escHtml(header.totalMarks || '--')}</div>
+              <div><strong>Exam Date</strong>${escHtml(header.examDate || '--')}</div>
+              <div><strong>Generated</strong>${escHtml(header.generatedDate || '--')}</div>
+              <div><strong>School ID</strong>${escHtml(paper.schoolId || '--')}</div>
+            </div>
+            <div class="instructions-box"><strong>Instructions:</strong> ${escHtml(header.instructions || 'Answer all questions.')}</div>
+          </div>
+        </header>
         ${sections}
       </div>
     `;
@@ -407,8 +498,7 @@
     const template = Shared.normalizeTemplate(settings.template || {});
     const schoolId = compactText(settings.schoolId || template.schoolId || currentSchoolId());
     const year = String(settings.year || template.year || currentYear());
-    const monthKey = compactText(settings.monthKey || Scheduler.buildMonthKey(new Date()));
-    const monthStorageKey = compactMonthKey(monthKey);
+    const monthKey = compactText(settings.monthKey || template.monthKey || Scheduler.buildMonthKey(new Date()));
     const generalSettings = settings.generalSettings || {};
     const generationMode = compactText(settings.generationMode || 'manual') || 'manual';
     const existing = await readExistingPapers({
@@ -432,7 +522,7 @@
       monthKey,
       minimumConfidenceScore: template.settings.minimumConfidenceScore || generalSettings.minimumConfidenceScore || 60
     });
-    let topics = sourceResult.topics;
+    let topics = template.settings.includeOnlyTopicsAboveThreshold ? sourceResult.topics : sourceResult.allTopics;
     if (template.settings.requireHomeworkGivenForComplexSections) {
       topics = topics.filter((topic) => compactText(topic.sourceHomework));
     }
@@ -472,17 +562,22 @@
     const revision = sameTemplate.length + 1;
     const generatedAt = Date.now();
     const paperId = createId('exam_paper');
+    const schoolProfile = await loadSchoolProfile({ schoolId });
     const paper = {
       id: paperId,
       schoolId,
+      schoolName: compactText(schoolProfile?.name || Shared?.prettifySchoolName?.(schoolId) || schoolId),
+      schoolLogoUrl: compactText(schoolProfile?.logoUrl || schoolProfile?.logo || resolveDefaultLogoUrl()),
       year,
       monthKey,
+      monthLabel: formatMonthLabel(monthKey, false),
       className: template.className,
       subject: template.subject,
       term: template.term,
       status: 'draft',
       title: revision > 1 ? `${template.title} (Draft ${revision})` : template.title,
       instructions: template.instructions,
+      examDate: compactText(template.settings.schedule?.exactDate || ''),
       formatId: template.formatId || template.id,
       generatedAt,
       generatedBy: 'exam-engine-v1',
@@ -490,6 +585,7 @@
       sourceTopics: topics.map((topic) => ({
         topic: topic.topic,
         confidenceScore: topic.confidenceScore,
+        dates: topic.dates || [],
         sourceRefs: topic.sourceRefs
       })),
       sections,

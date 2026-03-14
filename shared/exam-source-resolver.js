@@ -33,9 +33,58 @@
     return Shared ? Shared.getDb() : (global.db || global.firebase?.database?.() || null);
   }
 
+  function buildCandidatePaths(relativePath, schoolId, extraPaths) {
+    const paths = [];
+    const seen = new Set();
+    function push(pathValue) {
+      const path = compactText(pathValue);
+      if (!path || seen.has(path)) return;
+      seen.add(path);
+      paths.push(path);
+    }
+    if (Shared?.scopedPath) push(Shared.scopedPath(relativePath, schoolId));
+    push(relativePath);
+    if (schoolId && !relativePath.startsWith('schools/')) push(`schools/${schoolId}/${relativePath}`);
+    (extraPaths || []).forEach(push);
+    return paths;
+  }
+
+  async function readMergedObject(paths) {
+    const db = getDb();
+    if (!db) return {};
+    let merged = {};
+    let found = false;
+    for (const path of paths || []) {
+      const snap = await db.ref(path).once('value').catch(() => ({ val: () => null }));
+      const value = (snap && typeof snap.val === 'function' && snap.val()) || null;
+      if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.keys(value).length) continue;
+      merged = deepMerge(merged, value);
+      found = true;
+    }
+    return found ? merged : {};
+  }
+
+  function deepMerge(baseValue, incomingValue) {
+    if (!baseValue || typeof baseValue !== 'object' || Array.isArray(baseValue)) return incomingValue;
+    if (!incomingValue || typeof incomingValue !== 'object' || Array.isArray(incomingValue)) return baseValue;
+    const merged = { ...baseValue };
+    Object.entries(incomingValue).forEach(([key, value]) => {
+      if (merged[key] && typeof merged[key] === 'object' && !Array.isArray(merged[key]) && value && typeof value === 'object' && !Array.isArray(value)) {
+        merged[key] = deepMerge(merged[key], value);
+      } else {
+        merged[key] = value;
+      }
+    });
+    return merged;
+  }
+
   function monthKeyFromDate(value) {
     const clean = compactText(value);
     return /^\d{4}-\d{2}/.test(clean) ? clean.slice(0, 7) : '';
+  }
+
+  function normalizeMonthKey(value, fallbackYear) {
+    return Shared?.normalizeMonthKey ? Shared.normalizeMonthKey(value, fallbackYear) : monthKeyFromDate(value);
   }
 
   function normalizeClassName(value) {
@@ -47,15 +96,16 @@
     const base = fallback && typeof fallback === 'object' ? fallback : {};
     const className = normalizeClassName(raw.className || raw.class || base.className || '');
     const date = compactText(raw.date || base.date || '');
+    const year = String(raw.year || raw.academicYear || base.year || currentYear());
     return {
       id: compactText(raw.id || id || ''),
       schoolId: compactText(raw.schoolId || base.schoolId || currentSchoolId()),
-      year: String(raw.year || raw.academicYear || base.year || currentYear()),
+      year,
       className,
       subject: compactText(raw.subject || base.subject || ''),
       term: compactText(raw.term || ''),
       date,
-      monthKey: monthKeyFromDate(date),
+      monthKey: normalizeMonthKey(raw.monthKey || raw.lessonMonth || raw.month || date, year),
       topic: compactText(raw.topic || ''),
       objectives: compactText(raw.objectives || ''),
       activities: compactText(raw.activities || ''),
@@ -72,15 +122,16 @@
     const raw = note && typeof note === 'object' ? note : {};
     const className = normalizeClassName(raw.class || raw.className || '');
     const date = compactText(raw.lessonDateContext || raw.date || '');
+    const year = String(raw.year || raw.academicYear || currentYear());
     return {
       id: compactText(raw.id || id || ''),
       schoolId: compactText(raw.schoolId || currentSchoolId()),
-      year: String(raw.year || raw.academicYear || currentYear()),
+      year,
       className,
       subject: compactText(raw.subject || ''),
       term: compactText(raw.term || ''),
       date,
-      monthKey: monthKeyFromDate(date),
+      monthKey: normalizeMonthKey(raw.monthKey || raw.lessonMonth || raw.month || date, year),
       topic: compactText(raw.topic || ''),
       subTopic: compactText(raw.subTopic || ''),
       keyConcepts: compactText(raw.keyConcepts || ''),
@@ -104,7 +155,7 @@
       className: normalizeClassName(raw.className || className || ''),
       subject: compactText(raw.subject || ''),
       date: compactText(raw.date || date || ''),
-      monthKey: monthKeyFromDate(raw.date || date || ''),
+      monthKey: normalizeMonthKey(raw.monthKey || raw.month || raw.date || date || '', raw.year || year || currentYear()),
       topic: compactText(raw.topicTaught || raw.topic || ''),
       lessonSummary: compactText(raw.lessonSummary || ''),
       homeworkGiven: compactText(raw.homeworkGiven || ''),
@@ -116,18 +167,20 @@
     const raw = journal && typeof journal === 'object' ? journal : {};
     const className = normalizeClassName(raw.className || raw.class || '');
     const date = compactText(raw.date || '');
+    const year = String(raw.year || currentYear());
     return {
       id: compactText(id || raw.id || ''),
       schoolId: compactText(raw.schoolId || currentSchoolId()),
-      year: String(raw.year || currentYear()),
+      year,
       className,
       date,
-      monthKey: monthKeyFromDate(date),
+      monthKey: normalizeMonthKey(raw.monthKey || raw.month || date, year),
       linkedLessonPlanIds: Array.isArray(raw.linkedLessonPlanIds) ? raw.linkedLessonPlanIds.map(compactText).filter(Boolean) : [],
       linkedSubjects: Array.isArray(raw.linkedSubjects) ? raw.linkedSubjects.map(compactText).filter(Boolean) : [],
       topicsCovered: compactText(raw.topicsCovered || ''),
       homeworkGiven: compactText(raw.homeworkGiven || ''),
-      materialsUsed: compactText(raw.materialsUsed || '')
+      materialsUsed: compactText(raw.materialsUsed || ''),
+      subject: compactText(raw.subject || raw.primarySubject || '')
     };
   }
 
@@ -142,6 +195,7 @@
       topic: compactText(raw.specificActivities || raw.specificCompetence || raw.mainCompetence || ''),
       reference: compactText(raw.reference || ''),
       month: compactText(raw.month || ''),
+      monthKey: normalizeMonthKey(raw.month || '', meta.year || currentYear()),
       week: compactText(raw.week || '')
     };
   }
@@ -159,7 +213,10 @@
         ? Shared.academicTermsMatch(record.term || '', filters.term)
         : normalizeLookupToken(record.term || '') === normalizeLookupToken(filters.term))
     ) return false;
-    if (filters.monthKey && compactText(record.monthKey || '') && compactText(record.monthKey || '') !== compactText(filters.monthKey)) return false;
+    if (filters.monthKey) {
+      if (!compactText(record.monthKey || '')) return false;
+      if (compactText(record.monthKey || '') !== compactText(filters.monthKey)) return false;
+    }
     return true;
   }
 
@@ -174,9 +231,9 @@
     ].filter(Boolean)));
     const plans = [];
     for (const classCandidate of classCandidates) {
-      const path = scopedPath(`lessonPlans/${year}/${classCandidate}`, schoolId);
-      const snap = await db.ref(path).once('value').catch(() => ({ val: () => null }));
-      const data = (snap && typeof snap.val === 'function' && snap.val()) || {};
+      const data = await readMergedObject(buildCandidatePaths(`lessonPlans/${year}/${classCandidate}`, schoolId, [
+        `lessonPlans/${year}/${classCandidate.replace(/\s+/g, '_')}`
+      ]));
       Object.entries(data || {}).forEach(([date, byId]) => {
         Object.entries(byId || {}).forEach(([id, plan]) => {
           const normalized = normalizePlanRecord(id, plan, { schoolId, year, className: filters.className, date });
@@ -192,8 +249,9 @@
     if (!db) return [];
     const schoolId = compactText(filters.schoolId || currentSchoolId());
     const year = String(filters.year || currentYear());
-    const snap = await db.ref(scopedPath(`lessonNotes/${year}`, schoolId)).once('value').catch(() => ({ val: () => null }));
-    const data = (snap && typeof snap.val === 'function' && snap.val()) || {};
+    const data = await readMergedObject(buildCandidatePaths(`lessonNotes/${year}`, schoolId, [
+      'lesson_notes'
+    ]));
     const notes = [];
     Object.values(data || {}).forEach((byWorker) => {
       Object.entries(byWorker || {}).forEach(([id, note]) => {
@@ -209,8 +267,7 @@
     if (!db) return [];
     const schoolId = compactText(filters.schoolId || currentSchoolId());
     const year = String(filters.year || currentYear());
-    const snap = await db.ref(scopedPath(`logbooks/${year}`, schoolId)).once('value').catch(() => ({ val: () => null }));
-    const data = (snap && typeof snap.val === 'function' && snap.val()) || {};
+    const data = await readMergedObject(buildCandidatePaths(`logbooks/${year}`, schoolId));
     const logs = [];
     Object.entries(data || {}).forEach(([className, byDate]) => {
       Object.entries(byDate || {}).forEach(([date, byId]) => {
@@ -226,8 +283,7 @@
   async function readClassJournals(filters) {
     const db = getDb();
     if (!db) return [];
-    const snap = await db.ref('class_journals').once('value').catch(() => ({ val: () => null }));
-    const data = (snap && typeof snap.val === 'function' && snap.val()) || {};
+    const data = await readMergedObject(buildCandidatePaths('class_journals', filters.schoolId || currentSchoolId()));
     const journals = [];
     Object.values(data || {}).forEach((byWorker) => {
       Object.entries(byWorker || {}).forEach(([id, journal]) => {
@@ -243,13 +299,17 @@
     if (!db) return [];
     const schoolId = compactText(filters.schoolId || currentSchoolId());
     const year = String(filters.year || currentYear());
-    const snap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value').catch(() => ({ val: () => null }));
-    const data = (snap && typeof snap.val === 'function' && snap.val()) || {};
+    const data = await readMergedObject([
+      `schemes/${schoolId}/templates/${year}`,
+      `schools/${schoolId}/schemes/templates/${year}`
+    ]);
     const rows = [];
     Object.entries(data || {}).forEach(([storedClass, bySubject]) => {
       Object.entries(bySubject || {}).forEach(([storedSubject, byTerm]) => {
         Object.entries(byTerm || {}).forEach(([termKey, byId]) => {
-          Object.values(byId || {}).forEach((template) => {
+          const templates = Shared?.looksLikeTemplateObject?.(byId) ? [byId] : Object.values(byId || {});
+          templates.forEach((template) => {
+            if (!template || typeof template !== 'object') return;
             const meta = {
               schoolId,
               year,

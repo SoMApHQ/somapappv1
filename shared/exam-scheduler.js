@@ -102,20 +102,25 @@
     const monthKey = compactText(settings.monthKey || buildMonthKey(now));
     const generated = [];
     for (const template of templates) {
+      const resolvedMonthKey = compactText(
+        typeof settings.resolveMonthKey === 'function'
+          ? settings.resolveMonthKey(template, monthKey)
+          : (template?.monthKey || monthKey)
+      ) || monthKey;
       const schedule = resolveSchedule(generalSettings, template);
-      const eligibility = shouldGenerateNow({ schedule, now, monthKey });
-      if (!eligibility.eligible) continue;
+      const eligibility = shouldGenerateNow({ schedule, now, monthKey: resolvedMonthKey });
+      if (!eligibility.eligible && !settings.forceEligible) continue;
       const existingState = await readGenerationState({
         schoolId: settings.schoolId,
         year: settings.year,
-        monthKey,
+        monthKey: resolvedMonthKey,
         className: template.className,
         subject: template.subject,
         formatId: template.formatId || template.id
       });
       if (existingState?.lastGeneratedPaperId) continue;
       if (typeof settings.generateDraft !== 'function') continue;
-      const result = await settings.generateDraft(template, monthKey);
+      const result = await settings.generateDraft(template, resolvedMonthKey);
       if (result?.paper?.id) generated.push(result.paper.id);
     }
     return generated;
