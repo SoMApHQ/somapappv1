@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Check Exams | SoMAp</title>
+  <script src="../../somapappv1multischool/js/context.js"></script>
+  <script src="../../Todashboardhtml/yearContext.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="../../firebase.js"></script>
+  <script src="../../shared/academic-class-utils.js"></script>
+  <script src="../../shared/exam-template-engine.js"></script>
+  <script src="../../shared/exam-diagram-engine.js"></script>
+  <script src="../../shared/exam-name-pool.js"></script>
+  <script src="../../shared/exam-answer-gate.js"></script>
+  <script src="../../shared/exam-source-resolver.js"></script>
+  <script src="../../shared/exam-scheduler.js"></script>
+  <script src="../../shared/exam-generator.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      color: #eff6ff;
+      background:
+        radial-gradient(circle at top left, rgba(59, 130, 246, 0.18), transparent 24%),
+        radial-gradient(circle at bottom right, rgba(251, 191, 36, 0.18), transparent 24%),
+        linear-gradient(150deg, #111827, #0f172a 45%, #1e293b);
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .shell { max-width: 1520px; margin: 0 auto; }
+    .panel, .card {
+      background: rgba(15, 23, 42, 0.78);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 22px;
+      backdrop-filter: blur(18px);
+      box-shadow: 0 16px 40px rgba(2, 8, 23, 0.2);
+    }
+    .header {
+      padding: 24px 28px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .header h1 { margin: 0; font-size: 2rem; }
+    .header p { margin: 8px 0 0; color: rgba(226, 232, 240, 0.74); }
+    .badge-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+    .badge {
+      padding: 7px 12px;
+      border-radius: 999px;
+      background: rgba(59, 130, 246, 0.14);
+      color: #bfdbfe;
+      border: 1px solid rgba(96, 165, 250, 0.18);
+      font-size: 0.88rem;
+    }
+    .btn, button {
+      border: none;
+      border-radius: 12px;
+      padding: 11px 15px;
+      cursor: pointer;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .btn-primary { background: linear-gradient(135deg, #0ea5e9, #38bdf8); color: #082f49; }
+    .btn-secondary { background: rgba(59, 130, 246, 0.14); color: #dbeafe; border: 1px solid rgba(96, 165, 250, 0.18); }
+    .btn-muted { background: rgba(148, 163, 184, 0.14); color: #e2e8f0; border: 1px solid rgba(148, 163, 184, 0.18); }
+    .layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 20px; }
+    .sidebar, .content { padding: 18px; }
+    .filters, .field-grid { display: grid; gap: 12px; }
+    .field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .field {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid rgba(100, 116, 139, 0.18);
+    }
+    .field label { display: block; margin-bottom: 7px; color: #bfdbfe; font-size: 0.88rem; }
+    .field input, .field select, .field textarea {
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(15, 23, 42, 0.84);
+      color: #f8fafc;
+      padding: 10px 12px;
+      font: inherit;
+    }
+    .field textarea { min-height: 92px; resize: vertical; }
+    .section-title { margin: 0 0 12px; text-transform: uppercase; letter-spacing: 0.08em; color: #7dd3fc; font-size: 0.98rem; }
+    .exam-list { display: grid; gap: 12px; margin-top: 16px; max-height: 70vh; overflow: auto; }
+    .exam-card {
+      padding: 15px;
+      border-radius: 18px;
+      background: rgba(15, 23, 42, 0.56);
+      border: 1px solid rgba(100, 116, 139, 0.16);
+      cursor: pointer;
+    }
+    .exam-card.active { border-color: rgba(96, 165, 250, 0.46); background: rgba(30, 64, 175, 0.18); }
+    .exam-card h4 { margin: 0 0 8px; }
+    .exam-card p { margin: 4px 0; color: rgba(226, 232, 240, 0.72); font-size: 0.9rem; }
+    .preview-layout { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 18px; }
+    .preview-card, .source-card, .answer-card { padding: 16px; border-radius: 18px; background: rgba(15, 23, 42, 0.46); border: 1px solid rgba(100, 116, 139, 0.16); }
+    .question-item { margin-bottom: 14px; padding: 12px; border-radius: 14px; background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(100, 116, 139, 0.14); }
+    .question-meta { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: #93c5fd; font-size: 0.9rem; }
+    .tag { display: inline-block; padding: 4px 9px; border-radius: 999px; background: rgba(14, 165, 233, 0.16); color: #bae6fd; font-size: 0.8rem; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+    .source-list, .access-log { display: grid; gap: 10px; }
+    .source-item, .log-item { padding: 10px 12px; border-radius: 12px; background: rgba(15, 23, 42, 0.54); border: 1px solid rgba(100, 116, 139, 0.14); }
+    .notice { margin-bottom: 16px; padding: 14px 16px; border-radius: 16px; background: rgba(59, 130, 246, 0.14); border: 1px solid rgba(96, 165, 250, 0.18); color: #dbeafe; }
+    .hidden { display: none !important; }
+    .empty { color: rgba(226, 232, 240, 0.68); padding: 18px 0; }
+    .diagram-preview svg { max-width: 100%; height: auto; background: white; border-radius: 12px; }
+    @media (max-width: 1180px) {
+      .layout, .preview-layout, .field-grid { grid-template-columns: 1fr; }
+      .header { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="panel header">
+      <div>
+        <h1>Check Exams</h1>
+        <p>Review draft exams generated only from verified taught content, inspect source topics, approve or regenerate safely, and unlock answer keys with audit logging.</p>
+        <div class="badge-row">
+          <span class="badge" id="schoolBadge">School: --</span>
+          <span class="badge" id="yearBadge">Year: --</span>
+          <span class="badge" id="roleBadge">Role: --</span>
+        </div>
+      </div>
+      <div class="actions">
+        <a class="btn btn-secondary" id="backLink" href="../workertasks.html">Back to Tasks</a>
+        <button class="btn btn-primary" id="generatePendingBtn" type="button">Generate Pending Drafts</button>
+      </div>
+    </div>
+
+    <div class="notice hidden" id="notice"></div>
+
+    <div class="layout" id="mainLayout">
+      <aside class="card sidebar">
+        <h2 class="section-title">Filters</h2>
+        <div class="filters">
+          <div class="field"><label for="filterClass">Class</label><select id="filterClass"></select></div>
+          <div class="field"><label for="filterSubject">Subject</label><select id="filterSubject"></select></div>
+          <div class="field"><label for="filterMonth">Month</label><input id="filterMonth" type="month"></div>
+          <div class="field"><label for="filterStatus">Status</label><select id="filterStatus"><option value="">All</option><option value="draft">Draft</option><option value="approved">Approved</option><option value="final">Final</option></select></div>
+        </div>
+        <div class="exam-list" id="examList">
+          <div class="empty">No generated exams yet.</div>
+        </div>
+      </aside>
+
+      <main class="card content">
+        <div class="preview-layout">
+          <section class="preview-card">
+            <h2 class="section-title">Paper Preview</h2>
+            <div class="field"><label for="paperTitle">Title</label><input id="paperTitle"></div>
+            <div class="field" style="margin-top:12px;"><label for="paperInstructions">Instructions</label><textarea id="paperInstructions"></textarea></div>
+            <div class="actions">
+              <button class="btn btn-primary" id="saveEditsBtn" type="button">Save Edits</button>
+              <button class="btn btn-secondary" id="approveBtn" type="button">Approve Draft</button>
+              <button class="btn btn-secondary" id="regenerateBtn" type="button">Regenerate</button>
+              <button class="btn btn-muted" id="printBtn" type="button">Print</button>
+              <button class="btn btn-muted" id="exportPdfBtn" type="button">Export PDF</button>
+            </div>
+            <div id="questionList" style="margin-top:16px;">
+              <div class="empty">Select a draft exam to preview it.</div>
+            </div>
+          </section>
+
+          <section style="display:grid; gap:18px;">
+            <div class="source-card">
+              <h2 class="section-title">Source Topics</h2>
+              <div class="source-list" id="sourceTopicsList">
+                <div class="empty">No exam selected.</div>
+              </div>
+            </div>
+            <div class="answer-card" id="answerPanel">
+              <h2 class="section-title">Answer Key</h2>
+              <div id="answerGateWrap">
+                <div class="field"><label for="answerPassword">Unlock password</label><input id="answerPassword" type="password" placeholder="Enter answer-key password"></div>
+                <div class="actions"><button class="btn btn-primary" id="unlockBtn" type="button">Unlock Answer Key</button></div>
+              </div>
+              <div id="answerContent" class="hidden">
+                <div id="answerList"></div>
+                <h3 class="section-title" style="margin-top:18px;">Access Log</h3>
+                <div class="access-log" id="accessLogList"></div>
+              </div>
+              <div id="answerDenied" class="empty hidden">Answer-key unlock is only shown to authorized academic roles.</div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+  <script>
+    const Shared = window.SoMApExamShared;
+    const Scheduler = window.SoMApExamScheduler;
+    const Generator = window.SoMApExamGenerator;
+    const AnswerGate = window.SoMApExamAnswerGate;
+    const db = window.db || firebase.database();
+    const params = new URLSearchParams(window.location.search);
+    const schoolParam = params.get('school');
+    const yearParam = params.get('year');
+    if (schoolParam) {
+      localStorage.setItem('somap.currentSchoolId', schoolParam);
+      localStorage.setItem('somap.currentSchoolName', schoolParam === 'socrates-school' ? 'Socrates School' : schoolParam);
+    }
+    if (yearParam && window.somapYearContext?.setSelectedYear) window.somapYearContext.setSelectedYear(yearParam);
+
+    const state = {
+      workerId: localStorage.getItem('workerId') || '',
+      role: String(localStorage.getItem('somap_role') || '').trim(),
+      schoolId: Shared.currentSchoolId(),
+      year: Shared.currentYear(),
+      templates: [],
+      generalSettings: {},
+      exams: [],
+      selectedExamId: '',
+      selectedAnswerKey: null
+    };
+
+    const notice = document.getElementById('notice');
+    const mainLayout = document.getElementById('mainLayout');
+    const examList = document.getElementById('examList');
+    const sourceTopicsList = document.getElementById('sourceTopicsList');
+    const questionList = document.getElementById('questionList');
+    const answerPanel = document.getElementById('answerPanel');
+    const answerDenied = document.getElementById('answerDenied');
+    const answerGateWrap = document.getElementById('answerGateWrap');
+    const answerContent = document.getElementById('answerContent');
+    const answerList = document.getElementById('answerList');
+    const accessLogList = document.getElementById('accessLogList');
+
+    function schoolPath(path) {
+      return Shared.scopedPath(path, state.schoolId);
+    }
+
+    function setNotice(message) {
+      if (!message) {
+        notice.classList.add('hidden');
+        return;
+      }
+      notice.textContent = message;
+      notice.classList.remove('hidden');
+    }
+
+    function setBadges() {
+      document.getElementById('schoolBadge').textContent = `School: ${localStorage.getItem('somap.currentSchoolName') || (state.schoolId === 'socrates-school' ? 'Socrates School' : state.schoolId)}`;
+      document.getElementById('yearBadge').textContent = `Year: ${state.year}`;
+      document.getElementById('roleBadge').textContent = `Role: ${state.role || 'Teacher'}`;
+      document.getElementById('backLink').href = `../workertasks.html?school=${encodeURIComponent(state.schoolId)}&year=${encodeURIComponent(state.year)}`;
+    }
+
+    async function readTeacherConfig() {
+      if (!state.workerId) return null;
+      const snap = await db.ref(schoolPath(`years/${state.year}/teachers_config/${state.workerId}`)).once('value').catch(() => ({ val: () => null }));
+      return (snap && typeof snap.val === 'function' && snap.val()) || null;
+    }
+
+    function populateSelect(selectEl, values) {
+      selectEl.innerHTML = '<option value="">All</option>';
+      values.forEach((value) => selectEl.add(new Option(value, value)));
+    }
+
+    async function loadTemplatesAndSettings() {
+      const [templateSnap, settingsSnap] = await Promise.all([
+        db.ref(schoolPath(`years/${state.year}/examFormats`)).once('value').catch(() => ({ val: () => null })),
+        db.ref(schoolPath(`years/${state.year}/examSettings/general`)).once('value').catch(() => ({ val: () => null }))
+      ]);
+      const templateTree = (templateSnap && typeof templateSnap.val === 'function' && templateSnap.val()) || {};
+      state.templates = [];
+      Object.values(templateTree || {}).forEach((bySubject) => {
+        Object.values(bySubject || {}).forEach((byId) => {
+          Object.values(byId || {}).forEach((template) => state.templates.push(Shared.normalizeTemplate(template)));
+        });
+      });
+      state.generalSettings = (settingsSnap && typeof settingsSnap.val === 'function' && settingsSnap.val()) || {};
+      populateSelect(document.getElementById('filterClass'), Array.from(new Set(state.templates.map((template) => template.className).filter(Boolean))));
+      populateSelect(document.getElementById('filterSubject'), Array.from(new Set(state.templates.map((template) => template.subject).filter(Boolean))));
+    }
+
+    async function loadExams() {
+      const snap = await db.ref(schoolPath(`years/${state.year}/generatedExams`)).once('value').catch(() => ({ val: () => null }));
+      const tree = (snap && typeof snap.val === 'function' && snap.val()) || {};
+      state.exams = [];
+      Object.values(tree || {}).forEach((bySubject) => {
+        Object.values(bySubject || {}).forEach((byMonth) => {
+        Object.values(byMonth || {}).forEach((paper) => state.exams.push(paper));
+        });
+      });
+      renderExamList();
+      if (!state.selectedExamId && filteredExams().length) {
+        await selectExam(filteredExams()[0].id);
+      }
+    }
+
+    function filteredExams() {
+      const classFilter = document.getElementById('filterClass').value;
+      const subjectFilter = document.getElementById('filterSubject').value;
+      const monthFilter = document.getElementById('filterMonth').value;
+      const statusFilter = document.getElementById('filterStatus').value;
+      return state.exams.filter((paper) => {
+        if (classFilter && paper.className !== classFilter) return false;
+        if (subjectFilter && paper.subject !== subjectFilter) return false;
+        if (monthFilter && paper.monthKey !== monthFilter) return false;
+        if (statusFilter && paper.status !== statusFilter) return false;
+        return true;
+      }).sort((a, b) => Number(b.generatedAt || 0) - Number(a.generatedAt || 0));
+    }
+
+    function renderExamList() {
+      const exams = filteredExams();
+      if (!exams.length) {
+        examList.innerHTML = '<div class="empty">No generated exams match the current filters.</div>';
+        return;
+      }
+      examList.innerHTML = exams.map((paper) => `
+        <div class="exam-card ${state.selectedExamId === paper.id ? 'active' : ''}" data-paper-id="${paper.id}">
+          <h4>${Shared.escHtml(paper.title || 'Draft exam')}</h4>
+          <p>${Shared.escHtml(paper.className)} | ${Shared.escHtml(paper.subject)}</p>
+          <p>${Shared.escHtml(paper.monthKey)} | ${Shared.escHtml(paper.status)} | ${new Date(Number(paper.generatedAt || 0)).toLocaleString()}</p>
+        </div>
+      `).join('');
+    }
+
+    function selectedExam() {
+      return state.exams.find((paper) => paper.id === state.selectedExamId) || null;
+    }
+
+    function renderSourceTopics(paper) {
+      if (!paper) {
+        sourceTopicsList.innerHTML = '<div class="empty">No exam selected.</div>';
+        return;
+      }
+      sourceTopicsList.innerHTML = (paper.sourceTopics || []).map((topic) => `
+        <div class="source-item">
+          <strong>${Shared.escHtml(topic.topic || 'Topic')}</strong>
+          <div>Confidence: ${topic.confidenceScore || 0}</div>
+          <div>Lesson plan: ${Shared.escHtml(topic.sourceRefs?.lessonPlanId || '-')}</div>
+        </div>
+      `).join('') || '<div class="empty">No source topics stored.</div>';
+    }
+
+    function renderQuestions(paper) {
+      if (!paper) {
+        questionList.innerHTML = '<div class="empty">Select a draft exam to preview it.</div>';
+        return;
+      }
+      questionList.innerHTML = (paper.questions || []).map((question, index) => `
+        <div class="question-item" data-question-id="${question.id}">
+          <div class="question-meta">
+            <span class="tag">${Shared.questionTypeLabel(question.type)}</span>
+            <span>${question.marks} marks</span>
+          </div>
+          <div class="field"><label>Question ${index + 1}</label><textarea data-edit="prompt">${Shared.escHtml(question.prompt || '')}</textarea></div>
+          <div class="field" style="margin-top:10px;"><label>Marks</label><input data-edit="marks" type="number" min="1" value="${question.marks || 1}"></div>
+          ${question.diagram?.svg ? `<div class="diagram-preview" style="margin-top:10px;">${question.diagram.svg}</div>` : ''}
+        </div>
+      `).join('');
+      document.getElementById('paperTitle').value = paper.title || '';
+      document.getElementById('paperInstructions').value = paper.instructions || '';
+    }
+
+    async function loadAnswerKey(paper) {
+      if (!paper) return null;
+      const snap = await db.ref(schoolPath(`years/${state.year}/generatedExamAnswerKeys/${paper.id}`)).once('value').catch(() => ({ val: () => null }));
+      return (snap && typeof snap.val === 'function' && snap.val()) || null;
+    }
+
+    async function loadAccessLogs(paper) {
+      if (!paper) return [];
+      const snap = await db.ref(schoolPath(`years/${state.year}/answerKeyAccessLog/${paper.id}`)).once('value').catch(() => ({ val: () => null }));
+      return Object.values((snap && typeof snap.val === 'function' && snap.val()) || {}).sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0)).slice(0, 5);
+    }
+
+    async function selectExam(paperId) {
+      state.selectedExamId = paperId;
+      state.selectedAnswerKey = null;
+      answerContent.classList.add('hidden');
+      answerList.innerHTML = '';
+      accessLogList.innerHTML = '';
+      renderExamList();
+      const paper = selectedExam();
+      renderSourceTopics(paper);
+      renderQuestions(paper);
+    }
+
+    async function unlockAnswerKey() {
+      const paper = selectedExam();
+      if (!paper) return;
+      const password = document.getElementById('answerPassword').value || '';
+      const ok = await AnswerGate.verifyPassword(password);
+      if (!ok) {
+        setNotice('Answer-key password did not match.');
+        return;
+      }
+      state.selectedAnswerKey = await loadAnswerKey(paper);
+      await AnswerGate.logAccess({
+        schoolId: state.schoolId,
+        year: state.year,
+        paperId: paper.id,
+        workerId: state.workerId,
+        workerName: localStorage.getItem('somap_workerName') || '',
+        workerRole: state.role
+      });
+      const logs = await loadAccessLogs(paper);
+      answerList.innerHTML = (state.selectedAnswerKey?.questions || []).map((question, index) => `
+        <div class="question-item">
+          <div class="question-meta"><span class="tag">Answer ${index + 1}</span><span>${Shared.escHtml(question.sourceTopic || '')}</span></div>
+          <div><strong>Prompt:</strong> ${Shared.escHtml(question.prompt || '')}</div>
+          <div style="margin-top:6px;"><strong>Answer:</strong> ${Shared.escHtml(question.answer || '')}</div>
+          ${question.diagram?.svg ? `<div class="diagram-preview" style="margin-top:10px;">${question.diagram.svg}</div>` : ''}
+        </div>
+      `).join('') || '<div class="empty">No answer key stored for this paper.</div>';
+      accessLogList.innerHTML = logs.map((log) => `
+        <div class="log-item">${Shared.escHtml(log.workerName || 'Worker')} | ${Shared.escHtml(log.workerRole || '')} | ${new Date(Number(log.timestamp || 0)).toLocaleString()}</div>
+      `).join('') || '<div class="empty">No access log yet.</div>';
+      answerContent.classList.remove('hidden');
+      setNotice('Answer key unlocked and access logged.');
+    }
+
+    async function saveEdits() {
+      const paper = selectedExam();
+      if (!paper) return;
+      paper.title = document.getElementById('paperTitle').value || paper.title;
+      paper.instructions = document.getElementById('paperInstructions').value || paper.instructions;
+      Array.from(questionList.querySelectorAll('.question-item')).forEach((item) => {
+        const questionId = item.dataset.questionId;
+        const question = (paper.questions || []).find((entry) => entry.id === questionId);
+        if (!question) return;
+        question.prompt = item.querySelector('[data-edit="prompt"]').value;
+        question.marks = Number(item.querySelector('[data-edit="marks"]').value || question.marks || 1);
+      });
+      paper.totalMarks = (paper.questions || []).reduce((sum, question) => sum + Number(question.marks || 0), 0);
+      paper.printableHtml = Generator.buildPrintableHtml(paper);
+      const classKey = Shared.sanitizeKey(paper.className || '');
+      const subjectKey = Shared.sanitizeKey(paper.subject || '');
+      const monthKey = String(paper.monthKey || '').replace('-', '');
+      await db.ref(schoolPath(`years/${state.year}/generatedExams/${classKey}/${subjectKey}/${monthKey}/${paper.id}`)).update({
+        title: paper.title,
+        instructions: paper.instructions,
+        questions: paper.questions,
+        totalMarks: paper.totalMarks,
+        printableHtml: paper.printableHtml,
+        updatedAt: Date.now()
+      });
+      setNotice('Draft edits saved.');
+      await loadExams();
+      await selectExam(paper.id);
+    }
+
+    async function approveExam() {
+      const paper = selectedExam();
+      if (!paper) return;
+      const classKey = Shared.sanitizeKey(paper.className || '');
+      const subjectKey = Shared.sanitizeKey(paper.subject || '');
+      const monthKey = String(paper.monthKey || '').replace('-', '');
+      await db.ref(schoolPath(`years/${state.year}/generatedExams/${classKey}/${subjectKey}/${monthKey}/${paper.id}`)).update({
+        status: 'approved',
+        reviewMeta: { ...(paper.reviewMeta || {}), approvedAt: Date.now(), approvedBy: state.workerId || state.role }
+      });
+      setNotice('Draft approved.');
+      await loadExams();
+      await selectExam(paper.id);
+    }
+
+    async function regenerateExam() {
+      const paper = selectedExam();
+      if (!paper) return;
+      const template = state.templates.find((entry) => String(entry.formatId || entry.id) === String(paper.formatId || ''));
+      if (!template) {
+        setNotice('The saved format for this paper could not be found.');
+        return;
+      }
+      const result = await Generator.generateDraftExam({
+        schoolId: state.schoolId,
+        year: state.year,
+        monthKey: paper.monthKey,
+        template,
+        generalSettings: state.generalSettings,
+        generationMode: 'manual',
+        forceRegenerate: true
+      });
+      setNotice(result.created ? 'New regeneration draft created.' : 'No new draft was created.');
+      await loadExams();
+      if (result.paper?.id) await selectExam(result.paper.id);
+    }
+
+    function printExam() {
+      const paper = selectedExam();
+      if (!paper) return;
+      const preview = window.open('', '_blank', 'width=1000,height=900');
+      preview.document.write(`<!DOCTYPE html><html><head><title>${Shared.escHtml(paper.title || 'Exam')}</title></head><body>${paper.printableHtml || ''}</body></html>`);
+      preview.document.close();
+      preview.focus();
+      preview.print();
+    }
+
+    function exportPdf() {
+      const paper = selectedExam();
+      if (!paper) return;
+      const jsPdfLib = window.jspdf;
+      if (!jsPdfLib?.jsPDF) {
+        setNotice('PDF export library is not available.');
+        return;
+      }
+      const doc = new jsPdfLib.jsPDF({ unit: 'pt', format: 'a4' });
+      let y = 40;
+      doc.setFontSize(18);
+      doc.text(paper.title || 'Exam', 40, y);
+      y += 22;
+      doc.setFontSize(11);
+      doc.text(`${paper.className || ''} | ${paper.subject || ''} | ${paper.monthKey || ''}`, 40, y);
+      y += 22;
+      doc.text(paper.instructions || '', 40, y, { maxWidth: 520 });
+      y += 30;
+      (paper.questions || []).forEach((question, index) => {
+        const lines = doc.splitTextToSize(`${index + 1}. ${question.prompt} (${question.marks} marks)`, 520);
+        if (y > 760) { doc.addPage(); y = 40; }
+        doc.text(lines, 40, y);
+        y += lines.length * 14 + 10;
+      });
+      doc.save(`${(paper.title || 'exam').replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.pdf`);
+    }
+
+    async function runPendingGeneration() {
+      const monthKey = document.getElementById('filterMonth').value || Scheduler.buildMonthKey(new Date());
+      const generated = await Scheduler.runPendingGeneration({
+        schoolId: state.schoolId,
+        year: state.year,
+        monthKey,
+        templates: state.templates,
+        generalSettings: state.generalSettings,
+        generateDraft: async (template, resolvedMonthKey) => Generator.generateDraftExam({
+          schoolId: state.schoolId,
+          year: state.year,
+          monthKey: resolvedMonthKey,
+          template,
+          generalSettings: state.generalSettings,
+          generationMode: 'first-open-fallback'
+        })
+      });
+      if (generated.length) setNotice(`${generated.length} draft exam(s) generated for review.`);
+      await loadExams();
+    }
+
+    function bindEvents() {
+      document.getElementById('filterClass').addEventListener('change', renderExamList);
+      document.getElementById('filterSubject').addEventListener('change', renderExamList);
+      document.getElementById('filterMonth').addEventListener('change', renderExamList);
+      document.getElementById('filterStatus').addEventListener('change', renderExamList);
+      examList.addEventListener('click', async (event) => {
+        const card = event.target.closest('[data-paper-id]');
+        if (!card) return;
+        await selectExam(card.dataset.paperId);
+      });
+      document.getElementById('unlockBtn').addEventListener('click', unlockAnswerKey);
+      document.getElementById('saveEditsBtn').addEventListener('click', saveEdits);
+      document.getElementById('approveBtn').addEventListener('click', approveExam);
+      document.getElementById('regenerateBtn').addEventListener('click', regenerateExam);
+      document.getElementById('printBtn').addEventListener('click', printExam);
+      document.getElementById('exportPdfBtn').addEventListener('click', exportPdf);
+      document.getElementById('generatePendingBtn').addEventListener('click', runPendingGeneration);
+    }
+
+    async function init() {
+      document.getElementById('filterMonth').value = Scheduler.buildMonthKey(new Date());
+      const teacherConfig = await readTeacherConfig();
+      if (teacherConfig?.teacherType) state.role = teacherConfig.teacherType;
+      setBadges();
+      if (!AnswerGate.isAuthorizedRole(state.role)) {
+        setNotice('Check Exams is restricted to Academic Teacher, Head Teacher, Assistant Headteacher, or authorized academic management.');
+        mainLayout.classList.add('hidden');
+        return;
+      }
+      bindEvents();
+      await loadTemplatesAndSettings();
+      await runPendingGeneration();
+      await loadExams();
+    }
+
+    init().catch((error) => setNotice(error?.message || 'Failed to load exam review workspace.'));
+  </script>
+</body>
+</html>
