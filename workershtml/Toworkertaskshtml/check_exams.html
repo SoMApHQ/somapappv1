@@ -204,7 +204,7 @@
     const Scheduler = window.SoMApExamScheduler;
     const Generator = window.SoMApExamGenerator;
     const AnswerGate = window.SoMApExamAnswerGate;
-    const db = window.db || firebase.database();
+    const db = window.db || window.firebase?.database?.() || null;
     const params = new URLSearchParams(window.location.search);
     const schoolParam = params.get('school');
     const yearParam = params.get('year');
@@ -436,12 +436,23 @@
 
     async function refreshRegistry() {
       if (!Registry?.buildSchoolRegistry) return;
-      state.registry = await Registry.buildSchoolRegistry({
-        context: state,
-        role: state.role,
-        teacherConfig: state.teacherConfig,
-        templates: state.templates
-      });
+      try {
+        state.registry = await Registry.buildSchoolRegistry({
+          context: state,
+          role: state.role,
+          teacherConfig: state.teacherConfig,
+          templates: state.templates
+        });
+      } catch (error) {
+        console.warn('Exam review registry fallback activated', error);
+        state.registry = {
+          classes: Array.from(new Set(state.teacherConfig?.classes || [])),
+          subjectsByClass: {},
+          allSubjects: Array.from(new Set(state.teacherConfig?.subjects || [])),
+          terms: [],
+          sourcesUsed: ['fallback']
+        };
+      }
     }
 
     function filteredExams() {
@@ -791,10 +802,18 @@
         return;
       }
       bindEvents();
-      await loadTemplatesAndSettings();
-      await refreshRegistry();
       refreshFilterOptions();
-      await loadExams();
+      try {
+        await loadTemplatesAndSettings();
+        await refreshRegistry();
+        refreshFilterOptions();
+        await loadExams();
+      } catch (error) {
+        console.warn('Check exams fallback load', error);
+        await refreshRegistry();
+        refreshFilterOptions();
+        setNotice(`Loaded fallback filters. ${error?.message || error}`);
+      }
     }
 
     init().catch((error) => setNotice(error?.message || 'Failed to load exam review workspace.'));
