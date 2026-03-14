@@ -14,6 +14,7 @@
   <script src="../../shared/exam-school-registry.js"></script>
   <script src="../../shared/exam-name-pool.js"></script>
   <script src="../../shared/exam-answer-gate.js"></script>
+  <script src="../../shared/exam-source-resolver.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous"></script>
   <script>
     if (window.pdfjsLib) {
@@ -111,7 +112,9 @@
     .row-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; }
     .upload-card { padding: 16px; margin-top: 18px; }
     .status { margin-top: 10px; color: #bfdbfe; font-size: 0.92rem; }
-    .notice { margin-bottom: 16px; padding: 14px 16px; border-radius: 16px; background: rgba(15, 118, 110, 0.18); border: 1px solid rgba(45, 212, 191, 0.18); color: #ccfbf1; }
+    .notice { margin-bottom: 16px; padding: 14px 16px; border-radius: 16px; background: rgba(15, 118, 110, 0.18); border: 1px solid rgba(45, 212, 191, 0.18); color: #ccfb1; }
+    .diag-banner { margin-bottom: 16px; padding: 10px 14px; border-radius: 12px; background: rgba(15, 23, 42, 0.7); border: 1px dashed rgba(45, 212, 191, 0.4); font-size: 0.8rem; color: #e0f2fe; display: flex; flex-wrap: wrap; gap: 10px; }
+    .diag-chip { padding: 4px 8px; border-radius: 999px; background: rgba(15, 118, 110, 0.3); border: 1px solid rgba(45, 212, 191, 0.5); }
     .template-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
     .empty { color: rgba(226, 232, 240, 0.68); padding: 14px 0; }
     .hidden { display: none !important; }
@@ -190,6 +193,11 @@
     </script>
 
     <div class="notice hidden" id="authNotice"></div>
+    <div class="diag-banner" id="diagBanner">
+      <span class="diag-chip" id="diagContext"></span>
+      <span class="diag-chip" id="diagCounts"></span>
+      <span class="diag-chip" id="diagTopics"></span>
+    </div>
 
     <div class="layout" id="mainLayout">
       <aside class="card sidebar">
@@ -421,6 +429,7 @@
 
     const Shared = window.SoMApExamShared || null;
     const Registry = window.SoMApExamSchoolRegistry || null;
+    const Resolver = window.SoMApExamSourceResolver || null;
     const AnswerGate = window.SoMApExamAnswerGate || null;
     const db = window.db || window.firebase?.database?.() || null;
     const params = new URLSearchParams(window.location.search);
@@ -466,6 +475,10 @@
     const builderRows = document.getElementById('builderRows');
     const referenceStatus = document.getElementById('referenceStatus');
     const backLink = document.getElementById('backLink');
+    const diagBanner = document.getElementById('diagBanner');
+    const diagContext = document.getElementById('diagContext');
+    const diagCounts = document.getElementById('diagCounts');
+    const diagTopics = document.getElementById('diagTopics');
 
     function schoolPath(path) {
       if (!Shared?.scopedPath) {
@@ -530,6 +543,51 @@
       dayBadge.textContent = `Day: ${nowInfo.dayLabel}`;
       timeBadge.textContent = `Time: ${nowInfo.timeLabel}`;
       backLink.href = `../workertasks.html?school=${encodeURIComponent(state.schoolId)}&year=${encodeURIComponent(state.year)}`;
+    }
+
+    async function refreshDiagnostics() {
+      if (!diagBanner) return;
+      const schoolId = state.schoolId || resolvedSchoolId;
+      const year = state.year || resolvedYear;
+      const role = state.role || resolveStoredRole();
+      const workerId = state.workerId || safeStorageGet('workerId') || safeSessionGet('workerId') || '';
+      if (diagContext) {
+        diagContext.textContent = `Ctx: ${schoolId} | ${year} | ${role} | ${workerId || 'no workerId'}`;
+      }
+      if (diagCounts) {
+        const classCount = state.registry?.classes?.length || 0;
+        const subjectBuckets = state.registry?.subjectsByClass || {};
+        const subjectCount = Object.values(subjectBuckets).reduce((sum, list) => sum + (Array.isArray(list) ? list.length : 0), 0);
+        diagCounts.textContent = `Formats: ${state.templates.length} | Classes: ${classCount} | Class‑Subjects: ${subjectCount}`;
+      }
+      if (!Resolver || !db) {
+        if (diagTopics) diagTopics.textContent = 'Topics: resolver not ready';
+        return;
+      }
+      const className = compactText(templateClass.value || '');
+      const subject = compactText(templateSubject.value || '');
+      const monthKey = compactText(templateMonth.value || '');
+      if (!className || !subject || !monthKey) {
+        if (diagTopics) diagTopics.textContent = 'Topics: select class, subject & month';
+        return;
+      }
+      try {
+        const result = await Resolver.resolveVerifiedTopics({
+          schoolId,
+          year,
+          className,
+          subject,
+          term: compactText(templateTerm.value || ''),
+          monthKey,
+          minimumConfidenceScore: 0
+        });
+        const count = Array.isArray(result?.topics) ? result.topics.length : 0;
+        if (diagTopics) {
+          diagTopics.textContent = `Verified topics for ${className} / ${subject} / ${monthKey}: ${count}`;
+        }
+      } catch (error) {
+        if (diagTopics) diagTopics.textContent = `Topics: error – ${error?.message || error}`;
+      }
     }
 
     async function readTeacherConfig() {
@@ -796,6 +854,7 @@
       renderRows(normalized.rows);
       toggleScheduleFields();
       renderTemplateList();
+      refreshDiagnostics();
     }
 
     function resetForm() {
@@ -820,6 +879,7 @@
       renderRows([]);
       toggleScheduleFields();
       renderTemplateList();
+      refreshDiagnostics();
     }
 
     async function handleReferenceFile(file) {
@@ -905,7 +965,9 @@
     }
 
     function bindEvents() {
-      document.getElementById('newTemplateBtn').addEventListener('click', resetForm);
+      document.getElementById('newTemplateBtn').addEventListener('click', () => {
+        resetForm();
+      });
       document.getElementById('duplicateTemplateBtn').addEventListener('click', () => {
         state.activeTemplateId = '';
         document.getElementById('templateTitle').value = `${document.getElementById('templateTitle').value} Copy`.trim();
@@ -923,7 +985,10 @@
         const rows = getRowsFromUi().filter((_, index) => String(index) !== String(btn.dataset.removeRow));
         renderRows(rows);
       });
-      document.getElementById('saveTemplateBtn').addEventListener('click', saveTemplate);
+      document.getElementById('saveTemplateBtn').addEventListener('click', async () => {
+        await saveTemplate();
+        await refreshDiagnostics();
+      });
       document.getElementById('scheduleMode').addEventListener('change', toggleScheduleFields);
       document.getElementById('referenceFile').addEventListener('change', async (event) => handleReferenceFile(event.target.files?.[0] || null));
       document.getElementById('importReferenceBtn').addEventListener('click', () => {
@@ -936,6 +1001,7 @@
       templateClass.addEventListener('change', () => {
         repopulateSubjects(templateClass.value);
         refreshSummary();
+        refreshDiagnostics();
       });
       listClass.addEventListener('change', () => {
         const subjects = Array.from(new Set([
@@ -946,6 +1012,9 @@
         renderTemplateList();
       });
       listSubject.addEventListener('change', renderTemplateList);
+      templateSubject.addEventListener('change', refreshDiagnostics);
+      templateMonth.addEventListener('change', refreshDiagnostics);
+      templateTerm.addEventListener('change', refreshDiagnostics);
       templateList.addEventListener('click', (event) => {
         const item = event.target.closest('[data-template-id]');
         if (!item) return;
@@ -991,6 +1060,7 @@
         await refreshRegistry();
         refreshClassAndSubjectSelectors();
         await loadAcademicTermOptions();
+        await refreshDiagnostics();
       } catch (error) {
         console.warn('Exam formats fallback load', error);
         await refreshRegistry();

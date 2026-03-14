@@ -112,6 +112,8 @@
     .source-list, .access-log { display: grid; gap: 10px; }
     .source-item, .log-item { padding: 10px 12px; border-radius: 12px; background: rgba(15, 23, 42, 0.54); border: 1px solid rgba(100, 116, 139, 0.14); }
     .notice { margin-bottom: 16px; padding: 14px 16px; border-radius: 16px; background: rgba(59, 130, 246, 0.14); border: 1px solid rgba(96, 165, 250, 0.18); color: #dbeafe; }
+    .diag-banner { margin-bottom: 16px; padding: 10px 14px; border-radius: 12px; background: rgba(15, 23, 42, 0.7); border: 1px dashed rgba(96, 165, 250, 0.5); font-size: 0.78rem; color: #e0f2fe; display: flex; flex-wrap: wrap; gap: 10px; }
+    .diag-chip { padding: 4px 8px; border-radius: 999px; background: rgba(30, 64, 175, 0.4); border: 1px solid rgba(96, 165, 250, 0.8); }
     .hidden { display: none !important; }
     .empty { color: rgba(226, 232, 240, 0.68); padding: 18px 0; }
     .diagram-preview svg { max-width: 100%; height: auto; background: white; border-radius: 12px; }
@@ -140,6 +142,11 @@
     </div>
 
     <div class="notice hidden" id="notice"></div>
+    <div class="diag-banner" id="diagBanner">
+      <span class="diag-chip" id="diagContext"></span>
+      <span class="diag-chip" id="diagCounts"></span>
+      <span class="diag-chip" id="diagTopics"></span>
+    </div>
 
     <div class="layout" id="mainLayout">
       <aside class="card sidebar">
@@ -299,6 +306,10 @@
     const answerContent = document.getElementById('answerContent');
     const answerList = document.getElementById('answerList');
     const accessLogList = document.getElementById('accessLogList');
+    const diagBanner = document.getElementById('diagBanner');
+    const diagContext = document.getElementById('diagContext');
+    const diagCounts = document.getElementById('diagCounts');
+    const diagTopics = document.getElementById('diagTopics');
 
     function schoolPath(path) {
       if (!Shared?.scopedPath) {
@@ -341,6 +352,54 @@
       document.getElementById('yearBadge').textContent = `Year: ${state.year}`;
       document.getElementById('roleBadge').textContent = `Role: ${state.role || 'Teacher'}`;
       document.getElementById('backLink').href = `../workertasks.html?school=${encodeURIComponent(state.schoolId)}&year=${encodeURIComponent(state.year)}`;
+    }
+
+    async function refreshDiagnostics() {
+      if (!diagBanner) return;
+      const schoolId = state.schoolId || resolvedSchoolId;
+      const year = state.year || resolvedYear;
+      const role = state.role || resolveStoredRole();
+      const workerId = state.workerId || safeStorageGet('workerId') || safeSessionGet('workerId') || '';
+      if (diagContext) {
+        diagContext.textContent = `Ctx: ${schoolId} | ${year} | ${role} | ${workerId || 'no workerId'}`;
+      }
+      if (diagCounts) {
+        const classCount = state.registry?.classes?.length || 0;
+        const subjectBuckets = state.registry?.subjectsByClass || {};
+        const subjectCount = Object.values(subjectBuckets).reduce((sum, list) => sum + (Array.isArray(list) ? list.length : 0), 0);
+        diagCounts.textContent = `Formats: ${state.templates.length} | Classes: ${classCount} | Class‑Subjects: ${subjectCount} | Exams: ${state.exams.length}`;
+      }
+      if (!window.SoMApExamSourceResolver || !db) {
+        if (diagTopics) diagTopics.textContent = 'Topics: resolver not ready';
+        return;
+      }
+      const classFilter = document.getElementById('filterClass').value;
+      const subjectFilter = document.getElementById('filterSubject').value;
+      const monthFilter = document.getElementById('filterMonth').value;
+      const className = compactText(classFilter || '');
+      const subject = compactText(subjectFilter || '');
+      const monthKey = compactText(monthFilter || '');
+      if (!className || !subject || !monthKey) {
+        if (diagTopics) diagTopics.textContent = 'Topics: select class, subject & month';
+        return;
+      }
+      try {
+        const result = await window.SoMApExamSourceResolver.resolveVerifiedTopics({
+          schoolId,
+          year,
+          className,
+          subject,
+          term: '',
+          monthKey,
+          minimumConfidenceScore: 0
+        });
+        const count = Array.isArray(result?.topics) ? result.topics.length : 0;
+        if (diagTopics) {
+          diagTopics.textContent = `Verified topics for ${className} / ${subject} / ${monthKey}: ${count}`;
+        }
+      } catch (error) {
+        if (diagTopics) diagTopics.textContent = `Topics: error – ${error?.message || error}`;
+      }
     }
 
     async function readTeacherConfig() {
@@ -395,6 +454,7 @@
       populateSelect(subjectSelect, subjectValues);
       if (currentClass && classValues.includes(currentClass)) classSelect.value = currentClass;
       if (currentSubject && subjectValues.includes(currentSubject)) subjectSelect.value = currentSubject;
+      refreshDiagnostics();
     }
 
     async function loadTemplatesAndSettings() {
@@ -762,8 +822,14 @@
         refreshFilterOptions();
         renderExamList();
       });
-      document.getElementById('filterSubject').addEventListener('change', renderExamList);
-      document.getElementById('filterMonth').addEventListener('change', renderExamList);
+      document.getElementById('filterSubject').addEventListener('change', () => {
+        renderExamList();
+        refreshDiagnostics();
+      });
+      document.getElementById('filterMonth').addEventListener('change', () => {
+        renderExamList();
+        refreshDiagnostics();
+      });
       document.getElementById('filterStatus').addEventListener('change', renderExamList);
       examList.addEventListener('click', async (event) => {
         const card = event.target.closest('[data-paper-id]');
@@ -808,6 +874,7 @@
         await refreshRegistry();
         refreshFilterOptions();
         await loadExams();
+        await refreshDiagnostics();
       } catch (error) {
         console.warn('Check exams fallback load', error);
         await refreshRegistry();
