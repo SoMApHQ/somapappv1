@@ -4,168 +4,180 @@
   const Shared = global.SoMApExamShared || global.SoMApExamTemplateEngine;
 
   function compactText(value) {
-    return Shared ? Shared.compactText(value) : String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
-  }
-
-  function normalizeLookupToken(value) {
-    return Shared ? Shared.normalizeLookupToken(value) : compactText(value).toLowerCase();
+    return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   }
 
   function escHtml(value) {
-    return Shared ? Shared.escHtml(value) : String(value == null ? '' : value);
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  function wrapSvg(body, width, height) {
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Exam diagram">${body}</svg>`;
+  function normalizeLookupToken(value) {
+    return compactText(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   }
 
-  function buildShapeDiagram() {
+  // ---------------------------------------------------------------
+  // Simple SVG diagram generators for primary school subjects
+  // ---------------------------------------------------------------
+
+  function buildBlankDiagram(label) {
+    return `<svg viewBox="0 0 300 180" xmlns="http://www.w3.org/2000/svg" style="border:1px solid #ccc;background:#fff;max-width:100%;">
+  <rect x="10" y="10" width="280" height="160" fill="#f8f9fa" stroke="#dee2e6" stroke-width="1"/>
+  <text x="150" y="95" text-anchor="middle" font-family="Arial" font-size="13" fill="#6c757d">${escHtml(label || 'Diagram')}</text>
+</svg>`;
+  }
+
+  function buildFoodChainDiagram() {
+    const items = ['Sun', 'Grass', 'Grasshopper', 'Frog', 'Snake', 'Eagle'];
+    const colors = ['#ffd700', '#28a745', '#6c757d', '#20c997', '#dc3545', '#6610f2'];
+    let svg = `<svg viewBox="0 0 500 100" xmlns="http://www.w3.org/2000/svg" style="background:#fff;max-width:100%;">`;
+    items.forEach((item, i) => {
+      const x = 20 + i * 80;
+      svg += `<rect x="${x}" y="30" width="60" height="40" rx="8" fill="${colors[i]}" opacity="0.8"/>`;
+      svg += `<text x="${x + 30}" y="55" text-anchor="middle" font-family="Arial" font-size="10" fill="#fff">${item}</text>`;
+      if (i < items.length - 1) {
+        svg += `<text x="${x + 65}" y="55" text-anchor="middle" font-family="Arial" font-size="16" fill="#333">→</text>`;
+      }
+    });
+    svg += `</svg>`;
+    return svg;
+  }
+
+  function buildPlantPartsDiagram() {
+    return `<svg viewBox="0 0 200 250" xmlns="http://www.w3.org/2000/svg" style="background:#fff;max-width:100%;">
+  <!-- Roots -->
+  <line x1="100" y1="200" x2="70" y2="240" stroke="#8B4513" stroke-width="2"/>
+  <line x1="100" y1="200" x2="100" y2="245" stroke="#8B4513" stroke-width="2"/>
+  <line x1="100" y1="200" x2="130" y2="240" stroke="#8B4513" stroke-width="2"/>
+  <text x="145" y="235" font-family="Arial" font-size="10" fill="#333">Roots</text>
+  <!-- Stem -->
+  <line x1="100" y1="80" x2="100" y2="200" stroke="#6B8E23" stroke-width="4"/>
+  <text x="108" y="160" font-family="Arial" font-size="10" fill="#333">Stem</text>
+  <!-- Leaves -->
+  <ellipse cx="65" cy="120" rx="30" ry="15" fill="#28a745" transform="rotate(-30 65 120)"/>
+  <line x1="65" y1="120" x2="100" y2="140" stroke="#6B8E23" stroke-width="1.5"/>
+  <text x="20" y="115" font-family="Arial" font-size="10" fill="#333">Leaf</text>
+  <ellipse cx="135" cy="130" rx="30" ry="15" fill="#28a745" transform="rotate(30 135 130)"/>
+  <line x1="135" y1="130" x2="100" y2="150" stroke="#6B8E23" stroke-width="1.5"/>
+  <!-- Flower -->
+  <circle cx="100" cy="55" r="20" fill="#ffd700" opacity="0.9"/>
+  <circle cx="100" cy="55" r="8" fill="#ff8c00"/>
+  <text x="125" y="50" font-family="Arial" font-size="10" fill="#333">Flower</text>
+  <!-- Labels -->
+  <text x="5" y="20" font-family="Arial" font-size="11" fill="#333" font-weight="bold">Parts of a Plant</text>
+</svg>`;
+  }
+
+  function buildWaterCycleDiagram() {
+    return `<svg viewBox="0 0 350 200" xmlns="http://www.w3.org/2000/svg" style="background:#e8f4fd;max-width:100%;">
+  <!-- Sun -->
+  <circle cx="300" cy="40" r="25" fill="#ffd700"/>
+  <text x="300" y="80" text-anchor="middle" font-family="Arial" font-size="10" fill="#333">Sun</text>
+  <!-- Cloud -->
+  <ellipse cx="120" cy="35" rx="45" ry="22" fill="white" stroke="#aaa" stroke-width="1"/>
+  <text x="120" y="75" text-anchor="middle" font-family="Arial" font-size="10" fill="#333">Cloud</text>
+  <!-- Rain arrows -->
+  <line x1="100" y1="58" x2="90" y2="110" stroke="#007bff" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <line x1="120" y1="58" x2="110" y2="110" stroke="#007bff" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <line x1="140" y1="58" x2="130" y2="110" stroke="#007bff" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <text x="60" y="105" font-family="Arial" font-size="10" fill="#007bff">Rain</text>
+  <!-- Ground water -->
+  <rect x="10" y="155" width="330" height="30" fill="#4a7c59" rx="5"/>
+  <text x="80" y="175" font-family="Arial" font-size="10" fill="#fff">River / Ocean</text>
+  <!-- Evaporation arrows -->
+  <line x1="220" y1="155" x2="240" y2="90" stroke="#ff6b35" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <line x1="240" y1="155" x2="255" y2="90" stroke="#ff6b35" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <text x="255" y="130" font-family="Arial" font-size="10" fill="#ff6b35">Evaporation</text>
+  <text x="5" y="20" font-family="Arial" font-size="11" fill="#333" font-weight="bold">The Water Cycle</text>
+</svg>`;
+  }
+
+  function buildNumberLineDiagram(start, end) {
+    const s = Number(start) || 0;
+    const e = Number(end) || 10;
+    const range = e - s;
+    const w = 320;
+    const step = w / range;
+    let svg = `<svg viewBox="0 0 360 60" xmlns="http://www.w3.org/2000/svg" style="background:#fff;max-width:100%;">`;
+    svg += `<line x1="20" y1="30" x2="340" y2="30" stroke="#333" stroke-width="2"/>`;
+    for (let i = s; i <= e; i++) {
+      const x = 20 + (i - s) * step;
+      svg += `<line x1="${x}" y1="22" x2="${x}" y2="38" stroke="#333" stroke-width="2"/>`;
+      svg += `<text x="${x}" y="52" text-anchor="middle" font-family="Arial" font-size="12" fill="#333">${i}</text>`;
+    }
+    svg += `</svg>`;
+    return svg;
+  }
+
+  function buildMapCompassDiagram() {
+    return `<svg viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg" style="background:#fff;max-width:100%;">
+  <circle cx="80" cy="80" r="70" fill="#f0f8ff" stroke="#333" stroke-width="2"/>
+  <line x1="80" y1="15" x2="80" y2="145" stroke="#333" stroke-width="1.5"/>
+  <line x1="15" y1="80" x2="145" y2="80" stroke="#333" stroke-width="1.5"/>
+  <text x="80" y="12" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold" fill="#dc3545">N</text>
+  <text x="80" y="155" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold" fill="#333">S</text>
+  <text x="8" y="84" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold" fill="#333">W</text>
+  <text x="152" y="84" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold" fill="#333">E</text>
+  <polygon points="80,30 74,80 80,70 86,80" fill="#dc3545"/>
+  <polygon points="80,130 74,80 80,90 86,80" fill="#666"/>
+  <text x="80" y="80" text-anchor="middle" font-family="Arial" font-size="10" fill="#333">Compass</text>
+</svg>`;
+  }
+
+  const DIAGRAM_MAP = {
+    'food chain': buildFoodChainDiagram,
+    'water cycle': buildWaterCycleDiagram,
+    'plant': buildPlantPartsDiagram,
+    'compass': buildMapCompassDiagram,
+    'number line': () => buildNumberLineDiagram(0, 10),
+    'map': buildMapCompassDiagram
+  };
+
+  function createDiagramQuestion(options) {
+    const settings = options && typeof options === 'object' ? options : {};
+    const topic = compactText(settings.topic || '');
+    const subject = normalizeLookupToken(settings.subject || '');
+    const topicToken = normalizeLookupToken(topic);
+
+    // Find matching diagram generator
+    let svgHtml = null;
+    for (const [key, generator] of Object.entries(DIAGRAM_MAP)) {
+      if (topicToken.includes(key) || subject.includes(key)) {
+        try { svgHtml = generator(); } catch (_) {}
+        break;
+      }
+    }
+
+    // Default blank diagram with label if no match
+    if (!svgHtml) {
+      if (subject.includes('math') || subject.includes('arithmetic')) {
+        svgHtml = buildNumberLineDiagram(0, 20);
+      } else if (subject.includes('science')) {
+        svgHtml = buildPlantPartsDiagram();
+      } else if (subject.includes('geography') || subject.includes('social')) {
+        svgHtml = buildMapCompassDiagram();
+      } else {
+        svgHtml = buildBlankDiagram(`Label the diagram: ${topic}`);
+      }
+    }
+
     return {
-      kind: 'shape_identification',
-      svg: wrapSvg(
-        [
-          '<rect x="10" y="10" width="380" height="220" rx="18" fill="#f8fafc" stroke="#0f172a" stroke-width="2"/>',
-          '<text x="28" y="40" font-size="18" font-family="Arial" fill="#0f172a">Which shape is shown?</text>',
-          '<polygon points="200,70 290,190 110,190" fill="#dbeafe" stroke="#1d4ed8" stroke-width="4"/>'
-        ].join(''),
-        400,
-        240
-      ),
-      answer: 'Triangle',
-      labels: ['Triangle'],
-      instructions: 'Study the shape and write its name.'
+      prompt: `Study the diagram below and answer: Label or describe what is shown in the diagram about ${topic || 'the topic studied'}.`,
+      answer: `Students should correctly label or describe the key parts shown in the diagram related to ${topic}.`,
+      diagram: { svg: svgHtml, type: 'inline_svg' }
     };
   }
 
-  function buildPlantDiagram(topic) {
-    const cleanTopic = compactText(topic || 'plant');
-    return {
-      kind: 'label_diagram',
-      svg: wrapSvg(
-        [
-          '<rect x="10" y="10" width="430" height="250" rx="18" fill="#f8fafc" stroke="#14532d" stroke-width="2"/>',
-          `<text x="24" y="38" font-size="18" font-family="Arial" fill="#14532d">Label the main parts of the ${escHtml(cleanTopic.toLowerCase())}.</text>`,
-          '<line x1="220" y1="68" x2="220" y2="180" stroke="#166534" stroke-width="8"/>',
-          '<ellipse cx="220" cy="62" rx="58" ry="26" fill="#86efac" stroke="#166534" stroke-width="4"/>',
-          '<ellipse cx="168" cy="100" rx="40" ry="20" fill="#bbf7d0" stroke="#166534" stroke-width="3"/>',
-          '<ellipse cx="272" cy="100" rx="40" ry="20" fill="#bbf7d0" stroke="#166534" stroke-width="3"/>',
-          '<line x1="220" y1="180" x2="190" y2="228" stroke="#92400e" stroke-width="6"/>',
-          '<line x1="220" y1="180" x2="220" y2="236" stroke="#92400e" stroke-width="6"/>',
-          '<line x1="220" y1="180" x2="250" y2="228" stroke="#92400e" stroke-width="6"/>',
-          '<text x="24" y="88" font-size="14" font-family="Arial" fill="#0f172a">A</text><line x1="40" y1="84" x2="158" y2="84" stroke="#0f172a" stroke-width="2"/>',
-          '<text x="366" y="68" font-size="14" font-family="Arial" fill="#0f172a">B</text><line x1="320" y1="64" x2="278" y2="64" stroke="#0f172a" stroke-width="2"/>',
-          '<text x="366" y="136" font-size="14" font-family="Arial" fill="#0f172a">C</text><line x1="320" y1="132" x2="228" y2="132" stroke="#0f172a" stroke-width="2"/>',
-          '<text x="36" y="228" font-size="14" font-family="Arial" fill="#0f172a">D</text><line x1="52" y1="224" x2="184" y2="224" stroke="#0f172a" stroke-width="2"/>'
-        ].join(''),
-        450,
-        270
-      ),
-      answer: 'A Leaf, B Flower, C Stem, D Root',
-      labels: ['Leaf', 'Flower', 'Stem', 'Root'],
-      instructions: 'Write the correct label for each letter.'
-    };
-  }
+  const api = {
+    createDiagramQuestion,
+    buildFoodChainDiagram,
+    buildPlantPartsDiagram,
+    buildWaterCycleDiagram,
+    buildNumberLineDiagram,
+    buildMapCompassDiagram
+  };
 
-  function buildBodyPartDiagram() {
-    return {
-      kind: 'identify_part',
-      svg: wrapSvg(
-        [
-          '<rect x="10" y="10" width="420" height="270" rx="18" fill="#f8fafc" stroke="#7c2d12" stroke-width="2"/>',
-          '<text x="24" y="38" font-size="18" font-family="Arial" fill="#7c2d12">Identify the labeled body parts.</text>',
-          '<circle cx="215" cy="70" r="32" fill="#fde68a" stroke="#92400e" stroke-width="3"/>',
-          '<line x1="215" y1="102" x2="215" y2="190" stroke="#92400e" stroke-width="7"/>',
-          '<line x1="215" y1="128" x2="148" y2="160" stroke="#92400e" stroke-width="6"/>',
-          '<line x1="215" y1="128" x2="282" y2="160" stroke="#92400e" stroke-width="6"/>',
-          '<line x1="215" y1="190" x2="172" y2="245" stroke="#92400e" stroke-width="6"/>',
-          '<line x1="215" y1="190" x2="258" y2="245" stroke="#92400e" stroke-width="6"/>',
-          '<text x="52" y="72" font-size="14" font-family="Arial" fill="#111827">A</text><line x1="66" y1="68" x2="180" y2="68" stroke="#111827" stroke-width="2"/>',
-          '<text x="344" y="156" font-size="14" font-family="Arial" fill="#111827">B</text><line x1="316" y1="152" x2="286" y2="152" stroke="#111827" stroke-width="2"/>',
-          '<text x="344" y="246" font-size="14" font-family="Arial" fill="#111827">C</text><line x1="316" y1="242" x2="264" y2="242" stroke="#111827" stroke-width="2"/>'
-        ].join(''),
-        440,
-        290
-      ),
-      answer: 'A Head, B Hand, C Leg',
-      labels: ['Head', 'Hand', 'Leg'],
-      instructions: 'Name the part shown by each letter.'
-    };
-  }
-
-  function buildLifecycleDiagram(topic) {
-    const clean = compactText(topic || 'life cycle');
-    return {
-      kind: 'lifecycle_order',
-      svg: wrapSvg(
-        [
-          '<rect x="10" y="10" width="470" height="220" rx="18" fill="#f8fafc" stroke="#0f172a" stroke-width="2"/>',
-          `<text x="24" y="38" font-size="18" font-family="Arial" fill="#0f172a">Arrange the stages of the ${escHtml(clean.toLowerCase())} in order.</text>`,
-          '<rect x="34" y="88" width="90" height="56" rx="12" fill="#dbeafe" stroke="#1d4ed8" stroke-width="3"/>',
-          '<rect x="146" y="88" width="90" height="56" rx="12" fill="#fef3c7" stroke="#ca8a04" stroke-width="3"/>',
-          '<rect x="258" y="88" width="90" height="56" rx="12" fill="#dcfce7" stroke="#15803d" stroke-width="3"/>',
-          '<rect x="370" y="88" width="90" height="56" rx="12" fill="#fee2e2" stroke="#b91c1c" stroke-width="3"/>',
-          '<text x="77" y="122" font-size="15" text-anchor="middle" font-family="Arial" fill="#0f172a">1</text>',
-          '<text x="191" y="122" font-size="15" text-anchor="middle" font-family="Arial" fill="#0f172a">2</text>',
-          '<text x="303" y="122" font-size="15" text-anchor="middle" font-family="Arial" fill="#0f172a">3</text>',
-          '<text x="415" y="122" font-size="15" text-anchor="middle" font-family="Arial" fill="#0f172a">4</text>',
-          '<line x1="124" y1="116" x2="146" y2="116" stroke="#0f172a" stroke-width="2"/><polygon points="146,116 138,112 138,120" fill="#0f172a"/>',
-          '<line x1="236" y1="116" x2="258" y2="116" stroke="#0f172a" stroke-width="2"/><polygon points="258,116 250,112 250,120" fill="#0f172a"/>',
-          '<line x1="348" y1="116" x2="370" y2="116" stroke="#0f172a" stroke-width="2"/><polygon points="370,116 362,112 362,120" fill="#0f172a"/>'
-        ].join(''),
-        490,
-        240
-      ),
-      answer: 'Egg -> Young stage -> Growing stage -> Adult stage',
-      labels: ['Egg', 'Young', 'Growing', 'Adult'],
-      instructions: 'Write the stage that belongs in each box.'
-    };
-  }
-
-  function buildMapDiagram() {
-    return {
-      kind: 'direction_map',
-      svg: wrapSvg(
-        [
-          '<rect x="10" y="10" width="470" height="280" rx="18" fill="#f8fafc" stroke="#1e293b" stroke-width="2"/>',
-          '<text x="24" y="38" font-size="18" font-family="Arial" fill="#1e293b">Use the map sketch to answer the question.</text>',
-          '<polygon points="426,58 442,58 434,34" fill="#0f172a"/><line x1="434" y1="58" x2="434" y2="84" stroke="#0f172a" stroke-width="3"/><text x="429" y="98" font-size="15" font-family="Arial">N</text>',
-          '<rect x="70" y="82" width="112" height="64" rx="10" fill="#dbeafe" stroke="#1d4ed8" stroke-width="3"/><text x="126" y="118" font-size="16" text-anchor="middle" font-family="Arial">Classroom</text>',
-          '<rect x="298" y="82" width="112" height="64" rx="10" fill="#dcfce7" stroke="#15803d" stroke-width="3"/><text x="354" y="118" font-size="16" text-anchor="middle" font-family="Arial">Garden</text>',
-          '<rect x="184" y="188" width="112" height="64" rx="10" fill="#fef3c7" stroke="#ca8a04" stroke-width="3"/><text x="240" y="224" font-size="16" text-anchor="middle" font-family="Arial">Office</text>',
-          '<line x1="182" y1="114" x2="298" y2="114" stroke="#334155" stroke-width="4"/><line x1="240" y1="146" x2="240" y2="188" stroke="#334155" stroke-width="4"/>'
-        ].join(''),
-        490,
-        300
-      ),
-      answer: 'The office is south of the classroom.',
-      labels: ['Classroom', 'Garden', 'Office'],
-      instructions: 'State the direction of one place from another.'
-    };
-  }
-
-  function selectDiagram(topic, subject) {
-    const merged = `${normalizeLookupToken(subject)} ${normalizeLookupToken(topic)}`;
-    if (/(math|arithmetic|geometry|shape|triangle|rectangle|circle)/.test(merged)) return buildShapeDiagram();
-    if (/(body|human|parts of body|hand|leg|head)/.test(merged)) return buildBodyPartDiagram();
-    if (/(life cycle|lifecycle|stages|growth)/.test(merged)) return buildLifecycleDiagram(topic);
-    if (/(map|direction|location|social|geography|compass)/.test(merged)) return buildMapDiagram();
-    return buildPlantDiagram(topic);
-  }
-
-  function createDiagramQuestion(config) {
-    const options = config && typeof config === 'object' ? config : {};
-    const diagram = selectDiagram(options.topic, options.subject);
-    let prompt = diagram.instructions;
-    if (diagram.kind === 'direction_map') prompt = 'Look at the map sketch and describe the position of the office from the classroom.';
-    if (diagram.kind === 'shape_identification') prompt = 'Study the diagram and write the name of the shape.';
-    return {
-      prompt,
-      answer: diagram.answer,
-      diagram
-    };
-  }
-
-  const api = { createDiagramQuestion };
   global.SoMApExamDiagramEngine = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
