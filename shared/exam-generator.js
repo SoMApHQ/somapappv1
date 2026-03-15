@@ -55,11 +55,11 @@
   }
 
   function resolveDefaultLogoUrl() {
-    if (!global.location?.href) return 'images/socrates_logo.png';
+    if (!global.location?.href) return 'images/somap-logo.png.jpg';
     try {
-      return new URL('../../images/socrates_logo.png', global.location.href).href;
+      return new URL('../../images/somap-logo.png.jpg', global.location.href).href;
     } catch (_) {
-      return 'images/socrates_logo.png';
+      return 'images/somap-logo.png.jpg';
     }
   }
 
@@ -109,6 +109,10 @@
       instructions: compactText(paper.instructions || ''),
       totalMarks: Number(paper.totalMarks || 0) || 0
     };
+  }
+
+  function formatHtmlBlock(value) {
+    return escHtml(value).replace(/\r?\n/g, '<br>');
   }
 
   function commonTerm(subjectText) {
@@ -368,11 +372,12 @@
 
   function buildPrintableHtml(paper) {
     const header = buildPaperHeaderMeta(paper);
+    const paperSubtitle = [header.className, header.subject, [header.monthLabel, header.academicYear].filter(Boolean).join(' '), header.term].filter(Boolean).join(' | ');
     const sections = paper.sections.map((section) => {
       const questions = paper.questions.filter((question) => question.sectionKey === section.sectionKey).map((question) => `
         <li class="exam-question">
           <div class="question-head">
-            <span>${question.sequence}. ${escHtml(question.prompt)}</span>
+            <span>${question.sequence}. ${formatHtmlBlock(question.prompt)}</span>
             <span>${question.marks} mark${question.marks === 1 ? '' : 's'}</span>
           </div>
           ${question.options?.length ? `<ol type="A">${question.options.map((option) => `<li>${escHtml(option)}</li>`).join('')}</ol>` : ''}
@@ -391,47 +396,60 @@
     return `
       <div class="exam-paper">
         <style>
-          .exam-paper { font-family: Arial, sans-serif; color: #0f172a; line-height: 1.45; }
-          .paper-header { display: grid; grid-template-columns: 72px 1fr; gap: 16px; align-items: center; border-bottom: 2px solid #cbd5e1; padding-bottom: 14px; margin-bottom: 18px; }
-          .paper-logo { width: 72px; height: 72px; object-fit: contain; border-radius: 12px; border: 1px solid #cbd5e1; padding: 6px; background: #fff; }
-          .paper-header h1 { margin: 0 0 4px; font-size: 24px; }
-          .paper-header h2 { margin: 0 0 8px; font-size: 14px; font-weight: normal; color: #475569; }
-          .paper-school { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
-          .paper-meta-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; margin-top: 10px; font-size: 12px; }
-          .paper-meta-grid strong { display: block; font-size: 11px; color: #475569; text-transform: uppercase; letter-spacing: 0.04em; }
-          .instructions-box { margin-top: 12px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 10px; background: #f8fafc; }
+          .exam-paper { font-family: Arial, sans-serif; color: #0f172a; line-height: 1.5; background: #fff; border: 1px solid #dbe4f0; border-radius: 18px; padding: 24px; }
+          .paper-header { position: relative; border: 1px solid #cbd5e1; border-radius: 18px; overflow: hidden; margin-bottom: 20px; background: linear-gradient(135deg, #eff6ff 0%, #fff7ed 100%); }
+          .paper-header::before { content: ''; display: block; height: 9px; background: linear-gradient(90deg, #1d4ed8, #f59e0b, #0f766e); }
+          .paper-header-body { display: grid; grid-template-columns: 92px 1fr; gap: 18px; align-items: center; padding: 18px 20px 16px; }
+          .paper-logo-wrap { display: flex; align-items: center; justify-content: center; width: 92px; height: 92px; border-radius: 18px; border: 1px solid #cbd5e1; background: #fff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.8); }
+          .paper-logo { width: 74px; height: 74px; object-fit: contain; }
+          .paper-school { font-size: 28px; font-weight: 800; line-height: 1.05; letter-spacing: 0.04em; color: #0f172a; text-transform: uppercase; }
+          .paper-title { margin: 8px 0 0; font-size: 26px; font-weight: 800; color: #1d4ed8; text-transform: uppercase; }
+          .paper-subtitle { margin: 7px 0 0; font-size: 14px; color: #475569; font-weight: 700; }
+          .paper-meta-bar { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 0 20px 18px; }
+          .paper-meta-pill { background: rgba(255,255,255,0.82); border: 1px solid #cbd5e1; border-radius: 14px; padding: 10px 12px; }
+          .paper-meta-pill strong { display: block; font-size: 10px; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+          .instructions-box { margin-top: 14px; padding: 12px 14px; border: 1px solid #bfdbfe; border-radius: 14px; background: linear-gradient(135deg, #eff6ff, #f8fafc); }
+          .instructions-box strong { color: #1d4ed8; }
           .paper-section { margin-top: 24px; }
-          .paper-section h3 { margin: 0 0 6px; font-size: 18px; }
-          .section-meta { margin: 0 0 12px; color: #64748b; font-size: 13px; }
-          .exam-question { margin-bottom: 18px; }
+          .paper-section h3 { margin: 0 0 6px; font-size: 18px; color: #0f172a; }
+          .section-meta { margin: 0 0 12px; color: #64748b; font-size: 13px; font-weight: 700; }
+          .exam-question { margin-bottom: 18px; padding-bottom: 12px; border-bottom: 1px dashed #dbe4f0; }
+          .exam-question:last-child { border-bottom: none; }
           .question-head { display: flex; justify-content: space-between; gap: 12px; font-weight: 600; }
+          .question-head span:first-child { flex: 1; }
           .diagram-wrap { margin-top: 10px; }
           ol { padding-left: 20px; }
+          .paper-footer-note { margin-top: 18px; font-size: 11px; color: #64748b; text-align: right; }
           @media print {
             .exam-paper { padding: 0; }
+            .paper-header { break-inside: avoid; }
           }
         </style>
         <header class="paper-header">
-          <img class="paper-logo" src="${escHtml(header.logoUrl)}" alt="${escHtml(header.schoolName)} logo">
-          <div>
-            <div class="paper-school">${escHtml(header.schoolName)}</div>
-            <h1>${escHtml(header.examTitle)}</h1>
-            <h2>${escHtml([header.className, header.subject, header.monthLabel || paper.monthKey].filter(Boolean).join(' | '))}</h2>
-            <div class="paper-meta-grid">
-              <div><strong>Class</strong>${escHtml(header.className || '--')}</div>
-              <div><strong>Subject</strong>${escHtml(header.subject || '--')}</div>
-              <div><strong>Term</strong>${escHtml(header.term || 'All Terms')}</div>
-              <div><strong>Month</strong>${escHtml(header.monthLabel || '--')}</div>
-              <div><strong>Academic Year</strong>${escHtml(header.academicYear || '--')}</div>
-              <div><strong>Total Marks</strong>${escHtml(header.totalMarks || '--')}</div>
-              <div><strong>Exam Date</strong>${escHtml(header.examDate || '--')}</div>
-              <div><strong>Generated</strong>${escHtml(header.generatedDate || '--')}</div>
-              <div><strong>School ID</strong>${escHtml(paper.schoolId || '--')}</div>
+          <div class="paper-header-body">
+            <div class="paper-logo-wrap">
+              <img class="paper-logo" src="${escHtml(header.logoUrl)}" alt="${escHtml(header.schoolName)} logo">
             </div>
-            <div class="instructions-box"><strong>Instructions:</strong> ${escHtml(header.instructions || 'Answer all questions.')}</div>
+            <div>
+              <div class="paper-school">${escHtml(header.schoolName)}</div>
+              <div class="paper-title">${escHtml(header.examTitle)}</div>
+              <div class="paper-subtitle">${escHtml(paperSubtitle || [header.className, header.subject].filter(Boolean).join(' | '))}</div>
+              <div class="instructions-box"><strong>Instructions:</strong> ${formatHtmlBlock(header.instructions || 'Answer all questions.')}</div>
+            </div>
+          </div>
+          <div class="paper-meta-bar">
+            <div class="paper-meta-pill"><strong>Class</strong>${escHtml(header.className || '--')}</div>
+            <div class="paper-meta-pill"><strong>Subject</strong>${escHtml(header.subject || '--')}</div>
+            <div class="paper-meta-pill"><strong>Term</strong>${escHtml(header.term || 'All Terms')}</div>
+            <div class="paper-meta-pill"><strong>Total Marks</strong>${escHtml(header.totalMarks || '--')}</div>
+            <div class="paper-meta-pill"><strong>Month</strong>${escHtml(header.monthLabel || '--')}</div>
+            <div class="paper-meta-pill"><strong>Academic Year</strong>${escHtml(header.academicYear || '--')}</div>
+            <div class="paper-meta-pill"><strong>Exam Date</strong>${escHtml(header.examDate || '--')}</div>
+            <div class="paper-meta-pill"><strong>Generated</strong>${escHtml(header.generatedDate || '--')}</div>
           </div>
         </header>
         ${sections}
+        <div class="paper-footer-note">Generated from verified lesson notes, homework, and taught-plan evidence.</div>
       </div>
     `;
   }
@@ -586,7 +604,11 @@
         topic: topic.topic,
         confidenceScore: topic.confidenceScore,
         dates: topic.dates || [],
-        sourceRefs: topic.sourceRefs
+        sourceRefs: topic.sourceRefs,
+        noteCount: Array.isArray(topic.notes) ? topic.notes.length : 0,
+        homeworkGiven: Boolean(topic.homeworkGiven),
+        homeworkSourceTopic: compactText(topic.homeworkGivenMeta?.sourceTopic || topic.homeworkSourceMeta?.topic || ''),
+        preferredNoteId: compactText(topic.preferredNoteId || '')
       })),
       sections,
       questions: questionsWithAnswers.map((question) => ({

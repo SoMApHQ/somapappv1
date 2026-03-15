@@ -208,16 +208,22 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     .paper-preview {
-      background: #fff;
+      background: linear-gradient(180deg, #f8fafc, #eef2ff 12%, #fff);
       color: #0f172a;
-      border-radius: 12px;
-      padding: 16px;
+      border-radius: 18px;
+      padding: 18px;
+      border: 1px solid rgba(148,163,184,0.28);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.72);
       font-family: Arial, sans-serif;
       font-size: 12px;
       line-height: 1.5;
       max-height: 500px;
       overflow-y: auto;
       margin-top: 12px;
+    }
+    .paper-preview .empty {
+      color: #475569;
+      padding: 8px 0;
     }
     @media (max-width: 1180px) {
       .layout, .preview-layout, .field-grid { grid-template-columns: 1fr; }
@@ -301,6 +307,9 @@
           <div id="questionList" style="margin-top:14px;">
             <div class="empty">Select a draft exam from the list to preview it.</div>
           </div>
+          <div class="paper-preview" id="paperSheetPreview">
+            <div class="empty">Decorated exam preview will appear here.</div>
+          </div>
         </section>
 
         <section style="display:grid;gap:18px;">
@@ -382,6 +391,52 @@
   }
   function questionTypeLabel(t) {
     return compact(t||'').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()) || 'Short Answer';
+  }
+  function formatHtmlBlock(v) {
+    return escHtml(v).replace(/\r?\n/g,'<br>');
+  }
+  function fallbackLogoUrl() {
+    try {
+      return new URL('../../images/somap-logo.png.jpg', location.href).href;
+    } catch (_) {
+      return '../../images/somap-logo.png.jpg';
+    }
+  }
+  function rebuildPrintableHtml(paper) {
+    if (!paper) return '';
+    paper.schoolId = compact(paper.schoolId || schoolId);
+    paper.schoolName = compact(paper.schoolName || prettifySchool(paper.schoolId));
+    paper.schoolLogoUrl = compact(paper.schoolLogoUrl || fallbackLogoUrl());
+    const sharedBuild = window.SoMApExamGenerator?.buildPrintableHtml;
+    if (typeof sharedBuild === 'function') {
+      return sharedBuild(paper);
+    }
+    return buildPrintableHtml({ schoolName: paper.schoolName, paper });
+  }
+  async function loadImageDataUrl(url, fallbackUrl) {
+    const targetUrl = compact(url || fallbackUrl);
+    if (!targetUrl) return null;
+    const tryLoad = (source) => new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth || img.width;
+          canvas.height = img.naturalHeight || img.height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          resolve(canvas.toDataURL('image/png'));
+        } catch (_) {
+          resolve(null);
+        }
+      };
+      img.onerror = () => resolve(null);
+      img.src = source;
+    });
+    const primary = await tryLoad(targetUrl);
+    if (primary || !fallbackUrl || targetUrl === fallbackUrl) return primary;
+    return tryLoad(fallbackUrl);
   }
 
   // ── Tanzania class/subject registry ──────────────────────────────────
@@ -641,12 +696,15 @@
   // ── Render exam preview ───────────────────────────────────────────────
   function renderQuestions(paper) {
     const el = document.getElementById('questionList');
+    const previewEl = document.getElementById('paperSheetPreview');
     if (!paper) {
       el.innerHTML = '<div class="empty">Select a draft exam to preview it.</div>';
+      if (previewEl) previewEl.innerHTML = '<div class="empty">Decorated exam preview will appear here.</div>';
       document.getElementById('paperTitle').value = '';
       document.getElementById('paperInstructions').value = '';
       return;
     }
+    paper.printableHtml = rebuildPrintableHtml(paper);
     document.getElementById('paperTitle').value        = paper.title || '';
     document.getElementById('paperInstructions').value = paper.instructions || '';
     el.innerHTML = (paper.questions||[]).map((q,i) => `
@@ -665,6 +723,7 @@
         ${q.diagram?.svg ? `<div class="diagram-preview" style="margin-top:8px;">${q.diagram.svg}</div>` : ''}
       </div>
     `).join('') || '<div class="empty">No questions in this exam yet.</div>';
+    if (previewEl) previewEl.innerHTML = paper.printableHtml || '<div class="empty">No printable paper prepared yet.</div>';
   }
 
   function renderSourceTopics(paper) {
@@ -675,6 +734,8 @@
         <strong>${escHtml(t.topic||'Topic')}</strong>
         <div>Confidence: ${t.confidenceScore||0}</div>
         <div>Lesson plan: ${escHtml(t.sourceRefs?.lessonPlanId||'-')}</div>
+        <div>Lesson notes: ${escHtml(String(t.noteCount || t.sourceRefs?.lessonNoteIds?.length || 0))}${t.preferredNoteId ? ` (preferred: ${escHtml(t.preferredNoteId)})` : ''}</div>
+        <div>Homework: ${t.homeworkGiven ? `GIVEN${t.homeworkSourceTopic ? ` from ${escHtml(t.homeworkSourceTopic)}` : ''}` : 'Not marked as GIVEN'}</div>
         <div>Dates: ${escHtml((t.dates||[]).join(', ')||'-')}</div>
       </div>
     `).join('') || '<div class="empty">No source topics stored.</div>';
@@ -694,6 +755,19 @@
 
   // ── Built-in exam generator (no external modules needed) ─────────────
   async function collectVerifiedTopics(className, subject, monthKey) {
+    const sharedResolver = window.SoMApExamSourceResolver;
+    if (sharedResolver?.resolveVerifiedTopics) {
+      const resolved = await sharedResolver.resolveVerifiedTopics({
+        schoolId,
+        year: String(state.year),
+        className,
+        subject,
+        monthKey,
+        minimumConfidenceScore: 0
+      });
+      return Array.isArray(resolved?.allTopics) ? resolved.allTopics : [];
+    }
+
     const yearStr = String(state.year);
     const topics  = [];
     const seen    = new Set();
@@ -849,7 +923,35 @@
     }
   }
 
-  async function generateExamFromTemplate(tpl, monthKey) {
+  async function generateExamFromTemplate(tpl, monthKey, options = {}) {
+    const sharedTemplate = window.SoMApExamShared?.normalizeTemplate;
+    const sharedGenerator = window.SoMApExamGenerator?.generateDraftExam;
+    if (typeof sharedTemplate === 'function' && typeof sharedGenerator === 'function') {
+      const template = sharedTemplate({
+        ...tpl,
+        monthKey,
+        settings: {
+          ...(tpl.settings || {}),
+          minimumConfidenceScore: Number(tpl.settings?.minimumConfidenceScore || 60) || 60
+        }
+      });
+      const result = await sharedGenerator({
+        template,
+        schoolId,
+        year: String(state.year),
+        monthKey,
+        generationMode: 'manual',
+        forceRegenerate: Boolean(options.forceRegenerate)
+      });
+      return {
+        paper: result.paper,
+        answerKey: result.answerKey,
+        autoSaved: true,
+        existing: Boolean(result.existing),
+        created: Boolean(result.created)
+      };
+    }
+
     const topics = await collectVerifiedTopics(tpl.className, tpl.subject, monthKey);
 
     if (!topics.length) {
@@ -907,7 +1009,12 @@
       generationMode: 'manual',
       sourceTopics: topics.map(t => ({
         topic: t.topic, confidenceScore: t.confidenceScore,
-        dates: t.dates, sourceRefs: t.sourceRefs
+        dates: t.dates,
+        sourceRefs: t.sourceRefs,
+        noteCount: t.noteCount || t.notes?.length || t.sourceRefs?.lessonNoteIds?.length || 0,
+        homeworkGiven: Boolean(t.homeworkGiven),
+        homeworkSourceTopic: compact(t.homeworkGivenMeta?.sourceTopic || t.homeworkSourceMeta?.topic || ''),
+        preferredNoteId: compact(t.preferredNoteId || '')
       })),
       sections: rows.map(row => ({
         sectionKey: sanitizeKey(row.sectionTitle||'section'),
@@ -918,8 +1025,9 @@
       })),
       questions: questions.map(q => ({ ...q, answer: '' })), // hide answers in paper
       totalMarks,
+      schoolLogoUrl: fallbackLogoUrl(),
       printableHtml: buildPrintableHtml({ schoolName, paper: { ...{ questions }, title: tpl.title, className: tpl.className, subject: tpl.subject, monthKey, term: tpl.term, year: String(state.year), instructions: tpl.instructions, totalMarks, sections: rows } }),
-      reviewMeta: { diagnostics: { lessonPlanCount: topics.filter(t=>t.plan).length, lessonNoteCount: topics.filter(t=>t.note).length } }
+      reviewMeta: { diagnostics: { lessonPlanCount: topics.filter(t=>t.plan).length, lessonNoteCount: topics.filter(t=>(t.notes||[]).length).length } }
     };
 
     const answerKey = {
@@ -928,15 +1036,24 @@
       gateVersion: 'v1'
     };
 
-    return { paper, answerKey };
+    return { paper, answerKey, autoSaved: false, existing: false, created: true };
   }
 
   function buildPrintableHtml({ schoolName, paper }) {
+    const sharedBuild = window.SoMApExamGenerator?.buildPrintableHtml;
+    if (typeof sharedBuild === 'function') {
+      return sharedBuild({
+        ...paper,
+        schoolId: compact(paper.schoolId || schoolId),
+        schoolName: compact(schoolName || paper.schoolName || prettifySchool(schoolId)),
+        schoolLogoUrl: compact(paper.schoolLogoUrl || fallbackLogoUrl())
+      });
+    }
     const p = paper;
     const qHTML = (p.questions||[]).map((q,i) => `
       <div style="margin-bottom:16px;">
         <div style="display:flex;justify-content:space-between;">
-          <strong>${i+1}. ${escHtml(q.prompt||'')}</strong>
+          <strong>${i+1}. ${formatHtmlBlock(q.prompt||'')}</strong>
           <span style="white-space:nowrap;">(${q.marks||1} mark${q.marks===1?'':'s'})</span>
         </div>
         ${(q.options||[]).length ? `<ol type="A" style="margin:6px 0 0 20px;">${(q.options||[]).map(o=>`<li>${escHtml(o)}</li>`).join('')}</ol>` : ''}
@@ -1007,13 +1124,16 @@
       }
 
       try {
-        const { paper, answerKey } = await generateExamFromTemplate(tpl, monthKey);
-
-        // Save paper
-        await dbSet(schoolPath(`years/${yearStr}/generatedExams/${classKey}/${subKey}/${monKey}/${paper.id}`), paper);
-        // Save answer key
-        await dbSet(schoolPath(`years/${yearStr}/generatedExamAnswerKeys/${paper.id}`), answerKey);
-
+        const result = await generateExamFromTemplate(tpl, monthKey);
+        if (result.existing) {
+          results.skipped++;
+          continue;
+        }
+        const { paper, answerKey, autoSaved } = result;
+        if (!autoSaved) {
+          await dbSet(schoolPath(`years/${yearStr}/generatedExams/${classKey}/${subKey}/${monKey}/${paper.id}`), paper);
+          await dbSet(schoolPath(`years/${yearStr}/generatedExamAnswerKeys/${paper.id}`), answerKey);
+        }
         results.created++;
       } catch (err) {
         results.errors.push(`${tpl.className} ${tpl.subject}: ${err.message||err}`);
@@ -1057,7 +1177,7 @@
     });
 
     paper.totalMarks = (paper.questions||[]).reduce((s,q) => s+Number(q.marks||0), 0);
-    paper.printableHtml = buildPrintableHtml({ schoolName: prettifySchool(schoolId), paper });
+    paper.printableHtml = rebuildPrintableHtml(paper);
     paper.updatedAt = nowTs();
 
     try {
@@ -1107,13 +1227,15 @@
       return;
     }
     try {
-      const { paper: newPaper, answerKey } = await generateExamFromTemplate(tpl, paper.monthKey);
+      const { paper: newPaper, answerKey, autoSaved } = await generateExamFromTemplate(tpl, paper.monthKey, { forceRegenerate: true });
       const yearStr  = String(state.year);
       const classKey = sanitizeKey(tpl.className);
       const subKey   = sanitizeKey(tpl.subject);
       const monKey   = (paper.monthKey||'').replace('-','');
-      await dbSet(schoolPath(`years/${yearStr}/generatedExams/${classKey}/${subKey}/${monKey}/${newPaper.id}`), newPaper);
-      await dbSet(schoolPath(`years/${yearStr}/generatedExamAnswerKeys/${newPaper.id}`), answerKey);
+      if (!autoSaved) {
+        await dbSet(schoolPath(`years/${yearStr}/generatedExams/${classKey}/${subKey}/${monKey}/${newPaper.id}`), newPaper);
+        await dbSet(schoolPath(`years/${yearStr}/generatedExamAnswerKeys/${newPaper.id}`), answerKey);
+      }
       setNotice('✅ New draft generated.', 'success');
       setTimeout(() => setNotice(''), 3000);
       await loadExams();
@@ -1127,31 +1249,123 @@
   function printExam() {
     const paper = selectedExam();
     if (!paper) return;
+    paper.printableHtml = rebuildPrintableHtml(paper);
     const w = window.open('', '_blank', 'width=900,height=800');
     w.document.write(`<!DOCTYPE html><html><head><title>${escHtml(paper.title||'Exam')}</title></head><body style="margin:20px;">${paper.printableHtml||'<p>No content</p>'}</body></html>`);
     w.document.close(); w.focus(); w.print();
   }
 
   // ── Export PDF ────────────────────────────────────────────────────────
-  function exportPdf() {
+  async function exportPdf() {
     const paper = selectedExam();
     if (!paper) return;
     const jsPdfLib = window.jspdf;
     if (!jsPdfLib?.jsPDF) { setNotice('jsPDF library not available.', 'error'); return; }
+    paper.printableHtml = rebuildPrintableHtml(paper);
     const doc = new jsPdfLib.jsPDF({ unit:'pt', format:'a4' });
-    let y = 40;
-    doc.setFontSize(16); doc.text(prettifySchool(paper.schoolId||schoolId), 40, y); y+=20;
-    doc.setFontSize(14); doc.text(paper.title||'Exam', 40, y); y+=18;
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 36;
+    const contentWidth = pageWidth - (margin * 2);
+    const logoData = await loadImageDataUrl(paper.schoolLogoUrl || fallbackLogoUrl(), fallbackLogoUrl());
+    let y = 26;
+
+    doc.setFillColor(20, 58, 138);
+    doc.roundedRect(margin, y, contentWidth, 106, 18, 18, 'F');
+    doc.setFillColor(251, 191, 36);
+    doc.roundedRect(margin, y, contentWidth, 10, 18, 18, 'F');
+
+    if (logoData) {
+      try {
+        doc.addImage(logoData, 'PNG', margin + 14, y + 20, 52, 52);
+      } catch (_) {}
+    }
+
+    const textStartX = margin + (logoData ? 78 : 16);
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(24);
+    doc.text(String(paper.schoolName || prettifySchool(paper.schoolId || schoolId)).toUpperCase(), textStartX, y + 36);
+    doc.setTextColor(254, 240, 138);
+    doc.setFontSize(18);
+    doc.text(String(paper.title || 'Exam').toUpperCase(), textStartX, y + 58);
+    doc.setTextColor(226, 232, 240);
+    doc.setFont('helvetica', 'bold');
     doc.setFontSize(10);
-    doc.text(`${paper.className} | ${paper.subject} | ${monthLabel(paper.monthKey)} | ${paper.term||''}`, 40, y); y+=16;
-    doc.text(`Year: ${paper.year} | Total Marks: ${paper.totalMarks||0}`, 40, y); y+=18;
-    doc.text(paper.instructions||'Answer all questions.', 40, y, {maxWidth:520}); y+=30;
-    doc.setLineWidth(0.5); doc.line(40, y, 555, y); y+=12;
+    doc.text(
+      [paper.className, paper.subject, monthLabel(paper.monthKey), paper.term || '', `Year ${paper.year || state.year}`].filter(Boolean).join(' | '),
+      textStartX,
+      y + 76
+    );
+
+    const metaY = y + 118;
+    const pillWidth = (contentWidth - 24) / 4;
+    [
+      { label: 'Class', value: paper.className || '--' },
+      { label: 'Subject', value: paper.subject || '--' },
+      { label: 'Month', value: monthLabel(paper.monthKey) || '--' },
+      { label: 'Total Marks', value: String(paper.totalMarks || 0) }
+    ].forEach((item, index) => {
+      const pillX = margin + (index * (pillWidth + 8));
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(191, 219, 254);
+      doc.roundedRect(pillX, metaY, pillWidth, 34, 10, 10, 'FD');
+      doc.setTextColor(71, 85, 105);
+      doc.setFontSize(8);
+      doc.setFont('helvetica', 'bold');
+      doc.text(item.label.toUpperCase(), pillX + 10, metaY + 12);
+      doc.setTextColor(15, 23, 42);
+      doc.setFontSize(10);
+      doc.text(String(item.value), pillX + 10, metaY + 24);
+    });
+
+    y = metaY + 48;
+    doc.setFillColor(239, 246, 255);
+    doc.setDrawColor(147, 197, 253);
+    const instructionLines = doc.splitTextToSize(paper.instructions || 'Answer all questions.', contentWidth - 28);
+    const instructionHeight = Math.max(28, instructionLines.length * 12 + 16);
+    doc.roundedRect(margin, y, contentWidth, instructionHeight, 12, 12, 'FD');
+    doc.setTextColor(29, 78, 216);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.text('INSTRUCTIONS', margin + 12, y + 14);
+    doc.setTextColor(15, 23, 42);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    doc.text(instructionLines, margin + 12, y + 30);
+    y += instructionHeight + 18;
+
     (paper.questions||[]).forEach((q,i) => {
-      const lines = doc.splitTextToSize(`${i+1}. ${q.prompt||''} (${q.marks||1} mark${q.marks===1?'':'s'})`, 510);
-      if (y > 760) { doc.addPage(); y = 40; }
-      doc.text(lines, 40, y);
-      y += lines.length * 13 + 10;
+      const promptLines = doc.splitTextToSize(`${i+1}. ${String(q.prompt||'').replace(/\s+/g, ' ')} (${q.marks||1} mark${q.marks===1?'':'s'})`, contentWidth);
+      const optionLines = [];
+      (q.options || []).forEach((option, optionIndex) => {
+        const label = String.fromCharCode(65 + optionIndex);
+        const wrapped = doc.splitTextToSize(`${label}. ${String(option)}`, contentWidth - 18);
+        wrapped.forEach((line, lineIndex) => optionLines.push(`${lineIndex === 0 ? '' : '   '}${line}`));
+      });
+      const neededHeight = (promptLines.length * 13) + (optionLines.length * 11) + (q.diagram?.svg ? 18 : 0) + 12;
+      if (y + neededHeight > pageHeight - 42) {
+        doc.addPage();
+        y = 42;
+      }
+      doc.setTextColor(15, 23, 42);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.text(promptLines, margin, y);
+      y += promptLines.length * 13;
+      if (optionLines.length) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.text(optionLines, margin + 16, y + 2);
+        y += optionLines.length * 11 + 4;
+      }
+      if (q.diagram?.svg) {
+        doc.setTextColor(71, 85, 105);
+        doc.setFontSize(9);
+        doc.text('Diagram is included in the print view. Use Print for exact SVG rendering.', margin + 16, y + 2);
+        y += 14;
+      }
+      y += 10;
     });
     doc.save(`${(paper.title||'exam').replace(/[^a-z0-9]+/gi,'-').toLowerCase()}.pdf`);
   }
@@ -1228,7 +1442,7 @@
     try {
       const topics = await collectVerifiedTopics(cls, sub, mon);
       document.getElementById('diagTopics').textContent =
-        `Topics found for ${cls}/${sub}/${mon}: ${topics.length} (${topics.filter(t=>t.plan).length} from plans, ${topics.filter(t=>t.note).length} from notes)`;
+        `Topics found for ${cls}/${sub}/${mon}: ${topics.length} (${topics.filter(t=>t.plan).length} with lesson plans, ${topics.filter(t=>(t.notes||[]).length).length} with lesson notes, ${topics.filter(t=>t.homeworkGiven).length} with GIVEN homework)`;
     } catch(_) {
       document.getElementById('diagTopics').textContent = 'Could not count topics';
     }

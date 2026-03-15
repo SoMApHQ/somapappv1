@@ -87,6 +87,21 @@
     return Shared?.normalizeMonthKey ? Shared.normalizeMonthKey(value, fallbackYear) : monthKeyFromDate(value);
   }
 
+  function normalizeDateKey(value) {
+    const clean = compactText(value);
+    if (!clean) return '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
+    if (/^\d{4}-\d{2}/.test(clean)) return clean.slice(0, 7) + '-01';
+    const parsed = Date.parse(clean);
+    if (Number.isNaN(parsed)) return '';
+    const date = new Date(parsed);
+    return [
+      date.getFullYear(),
+      String(date.getMonth() + 1).padStart(2, '0'),
+      String(date.getDate()).padStart(2, '0')
+    ].join('-');
+  }
+
   function normalizeClassName(value) {
     return ClassUtils?.normalizeClassName ? ClassUtils.normalizeClassName(value, { allowGraduated: true }) : compactText(value);
   }
@@ -112,6 +127,7 @@
       resources: compactText(raw.resources || ''),
       homework: compactText(raw.homework || ''),
       homeworkGivenMeta: raw.homeworkGivenMeta || null,
+      homeworkSourceMeta: raw.homeworkSourceMeta || null,
       coverageStatus: compactText(raw.coverageStatus || 'started') || 'started',
       teacherId: compactText(raw.teacherId || raw.teacher?.uid || ''),
       teacherName: compactText(raw.teacherName || raw.teacher?.name || raw.recordedBy || '')
@@ -216,6 +232,12 @@
     if (filters.monthKey) {
       if (!compactText(record.monthKey || '')) return false;
       if (compactText(record.monthKey || '') !== compactText(filters.monthKey)) return false;
+    }
+    if (filters.dateFrom || filters.dateTo) {
+      const recordDate = normalizeDateKey(record.date || '');
+      if (!recordDate) return false;
+      if (filters.dateFrom && recordDate < filters.dateFrom) return false;
+      if (filters.dateTo && recordDate > filters.dateTo) return false;
     }
     return true;
   }
@@ -332,6 +354,10 @@
     return Boolean(plan?.homeworkGivenMeta?.given);
   }
 
+  function hasHomeworkSource(plan) {
+    return Boolean(plan?.homeworkSourceMeta?.noteId || plan?.homeworkSourceMeta?.topic);
+  }
+
   function isHighCoverage(status) {
     const normalized = normalizeLookupToken(status || '');
     if (!normalized) return false;
@@ -359,11 +385,14 @@
 
   function computeTopicConfidence(bucket) {
     let score = 0;
-    if (bucket.plan) score += 35;
-    if (bucket.plan && isHighCoverage(bucket.plan.coverageStatus)) score += 25;
+    if (bucket.plan) score += 30;
+    if (bucket.plan && isHighCoverage(bucket.plan.coverageStatus)) score += 20;
     if (bucket.notes.length) score += 20;
+    if (bucket.preferredNoteId) score += 10;
+    if (bucket.plan && hasHomeworkSource(bucket.plan)) score += 10;
     if (bucket.plan && hasHomeworkGiven(bucket.plan)) score += 10;
-    if (bucket.logs.length || bucket.journals.length) score += 10;
+    if (bucket.logs.length) score += 5;
+    if (bucket.journals.length) score += 5;
     if (bucket.schemeRows.length) score += 5;
     return score;
   }
@@ -377,9 +406,39 @@
 
   function noteMatchesPlan(note, plan) {
     if (!note || !plan) return false;
-    if (normalizeLookupToken(note.topic) === normalizeLookupToken(plan.topic)) return true;
+    if (compactText(plan.homeworkSourceMeta?.noteId || '') && compactText(plan.homeworkSourceMeta?.noteId || '') === compactText(note.id || '')) {
+      return true;
+    }
+    const noteTopic = normalizeLookupToken(note.topic || '');
+    const planTopic = normalizeLookupToken(plan.topic || '');
+    const homeworkTopic = normalizeLookupToken(plan.homeworkGivenMeta?.sourceTopic || plan.homeworkSourceMeta?.topic || '');
+    const noteHomeworkTopic = normalizeLookupToken(note.homeworkMeta?.topicName || '');
+    if (homeworkTopic && noteTopic && (homeworkTopic === noteTopic || homeworkTopic.includes(noteTopic) || noteTopic.includes(homeworkTopic))) {
+      return true;
+    }
+    if (homeworkTopic && noteHomeworkTopic && (homeworkTopic === noteHomeworkTopic || homeworkTopic.includes(noteHomeworkTopic) || noteHomeworkTopic.includes(homeworkTopic))) {
+      return true;
+    }
+    if (noteTopic && planTopic && noteTopic === planTopic) return true;
+    if (noteTopic && planTopic && (noteTopic.includes(planTopic) || planTopic.includes(noteTopic))) return true;
     if (note.date && plan.date && note.date === plan.date) return true;
     return false;
+  }
+
+  function noteStrengthForPlan(note, plan) {
+    if (!note || !plan) return 0;
+    const noteId = compactText(note.id || '');
+    const noteTopic = normalizeLookupToken(note.topic || '');
+    const planTopic = normalizeLookupToken(plan.topic || '');
+    const homeworkTopic = normalizeLookupToken(plan.homeworkGivenMeta?.sourceTopic || plan.homeworkSourceMeta?.topic || '');
+    let score = 0;
+    if (noteId && noteId === compactText(plan.homeworkSourceMeta?.noteId || '')) score += 10;
+    if (noteTopic && planTopic && noteTopic === planTopic) score += 6;
+    if (noteTopic && planTopic && (noteTopic.includes(planTopic) || planTopic.includes(noteTopic))) score += 3;
+    if (homeworkTopic && noteTopic && (homeworkTopic === noteTopic || homeworkTopic.includes(noteTopic) || noteTopic.includes(homeworkTopic))) score += 5;
+    if (note.practiceQuestions) score += 2;
+    if (note.date && plan.date && note.date === plan.date) score += 2;
+    return score;
   }
 
   function logMatchesPlan(log, plan) {
@@ -403,7 +462,9 @@
       className: compactText(options?.className || ''),
       subject: compactText(options?.subject || ''),
       term: compactText(options?.term || ''),
-      monthKey: compactText(options?.monthKey || '')
+      monthKey: compactText(options?.monthKey || ''),
+      dateFrom: normalizeDateKey(options?.dateFrom || ''),
+      dateTo: normalizeDateKey(options?.dateTo || '')
     };
     const minimumConfidenceScore = Number(options?.minimumConfidenceScore || 60) || 60;
     const [plans, notes, logs, journals, schemeRows] = await Promise.all([
@@ -436,7 +497,8 @@
         sourceTexts: [],
         diagrams: [],
         homeworkTexts: [],
-        subTopics: []
+        subTopics: [],
+        preferredNoteId: ''
       });
     });
 
@@ -449,6 +511,9 @@
       }
       if (!noteMatchesPlan(note, bucket.plan)) return;
       bucket.notes.push(note);
+      if (!bucket.preferredNoteId && noteStrengthForPlan(note, bucket.plan) >= 10) {
+        bucket.preferredNoteId = compactText(note.id || '');
+      }
       addUniqueText(bucket.sourceTexts, [note.keyConcepts, note.detailedContent, note.examples, note.keyTakeaways].filter(Boolean).join('. '));
       addUniqueText(bucket.homeworkTexts, note.practiceQuestions);
       addUniqueText(bucket.diagrams, note.diagrams);
@@ -479,6 +544,8 @@
     });
 
     const topics = Array.from(buckets.values()).map((bucket) => {
+      bucket.notes.sort((left, right) => noteStrengthForPlan(right, bucket.plan) - noteStrengthForPlan(left, bucket.plan));
+      if (!bucket.preferredNoteId && bucket.notes[0]?.id) bucket.preferredNoteId = compactText(bucket.notes[0].id);
       addUniqueText(bucket.sourceTexts, conceptSourceText(bucket));
       addUniqueText(bucket.homeworkTexts, bucket.plan?.homework);
       const confidenceScore = computeTopicConfidence(bucket);
@@ -503,11 +570,15 @@
           logbookIds: bucket.logs.map((log) => log.id),
           classJournalIds: bucket.journals.map((journal) => journal.id)
         },
+        preferredNoteId: bucket.preferredNoteId,
         sourceTopic: bucket.topic,
         sourceText: bucket.sourceTexts.filter(Boolean).join('. '),
         sourceHomework: bucket.homeworkTexts.filter(Boolean).join('\n'),
         diagrams: bucket.diagrams.filter(Boolean),
         subTopics: bucket.subTopics.filter(Boolean),
+        homeworkGiven: hasHomeworkGiven(bucket.plan),
+        homeworkSourceMeta: bucket.plan?.homeworkSourceMeta || null,
+        homeworkGivenMeta: bucket.plan?.homeworkGivenMeta || null,
         plan: bucket.plan,
         notes: bucket.notes,
         logs: bucket.logs,
