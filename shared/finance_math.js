@@ -168,6 +168,15 @@
   function parseExplicitDate(value, endOfDay){
     if (!value) return null;
     if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      if (/^\d+$/.test(trimmed)) {
+        const numericTs = Number(trimmed);
+        return Number.isFinite(numericTs) ? numericTs : null;
+      }
+      if (!/\d{4}/.test(trimmed)) return null;
+    }
     const directDate = new Date(value);
     if (!Number.isNaN(directDate.getTime())) {
       if (endOfDay) {
@@ -436,6 +445,7 @@
     }
 
     if (Array.isArray(student._planSchedule) && student._planSchedule.length) {
+      const config = getConfig(student);
       const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
       const carryAmount = Math.max(0, Number(student.carryAmount || 0));
       const explicitAmounts = student._planSchedule.map((s) => Math.max(0, Math.round(Number(s.amount) || 0)));
@@ -455,8 +465,12 @@
       const isMonthlyPlan = planName.includes('monthly') || planName.includes('mwezi') ||
         student._planSchedule.some((s) => String(s.label || '').includes('Monthly:'));
       const sc = student._planSchedule.map((s, i) => {
-        let toTS = s.to ? new Date(s.to).getTime() : 0;
-        if (isMonthlyPlan && toTS > 0 && !Number.isNaN(toTS)) {
+        const fallback = config?.windows?.[i] || config?.windows?.[config.windows.length - 1] || { from: [1, 1], to: [1, 10] };
+        const fromRaw = s?.from ?? s?.fromDate ?? s?.window?.from;
+        const toRaw = s?.to ?? s?.toDate ?? s?.window?.to;
+        const fromTS = resolveAcademicWindowTS(targetYear, fromRaw, fallback.from, false);
+        let toTS = resolveAcademicWindowTS(targetYear, toRaw, fallback.to, true);
+        if (isMonthlyPlan && Number.isFinite(toTS) && toTS > 0) {
           const d = new Date(toTS);
           if (d.getDate() !== 10) {
             toTS = new Date(d.getFullYear(), d.getMonth(), 10, 23, 59, 59, 999).getTime();
@@ -465,7 +479,7 @@
         return {
           key: `inst${i + 1}`,
           label: s.label || `Inst ${i + 1}`,
-          fromTS: s.from ? new Date(s.from).getTime() : 0,
+          fromTS,
           toTS,
           amount: Math.max(0, amounts[i] || 0),
           paidAllocated: 0,
