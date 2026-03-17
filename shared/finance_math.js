@@ -199,7 +199,19 @@
   function resolveAcademicWindowTS(targetYear, raw, fallbackPair, endOfDay){
     const explicit = parseExplicitDate(raw, endOfDay);
     if (explicit != null) return explicit;
-    const pair = Array.isArray(raw) ? raw : fallbackPair;
+    let pair = Array.isArray(raw) ? raw : null;
+    if (!pair && typeof raw === 'string') {
+      const nums = raw.match(/\d+/g);
+      if (nums && nums.length >= 2) {
+        const hasYearFirst = nums[0].length === 4;
+        const month = Number(hasYearFirst ? nums[1] : nums[0]);
+        const day = Number(hasYearFirst ? nums[2] : nums[1]);
+        if (Number.isFinite(month) && Number.isFinite(day) && month > 0 && day > 0) {
+          pair = [month, day];
+        }
+      }
+    }
+    if (!pair) pair = fallbackPair;
     let [month, day] = Array.isArray(pair) ? pair : [1, endOfDay ? 10 : 1];
     month = Number(month);
     day = Number(day);
@@ -431,9 +443,10 @@
         .map((it, idx) => ({
           key: `custom${idx + 1}`,
           label: String(it.label || 'Item'),
-          fromTS: new Date(it.from).getTime() || 0,
-          toTS: new Date(it.to).getTime() || 0,
+          fromTS: resolveAcademicWindowTS(targetYear, it.from, [1, 1], false),
+          toTS: resolveAcademicWindowTS(targetYear, it.to, [1, 10], true),
           amount: Math.max(0, Math.round(Number(it.amount) || 0)),
+          carryComponent: Math.max(0, Number(it.carryComponent || 0)),
           paidAllocated: 0,
           status: 'Pending'
         }));
