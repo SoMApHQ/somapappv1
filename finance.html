@@ -1291,6 +1291,31 @@
   }
   window.__finance_computeStudentFinancials = computeStudentFinancials;
 
+  function resolveDebtDisplay(fin) {
+    const debtValue = Math.max(0, Number(fin?.periodDebtValue || 0));
+    const rawLabel = String(fin?.periodDebtLabel || '').trim();
+    const overdueThroughTs = Number(fin?.overdueThroughTs || 0);
+    const overdueWindowLabel = String(fin?.overdueWindowLabel || '').trim();
+    const hasLabel = rawLabel && rawLabel !== '-';
+    const fallbackLabel = overdueThroughTs > 0 ? new Date(overdueThroughTs).toLocaleDateString() : '';
+    const dueDateLabel = hasLabel ? rawLabel : (fallbackLabel || '');
+    const debtHasDueDate = debtValue > 0 && Boolean(dueDateLabel || overdueWindowLabel);
+    const debtNeedsAction = debtValue > 0;
+    const debtLabel = debtNeedsAction
+      ? (debtHasDueDate
+          ? `${fin?.extensionActive ? 'Due by' : 'Overdue till'} ${dueDateLabel || 'Overdue'}`
+          : 'Overdue')
+      : '-';
+    return {
+      debtValue,
+      dueDateLabel,
+      debtHasDueDate,
+      debtNeedsAction,
+      debtLabel,
+      overdueWindowLabel: overdueWindowLabel && overdueWindowLabel !== '-' ? overdueWindowLabel : ''
+    };
+  }
+
   function normalizePayments(source, targetYear) {
     if (!source) return {};
     let bucket = source;
@@ -1939,6 +1964,8 @@ function buildFinanceStudents(
           periodDebtLabel: fin.periodDebtLabel || '-',
           periodDebtValue: Math.max(0, Number(fin.periodDebtValue || 0)),
           isOverdueDebt: Boolean(fin.isOverdueDebt),
+          overdueWindowLabel: fin.overdueWindowLabel || '-',
+          hasCarryOutstanding: Boolean(fin.hasCarryOutstanding),
           overdueThroughTs: Number(fin.overdueThroughTs || 0),
           originalOverdueThroughTs: Number(fin.originalOverdueThroughTs || fin.overdueThroughTs || 0),
           extensionActive: Boolean(fin.extensionActive),
@@ -2049,13 +2076,10 @@ function buildFinanceStudents(
       totalCollected += fin.paidAmount;
 
       const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
-      const debtHasDueDate = Boolean(fin.periodDebtValue > 0 && fin.periodDebtLabel && fin.periodDebtLabel !== '-');
-      const debtIsOverdue = Boolean(fin.isOverdueDebt && debtHasDueDate);
-      const debtIsCarry = Boolean(fin.hasCarryOutstanding && debtHasDueDate);
-      const debtNeedsAction = debtHasDueDate;
-      const debtLabel = debtHasDueDate
-        ? `${fin.extensionActive ? 'Due by' : 'Overdue till'} ${fin.periodDebtLabel}`
-        : '-';
+      const debtMeta = resolveDebtDisplay(fin);
+      const debtHasDueDate = debtMeta.debtHasDueDate;
+      const debtNeedsAction = debtMeta.debtNeedsAction;
+      const debtLabel = debtMeta.debtLabel;
       const prevYearNum = Number(financeYear) - 1;
       const carryYearLabel = Number.isFinite(prevYearNum) ? prevYearNum : `${financeYear}-1`;
       const carryNote = student.carryAmount > 0
@@ -2090,7 +2114,7 @@ function buildFinanceStudents(
         <td class="p-2 border align-top text-right">${fmt(fin.balance)}</td>
         <td class="p-2 border align-top">
           <div class="flex items-center justify-between gap-2">
-            <span>${debtLabel}${debtNeedsAction && fin.overdueWindowLabel && fin.overdueWindowLabel !== '-' ? `<div class="text-xs text-red-700">${fin.overdueWindowLabel}</div>` : ''}</span>
+            <span>${debtLabel}${debtNeedsAction && debtMeta.overdueWindowLabel ? `<div class="text-xs text-red-700">${debtMeta.overdueWindowLabel}</div>` : ''}</span>
             <span class="font-semibold ${debtNeedsAction ? 'text-red-700' : ''}">${fmt(fin.periodDebtValue)}</span>
           </div>
         </td>
@@ -2204,7 +2228,7 @@ function buildFinanceStudents(
 
     const scopeParam = parentCtx.enabled ? '&scope=parent' : '';
     slot.innerHTML = `
-      <div class="p-3 text-xs text-slate-500">Loading breakdown…</div>
+      <div class="p-3 text-xs text-slate-500" data-breakdown-loading>Loading breakdown…</div>
       <iframe
         src="Tofinancehtml/payment.html?student=${encodeURIComponent(id)}&year=${encodeURIComponent(financeYear)}${scopeParam}"
         class="w-full h-[360px] rounded border"
@@ -2212,6 +2236,13 @@ function buildFinanceStudents(
       ></iframe>
     `;
     slot.dataset.loaded = '1';
+    const loadingEl = slot.querySelector('[data-breakdown-loading]');
+    const frame = slot.querySelector('iframe');
+    if (frame) {
+      frame.addEventListener('load', () => {
+        if (loadingEl) loadingEl.remove();
+      }, { once: true });
+    }
   }
 
   document.addEventListener('click', (e) => {
@@ -3935,15 +3966,11 @@ function buildFinanceStudents(
 
       if (student && debtCell && typeof window.__finance_computeStudentFinancials === 'function') {
         const finNow = window.__finance_computeStudentFinancials(student);
-        const debtHasDueDate = Boolean(finNow.periodDebtValue > 0 && finNow.periodDebtLabel && finNow.periodDebtLabel !== '-');
-        const debtIsOverdue = Boolean(finNow.isOverdueDebt && debtHasDueDate);
-        const debtIsCarry = Boolean(finNow.hasCarryOutstanding && debtHasDueDate);
-        const debtNeedsAction = debtHasDueDate;
-        const debtLabel = debtHasDueDate
-          ? `${finNow.extensionActive ? 'Due by' : 'Overdue till'} ${finNow.periodDebtLabel}`
-          : '-';
-        const windowLine = debtNeedsAction && finNow.overdueWindowLabel && finNow.overdueWindowLabel !== '-'
-          ? `<div class="text-xs text-red-700">${finNow.overdueWindowLabel}</div>`
+        const debtMeta = resolveDebtDisplay(finNow);
+        const debtNeedsAction = debtMeta.debtNeedsAction;
+        const debtLabel = debtMeta.debtLabel;
+        const windowLine = debtNeedsAction && debtMeta.overdueWindowLabel
+          ? `<div class="text-xs text-red-700">${debtMeta.overdueWindowLabel}</div>`
           : '';
         debtCell.innerHTML = `
           <div class="flex items-center justify-between gap-2">
