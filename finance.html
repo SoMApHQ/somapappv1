@@ -1152,6 +1152,23 @@
     return { items: sc, periodLabelNow: periodLabel, expectedToDate };
   }
 
+  function getInstallmentStatus(item) {
+    const expected = Math.max(0, Number(item?.amount || 0));
+    if (expected <= 0) return 'Cleared';
+
+    const allocated = Math.max(0, Number(item?.paidAllocated || 0));
+    const carryComponent = Math.min(expected, Math.max(0, Number(item?.carryComponent || 0)));
+    const baseExpected = Math.max(0, expected - carryComponent);
+    const progressExpected = baseExpected > 0 ? baseExpected : expected;
+    const progressAllocated = baseExpected > 0
+      ? Math.max(0, allocated - carryComponent)
+      : allocated;
+
+    if (progressAllocated >= progressExpected) return 'Cleared';
+    if (isPast(Number(item?.toTS || 0))) return progressAllocated > 0 ? 'Partially Paid (Overdue)' : 'Overdue';
+    return progressAllocated > 0 ? 'Partially Paid' : 'Pending';
+  }
+
   function allocatePayments(student, schedule) {
     const payList = [];
     if (student.payments) {
@@ -1175,12 +1192,7 @@
     }
     const credit = Math.max(0, pot);
     const now = Date.now();
-    for (const it of schedule.items) {
-      const a = it.paidAllocated, need = it.amount;
-      if (a >= need) it.status = 'Cleared';
-      else if (isPast(it.toTS)) it.status = a > 0 ? 'Partially Paid (Overdue)' : 'Overdue';
-      else it.status = a > 0 ? 'Partially Paid' : 'Pending';
-    }
+    for (const it of schedule.items) it.status = getInstallmentStatus(it);
     const expectedToDate = schedule.items.filter(it => it.toTS < now).reduce((s, it) => s + it.amount, 0);
     const paidConsumed = totalPaid - credit;
     const debtTillNow = Math.max(0, expectedToDate - paidConsumed);
@@ -1278,6 +1290,60 @@
     };
   }
   window.__finance_computeStudentFinancials = computeStudentFinancials;
+
+  function getStudentBaseFee(student) {
+    const rawCarry = Math.max(0, Number(student?.carryAmount || 0));
+    const baseFeeRaw = student?.baseFee != null
+      ? Number(student.baseFee)
+      : Number(student?.feePerYear || 0) - rawCarry;
+    return Math.max(0, Number.isFinite(baseFeeRaw) ? baseFeeRaw : 0);
+  }
+
+  function buildCarryAdjustedStudent(student, carryAmount) {
+    const baseFee = getStudentBaseFee(student);
+    const effectiveCarry = Math.max(0, Number(carryAmount || 0));
+    return {
+      ...student,
+      baseFee,
+      carryAmount: effectiveCarry,
+      feePerYear: Math.max(0, baseFee + effectiveCarry),
+    };
+  }
+
+  async function resolveEffectiveCarry(student, yearValue, admission) {
+    const dbCarry = Math.max(0, Number(student?.carryAmount || 0));
+    const targetYearNum = Number(yearValue || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
+    const admissionKey = String(admission || student?.admissionNumber || student?.admissionNo || '').trim();
+    let effectiveCarry = dbCarry;
+
+    if (Number(student?.__carryOverlayYear || 0) === targetYearNum) {
+      effectiveCarry = Math.max(effectiveCarry, Number(student?.__carryOverlayAmount || 0));
+    }
+
+    if (admissionKey) {
+      effectiveCarry = Math.max(
+        effectiveCarry,
+        Number(window.__financeCarryForwardVisual?.[`${targetYearNum}::${admissionKey}`]?.carry || 0)
+      );
+    }
+
+    if (
+      admissionKey &&
+      Number.isFinite(targetYearNum) &&
+      targetYearNum - 1 >= CARRY_FORWARD_START_YEAR &&
+      effectiveCarry <= 0 &&
+      typeof window.__finance_getBalanceForYearAdmission === 'function'
+    ) {
+      try {
+        const prevCarry = await window.__finance_getBalanceForYearAdmission(targetYearNum - 1, admissionKey);
+        effectiveCarry = Math.max(effectiveCarry, Number(prevCarry || 0));
+      } catch (err) {
+        console.warn('Effective carry lookup failed', admissionKey, targetYearNum - 1, err?.message || err);
+      }
+    }
+
+    return effectiveCarry;
+  }
 
   function normalizePayments(source, targetYear) {
     if (!source) return {};
@@ -1901,9 +1967,12 @@ function buildFinanceStudents(
       try {
         financeYear = targetYear;
         activeYear = targetYear;
-        const fin = computeStudentFinancials(student);
-        const baseFee = Math.max(0, Number(student.baseFee || student.feePerYear || 0));
-        const carry = Math.max(0, Number(student.carryAmount || 0));
+        const admissionNumber = String(student.admissionNumber || student.admissionNo || '').trim();
+        const effectiveCarry = await resolveEffectiveCarry(student, targetYear, admissionNumber || resolvedStudentId || identifier);
+        const financeStudent = buildCarryAdjustedStudent(student, effectiveCarry);
+        const fin = computeStudentFinancials(financeStudent);
+        const baseFee = getStudentBaseFee(financeStudent);
+        const carry = Math.max(0, Number(financeStudent.carryAmount || 0));
         const totalDue = Math.max(0, baseFee + carry);
         const parentContact = String(
           student.primaryParentContact ||
@@ -1914,9 +1983,9 @@ function buildFinanceStudents(
         ).trim();
         return {
           studentId: resolvedStudentId || student.id || student.studentId || identifier,
-          admissionNumber: String(student.admissionNumber || student.admissionNo || ''),
+          admissionNumber,
           fullName: `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim(),
-          classLevel: student.classLevel || student.className || '',
+          classLevel: financeStudent.classLevel || financeStudent.className || '',
           parentContact,
           due: totalDue,
           baseFee,
