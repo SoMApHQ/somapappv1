@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -2137,7 +2137,12 @@ function buildFinanceStudents(
     const overdueWindowLabel = String(fin?.overdueWindowLabel || '').trim();
     const resolvedDueDate = periodDebtLabel && periodDebtLabel !== '-' ? periodDebtLabel : fallbackDueDate;
     const resolvedWindow = overdueWindowLabel && overdueWindowLabel !== '-' ? overdueWindowLabel : fallbackWindow;
-    const isOverdue = Boolean(fin?.isOverdueDebt || latestOverdueItem);
+    const baseIsOverdue = Boolean(fin?.isOverdueDebt || latestOverdueItem);
+    const hasCarryOutstanding = Boolean(fin?.hasCarryOutstanding);
+    // If there is outstanding carry-forward debt but no active extension,
+    // treat it as overdue for display so the row is clearly marked.
+    const isCarryOnlyDebt = hasCarryOutstanding && !baseIsOverdue;
+    const isOverdue = baseIsOverdue || isCarryOnlyDebt;
     const hasDueDate = Boolean(resolvedDueDate);
     const debtLabel = hasDueDate
       ? `${fin?.extensionActive && !isOverdue ? 'Due by' : 'Overdue till'} ${resolvedDueDate}`
@@ -2189,10 +2194,22 @@ function buildFinanceStudents(
 
       const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
       const debtState = getDebtDisplayState(fin);
-      const prevYearNum = Number(financeYear) - 1;
+      const targetYearNum = Number(financeYear);
+      const prevYearNum = Number.isFinite(targetYearNum) ? targetYearNum - 1 : (Number(financeYear) - 1);
       const carryYearLabel = Number.isFinite(prevYearNum) ? prevYearNum : `${financeYear}-1`;
-      const carryNote = student.carryAmount > 0
-        ? `<div class="text-xs text-slate-500 text-right mt-1">Includes carry-forward from ${carryYearLabel}: ${fmt(student.carryAmount)}</div>`
+      let carryForwardPrev = 0;
+      if (Number.isFinite(targetYearNum) && prevYearNum >= CARRY_FORWARD_START_YEAR) {
+        try {
+          const admission = student.admissionNumber || id;
+          const key = `${targetYearNum}::${admission}`;
+          const sharedCarry = window.__financeCarryForwardVisual?.[key]?.carry;
+          if (sharedCarry) carryForwardPrev = Number(sharedCarry) || 0;
+        } catch (_) {}
+      }
+      const dbCarry = Math.max(0, Number(student.carryAmount || 0));
+      const effectiveCarry = Math.max(dbCarry, carryForwardPrev);
+      const carryNote = effectiveCarry > 0
+        ? `<div class="text-xs text-slate-500 text-right mt-1">Carry Forward (${carryYearLabel}+): ${fmt(effectiveCarry)}</div>`
         : '';
       const statusNote = student.isGraduated
         ? `<div class="mt-1 text-xs font-semibold text-emerald-600 uppercase">Graduated</div>`
@@ -2208,6 +2225,10 @@ function buildFinanceStudents(
       const tr = document.createElement('tr');
       tr.className = debtState.rowNeedsHighlight ? 'table-row table-row-overdue' : 'table-row';
       tr.dataset.studentId = id;
+      if (effectiveCarry > 0) {
+        tr.dataset.carryForward = String(effectiveCarry);
+        tr.dataset.carryForwardTotal = String(fin.feePerYear);
+      }
       tr.innerHTML = `
         <td class="p-2 border text-center align-top">
           <button class="expander text-indigo-600 hover:text-indigo-800" data-id="${id}" title="Expand/Collapse">
