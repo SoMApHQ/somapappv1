@@ -146,6 +146,31 @@
       const P = (subPath) => (window.SOMAP && typeof SOMAP.P === 'function') ? SOMAP.P(subPath) : subPath;
       const ref = (subPath) => db.ref(P(subPath));
       const financeCore = window.SOMAP_FINANCE || {};
+      const sharedFinanceMath = window.SomapFinance || null;
+      const getCarryState = (student, previousYearBalance) => {
+        if (sharedFinanceMath && typeof sharedFinanceMath.resolveCarryForwardState === 'function') {
+          return sharedFinanceMath.resolveCarryForwardState(student, previousYearBalance);
+        }
+        const existingCarry = Math.max(0, Number(student?.carryAmount || 0));
+        const priorBalance = Math.max(0, Number(previousYearBalance || 0));
+        const effectiveCarry = Math.max(existingCarry, priorBalance);
+        return {
+          existingCarry,
+          previousYearBalance: priorBalance,
+          effectiveCarry,
+          carryDelta: Math.max(0, effectiveCarry - existingCarry),
+        };
+      };
+      const getBaseFee = (student) => {
+        if (sharedFinanceMath && typeof sharedFinanceMath.getStudentBaseFee === 'function') {
+          return Math.max(0, Number(sharedFinanceMath.getStudentBaseFee(student)) || 0);
+        }
+        const rawCarry = Math.max(0, Number(student?.carryAmount || 0));
+        const baseFeeRaw = student?.baseFee != null
+          ? Number(student.baseFee)
+          : Number(student?.feePerYear || 0) - rawCarry;
+        return Math.max(0, Number.isFinite(baseFeeRaw) ? baseFeeRaw : 0);
+      };
 
       const mount = (html) => {
         const el = document.getElementById('breakdownContent');
@@ -776,9 +801,10 @@
         const hasYearData = Boolean(student.hasYearData);
         const admissionForLookup = student.admissionNumber || studentId;
         const prevCarry = hasYearData ? await fetchPrevYearCarry(admissionForLookup) : 0;
-        const dbCarry = Math.max(0, Number(student.carryAmount || 0));
-        const effectiveCarry = Math.max(dbCarry, prevCarry);
-        const carryDelta = Math.max(0, effectiveCarry - dbCarry);
+        const carryState = getCarryState(student, prevCarry);
+        const dbCarry = Math.max(0, Number(carryState.existingCarry || 0));
+        const effectiveCarry = Math.max(0, Number(carryState.effectiveCarry || 0));
+        const carryDelta = Math.max(0, Number(carryState.carryDelta || 0));
         const schedulePlannedTotal = schedule.items.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
         const desiredTotalDue = Math.max(0, Number(student.feePerYear || 0) + carryDelta);
         if (hasYearData && carryDelta > 0 && schedulePlannedTotal + 1 < desiredTotalDue) {
@@ -802,9 +828,7 @@
           sortScheduleItems(schedule.items);
         }
         ensureScheduleCarryComponent(schedule.items, effectiveCarry);
-        const inferredBaseFee = student.baseFee != null
-          ? Math.max(0, Number(student.baseFee) || 0)
-          : Math.max(0, Number(student.feePerYear || 0) - dbCarry);
+        const inferredBaseFee = getBaseFee(student);
         const totalDueWithCarry = hasYearData ? inferredBaseFee + effectiveCarry : 0;
 
         const summary = hasYearData ? await loadApprovedSummary(studentId, targetYearStr) : null;

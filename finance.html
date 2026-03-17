@@ -10,6 +10,7 @@
   <script src="Todashboardhtml/yearContext.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="firebase.js"></script>
+  <script src="shared/finance_math.js"></script>
   <script src="js/finance_core.js"></script>
   <script src="js/finance_dedupe.js"></script>
   <script src="js/finance_cashbook.js"></script>
@@ -1292,7 +1293,15 @@
   }
   window.__finance_computeStudentFinancials = computeStudentFinancials;
 
+  function getSharedFinanceMath() {
+    return window.SomapFinance || null;
+  }
+
   function getStudentBaseFee(student) {
+    const sharedMath = getSharedFinanceMath();
+    if (sharedMath && typeof sharedMath.getStudentBaseFee === 'function') {
+      return Math.max(0, Number(sharedMath.getStudentBaseFee(student)) || 0);
+    }
     const rawCarry = Math.max(0, Number(student?.carryAmount || 0));
     const baseFeeRaw = student?.baseFee != null
       ? Number(student.baseFee)
@@ -1301,6 +1310,10 @@
   }
 
   function buildCarryAdjustedStudent(student, carryAmount) {
+    const sharedMath = getSharedFinanceMath();
+    if (sharedMath && typeof sharedMath.buildEffectiveFinanceStudent === 'function') {
+      return sharedMath.buildEffectiveFinanceStudent(student, carryAmount).financeStudent;
+    }
     const baseFee = getStudentBaseFee(student);
     const effectiveCarry = Math.max(0, Number(carryAmount || 0));
     return {
@@ -1308,6 +1321,22 @@
       baseFee,
       carryAmount: effectiveCarry,
       feePerYear: Math.max(0, baseFee + effectiveCarry),
+    };
+  }
+
+  function resolveCarryState(student, previousYearBalance) {
+    const sharedMath = getSharedFinanceMath();
+    if (sharedMath && typeof sharedMath.resolveCarryForwardState === 'function') {
+      return sharedMath.resolveCarryForwardState(student, previousYearBalance);
+    }
+    const existingCarry = Math.max(0, Number(student?.carryAmount || 0));
+    const priorBalance = Math.max(0, Number(previousYearBalance || 0));
+    const effectiveCarry = Math.max(existingCarry, priorBalance);
+    return {
+      existingCarry,
+      previousYearBalance: priorBalance,
+      effectiveCarry,
+      carryDelta: Math.max(0, effectiveCarry - existingCarry),
     };
   }
 
@@ -1327,18 +1356,23 @@
   }
 
   function getCarryAdjustedFinanceStudent(student, studentId, yearValue = financeYear) {
-    const dbCarry = Math.max(0, Number(student?.carryAmount || 0));
-    const visualCarry = getVisualCarryForwardAmount(student, studentId, yearValue);
-    const effectiveCarry = Math.max(dbCarry, visualCarry);
+    const carryState = student?.__carryTruthYear === Number(yearValue || financeYear || activeYear || SOMAP_DEFAULT_YEAR)
+      ? (student.__carryState || resolveCarryState(student, student.__previousYearBalance || 0))
+      : resolveCarryState(student, getVisualCarryForwardAmount(student, studentId, yearValue));
     return {
-      dbCarry,
-      visualCarry,
-      effectiveCarry,
-      financeStudent: buildCarryAdjustedStudent(student, effectiveCarry),
+      dbCarry: Math.max(0, Number(carryState.existingCarry || student?.carryAmount || 0)),
+      visualCarry: Math.max(0, Number(carryState.previousYearBalance || 0)),
+      effectiveCarry: Math.max(0, Number(carryState.effectiveCarry || 0)),
+      carryState,
+      financeStudent: buildCarryAdjustedStudent(student, carryState.effectiveCarry),
     };
   }
 
   function ensureScheduleCarryComponent(items, carryAmount) {
+    const sharedMath = getSharedFinanceMath();
+    if (sharedMath && typeof sharedMath.ensureScheduleCarryComponent === 'function') {
+      return sharedMath.ensureScheduleCarryComponent(items, carryAmount);
+    }
     if (!Array.isArray(items) || !items.length) return items;
     const expectedCarry = Math.max(0, Number(carryAmount || 0));
     if (!(expectedCarry > 0)) return items;
@@ -1355,19 +1389,18 @@
     return items;
   }
 
-  async function resolveEffectiveCarry(student, yearValue, admission) {
-    const dbCarry = Math.max(0, Number(student?.carryAmount || 0));
+  async function resolvePreviousYearBalance(student, yearValue, admission) {
     const targetYearNum = Number(yearValue || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
     const admissionKey = String(admission || student?.admissionNumber || student?.admissionNo || '').trim();
-    let effectiveCarry = dbCarry;
+    let previousYearBalance = 0;
 
     if (Number(student?.__carryOverlayYear || 0) === targetYearNum) {
-      effectiveCarry = Math.max(effectiveCarry, Number(student?.__carryOverlayAmount || 0));
+      previousYearBalance = Math.max(previousYearBalance, Number(student?.__carryOverlayAmount || 0));
     }
 
     if (admissionKey) {
-      effectiveCarry = Math.max(
-        effectiveCarry,
+      previousYearBalance = Math.max(
+        previousYearBalance,
         Number(window.__financeCarryForwardVisual?.[`${targetYearNum}::${admissionKey}`]?.carry || 0)
       );
     }
@@ -1376,18 +1409,58 @@
       admissionKey &&
       Number.isFinite(targetYearNum) &&
       targetYearNum - 1 >= CARRY_FORWARD_START_YEAR &&
-      effectiveCarry <= 0 &&
       typeof window.__finance_getBalanceForYearAdmission === 'function'
     ) {
       try {
         const prevCarry = await window.__finance_getBalanceForYearAdmission(targetYearNum - 1, admissionKey);
-        effectiveCarry = Math.max(effectiveCarry, Number(prevCarry || 0));
+        previousYearBalance = Math.max(previousYearBalance, Number(prevCarry || 0));
       } catch (err) {
         console.warn('Effective carry lookup failed', admissionKey, targetYearNum - 1, err?.message || err);
       }
     }
 
-    return effectiveCarry;
+    return Math.max(0, Number(previousYearBalance || 0));
+  }
+
+  async function resolveEffectiveCarry(student, yearValue, admission) {
+    const previousYearBalance = await resolvePreviousYearBalance(student, yearValue, admission);
+    return resolveCarryState(student, previousYearBalance).effectiveCarry;
+  }
+
+  async function hydrateEffectiveCarryForwardTruth(studentsMap, yearValue) {
+    const targetYearNum = Number(yearValue || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
+    const entries = Object.entries(studentsMap || {});
+    await Promise.all(entries.map(async ([id, student]) => {
+      if (!student || student.isGraduated) return;
+      const admissionKey = String(student.admissionNumber || student.admissionNo || id || '').trim();
+      const previousYearBalance = await resolvePreviousYearBalance(student, targetYearNum, admissionKey || id);
+      const carryState = resolveCarryState(student, previousYearBalance);
+      const financeStudent = buildCarryAdjustedStudent(student, carryState.effectiveCarry);
+      Object.assign(student, financeStudent, {
+        __carryState: carryState,
+        __carryTruthYear: targetYearNum,
+        __previousYearBalance: carryState.previousYearBalance,
+        __effectiveCarryAmount: carryState.effectiveCarry,
+        __carryDelta: carryState.carryDelta,
+      });
+
+      if (admissionKey && Number.isFinite(targetYearNum)) {
+        const prevYearNum = targetYearNum - 1;
+        const key = `${targetYearNum}::${admissionKey}`;
+        if (carryState.effectiveCarry > 0 && prevYearNum >= CARRY_FORWARD_START_YEAR) {
+          window.__financeCarryForwardVisual = window.__financeCarryForwardVisual || {};
+          window.__financeCarryForwardVisual[key] = {
+            carry: carryState.effectiveCarry,
+            prevYear: prevYearNum,
+            total: Math.max(0, Number(student.feePerYear || 0)),
+          };
+          try {
+            sessionStorage.setItem(`somap_cf_${targetYearNum}_${admissionKey}`, String(carryState.effectiveCarry));
+          } catch (_) {}
+        }
+      }
+    }));
+    return studentsMap;
   }
 
   function normalizePayments(source, targetYear) {
@@ -1926,7 +1999,9 @@ function buildFinanceStudents(
           approvalsByStudent,
           key
         );
-        return decorateStudentsWithDeadlineExtensions(built || {}, deadlineExtensionsSnap.val() || {});
+        const decorated = decorateStudentsWithDeadlineExtensions(built || {}, deadlineExtensionsSnap.val() || {});
+        await hydrateEffectiveCarryForwardTruth(decorated, key);
+        return decorated;
       } catch (err) {
         console.warn('Carry-forward helper failed to load year dataset', key, err);
         return {};
@@ -2013,8 +2088,17 @@ function buildFinanceStudents(
         financeYear = targetYear;
         activeYear = targetYear;
         const admissionNumber = String(student.admissionNumber || student.admissionNo || '').trim();
-        const effectiveCarry = await resolveEffectiveCarry(student, targetYear, admissionNumber || resolvedStudentId || identifier);
-        const financeStudent = buildCarryAdjustedStudent(student, effectiveCarry);
+        let carryState = null;
+        if (student?.__carryTruthYear === Number(targetYear)) {
+          carryState = getCarryAdjustedFinanceStudent(student, resolvedStudentId || identifier, targetYear);
+        } else {
+          const effectiveCarry = await resolveEffectiveCarry(student, targetYear, admissionNumber || resolvedStudentId || identifier);
+          carryState = {
+            effectiveCarry,
+            financeStudent: buildCarryAdjustedStudent(student, effectiveCarry)
+          };
+        }
+        const financeStudent = carryState.financeStudent;
         const fin = computeStudentFinancials(financeStudent);
         const baseFee = getStudentBaseFee(financeStudent);
         const carry = Math.max(0, Number(financeStudent.carryAmount || 0));
@@ -2119,6 +2203,10 @@ function buildFinanceStudents(
   }
 
   function getDebtDisplayState(fin) {
+    const sharedMath = getSharedFinanceMath();
+    if (sharedMath && typeof sharedMath.getDebtDisplayState === 'function') {
+      return sharedMath.getDebtDisplayState(fin, financeYear);
+    }
     const debtValue = Math.max(0, Number(fin?.periodDebtValue || 0));
     if (!(debtValue > 0)) {
       return {
@@ -2257,22 +2345,9 @@ function buildFinanceStudents(
 
       const targetYearNum = Number(financeYear);
       const prevYearNum = Number.isFinite(targetYearNum) ? targetYearNum - 1 : (targetYearNum - 1);
-      const admissionKey = String(student.admissionNumber || id).trim();
-      const cfCacheKey = `${targetYearNum}::${admissionKey}`;
-      const cachedCF = window.__financeCarryForwardVisual?.[cfCacheKey];
-      const visualCarry = cachedCF ? Math.max(0, Number(cachedCF.carry || 0)) : 0;
-      const dbCarry = Math.max(0, Number(student.carryAmount || 0));
-      const effectiveCarry = Math.max(dbCarry, visualCarry);
-      const baseFeeRaw = student.baseFee != null
-        ? Number(student.baseFee)
-        : Number(student.feePerYear || 0) - dbCarry;
-      const baseFee = Math.max(0, Number.isFinite(baseFeeRaw) ? baseFeeRaw : 0);
-      const financeStudent = {
-        ...student,
-        baseFee,
-        carryAmount: effectiveCarry,
-        feePerYear: Math.max(0, baseFee + effectiveCarry),
-      };
+      const carryState = getCarryAdjustedFinanceStudent(student, id, financeYear);
+      const effectiveCarry = Math.max(0, Number(carryState.effectiveCarry || 0));
+      const financeStudent = carryState.financeStudent;
       let fin = computeStudentFinancials(financeStudent);
       if (student.isGraduated) {
         const effectiveFee = 0;
@@ -2311,7 +2386,7 @@ function buildFinanceStudents(
       tr.dataset.studentId = id;
       if (effectiveCarry > 0) {
         tr.dataset.carryForward = String(effectiveCarry);
-        tr.dataset.carryForwardTotal = String(financeStudent.feePerYear);
+        tr.dataset.carryForwardTotal = String(Math.max(0, Number(fin.feePerYear || financeStudent.feePerYear || 0)));
       }
       tr.innerHTML = `
         <td class="p-2 border text-center align-top">
@@ -2322,38 +2397,11 @@ function buildFinanceStudents(
         <td class="p-2 border align-top">${student.admissionNumber || ''}</td>
         <td class="p-2 border align-top">${fullName}</td>
         <td class="p-2 border align-top">${student.classLevel || ''}${statusNote}</td>
-        <td class="p-2 border align-top text-right">
-          ${fmt(financeStudent.feePerYear)}
-          ${effectiveCarry > 0 ? `
-            <div class="text-xs text-amber-700 mt-1">
-              Base: ${fmt(baseFee)} + Carry (${prevYearNum}): ${fmt(effectiveCarry)}
-            </div>
-          ` : ''}
-        </td>
+        <td class="p-2 border align-top text-right">${renderFeeYearCell(financeStudent, fin, prevYearNum, fin.feePerYear)}</td>
         <td class="p-2 border align-top">${student.paymentPlan || ''}</td>
         <td class="p-2 border align-top text-right">${renderPaidCell(fin, financeStudent, prevYearNum)}</td>
         <td class="p-2 border align-top text-right">${renderBalanceCell(fin)}</td>
-        <td class="p-2 border align-top">
-          <div class="flex items-center justify-between gap-2">
-            <span>
-              ${debtState.debtLabel}
-              ${debtState.hasDueDate && debtState.overdueWindowLabel && debtState.overdueWindowLabel !== '-'
-                ? `<div class="text-xs ${debtState.windowClass}">${debtState.overdueWindowLabel}</div>`
-                : ''}
-              ${(debtState.debtValue > 0 && effectiveCarry > 0) ? (() => {
-                  const carryOwed = Math.max(0, Math.min(effectiveCarry, debtState.debtValue));
-                  const yearOwed = Math.max(0, debtState.debtValue - carryOwed);
-                  if (carryOwed > 0 && yearOwed > 0) {
-                    return `<div class="text-xs text-rose-700 mt-1">Carry (${prevYearNum}): ${fmt(carryOwed)} + ${financeYear}: ${fmt(yearOwed)}</div>`;
-                  } else if (carryOwed > 0 && yearOwed === 0) {
-                    return `<div class="text-xs text-amber-700 mt-1">Carry from ${prevYearNum}: ${fmt(carryOwed)}</div>`;
-                  }
-                  return '';
-                })() : ''}
-            </span>
-            <span class="font-semibold ${debtState.amountClass}">${fmt(debtState.debtValue)}</span>
-          </div>
-        </td>
+        <td class="p-2 border align-top">${renderDebtCell(fin, debtState, financeStudent, prevYearNum)}</td>
         <td class="p-2 border align-top">
           <button class="viewBtn px-2 py-1 text-xs border rounded" data-id="${id}">View</button>
           ${payBtnHtml}
@@ -3854,6 +3902,7 @@ function buildFinanceStudents(
         targetYear
       );
       decorateStudentsWithDeadlineExtensions(cachedStudents, deadlineExtensionsSnap.val() || {});
+      await hydrateEffectiveCarryForwardTruth(cachedStudents, targetYear);
       armDeadlineExtensionWatcher(targetYear);
 
       // ===== Parent mode: filter to single learner =====
@@ -4088,86 +4137,22 @@ function buildFinanceStudents(
       running = false;
       return;
     }
-    const uniqueAdms = [...new Set(rows.map(r => r.adm))];
-    const cfMap = new Map();
-    if (typeof window.__finance_getBalanceForYearAdmission === 'function') {
-      await Promise.all(uniqueAdms.map(async (adm) => {
-        const carry = await window.__finance_getBalanceForYearAdmission(prevYear, adm);
-        cfMap.set(adm, Math.max(0, Number(carry) || 0));
-      }));
-    } else if (window.firebase?.database && uniqueAdms.length > 2) {
-      try {
-        const baseRef = window.firebase.database().ref(`finance/${prevYear}/students`);
-        const snap = await baseRef.once('value');
-        const students = snap.val() || {};
-        uniqueAdms.forEach((adm) => {
-          let carry = 0;
-          const lookup = typeof window.__finance_lookupStudent === 'function' ? window.__finance_lookupStudent(adm) : null;
-          const id = lookup?.id || adm;
-          const d = students[id] || students[adm];
-          if (d) {
-            if (d.balance !== undefined) carry = Number(d.balance) || 0;
-            else {
-              const feeYear = Number(String(d.feeYear || d.fee || 0).replace(/[^\d]/g, '')) || 0;
-              const paid = Number(String(d.paid || 0).replace(/[^\d]/g, '')) || 0;
-              carry = Math.max(feeYear - paid, 0);
-            }
-          }
-          cfMap.set(adm, Math.max(0, carry));
-        });
-      } catch (err) {
-        await Promise.all(uniqueAdms.map(async (adm) => {
-          const carry = await getPrevYearBalance(adm, prevYear);
-          cfMap.set(adm, Math.max(0, Number(carry) || 0));
-        }));
-      }
-    } else {
-      await Promise.all(uniqueAdms.map(async (adm) => {
-        const carry = await getPrevYearBalance(adm, prevYear);
-        cfMap.set(adm, Math.max(0, Number(carry) || 0));
-      }));
-    }
-
     rows.forEach(row => {
-      const carry = cfMap.get(row.adm) || 0;
-      const hasCF = carry > 0;
-      row.tr.dataset.carryForward = hasCF ? String(carry) : '0';
-      row.tr.dataset.carryForwardYear = String(prevYear);
-      const storeKey = `${targetYear}::${row.adm}`;
       const lookup = typeof window.__finance_lookupStudent === 'function'
         ? window.__finance_lookupStudent(row.adm)
         : null;
       const student = lookup?.student || null;
-
-      let originalDisplayedDue = row.feeYear;
-      let newTotalDue = originalDisplayedDue;
-      let appliedCarry = 0;
-
-      if (student) {
-        const existingCarry = Math.max(0, Number(student.carryAmount || 0));
-        const currentFeePerYear = Math.max(0, Number(student.feePerYear || 0));
-        const inferredBase = Math.max(0, Number(
-          student.baseFee ??
-          (currentFeePerYear > existingCarry ? currentFeePerYear - existingCarry : 0)
-        ));
-
-        student.__carryOverlayAmount = carry;
-        student.__carryOverlayPrevYear = prevYear;
-        student.__carryOverlayYear = targetYear;
-
-        appliedCarry = Math.max(0, carry - existingCarry);
-        if (appliedCarry > 0) {
-          student.baseFee = inferredBase;
-          student.carryAmount = existingCarry + appliedCarry;
-          student.feePerYear = Math.max(0, currentFeePerYear || inferredBase + existingCarry) + appliedCarry;
-          student.__carryOverlayMerged = true;
-        }
-
-        newTotalDue = Math.max(0, Number(student.feePerYear || inferredBase + existingCarry + appliedCarry));
-      } else if (hasCF) {
-        appliedCarry = carry;
-        newTotalDue = row.feeYear + appliedCarry;
-      }
+      if (!student) return;
+      const carryState = getCarryAdjustedFinanceStudent(student, lookup?.id || row.adm, targetYear);
+      const financeStudent = carryState.financeStudent;
+      const finNow = window.__finance_computeStudentFinancials(financeStudent);
+      const debtState = getDebtDisplayState(finNow);
+      const carry = Math.max(0, Number(carryState.effectiveCarry || 0));
+      const hasCF = carry > 0;
+      row.tr.dataset.carryForward = hasCF ? String(carry) : '0';
+      row.tr.dataset.carryForwardYear = String(prevYear);
+      const storeKey = `${targetYear}::${row.adm}`;
+      const newTotalDue = Math.max(0, Number(finNow.feePerYear || financeStudent.feePerYear || row.feeYear || 0));
 
       if (hasCF) {
         sharedCache[storeKey] = { carry, prevYear, total: newTotalDue };
@@ -4183,39 +4168,22 @@ function buildFinanceStudents(
 
       row.tr.dataset.carryForwardTotal = String(newTotalDue);
 
-      const delta = Math.max(0, newTotalDue - originalDisplayedDue);
-      if (delta > 0) {
-        adjustKpis(delta);
-      }
-
       const paidCell = row.tds[6];
       const balanceCell = row.tds[7];
       const debtCell = row.tds[8];
-      const paidAmount = getPrimaryCellAmount(paidCell);
-      const newBalance = Math.max(0, newTotalDue - paidAmount);
-
-      if (student && debtCell && typeof window.__finance_computeStudentFinancials === 'function') {
-        const finNow = window.__finance_computeStudentFinancials(student);
-        const debtState = getDebtDisplayState(finNow);
-        if (row.feeYearCell) {
-          row.feeYearCell.innerHTML = renderFeeYearCell(student, finNow, prevYear, row.tr.dataset.carryForwardTotal || newTotalDue);
-        }
-        if (paidCell) {
-          paidCell.innerHTML = renderPaidCell(finNow, student, prevYear);
-        }
-        if (balanceCell) {
-          balanceCell.innerHTML = renderBalanceCell(finNow);
-        }
-        debtCell.innerHTML = renderDebtCell(finNow, debtState, student, prevYear);
-        row.tr.classList.toggle('table-row-overdue', debtState.rowNeedsHighlight);
-      } else {
-        if (row.feeYearCell) {
-          row.feeYearCell.innerHTML = renderPrimaryAmount(newTotalDue);
-        }
-        if (balanceCell) {
-          balanceCell.innerHTML = renderPrimaryAmount(newBalance);
-        }
+      if (row.feeYearCell) {
+        row.feeYearCell.innerHTML = renderFeeYearCell(financeStudent, finNow, prevYear, newTotalDue);
       }
+      if (paidCell) {
+        paidCell.innerHTML = renderPaidCell(finNow, financeStudent, prevYear);
+      }
+      if (balanceCell) {
+        balanceCell.innerHTML = renderBalanceCell(finNow);
+      }
+      if (debtCell) {
+        debtCell.innerHTML = renderDebtCell(finNow, debtState, financeStudent, prevYear);
+      }
+      row.tr.classList.toggle('table-row-overdue', debtState.rowNeedsHighlight);
 
       row.feeYear = newTotalDue;
     });

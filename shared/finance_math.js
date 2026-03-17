@@ -72,8 +72,62 @@
     return String(num);
   }
 
+  const CARRY_FORWARD_START_YEAR = 2025;
+
   function clamp(n){ return Math.max(0, Math.round(Number(n) || 0)); }
   function fmtNumber(n){ return Number(n) || 0; }
+
+  function getStudentBaseFee(student){
+    const rawCarry = Math.max(0, Number(student?.carryAmount || 0));
+    const baseFeeRaw = student?.baseFee != null
+      ? Number(student.baseFee)
+      : Number(student?.feePerYear || 0) - rawCarry;
+    return Math.max(0, Number.isFinite(baseFeeRaw) ? baseFeeRaw : 0);
+  }
+
+  function resolveCarryForwardState(student, previousYearBalance){
+    const existingCarry = Math.max(0, Number(student?.carryAmount || 0));
+    const priorBalance = Math.max(0, Number(previousYearBalance || 0));
+    const effectiveCarry = Math.max(existingCarry, priorBalance);
+    const carryDelta = Math.max(0, effectiveCarry - existingCarry);
+    return {
+      existingCarry,
+      previousYearBalance: priorBalance,
+      effectiveCarry,
+      carryDelta,
+    };
+  }
+
+  function buildEffectiveFinanceStudent(student, previousYearBalance){
+    const carryState = resolveCarryForwardState(student, previousYearBalance);
+    const baseFee = getStudentBaseFee(student);
+    return {
+      carryState,
+      financeStudent: {
+        ...student,
+        baseFee,
+        carryAmount: carryState.effectiveCarry,
+        feePerYear: Math.max(0, baseFee + carryState.effectiveCarry),
+      }
+    };
+  }
+
+  function ensureScheduleCarryComponent(items, carryAmount){
+    if (!Array.isArray(items) || !items.length) return items;
+    const expectedCarry = Math.max(0, Number(carryAmount || 0));
+    if (!(expectedCarry > 0)) return items;
+
+    const existingCarry = items.reduce((sum, item) => sum + Math.max(0, Number(item?.carryComponent || 0)), 0);
+    const missingCarry = Math.max(0, expectedCarry - existingCarry);
+    if (!(missingCarry > 0)) return items;
+
+    const firstItem = items[0];
+    firstItem.carryComponent = Math.max(0, Number(firstItem?.carryComponent || 0)) + missingCarry;
+    if (Number(firstItem?.amount || 0) < Number(firstItem.carryComponent || 0)) {
+      firstItem.amount = Math.max(0, Number(firstItem.amount || 0)) + missingCarry;
+    }
+    return items;
+  }
 
   const financeDedupe = global.SOMAP_FINANCE || {};
   function dedupePayments(paymentsSource, workingYear, studentRef){
@@ -394,15 +448,21 @@
     const feePerYear = Math.max(0, Number(student.feePerYear) || 0);
     const previousDebt = 0;
     const schedule = buildSchedule(student, targetYear);
+    ensureScheduleCarryComponent(schedule.items, student?.carryAmount || 0);
     const alloc = allocatePayments(student, schedule);
     const paidAfterPrev = Math.max(0, alloc.totalPaid - (previousDebt - alloc.prevDebtAfter));
     const yearBalance = Math.max(0, feePerYear - paidAfterPrev);
+    const carryAmount = Math.max(0, Number(student.carryAmount || 0));
+    const totalPaid = Math.max(0, Number(alloc.totalPaid || 0));
     const overdueRows = alloc.scheduleItems.filter(it =>
       Number(it.toTS || 0) > 0 &&
       Date.now() > Number(it.toTS) &&
       Math.max(0, Number(it.amount || 0) - Number(it.paidAllocated || 0)) > 0
     );
-    const carryOutstanding = Math.max(0, Math.max(0, Number(student.carryAmount || 0)) - alloc.totalPaid);
+    const carryOutstanding = Math.max(0, carryAmount - totalPaid);
+    const paidAfterCarry = Math.max(0, totalPaid - carryAmount);
+    const overdueCarry = Math.max(0, Math.min(carryOutstanding, Number(alloc.debtTillNow || 0)));
+    const overdueCurrentYear = Math.max(0, Number(alloc.debtTillNow || 0) - overdueCarry);
     return {
       feePerYear,
       previousDebt,
@@ -411,12 +471,86 @@
       periodDebtLabel: schedule.periodLabelNow || '-',
       periodDebtValue: alloc.debtTillNow,
       isOverdueDebt: overdueRows.length > 0,
-      hasCarryOutstanding: Math.max(0, Number(student.carryAmount || 0)) > Math.max(0, alloc.totalPaid),
+      hasCarryOutstanding: carryOutstanding > 0,
       carryOutstanding,
+      paidAfterCarry,
+      overdueCarry,
+      overdueCurrentYear,
       overdueThroughTs: overdueRows.length ? Math.max(...overdueRows.map(it => Number(it.toTS || 0))) : 0,
       overdueWindowLabel: '-',
       credit: alloc.credit,
       scheduleItems: alloc.scheduleItems
+    };
+  }
+
+  function getDebtDisplayState(fin, targetYear){
+    const debtValue = Math.max(0, Number(fin?.periodDebtValue || 0));
+    if (!(debtValue > 0)) {
+      return {
+        debtValue,
+        debtLabel: '-',
+        overdueWindowLabel: '-',
+        hasDueDate: false,
+        isOverdue: false,
+        rowNeedsHighlight: false,
+        amountClass: '',
+        windowClass: 'text-slate-500',
+      };
+    }
+
+    const parseWindowTextDates = (windowText) => {
+      const parts = String(windowText || '').match(/\d{1,2}\/\d{1,2}(?:\/\d{2,4})?/g) || [];
+      const [fromText = '', toText = ''] = parts;
+      return { fromText, toText };
+    };
+
+    const scheduleItems = Array.isArray(fin?.scheduleItems) ? fin.scheduleItems : [];
+    const nowTs = Date.now();
+    const latestOverdueItem = scheduleItems
+      .filter((item) => {
+        const amount = Math.max(0, Number(item?.amount || 0));
+        const allocated = Math.max(0, Number(item?.paidAllocated || 0));
+        const remaining = Math.max(0, amount - allocated);
+        const toTs = Number(item?.toTS || 0);
+        const status = String(item?.status || '');
+        return remaining > 0 && ((toTs > 0 && toTs < nowTs) || status.includes('Overdue'));
+      })
+      .sort((a, b) => Number(b?.toTS || 0) - Number(a?.toTS || 0))[0] || null;
+
+    const overdueWindowText = parseWindowTextDates(latestOverdueItem?.windowText);
+    const fallbackDueDate = latestOverdueItem && Number(latestOverdueItem.toTS || 0) > 0
+      ? new Date(Number(latestOverdueItem.toTS)).toLocaleDateString()
+      : overdueWindowText.toText;
+    const fallbackWindow = latestOverdueItem && Number(latestOverdueItem.toTS || 0) > 0
+      ? `${new Date(Number(latestOverdueItem.fromTS || latestOverdueItem.toTS)).toLocaleDateString()} - ${new Date(Number(latestOverdueItem.toTS)).toLocaleDateString()}`
+      : (overdueWindowText.fromText && overdueWindowText.toText ? `${overdueWindowText.fromText} - ${overdueWindowText.toText}` : '-');
+
+    const periodDebtLabel = String(fin?.periodDebtLabel || '').trim();
+    const overdueWindowLabel = String(fin?.overdueWindowLabel || '').trim();
+    const resolvedDueDate = periodDebtLabel && periodDebtLabel !== '-' ? periodDebtLabel : fallbackDueDate;
+    const resolvedWindow = overdueWindowLabel && overdueWindowLabel !== '-' ? overdueWindowLabel : fallbackWindow;
+    const baseIsOverdue = Boolean(fin?.isOverdueDebt || latestOverdueItem);
+    const hasCarryOutstanding = Boolean(fin?.hasCarryOutstanding);
+    const isCarryOnlyDebt = hasCarryOutstanding && !baseIsOverdue;
+    const isOverdue = baseIsOverdue || isCarryOnlyDebt;
+    const hasDueDate = Boolean(resolvedDueDate);
+    const debtLabel = hasDueDate
+      ? `${fin?.extensionActive && !isOverdue ? 'Due by' : 'Overdue till'} ${resolvedDueDate}`
+      : '-';
+    const yearNum = Number(targetYear);
+
+    return {
+      debtValue,
+      debtLabel,
+      overdueWindowLabel: resolvedWindow,
+      hasDueDate,
+      isOverdue,
+      rowNeedsHighlight: isOverdue,
+      amountClass: isOverdue ? 'text-red-700' : '',
+      windowClass: isOverdue ? 'text-red-700' : 'text-slate-500',
+      overdueCarry: Math.max(0, Number(fin?.overdueCarry || 0)),
+      overdueCurrentYear: Math.max(0, Number(fin?.overdueCurrentYear || 0)),
+      carryYearLabel: Number.isFinite(yearNum) ? yearNum - 1 : null,
     };
   }
 
@@ -1176,6 +1310,11 @@ function buildFinanceStudents(
     getFinanceRoster,
     getYearFinanceEntries,
     getBalanceForYearAdmission,
+    getStudentBaseFee,
+    resolveCarryForwardState,
+    buildEffectiveFinanceStudent,
+    ensureScheduleCarryComponent,
+    getDebtDisplayState,
     computeStudentFinancials,
     _clearFinanceCaches: clearCaches
   };
