@@ -1203,6 +1203,7 @@
     const feePerYear = Math.max(0, Number(student.feePerYear) || 0);
     const previousDebt = 0;
     const schedule = buildSchedule(student);
+    ensureScheduleCarryComponent(schedule.items, student?.carryAmount || 0);
     sortScheduleItemsByDuePriority(schedule.items);
     const alloc = allocatePayments(student, schedule);
     const paidAfterPrev = Math.max(0, alloc.totalPaid - (previousDebt - alloc.prevDebtAfter));
@@ -1308,6 +1309,23 @@
       carryAmount: effectiveCarry,
       feePerYear: Math.max(0, baseFee + effectiveCarry),
     };
+  }
+
+  function ensureScheduleCarryComponent(items, carryAmount) {
+    if (!Array.isArray(items) || !items.length) return items;
+    const expectedCarry = Math.max(0, Number(carryAmount || 0));
+    if (!(expectedCarry > 0)) return items;
+
+    const existingCarry = items.reduce((sum, item) => sum + Math.max(0, Number(item?.carryComponent || 0)), 0);
+    const missingCarry = Math.max(0, expectedCarry - existingCarry);
+    if (!(missingCarry > 0)) return items;
+
+    const firstItem = items[0];
+    firstItem.carryComponent = Math.max(0, Number(firstItem?.carryComponent || 0)) + missingCarry;
+    if (Number(firstItem?.amount || 0) < Number(firstItem.carryComponent || 0)) {
+      firstItem.amount = Math.max(0, Number(firstItem.amount || 0)) + missingCarry;
+    }
+    return items;
   }
 
   async function resolveEffectiveCarry(student, yearValue, admission) {
@@ -3832,7 +3850,12 @@ function buildFinanceStudents(
   async function getPrevYearBalance(adm, prevYear) {
     if (!adm) return 0;
     if (typeof window.__finance_getBalanceForYearAdmission === 'function') {
-      return Number(await window.__finance_getBalanceForYearAdmission(prevYear, adm)) || 0;
+      try {
+        const helperValue = Number(await window.__finance_getBalanceForYearAdmission(prevYear, adm)) || 0;
+        if (helperValue > 0) return helperValue;
+      } catch (err) {
+        console.warn('CarryForward helper fetch failed', adm, prevYear, err);
+      }
     }
     if (window.firebase?.database) {
       try {
