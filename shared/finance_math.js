@@ -105,6 +105,22 @@
   }
   function dateFromYMD(y, m, d){ return new Date(y, m - 1, d).getTime(); }
   function isPast(ts){ return Date.now() > ts; }
+  function getInstallmentStatus(item){
+    const expected = Math.max(0, Number(item?.amount || 0));
+    if (expected <= 0) return 'Cleared';
+
+    const allocated = Math.max(0, Number(item?.paidAllocated || 0));
+    const carryComponent = Math.min(expected, Math.max(0, Number(item?.carryComponent || 0)));
+    const baseExpected = Math.max(0, expected - carryComponent);
+    const progressExpected = baseExpected > 0 ? baseExpected : expected;
+    const progressAllocated = baseExpected > 0
+      ? Math.max(0, allocated - carryComponent)
+      : allocated;
+
+    if (progressAllocated >= progressExpected) return 'Cleared';
+    if (isPast(Number(item?.toTS || 0))) return progressAllocated > 0 ? 'Partially Paid (Overdue)' : 'Overdue';
+    return progressAllocated > 0 ? 'Partially Paid' : 'Pending';
+  }
   function apportion(total, weights){
     if (!Array.isArray(weights) || !weights.length) return [];
     const sumW = weights.reduce((a, b) => a + b, 0);
@@ -378,12 +394,7 @@
     }
     const credit = Math.max(0, pot);
     const now = Date.now();
-    for (const it of schedule.items) {
-      const a = it.paidAllocated, need = it.amount;
-      if (a >= need) it.status = 'Cleared';
-      else if (isPast(it.toTS)) it.status = a > 0 ? 'Partially Paid (Overdue)' : 'Overdue';
-      else it.status = a > 0 ? 'Partially Paid' : 'Pending';
-    }
+    for (const it of schedule.items) it.status = getInstallmentStatus(it);
     const expectedToDate = schedule.items.filter((it) => it.toTS < now).reduce((s, it) => s + it.amount, 0);
     const paidConsumed = totalPaid - credit;
     const debtTillNow = Math.max(0, expectedToDate - paidConsumed);
@@ -1160,6 +1171,7 @@ function buildFinanceStudents(
     loadSchoolTotals,
     loadExpensesTotal,
     listRecentPayments,
+    getInstallmentStatus,
     installmentCompare,
     getYearStudents,
     getFinanceRoster,
