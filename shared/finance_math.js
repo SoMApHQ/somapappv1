@@ -484,7 +484,35 @@
   }
 
   function getDebtDisplayState(fin, targetYear){
-    const debtValue = Math.max(0, Number(fin?.periodDebtValue || 0));
+    const parseWindowTextDates = (windowText) => {
+      const parts = String(windowText || '').match(/\d{1,2}\/\d{1,2}(?:\/\d{2,4})?/g) || [];
+      const [fromText = '', toText = ''] = parts;
+      return { fromText, toText };
+    };
+
+    const scheduleItems = Array.isArray(fin?.scheduleItems) ? fin.scheduleItems : [];
+    const nowTs = Date.now();
+    const overdueItems = scheduleItems
+      .filter((item) => {
+        const amount = Math.max(0, Number(item?.amount || 0));
+        const allocated = Math.max(0, Number(item?.paidAllocated || 0));
+        const remaining = Math.max(0, amount - allocated);
+        const toTs = Number(item?.toTS || 0);
+        const status = String(item?.status || '');
+        return remaining > 0 && ((toTs > 0 && toTs < nowTs) || status.includes('Overdue'));
+      })
+      .sort((a, b) => Number(b?.toTS || 0) - Number(a?.toTS || 0));
+    const latestOverdueItem = overdueItems[0] || null;
+    const overdueRemaining = overdueItems.reduce((sum, item) => {
+      const amount = Math.max(0, Number(item?.amount || 0));
+      const allocated = Math.max(0, Number(item?.paidAllocated || 0));
+      return sum + Math.max(0, amount - allocated);
+    }, 0);
+    const balanceValue = Math.max(0, Number(fin?.balance || 0));
+    const inferredOverdueDebt = overdueRemaining > 0
+      ? Math.min(balanceValue > 0 ? balanceValue : overdueRemaining, overdueRemaining)
+      : 0;
+    const debtValue = Math.max(0, Number(fin?.periodDebtValue || 0), inferredOverdueDebt);
     if (!(debtValue > 0)) {
       return {
         debtValue,
@@ -497,25 +525,6 @@
         windowClass: 'text-slate-500',
       };
     }
-
-    const parseWindowTextDates = (windowText) => {
-      const parts = String(windowText || '').match(/\d{1,2}\/\d{1,2}(?:\/\d{2,4})?/g) || [];
-      const [fromText = '', toText = ''] = parts;
-      return { fromText, toText };
-    };
-
-    const scheduleItems = Array.isArray(fin?.scheduleItems) ? fin.scheduleItems : [];
-    const nowTs = Date.now();
-    const latestOverdueItem = scheduleItems
-      .filter((item) => {
-        const amount = Math.max(0, Number(item?.amount || 0));
-        const allocated = Math.max(0, Number(item?.paidAllocated || 0));
-        const remaining = Math.max(0, amount - allocated);
-        const toTs = Number(item?.toTS || 0);
-        const status = String(item?.status || '');
-        return remaining > 0 && ((toTs > 0 && toTs < nowTs) || status.includes('Overdue'));
-      })
-      .sort((a, b) => Number(b?.toTS || 0) - Number(a?.toTS || 0))[0] || null;
 
     const overdueWindowText = parseWindowTextDates(latestOverdueItem?.windowText);
     const fallbackDueDate = latestOverdueItem && Number(latestOverdueItem.toTS || 0) > 0
