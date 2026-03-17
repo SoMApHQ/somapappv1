@@ -2256,10 +2256,23 @@ function buildFinanceStudents(
       if (!isParentScope && student.isGraduated) return;
 
       const targetYearNum = Number(financeYear);
-      const prevYearNum = Number.isFinite(targetYearNum) ? targetYearNum - 1 : (Number(financeYear) - 1);
-      const carryYearLabel = Number.isFinite(prevYearNum) ? prevYearNum : `${financeYear}-1`;
-      const carryState = getCarryAdjustedFinanceStudent(student, id, financeYear);
-      const financeStudent = carryState.financeStudent;
+      const prevYearNum = Number.isFinite(targetYearNum) ? targetYearNum - 1 : (targetYearNum - 1);
+      const admissionKey = String(student.admissionNumber || id).trim();
+      const cfCacheKey = `${targetYearNum}::${admissionKey}`;
+      const cachedCF = window.__financeCarryForwardVisual?.[cfCacheKey];
+      const visualCarry = cachedCF ? Math.max(0, Number(cachedCF.carry || 0)) : 0;
+      const dbCarry = Math.max(0, Number(student.carryAmount || 0));
+      const effectiveCarry = Math.max(dbCarry, visualCarry);
+      const baseFeeRaw = student.baseFee != null
+        ? Number(student.baseFee)
+        : Number(student.feePerYear || 0) - dbCarry;
+      const baseFee = Math.max(0, Number.isFinite(baseFeeRaw) ? baseFeeRaw : 0);
+      const financeStudent = {
+        ...student,
+        baseFee,
+        carryAmount: effectiveCarry,
+        feePerYear: Math.max(0, baseFee + effectiveCarry),
+      };
       let fin = computeStudentFinancials(financeStudent);
       if (student.isGraduated) {
         const effectiveFee = 0;
@@ -2282,7 +2295,6 @@ function buildFinanceStudents(
 
       const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
       const debtState = getDebtDisplayState(fin);
-      const effectiveCarry = carryState.effectiveCarry;
       const statusNote = student.isGraduated
         ? `<div class="mt-1 text-xs font-semibold text-emerald-600 uppercase">Graduated</div>`
         : (!student.hasYearData && effectiveCarry <= 0 && Object.keys(student.payments || {}).length === 0
@@ -2299,7 +2311,7 @@ function buildFinanceStudents(
       tr.dataset.studentId = id;
       if (effectiveCarry > 0) {
         tr.dataset.carryForward = String(effectiveCarry);
-        tr.dataset.carryForwardTotal = String(fin.feePerYear);
+        tr.dataset.carryForwardTotal = String(financeStudent.feePerYear);
       }
       tr.innerHTML = `
         <td class="p-2 border text-center align-top">
@@ -2310,11 +2322,38 @@ function buildFinanceStudents(
         <td class="p-2 border align-top">${student.admissionNumber || ''}</td>
         <td class="p-2 border align-top">${fullName}</td>
         <td class="p-2 border align-top">${student.classLevel || ''}${statusNote}</td>
-        <td class="p-2 border align-top text-right">${renderFeeYearCell(financeStudent, fin, carryYearLabel, fin.feePerYear)}</td>
+        <td class="p-2 border align-top text-right">
+          ${fmt(financeStudent.feePerYear)}
+          ${effectiveCarry > 0 ? `
+            <div class="text-xs text-amber-700 mt-1">
+              Base: ${fmt(baseFee)} + Carry (${prevYearNum}): ${fmt(effectiveCarry)}
+            </div>
+          ` : ''}
+        </td>
         <td class="p-2 border align-top">${student.paymentPlan || ''}</td>
-        <td class="p-2 border align-top text-right">${renderPaidCell(fin, financeStudent, carryYearLabel)}</td>
+        <td class="p-2 border align-top text-right">${renderPaidCell(fin, financeStudent, prevYearNum)}</td>
         <td class="p-2 border align-top text-right">${renderBalanceCell(fin)}</td>
-        <td class="p-2 border align-top">${renderDebtCell(fin, debtState, financeStudent, carryYearLabel)}</td>
+        <td class="p-2 border align-top">
+          <div class="flex items-center justify-between gap-2">
+            <span>
+              ${debtState.debtLabel}
+              ${debtState.hasDueDate && debtState.overdueWindowLabel && debtState.overdueWindowLabel !== '-'
+                ? `<div class="text-xs ${debtState.windowClass}">${debtState.overdueWindowLabel}</div>`
+                : ''}
+              ${(debtState.debtValue > 0 && effectiveCarry > 0) ? (() => {
+                  const carryOwed = Math.max(0, Math.min(effectiveCarry, debtState.debtValue));
+                  const yearOwed = Math.max(0, debtState.debtValue - carryOwed);
+                  if (carryOwed > 0 && yearOwed > 0) {
+                    return `<div class="text-xs text-rose-700 mt-1">Carry (${prevYearNum}): ${fmt(carryOwed)} + ${financeYear}: ${fmt(yearOwed)}</div>`;
+                  } else if (carryOwed > 0 && yearOwed === 0) {
+                    return `<div class="text-xs text-amber-700 mt-1">Carry from ${prevYearNum}: ${fmt(carryOwed)}</div>`;
+                  }
+                  return '';
+                })() : ''}
+            </span>
+            <span class="font-semibold ${debtState.amountClass}">${fmt(debtState.debtValue)}</span>
+          </div>
+        </td>
         <td class="p-2 border align-top">
           <button class="viewBtn px-2 py-1 text-xs border rounded" data-id="${id}">View</button>
           ${payBtnHtml}

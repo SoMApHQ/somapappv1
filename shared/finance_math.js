@@ -397,6 +397,12 @@
     const alloc = allocatePayments(student, schedule);
     const paidAfterPrev = Math.max(0, alloc.totalPaid - (previousDebt - alloc.prevDebtAfter));
     const yearBalance = Math.max(0, feePerYear - paidAfterPrev);
+    const overdueRows = alloc.scheduleItems.filter(it =>
+      Number(it.toTS || 0) > 0 &&
+      Date.now() > Number(it.toTS) &&
+      Math.max(0, Number(it.amount || 0) - Number(it.paidAllocated || 0)) > 0
+    );
+    const carryOutstanding = Math.max(0, Math.max(0, Number(student.carryAmount || 0)) - alloc.totalPaid);
     return {
       feePerYear,
       previousDebt,
@@ -404,6 +410,11 @@
       balance: yearBalance,
       periodDebtLabel: schedule.periodLabelNow || '-',
       periodDebtValue: alloc.debtTillNow,
+      isOverdueDebt: overdueRows.length > 0,
+      hasCarryOutstanding: Math.max(0, Number(student.carryAmount || 0)) > Math.max(0, alloc.totalPaid),
+      carryOutstanding,
+      overdueThroughTs: overdueRows.length ? Math.max(...overdueRows.map(it => Number(it.toTS || 0))) : 0,
+      overdueWindowLabel: '-',
       credit: alloc.credit,
       scheduleItems: alloc.scheduleItems
     };
