@@ -1297,6 +1297,112 @@
     return window.SomapFinance || null;
   }
 
+  function getYearScopedCache(store, year) {
+    const targetYear = String(year || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
+    if (!store.has(targetYear)) store.set(targetYear, new Map());
+    return store.get(targetYear);
+  }
+
+  async function loadApprovedSummaryForFinance(studentId, admissionNumber, year) {
+    const targetYear = String(year || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
+    const summaryMap = getYearScopedCache(approvedSummaryCache, targetYear);
+    if (summaryMap.has(studentId)) return summaryMap.get(studentId);
+    const financeCore = window.SOMAP_FINANCE || {};
+    let summary = null;
+    if (financeCore && typeof financeCore.loadStudentYearSummary === 'function') {
+      try {
+        summary = await financeCore.loadStudentYearSummary(studentId, targetYear);
+      } catch (err) {
+        console.warn('Finance: approved summary load failed', studentId, targetYear, err?.message || err);
+      }
+      if (!summary && admissionNumber && String(admissionNumber).trim() !== String(studentId)) {
+        try {
+          summary = await financeCore.loadStudentYearSummary(String(admissionNumber).trim(), targetYear);
+        } catch (err) {
+          console.warn('Finance: admission summary fallback failed', admissionNumber, targetYear, err?.message || err);
+        }
+      }
+    }
+    summaryMap.set(studentId, summary || null);
+    return summary || null;
+  }
+
+  function attachSummaryDebtState(fin, debtState) {
+    if (!fin || !debtState) return fin;
+    return {
+      ...fin,
+      periodDebtValue: Math.max(0, Number(debtState.periodDebtValue ?? debtState.debtValue ?? 0)),
+      periodDebtLabel: debtState.periodDebtLabel || '-',
+      overdueWindowLabel: debtState.overdueWindowLabel || '-',
+      isOverdueDebt: Boolean(debtState.isOverdueDebt),
+      summaryDebtState: debtState,
+    };
+  }
+
+  function getCachedApprovedDebtRecord(studentId, year = financeYear) {
+    const debtMap = approvedDebtStateCache.get(String(year || financeYear || activeYear || SOMAP_DEFAULT_YEAR));
+    return debtMap ? debtMap.get(studentId) : null;
+  }
+
+  async function hydrateApprovedDebtStateCache(year = financeYear, students = cachedStudents) {
+    const sharedMath = getSharedFinanceMath();
+    if (!sharedMath || typeof sharedMath.computeDebtStateFromSummary !== 'function') return;
+    const targetYear = String(year || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
+    const summaryMap = getYearScopedCache(approvedSummaryCache, targetYear);
+    const debtMap = getYearScopedCache(approvedDebtStateCache, targetYear);
+    const studentEntries = Object.entries(students || {}).filter(([_, student]) => student && !student.isGraduated);
+
+    await Promise.all(studentEntries.map(async ([id, student]) => {
+      const carryState = getCarryAdjustedFinanceStudent(student, id, targetYear);
+      const financeStudent = carryState.financeStudent;
+      const schedule = (typeof sharedMath.buildSchedule === 'function')
+        ? sharedMath.buildSchedule(financeStudent, targetYear)
+        : { items: [] };
+      if (Array.isArray(schedule?.items) && typeof sharedMath.ensureScheduleCarryComponent === 'function') {
+        sharedMath.ensureScheduleCarryComponent(schedule.items, financeStudent?.carryAmount || 0);
+      }
+      const summary = await loadApprovedSummaryForFinance(id, financeStudent?.admissionNumber || student?.admissionNumber || id, targetYear);
+      summaryMap.set(id, summary || null);
+      if (!summary) {
+        debtMap.delete(id);
+        return;
+      }
+      const debtState = sharedMath.computeDebtStateFromSummary(
+        financeStudent,
+        targetYear,
+        Array.isArray(schedule?.items) ? schedule.items : [],
+        summary
+      );
+      debtMap.set(id, { summary, debtState: debtState || null });
+    }));
+  }
+
+  function resolveStudentFinanceDisplayState(student, studentId, year = financeYear) {
+    const targetYear = String(year || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
+    const carryState = getCarryAdjustedFinanceStudent(student, studentId, targetYear);
+    const financeStudent = carryState.financeStudent;
+    let fin = computeStudentFinancials(financeStudent);
+    if (student?.isGraduated) {
+      fin = {
+        feePerYear: 0,
+        previousDebt: 0,
+        paidAmount: 0,
+        balance: 0,
+        periodDebtLabel: '-',
+        periodDebtValue: 0,
+        credit: 0,
+        scheduleItems: []
+      };
+    } else {
+      const approvedRecord = getCachedApprovedDebtRecord(studentId, targetYear);
+      if (approvedRecord && approvedRecord.debtState) {
+        fin = attachSummaryDebtState(fin, approvedRecord.debtState);
+      }
+    }
+    const debtState = getDebtDisplayState(fin);
+    return { carryState, financeStudent, fin, debtState };
+  }
+
   function getStudentBaseFee(student) {
     const sharedMath = getSharedFinanceMath();
     if (sharedMath && typeof sharedMath.getStudentBaseFee === 'function') {
@@ -1837,6 +1943,8 @@ function buildFinanceStudents(
   const financeYearDataCache = new Map();
   const financeApprovalsCache = new Map();
   const financeBalanceCache = new Map();
+  const approvedSummaryCache = new Map();
+  const approvedDebtStateCache = new Map();
 
   async function loadApprovedFinanceApprovals(year, force = false) {
     if (!db) return {};
@@ -2325,7 +2433,7 @@ function buildFinanceStudents(
       ? `<div class="text-xs ${(carryOutstanding > 0) ? 'text-rose-700' : 'text-amber-700'} mt-1">From ${prevYearNum}: ${fmt(carryOutstanding)} | From ${financeYear}: ${fmt(currentYearDebt)}</div>`
       : '';
     const windowHtml = debtState?.hasDueDate && debtState?.overdueWindowLabel && debtState.overdueWindowLabel !== '-'
-      ? `<div class="text-xs text-slate-500 mt-1">${debtState.overdueWindowLabel}</div>`
+      ? `<div class="text-xs ${debtState?.windowClass || 'text-slate-500'} mt-1">${debtState.overdueWindowLabel}</div>`
       : '';
 
     return `
@@ -2354,23 +2462,8 @@ function buildFinanceStudents(
 
       const targetYearNum = Number(financeYear);
       const prevYearNum = Number.isFinite(targetYearNum) ? targetYearNum - 1 : (targetYearNum - 1);
-      const carryState = getCarryAdjustedFinanceStudent(student, id, financeYear);
+      const { carryState, financeStudent, fin, debtState } = resolveStudentFinanceDisplayState(student, id, financeYear);
       const effectiveCarry = Math.max(0, Number(carryState.effectiveCarry || 0));
-      const financeStudent = carryState.financeStudent;
-      let fin = computeStudentFinancials(financeStudent);
-      if (student.isGraduated) {
-        const effectiveFee = 0;
-        fin = {
-          feePerYear: isParentScope ? 0 : effectiveFee,
-          previousDebt: 0,
-          paidAmount: 0,
-          balance: isParentScope ? 0 : effectiveFee,
-          periodDebtLabel: '-',
-          periodDebtValue: 0,
-          credit: 0,
-          scheduleItems: []
-        };
-      }
 
       if (showingDebtorsOnly && (fin.balance <= 0 && fin.periodDebtValue <= 0)) return;
 
@@ -2378,7 +2471,6 @@ function buildFinanceStudents(
       totalCollected += fin.paidAmount;
 
       const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
-      const debtState = getDebtDisplayState(fin);
       const statusNote = student.isGraduated
         ? `<div class="mt-1 text-xs font-semibold text-emerald-600 uppercase">Graduated</div>`
         : (!student.hasYearData && effectiveCarry <= 0 && Object.keys(student.payments || {}).length === 0
@@ -3122,7 +3214,7 @@ function buildFinanceStudents(
   function buildDebtLetterData(studentId) {
     const s = cachedStudents[studentId];
     if (!s) return null;
-    let fin = computeStudentFinancials(s);
+    let { fin } = resolveStudentFinanceDisplayState(s, studentId, financeYear);
     if (s.isGraduated) fin = { feePerYear: 0, paidAmount: 0, balance: 0, periodDebtLabel: '-', periodDebtValue: 0, scheduleItems: [] };
     const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
     const targetYearNum = Number(financeYear);
@@ -3314,7 +3406,7 @@ function buildFinanceStudents(
     Object.entries(cachedStudents || {}).forEach(([id, s]) => {
       if (s.isGraduated) return;
       if (filterClass && s.classLevel !== filterClass) return;
-      const fin = computeStudentFinancials(s);
+      const { fin } = resolveStudentFinanceDisplayState(s, id, financeYear);
       if (Number(fin.periodDebtValue || 0) > 0) debtorStudents.push(id);
     });
     if (!debtorStudents.length) return alert('Hakuna wanafunzi wenye deni kwa darasa linalochaguliwa.');
@@ -3506,7 +3598,7 @@ function buildFinanceStudents(
 
   async function openDetailsModal(id) {
     const s = cachedStudents[id]; if (!s) return alert('Student not found');
-    let fin = computeStudentFinancials(s);
+    let { fin } = resolveStudentFinanceDisplayState(s, id, financeYear);
     if (s.isGraduated) {
       fin = {
         feePerYear: 0,
@@ -3810,6 +3902,8 @@ function buildFinanceStudents(
     const targetYear = String(year || activeYear);
     activeYear = targetYear;
     financeYear = targetYear;
+    approvedSummaryCache.delete(targetYear);
+    approvedDebtStateCache.delete(targetYear);
     try { sessionStorage.setItem('somap_selected_year', targetYear); } catch (_) {}
     updateYearHint();
     if (yearSelectEl && yearSelectEl.value !== targetYear) {
@@ -3945,6 +4039,7 @@ function buildFinanceStudents(
         cachedStudents = { [targetId]: cachedStudents[targetId] };
       }
 
+      await hydrateApprovedDebtStateCache(targetYear, cachedStudents);
       populateStudentSelect();
       renderTable();
       if (parentCtx.enabled) {
@@ -4152,10 +4247,11 @@ function buildFinanceStudents(
         : null;
       const student = lookup?.student || null;
       if (!student) return;
-      const carryState = getCarryAdjustedFinanceStudent(student, lookup?.id || row.adm, targetYear);
-      const financeStudent = carryState.financeStudent;
-      const finNow = window.__finance_computeStudentFinancials(financeStudent);
-      const debtState = getDebtDisplayState(finNow);
+      const resolved = resolveStudentFinanceDisplayState(student, lookup?.id || row.adm, targetYear);
+      const carryState = resolved.carryState;
+      const financeStudent = resolved.financeStudent;
+      const finNow = resolved.fin;
+      const debtState = resolved.debtState;
       const carry = Math.max(0, Number(carryState.effectiveCarry || 0));
       const hasCF = carry > 0;
       row.tr.dataset.carryForward = hasCF ? String(carry) : '0';
