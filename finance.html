@@ -1311,6 +1311,33 @@
     };
   }
 
+  function getVisualCarryForwardAmount(student, studentId, yearValue = financeYear) {
+    const targetYearNum = Number(yearValue || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
+    const prevYearNum = Number.isFinite(targetYearNum) ? targetYearNum - 1 : NaN;
+    if (!Number.isFinite(prevYearNum) || prevYearNum < CARRY_FORWARD_START_YEAR) return 0;
+
+    const admissionKey = String(student?.admissionNumber || studentId || '').trim();
+    if (!admissionKey) return 0;
+
+    try {
+      return Math.max(0, Number(window.__financeCarryForwardVisual?.[`${targetYearNum}::${admissionKey}`]?.carry || 0));
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function getCarryAdjustedFinanceStudent(student, studentId, yearValue = financeYear) {
+    const dbCarry = Math.max(0, Number(student?.carryAmount || 0));
+    const visualCarry = getVisualCarryForwardAmount(student, studentId, yearValue);
+    const effectiveCarry = Math.max(dbCarry, visualCarry);
+    return {
+      dbCarry,
+      visualCarry,
+      effectiveCarry,
+      financeStudent: buildCarryAdjustedStudent(student, effectiveCarry),
+    };
+  }
+
   function ensureScheduleCarryComponent(items, carryAmount) {
     if (!Array.isArray(items) || !items.length) return items;
     const expectedCarry = Math.max(0, Number(carryAmount || 0));
@@ -2172,7 +2199,12 @@ function buildFinanceStudents(
       if (filterClass && student.classLevel !== filterClass) return;
       if (!isParentScope && student.isGraduated) return;
 
-      let fin = computeStudentFinancials(student);
+      const targetYearNum = Number(financeYear);
+      const prevYearNum = Number.isFinite(targetYearNum) ? targetYearNum - 1 : (Number(financeYear) - 1);
+      const carryYearLabel = Number.isFinite(prevYearNum) ? prevYearNum : `${financeYear}-1`;
+      const carryState = getCarryAdjustedFinanceStudent(student, id, financeYear);
+      const financeStudent = carryState.financeStudent;
+      let fin = computeStudentFinancials(financeStudent);
       if (student.isGraduated) {
         const effectiveFee = 0;
         fin = {
@@ -2194,26 +2226,13 @@ function buildFinanceStudents(
 
       const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
       const debtState = getDebtDisplayState(fin);
-      const targetYearNum = Number(financeYear);
-      const prevYearNum = Number.isFinite(targetYearNum) ? targetYearNum - 1 : (Number(financeYear) - 1);
-      const carryYearLabel = Number.isFinite(prevYearNum) ? prevYearNum : `${financeYear}-1`;
-      let carryForwardPrev = 0;
-      if (Number.isFinite(targetYearNum) && prevYearNum >= CARRY_FORWARD_START_YEAR) {
-        try {
-          const admission = student.admissionNumber || id;
-          const key = `${targetYearNum}::${admission}`;
-          const sharedCarry = window.__financeCarryForwardVisual?.[key]?.carry;
-          if (sharedCarry) carryForwardPrev = Number(sharedCarry) || 0;
-        } catch (_) {}
-      }
-      const dbCarry = Math.max(0, Number(student.carryAmount || 0));
-      const effectiveCarry = Math.max(dbCarry, carryForwardPrev);
+      const effectiveCarry = carryState.effectiveCarry;
       const carryNote = effectiveCarry > 0
         ? `<div class="text-xs text-slate-500 text-right mt-1">Carry Forward (${carryYearLabel}+): ${fmt(effectiveCarry)}</div>`
         : '';
       const statusNote = student.isGraduated
         ? `<div class="mt-1 text-xs font-semibold text-emerald-600 uppercase">Graduated</div>`
-        : (!student.hasYearData && Object.keys(student.payments || {}).length === 0
+        : (!student.hasYearData && effectiveCarry <= 0 && Object.keys(student.payments || {}).length === 0
             ? `<div class="mt-1 text-xs text-slate-500">No finance records captured for ${financeYear} yet.</div>`
             : '');
 
@@ -2302,13 +2321,19 @@ function buildFinanceStudents(
   function computeAggregateTotals() {
     const totals = { totalStudents: 0, totalDue: 0, totalCollected: 0, totalOutstanding: 0, totalExpenses: 0 };
     if (!cachedStudents || !Object.keys(cachedStudents).length) return totals;
-    Object.values(cachedStudents).forEach((student) => {
+    Object.entries(cachedStudents).forEach(([id, student]) => {
       if (!parentCtx.enabled && student.isGraduated) return;
-      let fin = computeStudentFinancials(student);
-      if (!student.hasYearData || student.isGraduated) {
+      const carryState = getCarryAdjustedFinanceStudent(student, id, financeYear);
+      let fin = computeStudentFinancials(carryState.financeStudent);
+      if (student.isGraduated) {
         const effectiveFee = student.isGraduated ? 0 : Number(student.feePerYear) || 0;
         fin = {
           feePerYear: effectiveFee,
+          paidAmount: 0,
+        };
+      } else if (!student.hasYearData && carryState.effectiveCarry <= 0) {
+        fin = {
+          feePerYear: Number(student.feePerYear) || 0,
           paidAmount: 0,
         };
       }
