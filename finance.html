@@ -1316,6 +1316,56 @@
     };
   }
 
+  function getStudentBaseFee(student) {
+    const dbCarry = Math.max(0, Number(student?.carryAmount || 0));
+    const baseFeeRaw = student?.baseFee != null
+      ? Number(student.baseFee)
+      : Number(student?.feePerYear || 0) - dbCarry;
+    return Math.max(0, Number.isFinite(baseFeeRaw) ? baseFeeRaw : 0);
+  }
+
+  function buildCarryAdjustedStudent(student, carryAmount) {
+    const baseFee = getStudentBaseFee(student);
+    const effectiveCarry = Math.max(0, Number(carryAmount || 0));
+    return {
+      ...student,
+      baseFee,
+      carryAmount: effectiveCarry,
+      feePerYear: Math.max(0, baseFee + effectiveCarry),
+    };
+  }
+
+  async function resolveEffectiveCarry(student, yearValue, admission) {
+    const dbCarry = Math.max(0, Number(student?.carryAmount || 0));
+    const targetYearNum = Number(yearValue || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
+    let effectiveCarry = dbCarry;
+
+    if (!Number.isFinite(targetYearNum) || targetYearNum - 1 < CARRY_FORWARD_START_YEAR) {
+      return effectiveCarry;
+    }
+
+    const admissionKey = String(admission || student?.admissionNumber || student?.admissionNo || '').trim();
+    if (Number(student?.__carryOverlayYear || 0) === targetYearNum) {
+      effectiveCarry = Math.max(effectiveCarry, Number(student?.__carryOverlayAmount || 0));
+    }
+
+    if (admissionKey) {
+      const sharedCarry = Number(window.__financeCarryForwardVisual?.[`${targetYearNum}::${admissionKey}`]?.carry || 0);
+      effectiveCarry = Math.max(effectiveCarry, sharedCarry);
+    }
+
+    if (effectiveCarry <= 0 && admissionKey && typeof window.__finance_getBalanceForYearAdmission === 'function') {
+      try {
+        const prevYearCarry = await window.__finance_getBalanceForYearAdmission(targetYearNum - 1, admissionKey);
+        effectiveCarry = Math.max(effectiveCarry, Number(prevYearCarry || 0));
+      } catch (err) {
+        console.warn('Effective carry lookup failed', admissionKey, targetYearNum - 1, err?.message || err);
+      }
+    }
+
+    return effectiveCarry;
+  }
+
   function normalizePayments(source, targetYear) {
     if (!source) return {};
     let bucket = source;
@@ -1938,9 +1988,12 @@ function buildFinanceStudents(
       try {
         financeYear = targetYear;
         activeYear = targetYear;
-        const fin = computeStudentFinancials(student);
-        const baseFee = Math.max(0, Number(student.baseFee || student.feePerYear || 0));
-        const carry = Math.max(0, Number(student.carryAmount || 0));
+        const admissionNumber = String(student.admissionNumber || student.admissionNo || '').trim();
+        const effectiveCarry = await resolveEffectiveCarry(student, targetYear, admissionNumber || resolvedStudentId || identifier);
+        const financeStudent = buildCarryAdjustedStudent(student, effectiveCarry);
+        const fin = computeStudentFinancials(financeStudent);
+        const baseFee = Math.max(0, Number(financeStudent.baseFee || 0));
+        const carry = Math.max(0, Number(financeStudent.carryAmount || 0));
         const totalDue = Math.max(0, baseFee + carry);
         const parentContact = String(
           student.primaryParentContact ||
@@ -1951,9 +2004,9 @@ function buildFinanceStudents(
         ).trim();
         return {
           studentId: resolvedStudentId || student.id || student.studentId || identifier,
-          admissionNumber: String(student.admissionNumber || student.admissionNo || ''),
+          admissionNumber,
           fullName: `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim(),
-          classLevel: student.classLevel || student.className || '',
+          classLevel: financeStudent.classLevel || financeStudent.className || '',
           parentContact,
           due: totalDue,
           baseFee,
@@ -3959,13 +4012,20 @@ function buildFinanceStudents(
       const balanceCell = row.tds[7];
       const debtCell = row.tds[8];
       const paidAmount = parseNumberLike(paidCell?.innerText || '0');
-      const newBalance = Math.max(0, newTotalDue - paidAmount);
+      let finNow = null;
+      if (student && typeof window.__finance_computeStudentFinancials === 'function') {
+        const effectiveCarryForRow = Math.max(0, Number(carry || student.carryAmount || 0));
+        const financeStudent = buildCarryAdjustedStudent(student, Math.max(effectiveCarryForRow, Number(student.carryAmount || 0)));
+        finNow = window.__finance_computeStudentFinancials(financeStudent);
+      }
+      const newBalance = finNow
+        ? Math.max(0, Number(finNow.balance || 0))
+        : Math.max(0, newTotalDue - paidAmount);
       if (balanceCell) {
         balanceCell.textContent = formatNumber(newBalance);
       }
 
-      if (student && debtCell && typeof window.__finance_computeStudentFinancials === 'function') {
-        const finNow = window.__finance_computeStudentFinancials(student);
+      if (finNow && debtCell) {
         const debtMeta = resolveDebtDisplay(finNow);
         const debtNeedsAction = debtMeta.debtNeedsAction;
         const debtLabel = debtMeta.debtLabel;
