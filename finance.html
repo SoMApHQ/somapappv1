@@ -735,66 +735,6 @@
     return amounts;
   }
 
-  function parseInstallmentMonthDay(raw) {
-    if (Array.isArray(raw) && raw.length >= 2) {
-      const month = Number(raw[0]);
-      const day = Number(raw[1]);
-      if (Number.isFinite(month) && Number.isFinite(day) && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-        return [month, day];
-      }
-      return null;
-    }
-    if (raw && typeof raw === 'object') {
-      const month = Number(raw.month ?? raw.m ?? raw[0]);
-      const day = Number(raw.day ?? raw.d ?? raw[1]);
-      if (Number.isFinite(month) && Number.isFinite(day) && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-        return [month, day];
-      }
-      return null;
-    }
-    const value = String(raw || '').trim();
-    if (!value) return null;
-    const match = value.match(/^(?:\d{4}[/-])?(\d{1,2})[/-](\d{1,2})(?:[/-]\d{4})?$/);
-    if (!match) return null;
-    const month = Number(match[1]);
-    const day = Number(match[2]);
-    if (!Number.isFinite(month) || !Number.isFinite(day) || month < 1 || month > 12 || day < 1 || day > 31) {
-      return null;
-    }
-    return [month, day];
-  }
-
-  function getInstallmentExplicitOrder(row) {
-    if (!row || typeof row !== 'object') return null;
-    const candidates = [row.order, row.position, row.sortOrder, row.sortIndex, row.sequence, row.index];
-    for (const candidate of candidates) {
-      const value = Number(candidate);
-      if (Number.isFinite(value)) return value;
-    }
-    return null;
-  }
-
-  function compareInstallmentEntries(a, b) {
-    const orderA = getInstallmentExplicitOrder(a?.row);
-    const orderB = getInstallmentExplicitOrder(b?.row);
-    if (orderA != null || orderB != null) {
-      if (orderA == null) return 1;
-      if (orderB == null) return -1;
-      if (orderA !== orderB) return orderA - orderB;
-    }
-
-    const fromA = parseInstallmentMonthDay(a?.row?.window?.from);
-    const fromB = parseInstallmentMonthDay(b?.row?.window?.from);
-    if (fromA && fromB) {
-      if (fromA[0] !== fromB[0]) return fromA[0] - fromB[0];
-      if (fromA[1] !== fromB[1]) return fromA[1] - fromB[1];
-    } else if (fromA || fromB) {
-      return fromA ? -1 : 1;
-    }
-
-    return Number(a?.idx || 0) - Number(b?.idx || 0);
-  }
-
   // ===== Installment config (DISCOUNTS REMOVED) =====
   const installmentConfigs = {
     lower: {
@@ -951,18 +891,23 @@
       const rawRows = Array.isArray(student._classInstallments)
         ? student._classInstallments
         : Object.values(student._classInstallments || {});
-      const rows = rawRows
-        .map((row, idx) => ({ row, idx }))
-        .filter(({ row }) => row && row.active !== false);
+      const rows = rawRows.filter((row) => row && row.active !== false);
       if (rows.length) {
-        const sorted = rows.slice().sort(compareInstallmentEntries);
+        const sorted = rows.slice().sort((a, b) => {
+          const aw = a?.window?.from || [];
+          const bw = b?.window?.from || [];
+          const am = Number(aw[0] || 0), bm = Number(bw[0] || 0);
+          const ad = Number(aw[1] || 0), bd = Number(bw[1] || 0);
+          if (am !== bm) return am - bm;
+          return ad - bd;
+        });
 
         const planName = String(student.paymentPlan || '').toLowerCase();
         const isMonthlyPlan = planName.includes('monthly') || planName.includes('mwezi') ||
-          sorted.some(({ row }) => String(row?.label || '').includes('Monthly:'));
-        const sc = sorted.map(({ row }, idx) => {
-          const fromPair = parseInstallmentMonthDay(row?.window?.from);
-          const toPair = parseInstallmentMonthDay(row?.window?.to);
+          sorted.some(r => String(r?.label || '').includes('Monthly:'));
+        const sc = sorted.map((row, idx) => {
+          const fromPair = Array.isArray(row?.window?.from) ? row.window.from : null;
+          const toPair = Array.isArray(row?.window?.to) ? row.window.to : null;
           const fallback = getConfig(student).windows?.[idx] || { from: [1, 1], to: [1, 10] };
           const fromTS = parseScheduleTS(fromPair || fallback.from, false, academicYear);
           let toTS = parseScheduleTS(toPair || fallback.to, true, academicYear);
@@ -983,26 +928,28 @@
         });
 
         const carryAmount = Math.max(0, Number(student.carryAmount || 0));
-        const studentBaseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - carryAmount)) || 0));
-        const classBaseFee = Math.max(0, Math.round(Number(student?._classDefaults?.feePerYear || 0) || 0));
-        const plannedBase = sc.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
-        if (studentBaseFee > 0 && plannedBase > 0 && classBaseFee > 0) {
-          const tolerance = Math.max(100, Math.round(Math.max(studentBaseFee, classBaseFee) * 0.01));
-          if (Math.abs(studentBaseFee - classBaseFee) > tolerance) {
-            const ratio = studentBaseFee / plannedBase;
-            sc.forEach((row) => {
-              row.amount = Math.max(0, Math.floor(Math.max(0, Number(row.amount || 0)) * ratio));
-            });
-            const afterTotal = sc.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
-            const targetTotal = studentBaseFee;
-            const diff = targetTotal - afterTotal;
-            if (sc.length) sc[sc.length - 1].amount = Math.max(0, Number(sc[sc.length - 1].amount || 0) + diff);
-          }
-        }
-
         if (carryAmount > 0 && sc.length) {
           sc[0].amount += carryAmount;
           sc[0].carryComponent = Math.max(0, Number(sc[0].carryComponent || 0)) + carryAmount;
+        }
+
+        const studentBaseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - carryAmount)) || 0));
+        const plannedTotal = sc.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
+        const plannedBase = Math.max(0, plannedTotal - carryAmount);
+        if (studentBaseFee > 0 && plannedBase > 0) {
+          const tolerance = Math.max(100, Math.round(studentBaseFee * 0.01));
+          if (Math.abs(plannedBase - studentBaseFee) > tolerance) {
+            const ratio = studentBaseFee / plannedBase;
+            sc.forEach((row) => {
+              const carryPart = Math.max(0, Number(row.carryComponent || 0));
+              const basePart = Math.max(0, Number(row.amount || 0) - carryPart);
+              row.amount = Math.max(0, Math.floor(basePart * ratio) + carryPart);
+            });
+            const afterTotal = sc.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
+            const targetTotal = studentBaseFee + carryAmount;
+            const diff = targetTotal - afterTotal;
+            if (sc.length) sc[sc.length - 1].amount = Math.max(0, Number(sc[sc.length - 1].amount || 0) + diff);
+          }
         }
 
         let lastDueIndex = -1, periodLabel = '-', expectedToDate = 0;
@@ -1184,31 +1131,11 @@
       const remaining = Math.max(0, Number(it.amount || 0) - Number(it.paidAllocated || 0));
       return Number(it.toTS || 0) > 0 && isPast(Number(it.toTS)) && remaining > 0;
     });
-    const collectibleRows = (alloc.scheduleItems || [])
-      .map((it, idx) => ({ it, idx }))
-      .filter(({ it }) => {
-        const remaining = Math.max(0, Number(it.amount || 0) - Number(it.paidAllocated || 0));
-        return Number(it.fromTS || 0) > 0 && Number(it.fromTS || 0) <= nowTs && remaining > 0;
-      })
-      .sort((a, b) => {
-        const toDiff = Number(a?.it?.toTS || 0) - Number(b?.it?.toTS || 0);
-        return toDiff || (a.idx - b.idx);
-      });
     const latestOverdue = overdueRows.length
       ? overdueRows.reduce((latest, row) => (Number(row.toTS || 0) > Number(latest.toTS || 0) ? row : latest), overdueRows[0])
       : null;
-    const latestCollectibleMeta = collectibleRows.length ? collectibleRows[collectibleRows.length - 1] : null;
-    const latestCollectible = latestCollectibleMeta?.it || null;
-    const collectibleDebtRaw = latestCollectibleMeta
-      ? Math.max(
-          0,
-          (alloc.scheduleItems || [])
-            .slice(0, latestCollectibleMeta.idx + 1)
-            .reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0) - Number(row.paidAllocated || 0)), 0)
-        )
-      : 0;
     const overdueThroughTsRaw = latestOverdue ? Number(latestOverdue.toTS || 0) : 0;
-    const isOverdueDebtBase = overdueThroughTsRaw > 0 && collectibleDebtRaw > 0;
+    const isOverdueDebtBase = overdueThroughTsRaw > 0 && alloc.debtTillNow > 0;
     const nextInstallmentStartTs = getNextInstallmentStartTs(alloc.scheduleItems || [], overdueThroughTsRaw);
     const extensionRecord = isOverdueDebtBase ? pickLatestDeadlineExtension(student, overdueThroughTsRaw) : null;
     let overdueThroughTs = overdueThroughTsRaw;
@@ -1223,21 +1150,16 @@
     const prevYearNum = Number.isFinite(Number(financeYear)) ? Number(financeYear) - 1 : new Date().getFullYear() - 1;
     const carryOverdueTs = new Date(prevYearNum, 11, 31, 23, 59, 59, 999).getTime();
     const effectivelyCarryDebt = (hasCarryOutstanding || (carryAmount > 0 && yearBalance > 0 && yearBalance <= carryAmount + 100)) && !isOverdueDebt;
-    const summaryCollectibleToTs = latestCollectible ? Number(latestCollectible.toTS || 0) : 0;
-    const summaryCollectibleFromTs = latestCollectible ? Number(latestCollectible.fromTS || 0) : 0;
     const periodDebtLabel = (isOverdueDebtBase && overdueThroughTs > 0)
-      ? new Date(summaryCollectibleToTs || overdueThroughTs).toLocaleDateString()
+      ? new Date(overdueThroughTs).toLocaleDateString()
       : (effectivelyCarryDebt ? new Date(carryOverdueTs).toLocaleDateString() : '-');
-    const overdueWindowLabel = ((isOverdueDebtBase || extensionActive) && latestCollectible)
-      ? `${new Date(summaryCollectibleFromTs).toLocaleDateString()} - ${new Date(summaryCollectibleToTs).toLocaleDateString()}`
+    const overdueWindowLabel = ((isOverdueDebtBase || extensionActive) && latestOverdue)
+      ? `${new Date(Number(latestOverdue.fromTS || 0)).toLocaleDateString()} - ${new Date(Number(overdueThroughTs || latestOverdue.toTS || 0)).toLocaleDateString()}`
       : (effectivelyCarryDebt
           ? `Carry from ${prevYearNum} — due by ${new Date(carryOverdueTs).toLocaleDateString()}`
           : '-');
-    // For overdue collection, roll the summary to the latest collectible window:
-    // sum the remaining balance across all rows up to the latest row whose window has opened.
-    // This keeps "Overdue till ..." aligned with the active collection window instead of the last fully closed one.
     const debtTillNowCapped = Math.min(
-      Math.max(0, Number(collectibleDebtRaw || 0)),
+      Math.max(0, Number(alloc.debtTillNow || 0)),
       Math.max(0, Number(yearBalance || 0))
     );
     const debtForCollection = (isOverdueDebt || overdueRows.length > 0)
@@ -1859,51 +1781,6 @@ function buildFinanceStudents(
       console.warn('Carry-forward helper balance lookup failed', year, admissionNo, err);
       financeBalanceCache.set(cacheKey, 0);
       return 0;
-    }
-  };
-
-  window.__finance_getStudentPrepared = async function (year, studentIdOrAdm) {
-    const targetYear = String(year || financeYear || activeYear || SOMAP_DEFAULT_YEAR);
-    const identifier = String(studentIdOrAdm || '').trim();
-    if (!identifier) return null;
-    try {
-      const dataset = await loadFinanceStudentsForYearCached(targetYear);
-      let student = dataset[identifier];
-      let resolvedStudentId = student ? identifier : '';
-      if (!student) {
-        const matchKey = Object.keys(dataset || {}).find((key) => {
-          const entry = dataset[key] || {};
-          return String(entry.admissionNumber || entry.admissionNo || key).trim() === identifier;
-        });
-        if (matchKey) {
-          student = dataset[matchKey];
-          resolvedStudentId = matchKey;
-        }
-      }
-      if (!student) return null;
-      if (!resolvedStudentId) {
-        resolvedStudentId = Object.keys(dataset || {}).find((key) => dataset[key] === student) || '';
-      }
-
-      const prevFinanceYear = financeYear;
-      const prevActiveYear = activeYear;
-      try {
-        financeYear = targetYear;
-        activeYear = targetYear;
-        const studentClone = JSON.parse(JSON.stringify(student));
-        const financeClone = JSON.parse(JSON.stringify(computeStudentFinancials(studentClone)));
-        return {
-          studentId: resolvedStudentId || student.id || student.studentId || identifier,
-          student: studentClone,
-          finance: financeClone,
-        };
-      } finally {
-        financeYear = prevFinanceYear;
-        activeYear = prevActiveYear;
-      }
-    } catch (err) {
-      console.warn('Finance: prepared export failed', err?.message || err);
-      return null;
     }
   };
 
