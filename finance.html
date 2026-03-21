@@ -882,17 +882,12 @@
     const hasPlanSchedule = Array.isArray(student._planSchedule) && student._planSchedule.length > 0;
     const planName = String(student.paymentPlan || '').toLowerCase();
     const isDifferentPlanType = planName.includes('monthly') || planName.includes('mwezi') || planName.includes('full year');
-    // "4 INSTALLMENT" and "Dirisha la Malipo (4)" are the same plan type — both are installment-based.
-    // Extract the number from each plan ID and compare; if they match, treat as same-type (not an override).
-    const planNum = planName.match(/\d+/)?.[0] || '';
-    const classDefaultPlanNum = classDefaultPlanId.toLowerCase().match(/\d+/)?.[0] || '';
-    const isSamePlanType = (planNum && classDefaultPlanNum && planNum === classDefaultPlanNum) || !isDifferentPlanType;
 
     // 2) Class default edited installments (paymentedits) if present.
     // Use class installments for ALL students in the class unless: custom schedule, or plan override to Monthly/Full Year.
     // "4 INSTALLMENT" vs "Dirisha la Malipo (4)" are same-type plans; class installments are the source of truth.
     if (student._classInstallments && typeof student._classInstallments === 'object' &&
-        (!hasExplicitPlanOverride || !isDifferentPlanType || isSamePlanType)) {
+        (!hasExplicitPlanOverride || !isDifferentPlanType)) {
       const rawRows = Array.isArray(student._classInstallments)
         ? student._classInstallments
         : Object.values(student._classInstallments || {});
@@ -911,18 +906,8 @@
         const isMonthlyPlan = planName.includes('monthly') || planName.includes('mwezi') ||
           sorted.some(r => String(r?.label || '').includes('Monthly:'));
         const sc = sorted.map((row, idx) => {
-          // Firebase may return arrays as {0:m, 1:d} objects; handle both forms.
-          const toWindowPair = (raw) => {
-            if (Array.isArray(raw) && raw.length >= 2) return raw;
-            if (raw && typeof raw === 'object') {
-              const m = Number(raw[0] ?? raw['0']);
-              const d = Number(raw[1] ?? raw['1']);
-              if (Number.isFinite(m) && m > 0 && Number.isFinite(d) && d > 0) return [m, d];
-            }
-            return null;
-          };
-          const fromPair = toWindowPair(row?.window?.from);
-          const toPair = toWindowPair(row?.window?.to);
+          const fromPair = Array.isArray(row?.window?.from) ? row.window.from : null;
+          const toPair = Array.isArray(row?.window?.to) ? row.window.to : null;
           const fallback = getConfig(student).windows?.[idx] || { from: [1, 1], to: [1, 10] };
           const fromTS = parseScheduleTS(fromPair || fallback.from, false, academicYear);
           let toTS = parseScheduleTS(toPair || fallback.to, true, academicYear);
@@ -948,13 +933,13 @@
           sc[0].carryComponent = Math.max(0, Number(sc[0].carryComponent || 0)) + carryAmount;
         }
 
+        // If class installments were saved as explicit amounts for the class default fee,
+        // but this student has a fee override, scale installments to the student's base fee.
+        // This prevents impossible debts (e.g. debt 228,000 while yearly fee is 84,000).
         const studentBaseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - carryAmount)) || 0));
         const plannedTotal = sc.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
         const plannedBase = Math.max(0, plannedTotal - carryAmount);
-        // Only scale amounts when the student has an EXPLICIT fee override different from the class default fee.
-        // Without this guard, students paying the class default fee get wrong amounts due to rounding ratios.
-        const hasExplicitFeeOverride = Boolean(student.override?.feePerYear);
-        if (hasExplicitFeeOverride && studentBaseFee > 0 && plannedBase > 0) {
+        if (studentBaseFee > 0 && plannedBase > 0) {
           const tolerance = Math.max(100, Math.round(studentBaseFee * 0.01));
           if (Math.abs(plannedBase - studentBaseFee) > tolerance) {
             const ratio = studentBaseFee / plannedBase;
@@ -963,6 +948,7 @@
               const basePart = Math.max(0, Number(row.amount || 0) - carryPart);
               row.amount = Math.max(0, Math.floor(basePart * ratio) + carryPart);
             });
+            // Fix rounding remainder on last row
             const afterTotal = sc.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
             const targetTotal = studentBaseFee + carryAmount;
             const diff = targetTotal - afterTotal;
@@ -1149,8 +1135,9 @@
       const remaining = Math.max(0, Number(it.amount || 0) - Number(it.paidAllocated || 0));
       return Number(it.toTS || 0) > 0 && isPast(Number(it.toTS)) && remaining > 0;
     });
-    const overdueRowsSorted = overdueRows.slice().sort((a, b) => Number(a.toTS || 0) - Number(b.toTS || 0));
-    const latestOverdue = overdueRowsSorted.length ? overdueRowsSorted[overdueRowsSorted.length - 1] : null;
+    const latestOverdue = overdueRows.length
+      ? overdueRows.reduce((latest, row) => (Number(row.toTS || 0) > Number(latest.toTS || 0) ? row : latest), overdueRows[0])
+      : null;
     const overdueThroughTsRaw = latestOverdue ? Number(latestOverdue.toTS || 0) : 0;
     const isOverdueDebtBase = overdueThroughTsRaw > 0 && alloc.debtTillNow > 0;
     const nextInstallmentStartTs = getNextInstallmentStartTs(alloc.scheduleItems || [], overdueThroughTsRaw);
@@ -1175,6 +1162,10 @@
       : (effectivelyCarryDebt
           ? `Carry from ${prevYearNum} — due by ${new Date(carryOverdueTs).toLocaleDateString()}`
           : '-');
+    // Always use alloc.debtTillNow for overdue debt: it correctly sums expected-to-date minus
+    // allocated payments per period. overdueBaseOutstanding used a flawed formula that
+    // could show wrong amounts (e.g. 30,400 instead of 58,000) and risk wrong send-home decisions.
+    // When there are overdue periods with remaining balance, debt = alloc.debtTillNow (never overdueBaseOutstanding).
     const debtTillNowCapped = Math.min(
       Math.max(0, Number(alloc.debtTillNow || 0)),
       Math.max(0, Number(yearBalance || 0))
