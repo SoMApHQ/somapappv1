@@ -155,6 +155,7 @@
         try { window.parent.postMessage({ type:'resizeIframe', id: window.__STUDENT_ID__, height: h }, '*'); } catch {}
       };
       const err = (msg) => mount(`<div class="p-3 rounded bg-rose-50 text-rose-700 border border-rose-200">${msg}</div>`);
+      const cloneDeep = (value) => JSON.parse(JSON.stringify(value ?? null));
 
       if (!db) { err('Error: Database not initialized. Please check Firebase credentials or internet connection.'); return; }
 
@@ -245,6 +246,24 @@
           normalized[key] = payload;
         });
         return normalized;
+      }
+
+      async function loadAuthoritativePrepared(studentKey, year) {
+        try {
+          if (!window.parent || window.parent === window) return null;
+          if (typeof window.parent.__finance_getStudentPrepared !== 'function') return null;
+          const prepared = await window.parent.__finance_getStudentPrepared(year, studentKey);
+          if (!prepared?.student || !prepared?.finance) return null;
+          window.__SOMAP_BREAKDOWN_SKIP_CARRY_OVERLAY = true;
+          return {
+            studentId: prepared.studentId || studentKey,
+            student: cloneDeep(prepared.student),
+            finance: cloneDeep(prepared.finance),
+          };
+        } catch (err) {
+          console.warn('installment breakdown: authoritative parent lookup failed', err?.message || err);
+          return null;
+        }
       }
 
       async function loadApprovedSummary(studentKey, year) {
@@ -433,35 +452,85 @@
         return config.windows[idx] || config.windows[config.windows.length - 1];
       }
 
+      function parseInstallmentMonthDay(raw) {
+        if (Array.isArray(raw) && raw.length >= 2) {
+          const month = Number(raw[0]);
+          const day = Number(raw[1]);
+          if (Number.isFinite(month) && Number.isFinite(day) && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            return [month, day];
+          }
+          return null;
+        }
+        if (raw && typeof raw === 'object') {
+          const month = Number(raw.month ?? raw.m ?? raw[0]);
+          const day = Number(raw.day ?? raw.d ?? raw[1]);
+          if (Number.isFinite(month) && Number.isFinite(day) && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            return [month, day];
+          }
+          return null;
+        }
+        const value = String(raw || '').trim();
+        if (!value) return null;
+        const match = value.match(/^(?:\d{4}[/-])?(\d{1,2})[/-](\d{1,2})(?:[/-]\d{4})?$/);
+        if (!match) return null;
+        const month = Number(match[1]);
+        const day = Number(match[2]);
+        if (!Number.isFinite(month) || !Number.isFinite(day) || month < 1 || month > 12 || day < 1 || day > 31) {
+          return null;
+        }
+        return [month, day];
+      }
+
+      function getInstallmentExplicitOrder(row) {
+        if (!row || typeof row !== 'object') return null;
+        const candidates = [row.order, row.position, row.sortOrder, row.sortIndex, row.sequence, row.index];
+        for (const candidate of candidates) {
+          const value = Number(candidate);
+          if (Number.isFinite(value)) return value;
+        }
+        return null;
+      }
+
+      function compareInstallmentEntries(a, b) {
+        const orderA = getInstallmentExplicitOrder(a?.row);
+        const orderB = getInstallmentExplicitOrder(b?.row);
+        if (orderA != null || orderB != null) {
+          if (orderA == null) return 1;
+          if (orderB == null) return -1;
+          if (orderA !== orderB) return orderA - orderB;
+        }
+
+        const fromA = parseInstallmentMonthDay(a?.row?.window?.from);
+        const fromB = parseInstallmentMonthDay(b?.row?.window?.from);
+        if (fromA && fromB) {
+          if (fromA[0] !== fromB[0]) return fromA[0] - fromB[0];
+          if (fromA[1] !== fromB[1]) return fromA[1] - fromB[1];
+        } else if (fromA || fromB) {
+          return fromA ? -1 : 1;
+        }
+
+        return Number(a?.idx || 0) - Number(b?.idx || 0);
+      }
+
       function resolveWindowPair(row, key, fallbackPair) {
         if (!row) return fallbackPair || null;
-        const parseMonthDay = (raw) => {
-          if (!raw) return null;
-          const nums = String(raw).match(/\d+/g);
-          if (!nums || nums.length < 2) return null;
-          const hasYearFirst = nums[0].length === 4;
-          const m = Number(hasYearFirst ? nums[1] : nums[0]);
-          const d = Number(hasYearFirst ? nums[2] : nums[1]);
-          if (Number.isFinite(m) && Number.isFinite(d) && m > 0 && d > 0) return [m, d];
-          return null;
-        };
         const monthKey = `${key}Month`;
         const dayKey = `${key}Day`;
         if (row[monthKey] !== undefined && row[dayKey] !== undefined) {
           const m = Number(row[monthKey]);
           const d = Number(row[dayKey]);
-          if (Number.isFinite(m) && Number.isFinite(d) && m > 0 && d > 0) return [m, d];
+          if (Number.isFinite(m) && Number.isFinite(d) && m >= 1 && m <= 12 && d >= 1 && d <= 31) return [m, d];
         }
         const direct = row[key] || row[`${key}Date`];
         if (direct) {
-          const parsed = parseMonthDay(direct);
+          const parsed = parseInstallmentMonthDay(direct);
           if (parsed) return parsed;
         }
         if (row.windowText) {
           const segments = String(row.windowText).split(' ?"');
           const idx = key === 'from' ? 0 : 1;
           if (segments[idx]) {
-            const parsed = parseMonthDay(segments[idx]);
+            const parsed = parseInstallmentMonthDay(segments[idx]);
             if (parsed) return parsed;
           }
         }
@@ -487,14 +556,11 @@
         const fullTS = parseFullDate(direct, endOfDay);
         if (fullTS != null) return fullTS;
         const pair = resolveWindowPair(row, key, fallbackPair);
-        return toAcademicTS(pair, endOfDay);
+        return toAcademicTS(pair || fallbackPair, endOfDay);
       }
       function toAcademicTS(pair, endOfDay) {
-        let [month, day] = Array.isArray(pair) ? pair : [1, 1];
-        month = Number(month);
-        day = Number(day);
-        if (!Number.isFinite(month) || month <= 0 || month > 12) month = 1;
-        if (!Number.isFinite(day) || day <= 0 || day > 31) day = endOfDay ? 10 : 1;
+        const parsed = parseInstallmentMonthDay(pair);
+        let [month, day] = parsed || [1, endOfDay ? 10 : 1];
         return ymdToTS(targetYear, month, day, endOfDay);
       }
 
@@ -505,39 +571,33 @@
         const config = getConfig(student);
         
         // PRIORITY 1: Check for student custom schedule (highest priority override)
-        if (override && Array.isArray(override.customSchedule) && override.customSchedule.length > 0) {
-          // Student has custom schedule - let resolveEffectiveInstallments handle it
-          // Fall through to PRIORITY 2
-        }
+        const hasCustomSchedule = Boolean(override && Array.isArray(override.customSchedule) && override.customSchedule.length > 0);
         
         // PRIORITY 2: Check if class-level edited installments exist (from paymentedits.html)
         // These are stored in feesStructure/{year}/{Class}/installments
-        // Only use if student doesn't have a custom schedule or plan override
-        const hasStudentOverride = override && (
-          (Array.isArray(override.customSchedule) && override.customSchedule.length > 0) ||
-          override.planId
-        );
-        
-        if (!hasStudentOverride && classDefaults && classDefaults.installments && typeof classDefaults.installments === 'object') {
+        const classDefaultPlanId = String(classDefaults?.defaultPlanId || classDefaults?.defaultPlan || '').trim();
+        const overridePlanId = String(override?.planId || '').trim();
+        const hasExplicitPlanOverride = Boolean(overridePlanId) && (!classDefaultPlanId || overridePlanId !== classDefaultPlanId);
+        const planName = String(student.paymentPlan || '').toLowerCase();
+        const isDifferentPlanType = planName.includes('monthly') || planName.includes('mwezi') || planName.includes('full year');
+
+        if (!hasCustomSchedule &&
+            classDefaults &&
+            classDefaults.installments &&
+            typeof classDefaults.installments === 'object' &&
+            (!hasExplicitPlanOverride || !isDifferentPlanType)) {
           const installmentsObj = classDefaults.installments;
-          const entries = Object.values(installmentsObj).filter(inst => inst && inst.active !== false);
+          const entries = Object.values(installmentsObj)
+            .map((inst, idx) => ({ row: inst, idx }))
+            .filter(({ row }) => row && row.active !== false);
           
           if (entries.length > 0) {
-            // Sort by window date (from month/day)
-            const sorted = entries.slice().sort((a, b) => {
-              const af = (a?.window?.from || []);
-              const bf = (b?.window?.from || []);
-              if (!af.length && !bf.length) return 0;
-              if (!af.length) return 1;
-              if (!bf.length) return -1;
-              if (af[0] !== bf[0]) return af[0] - bf[0];
-              return af[1] - bf[1];
-            });
+            const sorted = entries.slice().sort(compareInstallmentEntries);
             
-            const items = sorted.map((inst, idx) => {
+            const items = sorted.map(({ row: inst }, idx) => {
               const win = inst?.window || {};
-              const fromPair = Array.isArray(win.from) ? win.from : null;
-              const toPair = Array.isArray(win.to) ? win.to : null;
+              const fromPair = parseInstallmentMonthDay(win.from);
+              const toPair = parseInstallmentMonthDay(win.to);
               const fallback = fallbackWindow(config, idx) || { from: [1, 1], to: [1, 10] };
               const amount = Math.max(0, Math.round(Number(inst?.amount) || 0));
               const label = inst?.label || (config?.labels?.[idx] || `Inst ${idx + 1}`);
@@ -553,14 +613,31 @@
                 windowText: inst?.windowText || ''
               };
             });
-            
-            // Add carry forward if exists
+
             const carryAmount = Math.max(0, Number(student.carryAmount || 0));
+            const studentBaseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - carryAmount)) || 0));
+            const classBaseFee = Math.max(0, Math.round(Number(classDefaults.feePerYear || 0) || 0));
+            const plannedBase = items.reduce((sum, item) => sum + Math.max(0, Number(item.amount || 0)), 0);
+            if (studentBaseFee > 0 && plannedBase > 0 && classBaseFee > 0) {
+              const tolerance = Math.max(100, Math.round(Math.max(studentBaseFee, classBaseFee) * 0.01));
+              if (Math.abs(studentBaseFee - classBaseFee) > tolerance) {
+                const ratio = studentBaseFee / plannedBase;
+                items.forEach((item) => {
+                  item.amount = Math.max(0, Math.floor(Math.max(0, Number(item.amount || 0)) * ratio));
+                });
+                const afterTotal = items.reduce((sum, item) => sum + Math.max(0, Number(item.amount || 0)), 0);
+                const diff = studentBaseFee - afterTotal;
+                if (items.length) {
+                  items[items.length - 1].amount = Math.max(0, Number(items[items.length - 1].amount || 0) + diff);
+                }
+              }
+            }
+
             if (carryAmount > 0 && items.length) {
               items[0].amount += carryAmount;
             }
             
-            const feeBase = Math.max(0, Math.round(Number(classDefaults.feePerYear || student.baseFee || student.feePerYear || 0)));
+            const feeBase = Math.max(0, Math.round(Number(studentBaseFee || classDefaults.feePerYear || student.baseFee || student.feePerYear || 0)));
             
             return {
               items,
@@ -687,7 +764,36 @@
         return { credit, totalPaid, debtTillNow };
       }
 
-      async function render(student, classDefaults, override) {
+      function buildBreakdownFromPreparedFinance(finance) {
+        const items = Array.isArray(finance?.scheduleItems) ? finance.scheduleItems : [];
+        const rows = items.map((it) => {
+          const expected = Math.max(0, Number(it.amount || 0));
+          const allocated = Math.max(0, Math.min(expected, Number(it.paidAllocated || 0)));
+          return {
+            label: it.label || '',
+            expected,
+            allocated,
+            remaining: Math.max(0, expected - allocated),
+            status: it.status || 'Pending',
+            fromTS: Number(it.fromTS || 0),
+            toTS: Number(it.toTS || 0),
+          };
+        });
+        const feeForYear = Math.max(0, Number(finance?.feePerYear || 0));
+        const paidTotal = Math.max(0, Number(finance?.paidAmount || 0));
+        const balance = Math.max(0, Number(finance?.balance || 0));
+        const credit = Math.max(0, Number(finance?.credit || 0));
+        return {
+          rows,
+          allocated: Math.min(feeForYear, rows.reduce((sum, row) => sum + row.allocated, 0)),
+          paidTotal,
+          remainingForYear: balance,
+          credit,
+          debtTillNow: Math.max(0, Number(finance?.periodDebtValue || 0)),
+        };
+      }
+
+      async function render(student, classDefaults, override, authoritative = null) {
         const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
         if (student.isGraduated) {
           mount(`
@@ -706,13 +812,22 @@
           return;
         }
 
-        const schedule = await buildSchedule(student, classDefaults, override);
+        const preparedFinance = authoritative?.finance || null;
+        const schedule = preparedFinance
+          ? {
+              items: cloneDeep(preparedFinance.scheduleItems) || [],
+              academicYear: targetYear,
+              feeBase: Math.max(0, Number(student.baseFee || 0)),
+              planName: student.paymentPlan || '',
+              planId: '',
+            }
+          : await buildSchedule(student, classDefaults, override);
         schedule.items = Array.isArray(schedule?.items) ? schedule.items : [];
-        sortScheduleItems(schedule.items);
-        const planDisplay = schedule.planName || student.paymentPlan || '';
+        if (!preparedFinance) sortScheduleItems(schedule.items);
+        const planDisplay = student.paymentPlan || schedule.planName || '';
         const hasYearData = Boolean(student.hasYearData);
         const admissionForLookup = student.admissionNumber || studentId;
-        const prevCarry = hasYearData ? await fetchPrevYearCarry(admissionForLookup) : 0;
+        const prevCarry = preparedFinance ? Math.max(0, Number(student.carryAmount || 0)) : (hasYearData ? await fetchPrevYearCarry(admissionForLookup) : 0);
         const dbCarry = Math.max(0, Number(student.carryAmount || 0));
         const effectiveCarry = Math.max(dbCarry, prevCarry);
         const inferredBaseFee = student.baseFee != null
@@ -720,7 +835,16 @@
           : Math.max(0, Number(student.feePerYear || 0) - dbCarry);
         const totalDueWithCarry = hasYearData ? inferredBaseFee + effectiveCarry : 0;
 
-        const summary = hasYearData ? await loadApprovedSummary(studentId, targetYearStr) : null;
+        const summary = preparedFinance
+          ? {
+              feeTotal: Number(preparedFinance.feePerYear || student.feePerYear || 0),
+              paidTotal: Number(preparedFinance.paidAmount || 0),
+              balanceTotal: Number(preparedFinance.balance || 0),
+              baseFee: Number(student.baseFee || 0),
+              carry: Number(student.carryAmount || 0),
+              credit: Number(preparedFinance.credit || 0),
+            }
+          : (hasYearData ? await loadApprovedSummary(studentId, targetYearStr) : null);
         const summaryFee = summary
           ? Number(
               summary.feeTotal ??
@@ -759,7 +883,9 @@
           : 0;
 
         const breakdown = hasYearData
-          ? buildBreakdownFromSummary(schedule.items, feeForYear, summaryPaid)
+          ? (preparedFinance
+              ? buildBreakdownFromPreparedFinance(preparedFinance)
+              : buildBreakdownFromSummary(schedule.items, feeForYear, summaryPaid))
           : { rows: [], allocated: 0, paidTotal: 0, remainingForYear: 0, credit: 0, debtTillNow: 0 };
 
         if (summary && breakdown.paidTotal !== summaryPaid) {
@@ -889,7 +1015,22 @@
       const studentId = new URL(location.href).searchParams.get('student');
       window.__STUDENT_ID__ = studentId;
       if (!studentId) { err('Error: No student ID provided in URL.'); return; }
-      Promise.all([
+      loadAuthoritativePrepared(studentId, targetYearStr)
+        .then(async (prepared) => {
+          if (prepared?.student && prepared?.finance) {
+            const authoritativeStudent = prepared.student || {};
+            authoritativeStudent.academicYear = authoritativeStudent.academicYear || targetYearStr;
+            authoritativeStudent.financeYear = authoritativeStudent.financeYear || targetYearStr;
+            authoritativeStudent.admissionNumber = authoritativeStudent.admissionNumber || studentId;
+            authoritativeStudent.hasYearData = authoritativeStudent.hasYearData !== false;
+            await render(authoritativeStudent, authoritativeStudent._classDefaults || {}, authoritativeStudent.override || {}, prepared);
+            return true;
+          }
+          return false;
+        })
+        .then((usedParent) => {
+          if (usedParent) return null;
+          return Promise.all([
         ref(`students/${studentId}`).once('value'),
         ref(`enrollments/${anchorYearStr}/${studentId}`).once('value'),
         ref(`enrollments/${targetYearStr}/${studentId}`).once('value'),
@@ -1039,6 +1180,7 @@
           }
 
           await render(prepared, classDefaults, effectiveOverride);
+        });
         })
         .catch(e => { console.error(e); err('Error loading student data.'); });
 
@@ -1054,6 +1196,7 @@
   /** SoMAp v2.1 — Carry-forward overlay for January installment (prevYear >= 2025) */
   (function carryForwardIntoJanuary() {
     const START_YEAR = 2025;
+    if (window.__SOMAP_BREAKDOWN_SKIP_CARRY_OVERLAY) return;
 
     function detectTargetYear() {
       const urlYear = Number(new URL(location.href).searchParams.get('year'));
@@ -1143,6 +1286,7 @@
     }
 
     async function applyCarryForward() {
+      if (window.__SOMAP_BREAKDOWN_SKIP_CARRY_OVERLAY) return;
       const adm = window.__STUDENT_ID__ || new URL(location.href).searchParams.get('student') || '';
       if (!adm) return;
       const carry = await getCarryForward(adm);
@@ -1226,6 +1370,7 @@
     }
 
     function startObserver() {
+      if (window.__SOMAP_BREAKDOWN_SKIP_CARRY_OVERLAY) return;
       const container = document.getElementById('breakdownContent');
       if (!container) return;
       const attempt = () => { applyCarryForward(); };

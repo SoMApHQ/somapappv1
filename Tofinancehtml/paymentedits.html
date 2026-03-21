@@ -481,6 +481,29 @@
     const $$ = (sel) => Array.from(document.querySelectorAll(sel));
     const fmtMoney = (n) => (Number(n) || 0).toLocaleString('en-US');
 
+    function parseMonthDayInput(value) {
+      const raw = String(value ?? '').trim();
+      if (!raw) return null;
+      const normalized = raw.replace(/\//g, '-');
+      const match = normalized.match(/^(\d{1,2})-(\d{1,2})$/);
+      if (!match) return null;
+      const month = Number(match[1]);
+      const day = Number(match[2]);
+      if (!Number.isFinite(month) || !Number.isFinite(day)) return null;
+      if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+      return { month, day };
+    }
+
+    function getInstallmentExplicitOrder(inst) {
+      if (!inst || typeof inst !== 'object') return null;
+      const candidates = [inst.order, inst.position, inst.sortOrder, inst.sortIndex, inst.sequence, inst.index];
+      for (const candidate of candidates) {
+        const value = Number(candidate);
+        if (Number.isFinite(value)) return value;
+      }
+      return null;
+    }
+
     function openModal(html) {
       const root = document.getElementById('modalRoot');
       const card = root.querySelector('.modal-card');
@@ -704,14 +727,23 @@
           { label: B?.label, window: windowLabelFromInstallment(B || {}) }
         ));
       }
-      return entries.sort(([, A], [, B]) => {
-        const af = A?.window?.from || [];
-        const bf = B?.window?.from || [];
-        if (!af.length && !bf.length) return 0;
-        if (!af.length) return 1;
-        if (!bf.length) return -1;
-        if (af[0] !== bf[0]) return af[0] - bf[0];
-        return af[1] - bf[1];
+      return entries.sort(([idA, A], [idB, B]) => {
+        const orderA = getInstallmentExplicitOrder(A);
+        const orderB = getInstallmentExplicitOrder(B);
+        if (orderA != null || orderB != null) {
+          if (orderA == null) return 1;
+          if (orderB == null) return -1;
+          if (orderA !== orderB) return orderA - orderB;
+        }
+        const fromA = parseMonthDayInput(`${A?.window?.from?.[0] ?? ''}-${A?.window?.from?.[1] ?? ''}`);
+        const fromB = parseMonthDayInput(`${B?.window?.from?.[0] ?? ''}-${B?.window?.from?.[1] ?? ''}`);
+        if (fromA && fromB) {
+          if (fromA.month !== fromB.month) return fromA.month - fromB.month;
+          if (fromA.day !== fromB.day) return fromA.day - fromB.day;
+        } else if (fromA || fromB) {
+          return fromA ? -1 : 1;
+        }
+        return String(idA).localeCompare(String(idB));
       });
     }
 
@@ -1031,8 +1063,12 @@
         const label = $('#instLabel').value.trim() || 'Installment';
         const amount = Math.max(0, Number($('#instAmount').value || 0));
         const weight = Math.max(0, Number($('#instWeight').value || 1));
-        const fromParts = ($('#instFrom').value || '').split('-').map((s) => Number(s.trim()));
-        const toParts = ($('#instTo').value || '').split('-').map((s) => Number(s.trim()));
+        const fromParsed = parseMonthDayInput($('#instFrom').value || '');
+        const toParsed = parseMonthDayInput($('#instTo').value || '');
+        if (!fromParsed || !toParsed) {
+          toast('Invalid window. Use MM-DD or MM/DD with month 1-12 and day 1-31.', 'error');
+          return;
+        }
         const path = `${pathFees(year)}/${className}/installments`;
         const ref = db.ref(path).push();
         const id = ref.key;
@@ -1040,7 +1076,7 @@
           label,
           amount,
           weight,
-          window: { from: [fromParts[0] || 1, fromParts[1] || 1], to: [toParts[0] || 1, toParts[1] || 1] },
+          window: { from: [fromParsed.month, fromParsed.day], to: [toParsed.month, toParsed.day] },
           active: true,
           createdAt: now(),
           createdBy: currentUser()
@@ -1110,8 +1146,12 @@
         const amount = Math.max(0, Number($('#instAmount').value || 0));
         const weight = Math.max(0, Number($('#instWeight').value || 1));
         const active = $('#instActive').value === 'true';
-        const fromParts = ($('#instFrom').value || '').split('-').map((s) => Number(s.trim()));
-        const toParts = ($('#instTo').value || '').split('-').map((s) => Number(s.trim()));
+        const fromParsed = parseMonthDayInput($('#instFrom').value || '');
+        const toParsed = parseMonthDayInput($('#instTo').value || '');
+        if (!fromParsed || !toParsed) {
+          toast('Invalid window. Use MM-DD or MM/DD with month 1-12 and day 1-31.', 'error');
+          return;
+        }
         const payload = {
           ...before,
           label,
@@ -1119,8 +1159,8 @@
           weight,
           active,
           window: {
-            from: [fromParts[0] || 1, fromParts[1] || 1],
-            to: [toParts[0] || 1, toParts[1] || 1]
+            from: [fromParsed.month, fromParsed.day],
+            to: [toParsed.month, toParsed.day]
           },
           updatedAt: now(),
           updatedBy: currentUser()
