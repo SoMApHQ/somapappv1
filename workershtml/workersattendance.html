@@ -718,6 +718,240 @@
       };
     }
 
+    // ======= TEACHER CHECK-IN READINESS =======
+
+    function getTermFromMonth(monthIndex) { // monthIndex 0-11
+      if (monthIndex <= 3) return 'term1';
+      if (monthIndex <= 7) return 'term2';
+      return 'term3';
+    }
+
+    function toSchemeKey(str) {
+      return String(str || '').trim().replace(/\s+/g, '_').replace(/[.#$/\[\]]/g, '_');
+    }
+
+    async function checkTeacherReadiness() {
+      const result = {
+        ready: true,
+        noTimetableSetup: false,
+        missingSchemes: [],
+        todayLessons: [],
+        missingPlans: [],
+        isWeekend: false,
+        dayName: ''
+      };
+
+      const now = new Date();
+      const nairobiNow = new Date(now.toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
+      const dayIndex = nairobiNow.getDay(); // 0=Sun, 6=Sat
+      const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      result.dayName = DAY_NAMES[dayIndex];
+      result.isWeekend = (dayIndex === 0 || dayIndex === 6);
+
+      const year = state.year || String(nairobiNow.getFullYear());
+      const todayDate = todayYMD(now); // YYYY-MM-DD
+
+      // 1. Load teacher config (class-subject mappings)
+      let teacherConfig = null;
+      try {
+        const configSnap = await schoolRef(`years/${year}/teachers_config/${state.workerId}`).once('value');
+        teacherConfig = configSnap.val();
+      } catch (err) {
+        console.warn('Teacher config load failed:', err);
+      }
+
+      const classSubjectMappings = teacherConfig?.classSubjectMappings || [];
+      if (!classSubjectMappings.length) {
+        result.noTimetableSetup = true;
+        result.ready = false;
+        return result;
+      }
+
+      // 2. Check schemes exist for each class/subject
+      let schemesData = {};
+      try {
+        const schemesSnap = await db.ref(`schemes/${state.schoolId}/teacher/${state.workerId}/${year}`).once('value');
+        schemesData = schemesSnap.val() || {};
+      } catch (err) {
+        console.warn('Schemes load failed:', err);
+      }
+
+      for (const mapping of classSubjectMappings) {
+        const cls = mapping.class || '';
+        const subjects = mapping.subjects || [];
+        const clsKey = toSchemeKey(cls);
+        const clsSchemes = schemesData[clsKey] || {};
+        for (const subj of subjects) {
+          const subjKey = toSchemeKey(subj);
+          const subjSchemes = clsSchemes[subjKey];
+          const hasScheme = subjSchemes && Object.keys(subjSchemes).length > 0;
+          if (!hasScheme) {
+            result.missingSchemes.push(`${cls} – ${subj}`);
+          }
+        }
+      }
+
+      // 3. Timetable + lesson plan checks (weekdays only)
+      if (!result.isWeekend) {
+        const termKey = getTermFromMonth(nairobiNow.getMonth());
+        const timetableLessons = [];
+
+        try {
+          const ttSnap = await schoolRef(`years/${year}/timetable/generated/${termKey}`).once('value');
+          const ttData = ttSnap.val() || {};
+          for (const [, groupData] of Object.entries(ttData)) {
+            const grid = groupData.grid || {};
+            const slots = Array.isArray(groupData.slots) ? groupData.slots : [];
+            for (const [className, days] of Object.entries(grid)) {
+              const daySlots = (days && days[result.dayName]) || {};
+              for (const [slotId, cell] of Object.entries(daySlots)) {
+                if (cell && cell.teacherId === state.workerId && cell.subject && cell.type !== 'fixed') {
+                  const slotInfo = slots.find(s => s.id === slotId) || {};
+                  timetableLessons.push({
+                    className,
+                    subject: cell.subject,
+                    start: slotInfo.start || '',
+                    end: slotInfo.end || '',
+                    slotLabel: slotInfo.label || slotId
+                  });
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('Timetable load failed:', err);
+        }
+
+        result.todayLessons = timetableLessons;
+
+        // 4. Check lesson plans for each lesson today
+        if (timetableLessons.length > 0) {
+          const uniqueClasses = [...new Set(timetableLessons.map(l => l.className))];
+          const plansByClass = {};
+          for (const cls of uniqueClasses) {
+            try {
+              const plansSnap = await schoolRef(`lessonPlans/${year}/${cls}/${todayDate}`).once('value');
+              const plansData = plansSnap.val() || {};
+              plansByClass[cls] = Object.values(plansData);
+            } catch (err) {
+              console.warn(`Plans load failed for ${cls}:`, err);
+              plansByClass[cls] = [];
+            }
+          }
+
+          for (const lesson of timetableLessons) {
+            const plans = plansByClass[lesson.className] || [];
+            const hasPlan = plans.some(p => {
+              const pSubj = String(p.subject || p.subjectName || '').toLowerCase().trim();
+              const lSubj = String(lesson.subject || '').toLowerCase().trim();
+              return pSubj === lSubj || pSubj.includes(lSubj) || lSubj.includes(pSubj);
+            });
+            if (!hasPlan) {
+              result.missingPlans.push(lesson);
+            }
+          }
+        }
+      }
+
+      if (result.missingSchemes.length > 0 || result.missingPlans.length > 0) {
+        result.ready = false;
+      }
+      return result;
+    }
+
+    function showTeacherBlockModal(result) {
+      const somap = getSomap();
+      const schoolId = state.schoolId || '';
+      const year = state.year || '';
+      const qp = `school=${encodeURIComponent(schoolId)}&year=${encodeURIComponent(year)}`;
+      const SW_DAYS = ['Jumapili', 'Jumatatu', 'Jumanne', 'Jumatano', 'Alhamisi', 'Ijumaa', 'Jumamosi'];
+      const now = new Date();
+      const nairobiNow = new Date(now.toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
+      const todaySwName = SW_DAYS[nairobiNow.getDay()];
+
+      let sections = '';
+
+      // No teacher config
+      if (result.noTimetableSetup) {
+        sections += `
+          <div style="background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.4);border-radius:10px;padding:12px;margin-top:10px;">
+            <strong style="color:#fbbf24;">📋 Wasifu wa Mwalimu Haukupatikana</strong>
+            <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Bado hujasetup madarasa na masomo unayofundisha. Nenda Teacher Dashboard uweke madarasa yako na masomo.</p>
+            <a href="../workertasks.html" style="display:inline-block;margin-top:8px;padding:6px 14px;background:rgba(251,191,36,0.2);border:1px solid rgba(251,191,36,0.5);border-radius:8px;color:#fbbf24;text-decoration:none;font-size:0.88rem;">→ Nenda Teacher Dashboard</a>
+          </div>`;
+      }
+
+      // Missing schemes
+      if (result.missingSchemes.length > 0) {
+        sections += `
+          <div style="background:rgba(251,113,133,0.1);border:1px solid rgba(251,113,133,0.4);border-radius:10px;padding:12px;margin-top:10px;">
+            <strong style="color:#fb7185;">📚 Scheme za Kazi Zinazokosekana</strong>
+            <p style="margin:6px 0 4px;color:var(--muted);font-size:0.9rem;">Masomo yafuatayo bado hayana scheme ya kazi kwa mwaka ${year}. Lazima schemes zote ziwepo kabla ya kufanya check-in:</p>
+            <ul style="margin:4px 0 8px 18px;padding:0;color:#fecdd3;font-size:0.88rem;">
+              ${result.missingSchemes.map(s => `<li style="margin-bottom:3px;">${s}</li>`).join('')}
+            </ul>
+            <p style="margin:0 0 6px;color:var(--muted);font-size:0.83rem;">Huna scheme? Wasiliana na Academic Officer au Head Teacher akusaidie kupakia schemes zako.</p>
+            <a href="../Toworkertaskshtml/schemes.html?${qp}" style="display:inline-block;padding:6px 14px;background:rgba(251,113,133,0.2);border:1px solid rgba(251,113,133,0.5);border-radius:8px;color:#fb7185;text-decoration:none;font-size:0.88rem;">→ Fungua Schemes za Kazi</a>
+          </div>`;
+      }
+
+      // Timetable / lesson plan section (weekdays only)
+      if (!result.isWeekend) {
+        if (result.todayLessons.length === 0) {
+          sections += `
+            <div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.4);border-radius:10px;padding:12px;margin-top:10px;">
+              <strong style="color:#c7d2fe;">🗓️ Jedwali la Leo (${todaySwName})</strong>
+              <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Hukupatikana kwenye jedwali la masaa leo. Kama ni kosa, wasiliana na Academic / Head Teacher waboreshe jedwali.</p>
+            </div>`;
+        } else if (result.missingPlans.length > 0) {
+          const planRows = result.todayLessons.map(l => {
+            const missing = result.missingPlans.some(m => m.className === l.className && m.subject === l.subject);
+            const timeStr = l.start ? ` (${l.start}–${l.end})` : '';
+            const badge = missing
+              ? '<span style="color:#fb7185;font-size:0.82rem;"> ❌ Mpango unakosekana</span>'
+              : '<span style="color:#34d399;font-size:0.82rem;"> ✅ Tayari</span>';
+            return `<li style="margin-bottom:4px;">${l.className} – ${l.subject}${timeStr}${badge}</li>`;
+          }).join('');
+          sections += `
+            <div style="background:rgba(251,113,133,0.1);border:1px solid rgba(251,113,133,0.4);border-radius:10px;padding:12px;margin-top:10px;">
+              <strong style="color:#fb7185;">📝 Mipango ya Masomo (Lesson Plans) Inayokosekana</strong>
+              <p style="margin:6px 0 4px;color:var(--muted);font-size:0.9rem;">Kulingana na jedwali, leo ${todaySwName} una masomo ${result.todayLessons.length}. Andaa mipango inayokosekana kabla ya kufanya check-in:</p>
+              <ul style="margin:4px 0 8px 18px;padding:0;font-size:0.88rem;">
+                ${planRows}
+              </ul>
+              <a href="../Toworkertaskshtml/lessonplan.html?${qp}" style="display:inline-block;padding:6px 14px;background:rgba(251,113,133,0.2);border:1px solid rgba(251,113,133,0.5);border-radius:8px;color:#fb7185;text-decoration:none;font-size:0.88rem;">→ Fungua Lesson Plans</a>
+            </div>`;
+        } else if (result.todayLessons.length > 0) {
+          // All plans present — this branch only reached if something else blocked, show status
+          sections += `
+            <div style="background:rgba(52,211,153,0.1);border:1px solid rgba(52,211,153,0.4);border-radius:10px;padding:12px;margin-top:10px;">
+              <strong style="color:#34d399;">✅ Mipango ya Masomo – Tayari</strong>
+              <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Mipango yote ya masomo leo (${result.todayLessons.length}) iko tayari.</p>
+            </div>`;
+        }
+      }
+
+      const overlay = document.createElement('div');
+      overlay.className = 'mini-modal-overlay';
+      overlay.innerHTML = `
+        <div class="mini-modal-card" role="dialog" aria-modal="true" style="width:min(580px,100%);max-height:82vh;overflow-y:auto;display:grid;gap:0;">
+          <h3 style="color:#fb7185;">⚠️ Huwezi Kufanya Check-In Bado</h3>
+          <p style="color:var(--muted);font-size:0.92rem;">Kabla ya kufanya check-in, kamilisha mahitaji yafuatayo:</p>
+          ${sections}
+          <div class="mini-modal-actions" style="margin-top:16px;">
+            <button type="button" class="mini-modal-btn primary" data-act="close">Sawa — Nitafanya Kazi Inayohitajika</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      overlay.addEventListener('click', (e) => {
+        if (e.target.closest('[data-act="close"]') || e.target === overlay) {
+          overlay.remove();
+        }
+      });
+    }
+
+    // ==========================================
+
     async function handleCheck(direction) {
       if (!state.workerId) {
         toast('Worker session haijapatikana. Tafadhali ingia tena.', 'error');
@@ -751,6 +985,29 @@
           toast('Ulishafanya check-in leo.', 'warning');
           return;
         }
+
+        // Teacher-specific readiness gate
+        if (direction === 'in') {
+          const role = (
+            state.profile?.role ||
+            localStorage.getItem('role') ||
+            sessionStorage.getItem('role') || ''
+          ).toLowerCase();
+          if (role.includes('teacher')) {
+            if (btn) btn.textContent = 'Inathibitisha mahitaji...';
+            try {
+              const readiness = await checkTeacherReadiness();
+              if (!readiness.ready) {
+                showTeacherBlockModal(readiness);
+                return;
+              }
+            } catch (readinessErr) {
+              console.warn('Teacher readiness check failed — allowing check-in:', readinessErr);
+            }
+            if (btn) btn.textContent = 'Inahifadhi...';
+          }
+        }
+
         if (direction === 'out' && !existing.checkInTs) {
           toast('Hujafanya check-in bado.', 'warning');
           return;
