@@ -1894,6 +1894,20 @@
     function normalizeMultilineText(text) {
       return String(text || '')
         .replace(/\r/g, '')
+        // Replace Unicode chars jsPDF standard fonts cannot render (bullets, smart quotes, dashes)
+        .replace(/[\u2022\u2023\u25CF\u25E6\u2219\u25AA\u2662\u2666]/g, '-')
+        .replace(/[\u2713\u2714\u2715\u2716\u2717\u2718]/g, '-')
+        .replace(/[\u2013\u2014\u2015]/g, '-')
+        .replace(/[\u201C\u201D\u00AB\u00BB]/g, '"')
+        .replace(/[\u2018\u2019\u2039\u203A]/g, "'")
+        .replace(/\u00A0/g, ' ')
+        // Remove stray encoding artifacts like %Ï from PDF extraction
+        .replace(/%[\x80-\xFF]/g, '')
+        // Fix OCR spaced characters: "S t r u c t u r e" -> "Structure of the Ear"
+        // Matches 5+ single letters each separated by exactly one space
+        .replace(/(?:^|(?<=\s|[^a-zA-Z]))([a-zA-Z] ){4,}[a-zA-Z](?=[^a-zA-Z]|$)/gm, (m) =>
+          m.replace(/ /g, '').replace(/([a-z])([A-Z])/g, '$1 $2')
+        )
         .replace(/[ \t]+\n/g, '\n')
         .replace(/\n{3,}/g, '\n\n')
         .replace(/[ \t]{2,}/g, ' ')
@@ -2027,20 +2041,28 @@
             console.warn('Unable to resolve school logo', error);
           }
         }
-        if (!logoUrl) return null;
-        try {
-          const response = await fetch(logoUrl, { credentials: 'omit' });
-          const blob = await response.blob();
-          return await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-          });
-        } catch (error) {
-          console.warn('Unable to load school logo', error);
-          return null;
+        const fetchDataUrl = async (url) => {
+          try {
+            const response = await fetch(url, { credentials: 'omit' });
+            if (!response.ok) return null;
+            const blob = await response.blob();
+            return await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            });
+          } catch (error) {
+            console.warn('Unable to load logo from', url, error);
+            return null;
+          }
+        };
+        if (logoUrl) {
+          const dataUrl = await fetchDataUrl(logoUrl);
+          if (dataUrl) return dataUrl;
         }
+        // Fallback to local smap logo
+        return fetchDataUrl('/images/somap-logo.png.jpg');
       })();
       return schoolLogoDataUrlPromise;
     }
@@ -2144,12 +2166,12 @@
       if (logoDataUrl) {
         try { doc.addImage(logoDataUrl, 'PNG', 16, 13, 15, 15); } catch (_) {}
       }
-      doc.setFont('helvetica', 'bold');
+      doc.setFont('times', 'bold');
       doc.setFontSize(15);
       doc.text(schoolName || getCurrentSchoolName(), pageWidth / 2, 18, { align: 'center' });
       doc.setFontSize(11);
       doc.text(title, pageWidth / 2, 24, { align: 'center' });
-      doc.setFont('helvetica', 'normal');
+      doc.setFont('times', 'normal');
       doc.setFontSize(8.5);
       doc.text(subtitle, pageWidth / 2, 29.5, { align: 'center' });
     }
@@ -2159,7 +2181,7 @@
         startY,
         body: rows,
         theme: 'grid',
-        styles: { fontSize: 9, cellPadding: 2.4, lineColor: [148, 163, 184], lineWidth: 0.2 },
+        styles: { font: 'times', fontSize: 9, cellPadding: 2.4, lineColor: [148, 163, 184], lineWidth: 0.2 },
         columnStyles: {
           0: { fontStyle: 'bold', fillColor: [241, 245, 249], cellWidth: 34 },
           1: { cellWidth: 56 },
@@ -2182,8 +2204,8 @@
           ['Registered', (attendance.presentBoys || 0) + (attendance.absentBoys || 0), (attendance.presentGirls || 0) + (attendance.absentGirls || 0), attendance.total || 0]
         ],
         theme: 'grid',
-        headStyles: { fillColor: [22, 163, 74], textColor: 255, fontSize: 9 },
-        styles: { fontSize: 9, cellPadding: 2.2, lineColor: [148, 163, 184], lineWidth: 0.2, halign: 'center' },
+        headStyles: { font: 'times', fillColor: [22, 163, 74], textColor: 255, fontSize: 9 },
+        styles: { font: 'times', fontSize: 9, cellPadding: 2.2, lineColor: [148, 163, 184], lineWidth: 0.2, halign: 'center' },
         columnStyles: { 0: { halign: 'left', fontStyle: 'bold' } },
         margin: { left: 12, right: 12 }
       });
@@ -2195,24 +2217,29 @@
       let y = startY;
       const text = formatSectionValueForPdf(title, value);
       const labelHeight = 6;
+      // Set content font before splitTextToSize so wrapping is calculated correctly
+      doc.setFont('times', 'normal');
+      doc.setFontSize(11);
+      doc.setLineHeightFactor(1.25);
+      const lineH = doc.getLineHeight();
       const lines = String(text || 'N/A')
         .split('\n')
-        .flatMap((line) => doc.splitTextToSize(line || ' ', 180));
-      const estimatedHeight = labelHeight + Math.max(8, lines.length * 4.3) + 4;
+        .flatMap((line) => doc.splitTextToSize(line || ' ', 176));
+      const estimatedHeight = labelHeight + Math.max(8, lines.length * lineH + 4) + 4;
       if (y + estimatedHeight > pageHeight - 14) {
         doc.addPage();
         y = 18;
       }
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10.5);
+      doc.setFont('times', 'bold');
+      doc.setFontSize(11);
       doc.text(title, 12, y);
-      y += 4.5;
+      y += 5;
       doc.setDrawColor(226, 232, 240);
       doc.setFillColor(248, 250, 252);
-      const blockHeight = Math.max(10, lines.length * 4.3 + 4);
+      const blockHeight = Math.max(10, lines.length * lineH + 4);
       doc.roundedRect(12, y - 2.5, 186, blockHeight, 2, 2, 'FD');
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9.2);
+      doc.setFont('times', 'normal');
+      doc.setFontSize(11);
       doc.text(lines, 15, y + 1);
       return y + blockHeight + 4;
     }
@@ -2252,9 +2279,10 @@
       y = addSectionBlock(doc, 'Reference Materials / Sources', note.references, y);
       y = addSectionBlock(doc, 'Teaching Tips / Notes for Self', note.teachingTips, y);
 
+      doc.setFont('times', 'normal');
       doc.setFontSize(8);
       doc.setTextColor(71, 85, 105);
-      doc.text(`Export ${index + 1} of ${total} • Teacher ${context.teacherName || 'N/A'} • Present ${context.attendance.present || 0}/${context.attendance.total || 0}`, 12, doc.internal.pageSize.getHeight() - 8);
+      doc.text(`Export ${index + 1} of ${total} - Teacher ${context.teacherName || 'N/A'} - Present ${context.attendance.present || 0}/${context.attendance.total || 0}`, 12, doc.internal.pageSize.getHeight() - 8);
       doc.setTextColor(0, 0, 0);
     }
 
