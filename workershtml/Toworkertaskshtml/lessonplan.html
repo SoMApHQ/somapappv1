@@ -752,7 +752,7 @@
 
       <div class="form-group">
         <label>Homework / Assignment</label>
-        <textarea id="planHomework" placeholder="Any homework or follow-up tasks?"></textarea>
+        <textarea id="planHomework" placeholder="Optional: any extra notes about the homework assignment (questions are selected from lesson notes via the button below)."></textarea>
         <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;">
           <button class="btn btn-secondary" type="button" id="loadHomeworkFromNotesBtn">Use Lesson Notes Homework</button>
           <button class="btn btn-success" type="button" id="markHomeworkGivenBtn">Mark GIVEN</button>
@@ -1735,7 +1735,7 @@
         topic: planTopic?.value || ''
       };
       if (!selection.className || !selection.subject || !selection.topic) {
-        if (!planHomework?.value.trim()) lessonHomeworkSourceMeta = null;
+        lessonHomeworkSourceMeta = null;
         renderHomeworkSyncStatus();
         return null;
       }
@@ -1743,7 +1743,7 @@
       const notesMap = await getLessonNotesForTeacher(planDate?.value ? new Date(planDate.value).getFullYear() : getYear());
       const matchedNote = findBestLessonNoteMatch(notesMap, selection);
       if (!matchedNote) {
-        if (!planHomework?.value.trim()) lessonHomeworkSourceMeta = null;
+        lessonHomeworkSourceMeta = null;
         renderHomeworkSyncStatus();
         return null;
       }
@@ -1756,10 +1756,6 @@
         syncedAt: Date.now()
       };
 
-      const shouldFill = Boolean(options.force || !compactTextBlock(planHomework?.value));
-      if (shouldFill && planHomework) {
-        planHomework.value = matchedNote.practiceQuestions || '';
-      }
       renderHomeworkSyncStatus();
       return matchedNote;
     }
@@ -2808,64 +2804,14 @@
       }
     });
     if (loadHomeworkFromNotesBtn) {
-      loadHomeworkFromNotesBtn.addEventListener('click', async () => {
-        const note = await maybeSyncHomeworkFromNotes({ force: true });
-        if (note) toast('Homework loaded from matching lesson notes.', 'success');
-        else toast('No matching lesson notes homework was found for this class, subject, term, and topic.', 'warning');
-      });
+      loadHomeworkFromNotesBtn.addEventListener('click', () => openHomeworkPickerModal());
     }
     if (markHomeworkGivenBtn) {
-      markHomeworkGivenBtn.addEventListener('click', () => {
-        const homeworkText = compactTextBlock(planHomework?.value);
-        if (!homeworkText) {
-          toast('Load or write homework in the lesson plan before marking it as given.', 'warning');
-          planHomework?.focus();
-          return;
-        }
-
-        const detectedCount = lessonHomeworkSourceMeta?.questionCount || countHomeworkQuestions(homeworkText);
-        const countInput = window.prompt('How many question(s) were given?', detectedCount ? String(detectedCount) : '');
-        if (countInput === null) return;
-        const questionCount = Math.max(0, parseInt(String(countInput).trim(), 10) || 0);
-        if (!questionCount) {
-          toast('Enter a valid number of homework questions.', 'warning');
-          return;
-        }
-
-        const topicInput = window.prompt('From which topic were the questions given?', compactTextBlock(planTopic?.value || lessonHomeworkSourceMeta?.topic || ''));
-        if (topicInput === null) return;
-        const sourceTopic = compactTextBlock(topicInput || planTopic?.value || lessonHomeworkSourceMeta?.topic || '');
-        if (!sourceTopic) {
-          toast('Enter the topic used for the homework.', 'warning');
-          return;
-        }
-
-        const scopeInput = window.prompt('Type "same topic" or "revision".', homeworkGivenMeta?.scope || 'same topic');
-        if (scopeInput === null) return;
-        const normalizedScope = L(scopeInput).includes('revision') ? 'revision' : 'same topic';
-        homeworkGivenMeta = {
-          given: true,
-          questionCount,
-          sourceTopic,
-          scope: normalizedScope,
-          markedAt: Date.now()
-        };
-        homeworkGivenMeta.journalText = buildHomeworkGivenJournalText(homeworkGivenMeta);
-        renderHomeworkSyncStatus();
-        toast('Homework marked as GIVEN for class journal sync.', 'success');
-      });
+      markHomeworkGivenBtn.addEventListener('click', () => openHomeworkPickerModal());
     }
     if (clearHomeworkGivenBtn) {
       clearHomeworkGivenBtn.addEventListener('click', () => {
         homeworkGivenMeta = null;
-        renderHomeworkSyncStatus();
-      });
-    }
-    if (planHomework) {
-      planHomework.addEventListener('input', () => {
-        if (!compactTextBlock(planHomework.value)) {
-          homeworkGivenMeta = null;
-        }
         renderHomeworkSyncStatus();
       });
     }
@@ -4152,7 +4098,93 @@ ${plan.reflection || 'N/A'}
 
     // Initialize
     loadTeacherConfig();
+
+    // Homework lesson notes picker modal
+    document.getElementById('hwPickerCloseBtn')?.addEventListener('click', () => {
+      document.getElementById('hwPickerModal').style.display = 'none';
+    });
+    document.getElementById('hwPickerModal')?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+    });
+
+    async function openHomeworkPickerModal() {
+      const modal = document.getElementById('hwPickerModal');
+      const list = document.getElementById('hwPickerList');
+      if (!modal || !list) return;
+      modal.style.display = 'block';
+      list.innerHTML = '<div style="color:rgba(255,255,255,0.5);text-align:center;padding:24px;font-size:0.9rem;">Loading lesson notes&hellip;</div>';
+
+      const year = planDate?.value ? new Date(planDate.value).getFullYear() : getYear();
+      const notesMap = await getLessonNotesForTeacher(year);
+      const entries = Object.entries(notesMap || {})
+        .map(([id, note]) => ({ id, ...note }))
+        .filter((note) => compactTextBlock(note.practiceQuestions || ''))
+        .sort((a, b) => (Number(b.updatedAt || b.createdAt || 0)) - (Number(a.updatedAt || a.createdAt || 0)));
+
+      if (!entries.length) {
+        list.innerHTML = '<div style="color:rgba(255,255,255,0.5);text-align:center;padding:24px;font-size:0.9rem;">No lesson notes with homework found for this year.</div>';
+        return;
+      }
+
+      list.innerHTML = entries.map((note) => {
+        const qCount = countHomeworkQuestions(note.practiceQuestions, note.homeworkMeta);
+        const stamp = Number(note.updatedAt || note.createdAt || 0);
+        const savedLabel = stamp
+          ? new Date(stamp).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+          : 'Unknown date';
+        const termLabel = note.term ? ` &bull; ${note.term}` : '';
+        return `
+          <div onclick="selectHomeworkNote('${note.id}')"
+               style="background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;padding:12px 14px;cursor:pointer;transition:background .15s;"
+               onmouseover="this.style.background='rgba(99,102,241,0.25)'" onmouseout="this.style.background='rgba(255,255,255,0.07)'">
+            <div style="font-weight:600;font-size:0.93rem;">${note.topic || 'Untitled'}</div>
+            <div style="font-size:0.8rem;color:rgba(255,255,255,0.65);margin-top:3px;">${note.class || ''} &bull; ${note.subject || ''}${termLabel}</div>
+            <div style="font-size:0.78rem;color:rgba(255,255,255,0.5);margin-top:3px;">Saved: ${savedLabel} &bull; <strong style="color:rgba(99,255,160,0.9);">${qCount} question${qCount === 1 ? '' : 's'}</strong></div>
+          </div>`;
+      }).join('');
+    }
+
+    window.selectHomeworkNote = function(noteId) {
+      const year = planDate?.value ? new Date(planDate.value).getFullYear() : getYear();
+      getLessonNotesForTeacher(year).then((notesMap) => {
+        const note = (notesMap || {})[noteId];
+        if (!note) return;
+        const questionCount = countHomeworkQuestions(note.practiceQuestions, note.homeworkMeta);
+        const sourceTopic = compactTextBlock(note.topic || planTopic?.value || '');
+        lessonHomeworkSourceMeta = {
+          noteId: note.id || noteId,
+          topic: sourceTopic,
+          questionCount,
+          syncedAt: Date.now()
+        };
+        homeworkGivenMeta = {
+          given: true,
+          questionCount,
+          sourceTopic,
+          scope: 'same topic',
+          noteId,
+          markedAt: Date.now()
+        };
+        homeworkGivenMeta.journalText = buildHomeworkGivenJournalText(homeworkGivenMeta);
+        renderHomeworkSyncStatus();
+        document.getElementById('hwPickerModal').style.display = 'none';
+        toast(`Homework marked as GIVEN — ${questionCount} question${questionCount === 1 ? '' : 's'} from "${sourceTopic}".`, 'success');
+      });
+    };
   </script>
+<!-- Homework lesson notes picker modal -->
+<div id="hwPickerModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); z-index:9999; overflow-y:auto; padding:20px 12px;">
+  <div style="background:#1e293b; border:1px solid rgba(255,255,255,0.12); border-radius:12px; max-width:620px; margin:0 auto; padding:24px; color:#fff; box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+      <h3 style="margin:0; font-size:1.05rem; font-weight:700;">Select Lesson Notes — Mark Homework as Given</h3>
+      <button id="hwPickerCloseBtn" style="background:none;border:none;color:rgba(255,255,255,0.7);font-size:1.6rem;cursor:pointer;line-height:1;padding:0 4px;">&times;</button>
+    </div>
+    <p style="margin:0 0 14px; font-size:0.82rem; color:rgba(255,255,255,0.6);">Choose the lesson notes whose homework was assigned. The question count is detected automatically.</p>
+    <div id="hwPickerList" style="max-height:420px; overflow-y:auto; display:flex; flex-direction:column; gap:8px;">
+      <div style="color:rgba(255,255,255,0.5); text-align:center; padding:24px; font-size:0.9rem;">Loading lesson notes&hellip;</div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
 
