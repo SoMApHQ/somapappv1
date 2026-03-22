@@ -1267,6 +1267,7 @@
                     invoiceNo: inv.invoiceNo || req.invoiceNo || `MAIN-${child.key.slice(-6).toUpperCase()}`,
                     vehicle: req.vehiclePlate || req.vehicleId || inv.vehiclePlate || '-',
                     part: req.part || inv.part || '-',
+                    itemCount: Number(req.itemCount || inv.itemCount || (Array.isArray(req.items) ? req.items.length : 1)),
                     total: Number(inv.total || req.totalQuotedCost || (Number(req.estCost || 0) + Number(req.fundiLabourCost || 0))),
                     approvedAt: Number(inv.approvals?.approvedAt || req.reviewedAt || 0),
                     year: Number(req.year || inv.year || 0)
@@ -1279,16 +1280,23 @@
                 tbody.innerHTML = '<tr><td colspan="6">No approved maintenance invoices yet.</td></tr>';
                 return;
             }
-            tbody.innerHTML = filteredRows.slice(0, 40).map((r) => `
+            tbody.innerHTML = filteredRows.slice(0, 40).map((r) => {
+                const partDisplay = r.itemCount > 1
+                    ? `${r.itemCount} bidhaa — ${r.part}`
+                    : (r.part || '-');
+                const approvedDate = r.approvedAt
+                    ? new Date(r.approvedAt).toLocaleDateString('sw-TZ', {day:'2-digit',month:'short',year:'numeric'})
+                    : '-';
+                return `
                 <tr>
                     <td>${r.invoiceNo}</td>
                     <td>${r.vehicle}</td>
-                    <td>${r.part}</td>
-                    <td>${formatTsh(r.total)}</td>
-                    <td>${r.approvedAt ? new Date(r.approvedAt).toLocaleDateString() : '-'}</td>
-                    <td><button class="btn btn-small" data-maint-pdf="${r.id}">Download PDF</button></td>
-                </tr>
-            `).join('');
+                    <td>${partDisplay}</td>
+                    <td><strong>${formatTsh(r.total)}</strong></td>
+                    <td>${approvedDate}</td>
+                    <td><button class="btn btn-small" data-maint-pdf="${r.id}">Pakua PDF</button></td>
+                </tr>`;
+            }).join('');
         } catch (err) {
             console.error('Failed to load maintenance invoices', err);
             tbody.innerHTML = '<tr><td colspan="6">Error loading invoices.</td></tr>';
@@ -1327,20 +1335,24 @@
                 tbody.innerHTML = '<tr><td colspan="6">No pending maintenance requests.</td></tr>';
                 return;
             }
-            tbody.innerHTML = renderRows.slice(0, 50).map((r) => `
+            tbody.innerHTML = renderRows.slice(0, 50).map((r) => {
+                const multiItems = Array.isArray(r.items) && r.items.length > 1;
+                const partCell = multiItems
+                    ? `<strong>${r.items.length} bidhaa (items)</strong><br/><small>${r.items.slice(0,2).map(i=>i.part).join(', ')}${r.items.length > 2 ? '…' : ''}</small>`
+                    : `<strong>${r.part || '-'}</strong><br/><small>${r.sokoShopName || '-'} · ${r.sokoPhone || '-'}</small>`;
+                const date = r.createdAt ? new Date(r.createdAt).toLocaleDateString('sw-TZ', {day:'2-digit',month:'short',year:'numeric'}) : '-';
+                return `
                 <tr>
                     <td>
                         <strong>${r.driverName || '-'}</strong><br/>
-                        <small>${r.vehiclePlate || r.vehicleId || '-'}</small>
+                        <small>${r.vehiclePlate || r.vehicleId || '-'}</small><br/>
+                        <small style="color:#6b7280;">${date}</small>
                     </td>
-                    <td>
-                        <strong>${r.part || '-'}</strong><br/>
-                        <small>${r.sokoShopName || '-'} · ${r.sokoPhone || '-'}</small>
-                    </td>
+                    <td>${partCell}</td>
                     <td>
                         Spare: ${formatTsh(r.estCost || 0)}<br/>
                         Labour: ${formatTsh(r.fundiLabourCost || 0)}<br/>
-                        Total: ${formatTsh((Number(r.estCost || 0) + Number(r.fundiLabourCost || 0)))}
+                        <strong>Total: ${formatTsh((Number(r.estCost || 0) + Number(r.fundiLabourCost || 0)))}</strong>
                     </td>
                     <td>${maintFlagText(r)}</td>
                     <td>${r.notes || '-'}</td>
@@ -1350,7 +1362,8 @@
                         <button class="btn btn-small" style="background:#dc2626;color:#fff;" data-maint-reject="${r.id}">Reject</button>
                     </td>
                 </tr>
-            `).join('');
+                `;
+            }).join('');
         } catch (err) {
             console.error('Failed to load pending maintenance table', err);
             tbody.innerHTML = '<tr><td colspan="6">Error loading pending requests.</td></tr>';
@@ -1390,13 +1403,19 @@
                 updatedAt: Date.now(),
             };
         });
-        if (req.part && window.TransportMaintenance) {
-            const slug = window.TransportMaintenance.slug(req.part);
-            await ledgerBase.child(`partsHistory/${slug}`).transaction((current) => {
-                const h = current || [];
-                h.push({ reqId, ts: Date.now(), cost: Number(req.estCost || 0) });
-                return h.slice(-30);
-            });
+        if (window.TransportMaintenance) {
+            const itemsToRecord = Array.isArray(req.items) && req.items.length
+                ? req.items
+                : req.part ? [{ part: req.part, estCost: req.estCost }] : [];
+            for (const recItem of itemsToRecord) {
+                if (!recItem.part) continue;
+                const slug = window.TransportMaintenance.slug(recItem.part);
+                await ledgerBase.child(`partsHistory/${slug}`).transaction((current) => {
+                    const h = current || [];
+                    h.push({ reqId, ts: Date.now(), cost: Number(recItem.estCost || 0) });
+                    return h.slice(-30);
+                });
+            }
         }
         const invoice = window.TransportMaintenance
             ? window.TransportMaintenance.buildInvoiceObject({ id: reqId, ...req }, {
@@ -1447,21 +1466,54 @@
             const reqId = viewBtn.getAttribute('data-maint-view');
             const snap = await db.ref(`maintenance_requests/${reqId}`).once('value');
             const r = snap.val() || {};
-            const details = [
-                `Driver: ${r.driverName || '-'}`,
-                `Vehicle: ${r.vehiclePlate || r.vehicleId || '-'}`,
-                `Part: ${r.part || '-'}`,
-                `Shop: ${r.sokoShopName || '-'}`,
-                `Seller Contact: ${r.sokoPhone || '-'}`,
-                `WhatsApp: ${r.sokoWhatsapp || '-'}`,
-                `Payment (Lipa): ${r.sokoLipaNumber || '-'}`,
-                `Spare Cost: ${formatTsh(r.estCost || 0)}`,
-                `Labour Cost: ${formatTsh(r.fundiLabourCost || 0)}`,
-                `Total: ${formatTsh((Number(r.estCost || 0) + Number(r.fundiLabourCost || 0)))}`,
-                `Flags: ${maintFlagText(r)}`,
-                `Notes: ${r.notes || '-'}`,
-            ].join('<br/>');
-            Swal.fire({ title: 'Maintenance Request Details', html: details, width: 760 });
+            const multiItems = Array.isArray(r.items) && r.items.length > 1;
+            const date = r.createdAt ? new Date(r.createdAt).toLocaleString('sw-TZ') : '-';
+            let itemsHtml = '';
+            if (multiItems) {
+                const rows = r.items.map(item => `
+                    <tr>
+                        <td style="padding:6px 8px;border:1px solid #d1d5db;">${item.part || '-'}</td>
+                        <td style="padding:6px 8px;border:1px solid #d1d5db;">${item.sokoShopName || '-'}</td>
+                        <td style="padding:6px 8px;border:1px solid #d1d5db;">${formatTsh(item.estCost || 0)}</td>
+                        <td style="padding:6px 8px;border:1px solid #d1d5db;">${item.fundiName || '-'}</td>
+                        <td style="padding:6px 8px;border:1px solid #d1d5db;">${item.fundiContact || '-'}</td>
+                        <td style="padding:6px 8px;border:1px solid #d1d5db;">${formatTsh(item.fundiLabourCost || 0)}</td>
+                    </tr>`).join('');
+                itemsHtml = `
+                    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:10px;">
+                        <thead><tr style="background:#ecfeff;">
+                            <th style="padding:6px 8px;border:1px solid #d1d5db;">Bidhaa</th>
+                            <th style="padding:6px 8px;border:1px solid #d1d5db;">Duka</th>
+                            <th style="padding:6px 8px;border:1px solid #d1d5db;">Gharama</th>
+                            <th style="padding:6px 8px;border:1px solid #d1d5db;">Fundi</th>
+                            <th style="padding:6px 8px;border:1px solid #d1d5db;">Simu Fundi</th>
+                            <th style="padding:6px 8px;border:1px solid #d1d5db;">Kazi</th>
+                        </tr></thead>
+                        <tbody>${rows}</tbody>
+                        <tfoot><tr style="background:#f0fdfa;font-weight:700;">
+                            <td colspan="2" style="padding:6px 8px;border:1px solid #d1d5db;">Jumla</td>
+                            <td style="padding:6px 8px;border:1px solid #d1d5db;">${formatTsh(r.estCost || 0)}</td>
+                            <td></td>
+                            <td></td>
+                            <td style="padding:6px 8px;border:1px solid #d1d5db;">${formatTsh(r.fundiLabourCost || 0)}</td>
+                        </tfoot>
+                    </table>
+                    <p style="margin-top:8px;font-weight:700;">Grand Total: ${formatTsh((Number(r.estCost||0)+Number(r.fundiLabourCost||0)))}</p>`;
+            } else {
+                itemsHtml = `
+                    <p><strong>Bidhaa:</strong> ${r.part || '-'}</p>
+                    <p><strong>Duka:</strong> ${r.sokoShopName || '-'} · ${r.sokoPhone || '-'}</p>
+                    <p><strong>Fundi:</strong> ${r.fundiName || '-'} · ${r.fundiContact || '-'}</p>
+                    <p><strong>Spare:</strong> ${formatTsh(r.estCost||0)} | <strong>Labour:</strong> ${formatTsh(r.fundiLabourCost||0)} | <strong>Total:</strong> ${formatTsh((Number(r.estCost||0)+Number(r.fundiLabourCost||0)))}</p>`;
+            }
+            const details = `
+                <div style="text-align:left;font-size:14px;">
+                    <p><strong>Dereva:</strong> ${r.driverName || '-'} &nbsp;|&nbsp; <strong>Gari:</strong> ${r.vehiclePlate || r.vehicleId || '-'}</p>
+                    <p><strong>Tarehe:</strong> ${date} &nbsp;|&nbsp; <strong>Flags:</strong> ${maintFlagText(r)}</p>
+                    <p><strong>Maelezo:</strong> ${r.notes || '-'}</p>
+                    ${itemsHtml}
+                </div>`;
+            Swal.fire({ title: 'Maombi ya Matengenezo', html: details, width: 820 });
             return;
         }
 

@@ -424,8 +424,8 @@
             <div><strong>Approved Date:</strong> ${approvedDate}</div>
             <div><strong>Vehicle:</strong> ${invoice.vehiclePlate || invoice.vehicleId || "-"}</div>
             <div><strong>Model:</strong> ${invoice.vehicleModel || "-"}</div>
-            <div><strong>Driver:</strong> ${invoice.driverName || "-"}</div>
-            <div><strong>Fundi:</strong> ${invoice.fundiName || "-"}</div>
+            <div><strong>Dereva:</strong> ${invoice.driverName || "-"}</div>
+            <div><strong>Fundi:</strong> ${invoice.fundiName || "-"}${invoice.items && invoice.items[0]?.fundiContact ? " · " + invoice.items[0].fundiContact : ""}</div>
           </div>
 
           <div class="inv-section">
@@ -450,7 +450,7 @@
                   <td>${item.part || "-"}</td>
                   <td>${item.sokoShopName || "-"}<br/><small>${item.sokoPhone || ""}</small></td>
                   <td>${fmtMoney(item.estCost)}</td>
-                  <td>${item.fundiName || "-"}</td>
+                  <td>${item.fundiName || "-"}<br/><small>${item.fundiContact || ""}</small></td>
                   <td>${fmtMoney(item.fundiLabourCost)}</td>
                 </tr>`).join("")}
                 <tr style="font-weight:700; background:#f0fdfa;">
@@ -606,7 +606,8 @@ ${invoiceBodyHtml(invoice)}
     y = 36;
     row("Invoice #", invoice.invoiceNo || "-", "Approved Date", approvedDate);
     row("Vehicle", invoice.vehiclePlate || invoice.vehicleId || "-", "Model", invoice.vehicleModel || "-");
-    row("Driver", invoice.driverName || "-", "Fundi", invoice.fundiName || "-");
+    const fundiDisplay = invoice.fundiName ? `${invoice.fundiName}${invoice.items && invoice.items[0]?.fundiContact ? " · " + invoice.items[0].fundiContact : ""}` : "-";
+    row("Driver", invoice.driverName || "-", "Fundi", fundiDisplay);
     line();
 
     text("This is an invoice requesting you to do the following approved maintenance work.", 11, true, [120, 53, 15]);
@@ -617,28 +618,30 @@ ${invoiceBodyHtml(invoice)}
     if (multiItems) {
       // Multi-item header row
       const colPart = margin + 2;
-      const colSpare = margin + 94;
-      const colFundi = margin + 120;
+      const colSpare = margin + 84;
+      const colFundi = margin + 112;
       const colLabour = pageW - margin - 28;
       doc.setFillColor(236, 254, 255);
       doc.rect(margin, y, pageW - margin * 2, 8, "F");
       doc.setFont("helvetica", "bold");
       doc.setFontSize(9);
       doc.setTextColor(17, 24, 39);
-      doc.text("SPARE PART", colPart, y + 5.2);
-      doc.text("SPARE COST", colSpare, y + 5.2);
-      doc.text("FUNDI", colFundi, y + 5.2);
-      doc.text("LABOUR", colLabour, y + 5.2);
+      doc.text("BIDHAA / SPARE PART", colPart, y + 5.2);
+      doc.text("GHARAMA", colSpare, y + 5.2);
+      doc.text("FUNDI (SIMU)", colFundi, y + 5.2);
+      doc.text("KAZI", colLabour, y + 5.2);
       y += 8;
       doc.setFont("helvetica", "normal");
       multiItems.forEach((item) => {
-        doc.rect(margin, y, pageW - margin * 2, 8);
-        const partLabel = doc.splitTextToSize(String(item.part || "-"), 88);
+        const rowH = 10;
+        doc.rect(margin, y, pageW - margin * 2, rowH);
+        const partLabel = doc.splitTextToSize(String(item.part || "-"), 80);
         doc.text(partLabel[0], colPart, y + 5.2);
         doc.text(fmtMoney(Number(item.estCost || 0)), colSpare, y + 5.2);
-        doc.text(String(item.fundiName || "-").slice(0, 20), colFundi, y + 5.2);
+        const fundiLine = `${String(item.fundiName || "-").slice(0, 16)} ${item.fundiContact ? item.fundiContact.slice(0, 13) : ""}`.trim();
+        doc.text(fundiLine, colFundi, y + 5.2);
         doc.text(fmtMoney(Number(item.fundiLabourCost || 0)), colLabour, y + 5.2);
-        y += 8;
+        y += rowH;
       });
       // Subtotals
       doc.rect(margin, y, pageW - margin * 2, 8);

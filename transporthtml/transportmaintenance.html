@@ -196,20 +196,24 @@
           </div>
           <div class="grid two mt-1">
             <div>
-              <label>Quoted Spare Cost (TZS)</label>
-              <input id="costInput" type="number" min="0" placeholder="0" />
+              <label for="costInput">Gharama ya Bidhaa (TZS) — Quoted Spare Cost</label>
+              <input id="costInput" type="number" min="0" placeholder="0" aria-label="Quoted spare cost" />
             </div>
             <div>
-              <label>Fundi Name <span style="color:#f59e0b; font-weight:normal;">(mechanic)</span></label>
-              <input id="fundiNameInput" placeholder="e.g. Juma Hassan" />
+              <label for="fundiNameInput">Jina la Fundi <span style="color:#f59e0b; font-weight:normal;">(lazima)</span></label>
+              <input id="fundiNameInput" placeholder="e.g. Juma Hassan" aria-label="Fundi name" />
             </div>
             <div>
-              <label>Fundi Labour Cost (TZS)</label>
-              <input id="labourCostInput" type="number" min="0" value="0" />
+              <label for="fundiContactInput">Simu ya Fundi <span style="color:#f59e0b; font-weight:normal;">(lazima)</span></label>
+              <input id="fundiContactInput" placeholder="e.g. 0712345678" aria-label="Fundi phone number" />
             </div>
-            <div style="display:flex; align-items:flex-end;">
-              <button type="button" id="addItemBtn" class="btn" style="width:100%;">+ Add Item to Request</button>
+            <div>
+              <label for="labourCostInput">Gharama ya Kazi ya Fundi (TZS)</label>
+              <input id="labourCostInput" type="number" min="0" value="0" aria-label="Fundi labour cost" />
             </div>
+          </div>
+          <div style="text-align:right; margin-top:0.5rem;">
+            <button type="button" id="addItemBtn" class="btn">+ Ongeza Bidhaa hii (Add Item)</button>
           </div>
           <div id="addItemError" class="alert red hidden" style="margin-top:0.5rem;"></div>
         </div>
@@ -288,6 +292,7 @@
         cost: document.getElementById("costInput"),
         labourCost: document.getElementById("labourCostInput"),
         fundiName: document.getElementById("fundiNameInput"),
+        fundiContact: document.getElementById("fundiContactInput"),
         odo: document.getElementById("odoInput"),
         notes: document.getElementById("notesInput"),
         photo: document.getElementById("photoInput"),
@@ -332,7 +337,7 @@
         toast.textContent = message;
         toast.classList.remove("hidden");
         toast.style.background = tone === "bad" ? "#dc2626" : "#1f2937";
-        setTimeout(() => toast.classList.add("hidden"), 3200);
+        setTimeout(() => toast.classList.add("hidden"), 5000);
       }
 
       function showBox(el, text) {
@@ -372,7 +377,7 @@
                 <small style="display:block; color:#94a3b8;">${item.sokoShopName} &middot; Soko: ${TransportMaintenance.fmtMoney(item.sokoPrice, item.sokoCurrency)}</small>
               </div>
               <small style="white-space:nowrap;">Spare: <strong>${TransportMaintenance.fmtMoney(item.estCost)}</strong></small>
-              <small style="white-space:nowrap;">Fundi: <strong>${item.fundiName || "-"}</strong></small>
+              <small style="white-space:nowrap;">Fundi: <strong>${item.fundiName || "-"}</strong> ${item.fundiContact ? `(${item.fundiContact})` : ""}</small>
               <small style="white-space:nowrap;">Labour: <strong>${TransportMaintenance.fmtMoney(item.fundiLabourCost)}</strong></small>
               <button type="button" class="btn danger" style="padding:0.2rem 0.6rem; font-size:0.85rem;" data-remove-item="${i}">&times;</button>
             </div>
@@ -780,8 +785,18 @@
         event.preventDefault();
         clearBoxes();
         const vehicle = selectedVehicle();
-        if (!vehicle) return showBox(refs.formError, "Select a vehicle first.");
-        if (!state.pendingItems.length) return showBox(refs.formError, "Add at least one spare item using the soko picker above.");
+        if (!vehicle) return showBox(refs.formError, "Chagua gari kwanza. (Select a vehicle first.)");
+
+        // Auto-add current picker state if driver forgot to click "Add Item"
+        if (!state.pendingItems.length) {
+          const auto = buildPendingItemFromPicker();
+          if (auto) {
+            state.pendingItems.push(auto);
+            renderItemsList();
+            clearPicker();
+          }
+        }
+        if (!state.pendingItems.length) return showBox(refs.formError, "Ongeza angalau bidhaa moja na jina + simu ya fundi. (Add at least one item with fundi name and contact.)");
 
         try {
           const combinedFlags = [];
@@ -855,7 +870,8 @@
             if (url) payload.photoUrl = url;
           }
           await requestRef.set(payload);
-          showToast("Request sent");
+          // Swahili success — tell driver to collect invoice from accountant
+          showToast("Ombi limetumwa! Ankara itatolewa na mhasibu baada ya kupitishwa.", "ok");
           refs.form.reset();
           refs.vehicle.value = vehicle.id;
           refs.sokoItemKey.value = "";
@@ -863,6 +879,7 @@
           refs.sokoMeta.textContent = "";
           refs.sokoPrice.value = "";
           refs.sokoSearch.value = "";
+          refs.fundiContact.value = "";
           state.pendingItems = [];
           renderItemsList();
           renderSokoList();
@@ -884,19 +901,13 @@
         if (refs.part.value) chooseSokoByKey(refs.part.value);
       });
 
-      refs.addItemBtn.addEventListener("click", () => {
-        showBox(refs.addItemError, "");
+      function buildPendingItemFromPicker() {
         const item = selectedSokoItem();
-        if (!item) {
-          showBox(refs.addItemError, "Please select a spare part from the soko list first.");
-          return;
-        }
+        if (!item) return null;
         const fundiName = String(refs.fundiName.value || "").trim();
-        if (!fundiName) {
-          showBox(refs.addItemError, "Please enter the fundi (mechanic) name for this item.");
-          return;
-        }
-        state.pendingItems.push({
+        const fundiContact = String(refs.fundiContact.value || "").trim();
+        if (!fundiName || !fundiContact) return null;
+        return {
           part: item.title,
           partSlug: TransportMaintenance.slug(item.title),
           sokoItemId: item.itemId,
@@ -910,10 +921,12 @@
           sokoCurrency: item.currency || "TZS",
           estCost: Number(refs.cost.value || 0),
           fundiName,
+          fundiContact,
           fundiLabourCost: Number(refs.labourCost.value || 0),
-        });
-        renderItemsList();
-        // Clear picker for next item
+        };
+      }
+
+      function clearPicker() {
         refs.sokoItemKey.value = "";
         refs.part.value = "";
         refs.sokoPrice.value = "";
@@ -921,8 +934,32 @@
         refs.cost.value = "";
         refs.labourCost.value = "0";
         refs.fundiName.value = "";
+        refs.fundiContact.value = "";
         refs.sokoSearch.value = "";
         renderSokoList();
+      }
+
+      refs.addItemBtn.addEventListener("click", () => {
+        showBox(refs.addItemError, "");
+        if (!selectedSokoItem()) {
+          showBox(refs.addItemError, "Chagua bidhaa kutoka kwenye orodha ya soko kwanza. (Select a spare part first.)");
+          return;
+        }
+        const fundiName = String(refs.fundiName.value || "").trim();
+        if (!fundiName) {
+          showBox(refs.addItemError, "Andika jina la fundi. (Enter fundi name — required.)");
+          return;
+        }
+        const fundiContact = String(refs.fundiContact.value || "").trim();
+        if (!fundiContact) {
+          showBox(refs.addItemError, "Andika simu ya fundi. (Enter fundi phone — required.)");
+          return;
+        }
+        const pending = buildPendingItemFromPicker();
+        if (!pending) return;
+        state.pendingItems.push(pending);
+        renderItemsList();
+        clearPicker();
       });
 
       document.querySelectorAll("button[data-tab]").forEach((btn) => {
