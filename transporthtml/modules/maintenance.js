@@ -318,8 +318,14 @@
   function buildInvoiceObject(request, reviewer = {}) {
     const issuedAt = Date.now();
     const invoiceNo = `MAIN-${new Date(issuedAt).getFullYear()}-${String(request.id || "").slice(-6).toUpperCase()}`;
-    const spare = Number(request.estCost || 0);
-    const labour = Number(request.fundiLabourCost || 0);
+    const multiItems = Array.isArray(request.items) && request.items.length ? request.items : null;
+    const spare = multiItems
+      ? multiItems.reduce((s, i) => s + Number(i.estCost || 0), 0)
+      : Number(request.estCost || 0);
+    const labour = multiItems
+      ? multiItems.reduce((s, i) => s + Number(i.fundiLabourCost || 0), 0)
+      : Number(request.fundiLabourCost || 0);
+    const firstItem = multiItems ? multiItems[0] : null;
     return {
       invoiceNo,
       requestId: request.id,
@@ -329,6 +335,7 @@
       vehiclePlate: request.vehiclePlate || "",
       vehicleModel: request.vehicleModel || "",
       part: request.part || "",
+      items: multiItems,
       driverName: request.driverName || "",
       driverUid: request.driverUid || "",
       fundiName: request.fundiName || "",
@@ -336,12 +343,12 @@
       spareCost: spare,
       total: spare + labour,
       soko: {
-        shopName: request.sokoShopName || "",
-        ownerName: request.sokoOwnerName || "",
-        phone: request.sokoPhone || "",
-        whatsapp: request.sokoWhatsapp || "",
-        lipaNumber: request.sokoLipaNumber || "",
-        itemId: request.sokoItemId || "",
+        shopName: (firstItem ? firstItem.sokoShopName : request.sokoShopName) || "",
+        ownerName: (firstItem ? firstItem.sokoOwnerName : request.sokoOwnerName) || "",
+        phone: (firstItem ? firstItem.sokoPhone : request.sokoPhone) || "",
+        whatsapp: (firstItem ? firstItem.sokoWhatsapp : request.sokoWhatsapp) || "",
+        lipaNumber: (firstItem ? firstItem.sokoLipaNumber : request.sokoLipaNumber) || "",
+        itemId: (firstItem ? firstItem.sokoItemId : request.sokoItemId) || "",
       },
       approvals: {
         accountantUid: reviewer.uid || "",
@@ -425,23 +432,52 @@
             <div class="inv-note">
               This is an invoice requesting you to do the following approved maintenance work.
             </div>
-            <ol class="inv-list">
-              <li>Purchase and replace spare part: <strong>${invoice.part || "Spare part"}</strong>.</li>
-              <li>Perform required vehicle maintenance and labour tasks for the stated vehicle.</li>
-              <li>Use seller contact and payment details below for procurement.</li>
-            </ol>
 
+            ${invoice.items && invoice.items.length > 1 ? `
+            <table class="inv-table">
+              <thead>
+                <tr>
+                  <th>Spare Part</th>
+                  <th>Shop / Seller</th>
+                  <th>Spare Cost</th>
+                  <th>Fundi</th>
+                  <th>Labour</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${invoice.items.map((item) => `
+                <tr>
+                  <td>${item.part || "-"}</td>
+                  <td>${item.sokoShopName || "-"}<br/><small>${item.sokoPhone || ""}</small></td>
+                  <td>${fmtMoney(item.estCost)}</td>
+                  <td>${item.fundiName || "-"}</td>
+                  <td>${fmtMoney(item.fundiLabourCost)}</td>
+                </tr>`).join("")}
+                <tr style="font-weight:700; background:#f0fdfa;">
+                  <td colspan="2">Subtotals</td>
+                  <td>${fmtMoney(invoice.spareCost)}</td>
+                  <td></td>
+                  <td>${fmtMoney(invoice.fundiLabourCost)}</td>
+                </tr>
+                <tr class="inv-total">
+                  <td colspan="4">Grand Total Approved Amount</td>
+                  <td>${fmtMoney(invoice.total)}</td>
+                </tr>
+              </tbody>
+            </table>
+            ` : `
             <table class="inv-table">
               <thead><tr><th>Approved Work Item</th><th>Amount</th></tr></thead>
               <tbody>
                 <tr><td>${invoice.part || "Spare part"}</td><td>${fmtMoney(invoice.spareCost)}</td></tr>
-                <tr><td>Fundi Labour</td><td>${fmtMoney(invoice.fundiLabourCost)}</td></tr>
+                <tr><td>Fundi Labour (${invoice.fundiName || "-"})</td><td>${fmtMoney(invoice.fundiLabourCost)}</td></tr>
                 <tr class="inv-total"><td>Total Approved Amount</td><td>${fmtMoney(invoice.total)}</td></tr>
               </tbody>
             </table>
+            `}
 
             <table class="inv-table">
-              <thead><tr><th colspan="2">Seller / Shop Contact & Payment Details</th></tr></thead>
+              <thead><tr><th colspan="2">Seller / Shop Contact &amp; Payment Details</th></tr></thead>
               <tbody>
                 <tr><td>Shop Name</td><td>${invoice.soko.shopName || "-"}</td></tr>
                 <tr><td>Seller Name</td><td>${invoice.soko.ownerName || "-"}</td></tr>
@@ -574,35 +610,76 @@ ${invoiceBodyHtml(invoice)}
     line();
 
     text("This is an invoice requesting you to do the following approved maintenance work.", 11, true, [120, 53, 15]);
-    text(`1. Purchase and replace spare part: ${invoice.part || "Spare part"}.`, 10);
-    text("2. Perform required vehicle maintenance and labour tasks for the stated vehicle.", 10);
-    text("3. Use seller contact and payment details below for procurement.", 10);
     line();
 
-    doc.setFillColor(236, 254, 255);
-    doc.rect(margin, y, pageW - margin * 2, 8, "F");
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10);
-    doc.setTextColor(17, 24, 39);
-    doc.text("APPROVED WORK ITEM", margin + 2, y + 5.2);
-    doc.text("AMOUNT", pageW - margin - 34, y + 5.2);
-    y += 8;
-    doc.setFont("helvetica", "normal");
-    doc.rect(margin, y, pageW - margin * 2, 8);
-    doc.text(invoice.part || "Spare part", margin + 2, y + 5.2);
-    doc.text(fmtMoney(spare), pageW - margin - 34, y + 5.2);
-    y += 8;
-    doc.rect(margin, y, pageW - margin * 2, 8);
-    doc.text("Fundi Labour", margin + 2, y + 5.2);
-    doc.text(fmtMoney(labour), pageW - margin - 34, y + 5.2);
-    y += 8;
-    doc.setFillColor(240, 253, 250);
-    doc.rect(margin, y, pageW - margin * 2, 8, "F");
-    doc.rect(margin, y, pageW - margin * 2, 8);
-    doc.setFont("helvetica", "bold");
-    doc.text("Total Approved Amount", margin + 2, y + 5.2);
-    doc.text(fmtMoney(total), pageW - margin - 34, y + 5.2);
-    y += 12;
+    const multiItems = Array.isArray(invoice.items) && invoice.items.length > 1 ? invoice.items : null;
+
+    if (multiItems) {
+      // Multi-item header row
+      const colPart = margin + 2;
+      const colSpare = margin + 94;
+      const colFundi = margin + 120;
+      const colLabour = pageW - margin - 28;
+      doc.setFillColor(236, 254, 255);
+      doc.rect(margin, y, pageW - margin * 2, 8, "F");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9);
+      doc.setTextColor(17, 24, 39);
+      doc.text("SPARE PART", colPart, y + 5.2);
+      doc.text("SPARE COST", colSpare, y + 5.2);
+      doc.text("FUNDI", colFundi, y + 5.2);
+      doc.text("LABOUR", colLabour, y + 5.2);
+      y += 8;
+      doc.setFont("helvetica", "normal");
+      multiItems.forEach((item) => {
+        doc.rect(margin, y, pageW - margin * 2, 8);
+        const partLabel = doc.splitTextToSize(String(item.part || "-"), 88);
+        doc.text(partLabel[0], colPart, y + 5.2);
+        doc.text(fmtMoney(Number(item.estCost || 0)), colSpare, y + 5.2);
+        doc.text(String(item.fundiName || "-").slice(0, 20), colFundi, y + 5.2);
+        doc.text(fmtMoney(Number(item.fundiLabourCost || 0)), colLabour, y + 5.2);
+        y += 8;
+      });
+      // Subtotals
+      doc.rect(margin, y, pageW - margin * 2, 8);
+      doc.setFont("helvetica", "bold");
+      doc.text("Subtotals", colPart, y + 5.2);
+      doc.text(fmtMoney(spare), colSpare, y + 5.2);
+      doc.text(fmtMoney(labour), colLabour, y + 5.2);
+      y += 8;
+      doc.setFillColor(240, 253, 250);
+      doc.rect(margin, y, pageW - margin * 2, 8, "F");
+      doc.rect(margin, y, pageW - margin * 2, 8);
+      doc.text("Grand Total Approved Amount", colPart, y + 5.2);
+      doc.text(fmtMoney(total), colLabour, y + 5.2);
+      y += 12;
+    } else {
+      // Single item
+      doc.setFillColor(236, 254, 255);
+      doc.rect(margin, y, pageW - margin * 2, 8, "F");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.setTextColor(17, 24, 39);
+      doc.text("APPROVED WORK ITEM", margin + 2, y + 5.2);
+      doc.text("AMOUNT", pageW - margin - 34, y + 5.2);
+      y += 8;
+      doc.setFont("helvetica", "normal");
+      doc.rect(margin, y, pageW - margin * 2, 8);
+      doc.text(invoice.part || "Spare part", margin + 2, y + 5.2);
+      doc.text(fmtMoney(spare), pageW - margin - 34, y + 5.2);
+      y += 8;
+      doc.rect(margin, y, pageW - margin * 2, 8);
+      doc.text(`Fundi Labour (${invoice.fundiName || "-"})`, margin + 2, y + 5.2);
+      doc.text(fmtMoney(labour), pageW - margin - 34, y + 5.2);
+      y += 8;
+      doc.setFillColor(240, 253, 250);
+      doc.rect(margin, y, pageW - margin * 2, 8, "F");
+      doc.rect(margin, y, pageW - margin * 2, 8);
+      doc.setFont("helvetica", "bold");
+      doc.text("Total Approved Amount", margin + 2, y + 5.2);
+      doc.text(fmtMoney(total), pageW - margin - 34, y + 5.2);
+      y += 12;
+    }
 
     text("Seller / Shop Contact & Payment Details", 11, true);
     row("Shop Name", invoice.soko?.shopName || "-", "Seller Name", invoice.soko?.ownerName || "-");
