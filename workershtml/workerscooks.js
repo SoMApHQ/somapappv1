@@ -443,7 +443,10 @@ function App() {
       setKitchenItems(kItems);
       setMarketCatalog(marketData);
       setWeekPlan(weeklyPlan);
-      
+
+      // Retroactively deduct past invoices that were saved before inventory tracking was active
+      await applyPastInvoiceDeductions(items);
+
       await loadRegister(reportDate, studentsMap);
       await loadWorkerPresence(reportDate);
     } catch (err) {
@@ -1383,6 +1386,9 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     // Build invoice using current state
     const invoice = buildFoodInvoiceObject(cookPayload, { markDraft: false });
 
+    // Track new onHand values per itemId for direct state update
+    const newOnHandMap = {};
+
     // Adjust inventory for each invoice line
     for (const line of invoice.lines) {
       if (!line.itemId) continue;
@@ -1408,10 +1414,11 @@ function buildRegisterStats(studentMap, attendanceByClass) {
           onHand: newOnHand,
           totalValue: Number((newOnHand * unitPrice).toFixed(2))
         });
+        newOnHandMap[line.itemId] = newOnHand;
       }
     }
 
-    // Restore items that were in the old invoice but are no longer in the new one
+    // Restore items removed from new invoice that were in old invoice
     if (existing?.inventoryDeducted) {
       for (const oldLine of (existing.lines || [])) {
         if (!oldLine.itemId || !Number(oldLine.requiredQty || 0)) continue;
@@ -1424,6 +1431,7 @@ function buildRegisterStats(studentMap, attendanceByClass) {
             onHand: restoredOnHand,
             totalValue: Number((restoredOnHand * unitPrice).toFixed(2))
           });
+          newOnHandMap[oldLine.itemId] = restoredOnHand;
         }
       }
     }
@@ -1435,11 +1443,76 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     await pushFoodAlerts(invoice.missingLines || []);
     await schoolRef(`years/${currentYear}/foodInvoices/${reportDate}`).set(invoice);
 
-    // Refresh inventory state in the UI
-    const updatedItems = await fetchInventoryItems(workerSession.schoolId);
-    setInventoryItems(updatedItems);
+    // Update inventoryItems state directly — no RTDB re-read latency
+    if (Object.keys(newOnHandMap).length) {
+      setInventoryItems(prev => prev.map(item =>
+        newOnHandMap[item.id] !== undefined ? { ...item, onHand: newOnHandMap[item.id] } : item
+      ));
+    }
 
     return invoice;
+  }
+
+  async function applyPastInvoiceDeductions(currentItems) {
+    try {
+      const invoicesSnap = await schoolRef(`years/${currentYear}/foodInvoices`).once('value').catch(() => null);
+      if (!invoicesSnap?.exists()) return;
+
+      const invoices = invoicesSnap.val() || {};
+
+      // Build a set of current item IDs (only deduct for items that still exist)
+      const liveItemIds = new Set((currentItems || []).map(it => it.id));
+
+      // Aggregate undeducted quantities per item from past invoices
+      const toDeduct = {};
+      const datesToMark = [];
+
+      for (const [date, invoice] of Object.entries(invoices)) {
+        if (!invoice || invoice.inventoryDeducted) continue;
+        let hasDeductions = false;
+        for (const line of (invoice.lines || [])) {
+          const qty = Number(line.requiredQty || 0);
+          if (!line.itemId || qty <= 0) continue;
+          if (!liveItemIds.has(line.itemId)) continue; // item deleted, skip
+          toDeduct[line.itemId] = (toDeduct[line.itemId] || 0) + qty;
+          hasDeductions = true;
+        }
+        if (hasDeductions) datesToMark.push(date);
+      }
+
+      if (!datesToMark.length) return;
+
+      // Re-read current inventory from RTDB (fresh snapshot)
+      const invSnap = await schoolRef(inventoryPath()).once('value').catch(() => null);
+      const invMap = invSnap?.val() || {};
+
+      const newOnHandMap = {};
+      for (const [itemId, totalDeduction] of Object.entries(toDeduct)) {
+        const inv = invMap[itemId] || {};
+        const currentOnHand = Number(inv.onHand || 0);
+        const newOnHand = Math.max(0, currentOnHand - totalDeduction);
+        const unitPrice = Number(inv.unitPrice || inv.unitCost || 0);
+        await schoolRef(`${inventoryPath()}/${itemId}`).update({
+          onHand: newOnHand,
+          totalValue: Number((newOnHand * unitPrice).toFixed(2))
+        });
+        newOnHandMap[itemId] = newOnHand;
+      }
+
+      // Mark all processed invoices as deducted
+      for (const date of datesToMark) {
+        await schoolRef(`years/${currentYear}/foodInvoices/${date}`).update({ inventoryDeducted: true });
+      }
+
+      // Update React state directly
+      if (Object.keys(newOnHandMap).length) {
+        setInventoryItems(prev => prev.map(item =>
+          newOnHandMap[item.id] !== undefined ? { ...item, onHand: newOnHandMap[item.id] } : item
+        ));
+      }
+    } catch (err) {
+      console.error('applyPastInvoiceDeductions failed', err);
+    }
   }
 
   async function upsertDraftInvoice() {
