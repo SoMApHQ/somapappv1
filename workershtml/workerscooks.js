@@ -1372,9 +1372,73 @@ function buildRegisterStats(studentMap, attendanceByClass) {
   }
 
   async function buildAndSaveFoodInvoice(cookPayload) {
+    // Fetch existing invoice for this date to check if inventory was already deducted
+    const existingSnap = await schoolRef(`years/${currentYear}/foodInvoices/${reportDate}`).once('value').catch(() => null);
+    const existing = existingSnap?.exists() ? existingSnap.val() : null;
+
+    // Fetch current inventory from RTDB for accurate onHand values
+    const invSnap = await schoolRef(inventoryPath()).once('value').catch(() => null);
+    const invMap = invSnap?.val() || {};
+
+    // Build invoice using current state
     const invoice = buildFoodInvoiceObject(cookPayload, { markDraft: false });
+
+    // Adjust inventory for each invoice line
+    for (const line of invoice.lines) {
+      if (!line.itemId) continue;
+      const inv = invMap[line.itemId] || {};
+      let preUsageOnHand = Number(inv.onHand || 0);
+
+      // If previous invoice already deducted this item, restore it first to get pre-usage stock
+      if (existing?.inventoryDeducted) {
+        const oldLine = (existing.lines || []).find(l => l.itemId === line.itemId);
+        if (oldLine) preUsageOnHand += Number(oldLine.requiredQty || 0);
+      }
+
+      const newOnHand = Math.max(0, preUsageOnHand - Number(line.requiredQty || 0));
+
+      // Fix invoice line to reflect actual stock before and after this usage
+      line.onHand = preUsageOnHand;
+      line.balanceAfterIssue = newOnHand;
+
+      // Write the deduction to RTDB
+      if (Number(line.requiredQty || 0) > 0) {
+        const unitPrice = Number(inv.unitPrice || inv.unitCost || 0);
+        await schoolRef(`${inventoryPath()}/${line.itemId}`).update({
+          onHand: newOnHand,
+          totalValue: Number((newOnHand * unitPrice).toFixed(2))
+        });
+      }
+    }
+
+    // Restore items that were in the old invoice but are no longer in the new one
+    if (existing?.inventoryDeducted) {
+      for (const oldLine of (existing.lines || [])) {
+        if (!oldLine.itemId || !Number(oldLine.requiredQty || 0)) continue;
+        const inNew = invoice.lines.some(l => l.itemId === oldLine.itemId);
+        if (!inNew) {
+          const inv = invMap[oldLine.itemId] || {};
+          const restoredOnHand = Number(inv.onHand || 0) + Number(oldLine.requiredQty);
+          const unitPrice = Number(inv.unitPrice || inv.unitCost || 0);
+          await schoolRef(`${inventoryPath()}/${oldLine.itemId}`).update({
+            onHand: restoredOnHand,
+            totalValue: Number((restoredOnHand * unitPrice).toFixed(2))
+          });
+        }
+      }
+    }
+
+    // Recompute missingLines based on corrected onHand values
+    invoice.missingLines = invoice.lines.filter(l => Number(l.requiredQty || 0) > Number(l.onHand || 0));
+    invoice.inventoryDeducted = true;
+
     await pushFoodAlerts(invoice.missingLines || []);
     await schoolRef(`years/${currentYear}/foodInvoices/${reportDate}`).set(invoice);
+
+    // Refresh inventory state in the UI
+    const updatedItems = await fetchInventoryItems(workerSession.schoolId);
+    setInventoryItems(updatedItems);
+
     return invoice;
   }
 
