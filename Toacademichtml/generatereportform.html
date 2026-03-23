@@ -1413,6 +1413,7 @@
       rawStudents: {}, students: [], filtered: [], selectedAdm: null, subjects: [], teachers: new Map(),
       teacherByClassSubject: new Map(), teacherBySubject: new Map(),
       classTeacherAssignments: {},
+      sharedClassStreams: {},
       classTeacherPhotoCache: new Map(),
       logoDataUrl: null,
       schoolLogoDataUrl: null,
@@ -1815,6 +1816,55 @@
       }
     }
 
+    async function loadSharedClassStreamsForYear(year) {
+      try {
+        const snap = await getSnapScopedOrLegacy(`years/${year}/classStreams`);
+        const raw = snap?.val?.() || {};
+        const next = {};
+        Object.values(raw || {}).forEach((entry) => {
+          if (!entry || typeof entry !== 'object') return;
+          const classDisplay = normalizeDisplayClass(entry.className || entry.class || '');
+          if (!classDisplay) return;
+          const streams = {};
+          Object.values(entry.streams || {}).forEach((stream) => {
+            const name = sanitizeStreamFilter(stream?.name || stream?.streamKey || '');
+            if (!name) return;
+            const streamKey = String(stream?.streamKey || name).trim();
+            streams[streamKey] = {
+              name,
+              streamKey,
+              studentIds: Array.isArray(stream?.studentIds) ? stream.studentIds.slice() : [],
+              studentNames: Array.isArray(stream?.studentNames) ? stream.studentNames.slice() : []
+            };
+          });
+          next[classDisplay] = { className: classDisplay, streams };
+        });
+        state.sharedClassStreams = next;
+      } catch (error) {
+        console.warn('[Report] classStreams load failed', error?.message || error);
+        state.sharedClassStreams = {};
+      }
+    }
+
+    function resolveStudentEffectiveStream(student, fallbackStream = '') {
+      const className = normalizeDisplayClass(student?.class || state.className || '');
+      const classEntry = state.sharedClassStreams?.[className];
+      const rawFallback = sanitizeStreamFilter(fallbackStream || student?.stream || student?.streamName || student?.section || '');
+      if (!classEntry || !Object.keys(classEntry.streams || {}).length) {
+        return rawFallback;
+      }
+      const candidates = new Set(
+        [student?.id, student?.adm, student?.admissionNo, student?.studentId]
+          .map((value) => normalizeAdm(value))
+          .filter(Boolean)
+      );
+      const matched = Object.values(classEntry.streams || {}).find((stream) => {
+        const ids = Array.isArray(stream?.studentIds) ? stream.studentIds : [];
+        return ids.some((id) => candidates.has(normalizeAdm(id)));
+      });
+      return matched?.name ? sanitizeStreamFilter(matched.name) : '';
+    }
+
     function getAssignmentForStudent(student) {
       const studentClass = normalizeDisplayClass(student?.class || state.className || '');
       const studentStream = sanitizeStreamFilter(student?.stream || state.stream || '');
@@ -1946,6 +1996,7 @@
     async function loadAllData(){
       try {
         document.getElementById('bulkCount').textContent = '...';
+        await loadSharedClassStreamsForYear(state.year);
         if (state.parentMode && state.parentAdm) {
           await findStudentClass();
         }
@@ -2495,7 +2546,14 @@
       const rawClass = s.class || s.currentClass || s.level || s.className || s.grade || s.classLevel || '';
       const sClass = normalizeDisplayClass(rawClass);
       const embeddedStream = extractEmbeddedStream(rawClass);
-      const sStream = s.stream || s.streamName || s.section || embeddedStream || '';
+      const rawStream = s.stream || s.streamName || s.section || embeddedStream || '';
+      const sStream = resolveStudentEffectiveStream({
+        ...s,
+        class: sClass,
+        adm: s.adm || s.admissionNo || admKey,
+        admissionNo: s.admissionNo || s.adm || admKey,
+        id: s.id || s.studentId || admKey
+      }, rawStream);
       const feeDue = Number(s.totalFee || s.feePerYear || s.feeDue || s.required || s.debt || 0);
       let feePaid = Number(s.paid || s.feePaid || s.totalPaid || s.paidAmount || s.credit || 0);
       if (s.payments && typeof s.payments === 'object') {
