@@ -2743,10 +2743,16 @@
         }));
       })
       .filter((mapping) => mapping.class && mapping.subjects.length);
+    // Base classes that have been expanded into streams should not appear in teacher.classes —
+    // the teacher specifically teaches the streams (e.g. "3B"), not the raw base class ("Class 3").
+    const expandedBases = new Set(mappings.filter((m) => m.streamName).map((m) => m.baseClass).filter(Boolean));
     return {
       teacherType: compactTitleCase(config?.teacherType || ''),
       classSubjectMappings: mappings,
-      classes: Array.from(new Set([...(config?.classes || []).map(normalizeClassName), ...mappings.map((mapping) => mapping.class)])).filter(Boolean),
+      classes: Array.from(new Set([
+        ...(config?.classes || []).map(normalizeClassName).filter((c) => !expandedBases.has(c)),
+        ...mappings.map((mapping) => mapping.class)
+      ])).filter(Boolean),
       subjects: Array.from(new Set([...(config?.subjects || []).map(normalizeSubjectName), ...mappings.flatMap((mapping) => mapping.subjects || [])])).filter(Boolean),
       setupCompleted: config?.setupCompleted === true
     };
@@ -2771,9 +2777,9 @@
   }
 
   /**
-   * Mutate GROUPS[].classes to expand stream-equipped classes.
-   * E.g. if Class 3 has stream 3B, replace "Class 3" in upper_primary_group with "3B".
-   * Any class with 1+ named streams is replaced by its stream entries.
+   * Mutate GROUPS[].classes to insert stream entries alongside their base class.
+   * E.g. if Class 3 has stream 3B: ["Class 3", "3B", "Class 4", "Class 5", ...]
+   * The base class is ALWAYS kept. Stream rows are inserted immediately after it.
    * Falls back to BASE_GROUP_CLASSES for reset before re-applying.
    */
   function applyStreamsToGroups(classStreams) {
@@ -2781,12 +2787,11 @@
       const base = BASE_GROUP_CLASSES[groupId] || [];
       const expanded = [];
       base.forEach((className) => {
+        expanded.push(className);  // base class always kept
         const streams = classStreams[className];
         if (streams && streams.length >= 1) {
-          // Replace base class with its individual stream entries
+          // Insert each stream row immediately after its base class
           streams.forEach((s) => expanded.push(s.name));
-        } else {
-          expanded.push(className);
         }
       });
       GROUPS[groupId].classes = expanded;

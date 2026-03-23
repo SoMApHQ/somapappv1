@@ -102,7 +102,12 @@ export function canonClass(name) {
   if (/class\s*five|grade\s*five|standard\s*five|std\s*five/.test(s)) return 'Class 5';
   if (/class\s*six|grade\s*six|standard\s*six|std\s*six/.test(s)) return 'Class 6';
   if (/class\s*seven|grade\s*seven|standard\s*seven|std\s*seven/.test(s)) return 'Class 7';
-  // Class 1..7 (handles "Class 1 AB", "1AB", "Grade 1", etc.)
+  // Stream identifiers like "3B", "7A", "3 Blue" start with a class digit followed by
+  // letters or words (no "class/grade" prefix). Preserve them as-is — do NOT collapse
+  // to "Class N" because stream classes need to stay distinct from their base class.
+  const streamTest = s.match(/^([1-7])(.+)/);
+  if (streamTest && /[a-z]/.test(streamTest[2])) return name || '';
+  // Class 1..7 (handles "Class 1", "Grade 1", bare digit "1", etc.)
   const m = s.match(/(class|grade|std|standard)?\s*([1-7])/);
   if (m && m[2]) return `Class ${m[2]}`;
   return name || '';
