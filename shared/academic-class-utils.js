@@ -75,11 +75,38 @@
   }
 
   function normalizeClassMappings(mappings = []) {
-    return (mappings || []).map((mapping) => ({
-      ...mapping,
-      class: normalizeClassName(mapping?.class),
-      subjects: Array.from(new Set((mapping?.subjects || []).map(normalizeSubjectName).filter(Boolean)))
-    })).filter((mapping) => mapping.class);
+    const result = [];
+    (mappings || []).forEach((mapping) => {
+      const baseClass = normalizeClassName(mapping?.class);
+      if (!baseClass) return;
+      const streams = (mapping?.streams || []).filter((s) => s && s.name);
+      if (!streams.length) {
+        // No streams — standard single-class entry
+        result.push({
+          ...mapping,
+          class: baseClass,
+          subjects: Array.from(new Set((mapping?.subjects || []).map(normalizeSubjectName).filter(Boolean)))
+        });
+      } else {
+        // Has streams — expand each stream into its own class entry.
+        // The stream name (e.g. "3B") IS the class identifier for lesson plans, timetable, etc.
+        streams.forEach((stream) => {
+          result.push({
+            ...mapping,
+            class: stream.name,
+            baseClass,
+            streamName: stream.name,
+            streamKey: stream.streamKey || stream.name.toLowerCase().replace(/[^a-z0-9]/g, ''),
+            subjects: Array.from(new Set(
+              ((stream.subjects && stream.subjects.length) ? stream.subjects : (mapping?.subjects || []))
+                .map(normalizeSubjectName).filter(Boolean)
+            )),
+            streams: []   // flatten: no further nesting
+          });
+        });
+      }
+    });
+    return result;
   }
 
   function canonicalizeClassList(values = [], options = {}) {
@@ -110,8 +137,13 @@
 
   function normalizeTeacherConfig(config = {}, options = {}) {
     const mappings = normalizeClassMappings(config.classSubjectMappings || []);
+    // Base classes that have been split into streams should NOT appear in the class list —
+    // only the stream names (e.g. "3B") should appear, not "Class 3".
+    const expandedBases = new Set(
+      mappings.filter((m) => m.streamName).map((m) => m.baseClass).filter(Boolean)
+    );
     const classes = canonicalizeClassList([
-      ...(config.classes || []),
+      ...(config.classes || []).filter((cls) => !expandedBases.has(normalizeClassName(cls))),
       ...mappings.map((mapping) => mapping.class)
     ], options);
     const subjects = Array.from(new Set([

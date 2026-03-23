@@ -2772,7 +2772,8 @@
 
   /**
    * Mutate GROUPS[].classes to expand stream-equipped classes.
-   * E.g. if Class 7 has streams 7A and 7B, replace "Class 7" in upper_primary_group with "7A" and "7B".
+   * E.g. if Class 3 has stream 3B, replace "Class 3" in upper_primary_group with "3B".
+   * Any class with 1+ named streams is replaced by its stream entries.
    * Falls back to BASE_GROUP_CLASSES for reset before re-applying.
    */
   function applyStreamsToGroups(classStreams) {
@@ -2781,14 +2782,16 @@
       const expanded = [];
       base.forEach((className) => {
         const streams = classStreams[className];
-        if (streams && streams.length >= 2) {
-          // Replace base class with individual stream entries
+        if (streams && streams.length >= 1) {
+          // Replace base class with its individual stream entries
           streams.forEach((s) => expanded.push(s.name));
         } else {
           expanded.push(className);
         }
       });
       GROUPS[groupId].classes = expanded;
+      // Keep the group title in sync with the actual classes being used
+      GROUPS[groupId].title = expanded.join(' + ');
     });
   }
 
