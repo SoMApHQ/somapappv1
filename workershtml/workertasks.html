@@ -2340,6 +2340,7 @@
 
       let _pickerTarget = { cardIndex: -1, streamIndex: -1 };
       let _pickerData = [];
+      let _currentPickerSelection = new Set(); // live in-session selection
 
       async function openStudentPicker(cardIndex, streamIndex) {
         _pickerTarget = { cardIndex, streamIndex };
@@ -2360,6 +2361,8 @@
         if (list) list.innerHTML = '<p style="color:rgba(255,255,255,0.6);">Loading students...</p>';
         if (countEl) countEl.textContent = '0 selected';
         modal?.classList.add('is-open');
+        // Seed the in-session selection from whatever was previously saved for this stream
+        _currentPickerSelection = new Set(stream?.studentIds || []);
         try {
           const [studentsSnap, enrollmentsSnap] = await Promise.all([
             scopedOrSocratesLegacy('students', 'students'),
@@ -2381,32 +2384,29 @@
             });
           });
           _pickerData.sort((a, b) => a.name.localeCompare(b.name));
-          const alreadySelected = new Set(stream?.studentIds || []);
-          renderStudentPickerList(alreadySelected, '');
+          renderStudentPickerList('');
         } catch (err) {
           console.warn('Failed to load students for picker', err);
           if (list) list.innerHTML = '<p style="color:rgba(255,255,255,0.6);">Failed to load students. Check your connection.</p>';
         }
       }
 
-      function renderStudentPickerList(alreadySelected, searchTerm) {
+      // searchTerm only — uses _currentPickerSelection for checked state
+      function renderStudentPickerList(searchTerm) {
         const list = document.getElementById('studentPickerList');
-        const countEl = document.getElementById('studentPickerCount');
         if (!list) return;
         const term = (searchTerm || '').toLowerCase().trim();
         const filtered = term
           ? _pickerData.filter((s) => s.name.toLowerCase().includes(term) || s.admissionNumber.toLowerCase().includes(term))
           : _pickerData;
         if (!filtered.length) {
-          list.innerHTML = '<p style="color:rgba(255,255,255,0.6);">No students found for this class.</p>';
-          if (countEl) countEl.textContent = '0 selected';
+          list.innerHTML = `<p style="color:rgba(255,255,255,0.6);">No students found${term ? ' matching \u201c' + safeHtml(term) + '\u201d' : ' for this class'}.</p>`;
+          updatePickerCount();
           return;
         }
         list.innerHTML = '';
-        let selectedCount = 0;
         filtered.forEach((student) => {
-          const isChecked = alreadySelected.has(student.id);
-          if (isChecked) selectedCount++;
+          const isChecked = _currentPickerSelection.has(student.id);
           const item = document.createElement('div');
           item.className = 'student-picker-item';
           item.innerHTML = `
@@ -2416,30 +2416,34 @@
               <span style="color:rgba(255,255,255,0.55);font-size:0.8rem;margin-left:6px;">(${safeHtml(student.admissionNumber)})</span>
             </label>
           `;
-          item.querySelector('input').addEventListener('change', updatePickerCount);
+          // Each checkbox change updates the live selection set immediately
+          item.querySelector('input').addEventListener('change', (e) => {
+            if (e.target.checked) {
+              _currentPickerSelection.add(e.target.value);
+            } else {
+              _currentPickerSelection.delete(e.target.value);
+            }
+            updatePickerCount();
+          });
           list.appendChild(item);
         });
-        if (countEl) countEl.textContent = `${selectedCount} selected`;
+        updatePickerCount();
       }
 
       function updatePickerCount() {
-        const list = document.getElementById('studentPickerList');
         const countEl = document.getElementById('studentPickerCount');
-        if (!list || !countEl) return;
-        const count = list.querySelectorAll('input:checked').length;
-        countEl.textContent = `${count} selected`;
+        if (!countEl) return;
+        countEl.textContent = `${_currentPickerSelection.size} selected`;
       }
 
       function saveStudentPicker() {
         const { cardIndex, streamIndex } = _pickerTarget;
         if (cardIndex < 0 || streamIndex < 0) return;
-        const list = document.getElementById('studentPickerList');
-        if (!list) return;
-        const checked = Array.from(list.querySelectorAll('input:checked'));
-        const selectedIds = checked.map((cb) => cb.value);
-        const selectedNames = checked.map((cb) => {
-          const found = _pickerData.find((s) => s.id === cb.value);
-          return found?.name || cb.value;
+        // _currentPickerSelection is the live set maintained across all search renders
+        const selectedIds = Array.from(_currentPickerSelection);
+        const selectedNames = selectedIds.map((id) => {
+          const found = _pickerData.find((s) => s.id === id);
+          return found?.name || id;
         });
         const s = classSubjectMap[cardIndex]?.streams?.[streamIndex];
         if (s) {
@@ -2456,24 +2460,22 @@
         document.getElementById('studentPickerModal')?.classList.remove('is-open');
         _pickerTarget = { cardIndex: -1, streamIndex: -1 };
         _pickerData = [];
+        _currentPickerSelection = new Set();
       }
 
-      // Wire up student picker modal buttons (after DOM is ready — done inside DOMContentLoaded below)
-      document.addEventListener('DOMContentLoaded', () => {
+      function wireStudentPickerButtons() {
         document.getElementById('closeStudentPickerBtn')?.addEventListener('click', closeStudentPicker);
         document.getElementById('cancelStudentPickerBtn')?.addEventListener('click', closeStudentPicker);
         document.getElementById('saveStudentPickerBtn')?.addEventListener('click', saveStudentPicker);
         document.getElementById('studentPickerSearch')?.addEventListener('input', (e) => {
-          const { cardIndex, streamIndex } = _pickerTarget;
-          if (cardIndex < 0) return;
-          const stream = classSubjectMap[cardIndex]?.streams?.[streamIndex];
-          const alreadySelected = new Set(stream?.studentIds || []);
-          renderStudentPickerList(alreadySelected, e.target.value);
+          if (_pickerTarget.cardIndex < 0) return;
+          // _currentPickerSelection already tracks all checked state — just re-render with new search term
+          renderStudentPickerList(e.target.value);
         });
         document.getElementById('studentPickerModal')?.addEventListener('click', (e) => {
           if (e.target === document.getElementById('studentPickerModal')) closeStudentPicker();
         });
-      });
+      }
 
       function updateSubjectsForClass(cardIndex, className, preselected = []) {
         const subjectsGrid = document.getElementById(`subjects-grid-${cardIndex}`);
@@ -3042,6 +3044,8 @@
           day: 'numeric'
         });
       }
+
+      wireStudentPickerButtons();
 
       try {
         await updateSchoolDisplay();
