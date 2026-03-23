@@ -26,6 +26,12 @@
       classes: ['Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7']
     }
   };
+  // Frozen snapshot of original class lists — used to reset before applying streams
+  const BASE_GROUP_CLASSES = {
+    nursery_group: ['Baby Class', 'Middle Class', 'Pre-Unit'],
+    lower_primary_group: ['Class 1', 'Class 2'],
+    upper_primary_group: ['Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7']
+  };
   const GROUP_ORDER = Object.keys(GROUPS);
   const MANAGEMENT_ROLES = new Set(['head teacher', 'assistant headteacher', 'management teacher', 'academic teacher']);
   const SUBJECT_DEFAULTS = {
@@ -134,6 +140,7 @@
     teachers: [],
     teacherMap: {},
     subjectCatalog: {},
+    classStreams: {},
     schemeHoursByClass: {},
     settingsByGroup: {},
     generatedByGroup: {},
@@ -424,15 +431,19 @@
 
   async function loadTeacherSources() {
     const year = state.year;
-    const [workersSnap, configsSnap, catalogSnap] = await Promise.all([
+    const [workersSnap, configsSnap, catalogSnap, classStreamsSnap] = await Promise.all([
       scopedOrSocratesLegacy(`years/${year}/workers`, 'workers'),
       scopedOrSocratesLegacy(`years/${year}/teachers_config`, 'teachers_config'),
-      scopedOrSocratesLegacy(`subjectCatalog/${year}`, `subjectCatalog/${year}`)
+      scopedOrSocratesLegacy(`subjectCatalog/${year}`, `subjectCatalog/${year}`),
+      scopedOrSocratesLegacy(`years/${year}/classStreams`, `years/${year}/classStreams`)
     ]);
     const workersRaw = workersSnap.val() || {};
     const configsRaw = configsSnap.val() || {};
     const catalogRaw = catalogSnap.val() || {};
+    const classStreamsRaw = classStreamsSnap.val() || {};
     const subjectCatalog = normalizeSubjectCatalog(catalogRaw);
+    state.classStreams = normalizeClassStreams(classStreamsRaw);
+    applyStreamsToGroups(state.classStreams);
     const teachers = [];
 
     Object.entries(workersRaw).forEach(([workerId, workerValue]) => {
@@ -533,7 +544,7 @@
   }
 
   function subscribeToSourceChanges() {
-    ['workers', 'teachers_config'].forEach((pathSegment) => {
+    ['workers', 'teachers_config', 'classStreams'].forEach((pathSegment) => {
       const ref = state.db.ref(window.SOMAP.P(`years/${state.year}/${pathSegment}`));
       const handler = () => scheduleRefresh();
       ref.on('value', handler);
@@ -2215,7 +2226,11 @@
 
   function getTeachersForGroup(groupId) {
     const groupClasses = new Set(GROUPS[groupId].classes);
-    return state.teachers.filter((teacher) => teacher.classSubjectMappings.some((mapping) => groupClasses.has(normalizeClassName(mapping.class))));
+    return state.teachers.filter((teacher) =>
+      teacher.classSubjectMappings.some((mapping) =>
+        groupClasses.has(mapping.class) || groupClasses.has(normalizeClassName(mapping.class))
+      )
+    );
   }
 
   function getTeacherLegend(groupId, settings) {
@@ -2544,7 +2559,9 @@
     const groupClasses = new Set(GROUPS[groupId].classes);
     const subjects = new Set();
     teacher.classSubjectMappings.forEach((mapping) => {
-      if (!groupClasses.has(normalizeClassName(mapping.class))) return;
+      // Match both direct class name and stream names belonging to this group
+      const mappingClass = mapping.class;
+      if (!groupClasses.has(mappingClass) && !groupClasses.has(normalizeClassName(mappingClass))) return;
       (mapping.subjects || []).forEach((subject) => subjects.add(normalizeSubjectName(subject)));
     });
     return Array.from(subjects);
@@ -2568,11 +2585,15 @@
   }
 
   function getSubjectsForClass(groupId, className, settings) {
-    const subjects = new Set(SUBJECT_DEFAULTS[className] || []);
-    Object.keys(state.subjectCatalog[className] || {}).forEach((subject) => subjects.add(subject));
+    // For stream class names (e.g. "7A"), also look up subjects from the base class
+    const baseClass = resolveBaseClass(className);
+    const subjects = new Set(SUBJECT_DEFAULTS[baseClass] || SUBJECT_DEFAULTS[className] || []);
+    Object.keys(state.subjectCatalog[baseClass] || state.subjectCatalog[className] || {}).forEach((subject) => subjects.add(subject));
     state.teachers.forEach((teacher) => {
       teacher.classSubjectMappings.forEach((mapping) => {
-        if (normalizeClassName(mapping.class) !== normalizeClassName(className)) return;
+        const mappingClass = normalizeClassName(mapping.class);
+        const mappingBase = normalizeClassName(mapping.baseClass || mapping.class);
+        if (mappingClass !== className && mappingBase !== baseClass) return;
         (mapping.subjects || []).forEach((subject) => subjects.add(normalizeSubjectName(subject)));
       });
     });
@@ -2634,6 +2655,14 @@
     };
   }
 
+  /** For a stream class name like "7A", return its base class ("Class 7") if found in classStreams. */
+  function resolveBaseClass(className) {
+    for (const [baseClass, streams] of Object.entries(state.classStreams || {})) {
+      if (streams.some((s) => s.name === className)) return baseClass;
+    }
+    return className;
+  }
+
   function buildDefaultSettings(groupId, teachers, subjectCatalog) {
     const slots = deepClone(DEFAULT_SLOT_PRESETS[groupId] || []);
     const periodRequirements = {};
@@ -2641,11 +2670,12 @@
     const subjectAbbreviations = {};
     const subjectColors = {};
     GROUPS[groupId].classes.forEach((className) => {
-      const subjects = new Set(SUBJECT_DEFAULTS[className] || []);
-      Object.keys(subjectCatalog[className] || {}).forEach((subject) => subjects.add(subject));
+      const baseClass = resolveBaseClass(className);
+      const subjects = new Set(SUBJECT_DEFAULTS[baseClass] || SUBJECT_DEFAULTS[className] || []);
+      Object.keys(subjectCatalog[baseClass] || subjectCatalog[className] || {}).forEach((subject) => subjects.add(subject));
       teachers.forEach((teacher) => {
         teacher.classSubjectMappings.forEach((mapping) => {
-          if (normalizeClassName(mapping.class) !== className) return;
+          if (mapping.class !== className && normalizeClassName(mapping.baseClass || mapping.class) !== baseClass) return;
           (mapping.subjects || []).forEach((subject) => subjects.add(normalizeSubjectName(subject)));
         });
       });
@@ -2688,10 +2718,30 @@
 
   function normalizeTeacherConfig(config) {
     const mappings = (config?.classSubjectMappings || [])
-      .map((mapping) => ({
-        class: normalizeClassName(mapping?.class),
-        subjects: Array.from(new Set((mapping?.subjects || []).map(normalizeSubjectName).filter(Boolean)))
-      }))
+      .flatMap((mapping) => {
+        const baseClass = normalizeClassName(mapping?.class);
+        if (!baseClass) return [];
+        const streams = (mapping?.streams || []).filter((s) => s && s.name);
+        if (!streams.length) {
+          // No streams — standard single-class entry
+          return [{
+            class: baseClass,
+            baseClass,
+            subjects: Array.from(new Set((mapping?.subjects || []).map(normalizeSubjectName).filter(Boolean)))
+          }];
+        }
+        // Has streams — expand: each stream becomes its own timetable class entry
+        return streams.map((stream) => ({
+          class: stream.name,          // stream name IS the timetable class identifier
+          baseClass,                   // original class for grouping/lookup
+          streamName: stream.name,
+          streamKey: stream.streamKey || stream.name.toLowerCase().replace(/[^a-z0-9]/g, ''),
+          subjects: Array.from(new Set(
+            ((stream.subjects && stream.subjects.length) ? stream.subjects : (mapping?.subjects || []))
+              .map(normalizeSubjectName).filter(Boolean)
+          ))
+        }));
+      })
       .filter((mapping) => mapping.class && mapping.subjects.length);
     return {
       teacherType: compactTitleCase(config?.teacherType || ''),
@@ -2700,6 +2750,46 @@
       subjects: Array.from(new Set([...(config?.subjects || []).map(normalizeSubjectName), ...mappings.flatMap((mapping) => mapping.subjects || [])])).filter(Boolean),
       setupCompleted: config?.setupCompleted === true
     };
+  }
+
+  /**
+   * Convert raw classStreams Firebase data into a lookup:
+   *   { "Class 7": [{ name: "7A", streamKey: "7a", studentIds: [...] }, ...] }
+   */
+  function normalizeClassStreams(raw) {
+    const result = {};
+    Object.values(raw || {}).forEach((entry) => {
+      const className = normalizeClassName(entry?.className || '');
+      if (!className) return;
+      const streams = [];
+      Object.values(entry?.streams || {}).forEach((s) => {
+        if (s?.name) streams.push({ name: s.name, streamKey: s.streamKey || s.name.toLowerCase().replace(/[^a-z0-9]/g, ''), studentIds: s.studentIds || [], subjects: s.subjects || [] });
+      });
+      if (streams.length) result[className] = streams;
+    });
+    return result;
+  }
+
+  /**
+   * Mutate GROUPS[].classes to expand stream-equipped classes.
+   * E.g. if Class 7 has streams 7A and 7B, replace "Class 7" in upper_primary_group with "7A" and "7B".
+   * Falls back to BASE_GROUP_CLASSES for reset before re-applying.
+   */
+  function applyStreamsToGroups(classStreams) {
+    Object.keys(GROUPS).forEach((groupId) => {
+      const base = BASE_GROUP_CLASSES[groupId] || [];
+      const expanded = [];
+      base.forEach((className) => {
+        const streams = classStreams[className];
+        if (streams && streams.length >= 2) {
+          // Replace base class with individual stream entries
+          streams.forEach((s) => expanded.push(s.name));
+        } else {
+          expanded.push(className);
+        }
+      });
+      GROUPS[groupId].classes = expanded;
+    });
   }
 
   function normalizeSubjectCatalog(raw) {
@@ -2895,10 +2985,16 @@
     if (compact.includes('baby')) return 'Baby Class';
     if (compact.includes('middle')) return 'Middle Class';
     if (compact.includes('preunit') || compact.includes('preunitclass') || compact.includes('pre') || compact.includes('nursery')) return 'Pre-Unit';
-    const match = compact.match(/class([1-7])/);
-    if (match) return `Class ${match[1]}`;
+    // Match "Class N" with optional stream suffix (e.g., "Class 7A", "Class 7 Blue")
+    const streamMatch = input.match(/^class\s*([1-7])\s*(.*)$/i);
+    if (streamMatch) {
+      const base = `Class ${streamMatch[1]}`;
+      const suffix = (streamMatch[2] || '').replace(/\s+/g, ' ').trim();
+      return suffix ? `${base} ${suffix}` : base;
+    }
     const numeral = compact.match(/^([1-7])$/);
     if (numeral) return `Class ${numeral[1]}`;
+    // Stream names that don't start with "class" are returned as-is (e.g., "7A", "7 Blue")
     return input.replace(/\s+/g, ' ');
   }
 
