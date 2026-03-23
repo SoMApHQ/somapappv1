@@ -973,6 +973,59 @@
       font-size: 0.85rem;
     }
 
+    .stream-permission-note {
+      font-size: 0.75rem;
+      color: rgba(255,255,255,0.5);
+      max-width: 240px;
+      line-height: 1.35;
+    }
+
+    .stream-owner-note {
+      margin-top: 12px;
+      font-size: 0.78rem;
+      color: rgba(255,255,255,0.58);
+    }
+
+    .stream-roster-card {
+      width: 100%;
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      background: rgba(15, 23, 42, 0.32);
+      color: white;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .stream-roster-card[disabled] {
+      opacity: 0.7;
+      cursor: default;
+    }
+
+    .stream-roster-label {
+      display: block;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: rgba(255,255,255,0.55);
+      margin-bottom: 6px;
+    }
+
+    .stream-roster-count {
+      display: block;
+      font-size: 0.92rem;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .stream-roster-names {
+      display: block;
+      font-size: 0.82rem;
+      color: rgba(255,255,255,0.72);
+      line-height: 1.45;
+    }
+
     /* Student Picker Modal */
     .student-picker-modal {
       display: none;
@@ -1535,6 +1588,9 @@
       let currentWorkerSnapshot = null;
       let yearSelectorInitialized = false;
       let yearWatchArmed = false;
+      let sharedClassStreams = {};
+      let allTeacherConfigsCache = {};
+      let workerNameCache = new Map();
 
       function toggleSetupReminder(show) {
         if (!setupReminder) return;
@@ -1792,15 +1848,35 @@
         if (!assignmentClassSelect.value && options.length) assignmentClassSelect.value = options[0];
       }
 
+      function populateAssignmentStreamOptions() {
+        if (!assignmentStreamSelect || !assignmentClassSelect) return;
+        const selectedClass = assignmentClassSelect.value || '';
+        const currentValue = assignmentStreamSelect.value || '';
+        const classEntry = getSharedClassEntry(selectedClass) || { streams: {} };
+        const options = ['<option value="">All Streams</option>'];
+        Object.values(classEntry.streams || {})
+          .filter((stream) => stream && stream.name)
+          .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+          .forEach((stream) => {
+            options.push(`<option value="${safeHtml(stream.name)}">${safeHtml(stream.name)}</option>`);
+          });
+        assignmentStreamSelect.innerHTML = options.join('');
+        assignmentStreamSelect.value = Object.values(classEntry.streams || {}).some((stream) => stream?.name === currentValue)
+          ? currentValue
+          : '';
+      }
+
       async function hydrateClassTeacherHub(forceReload = false) {
         syncAssignmentYearField();
         populateAssignmentClassOptions();
         if (forceReload) {
           await Promise.all([
             loadTeacherDirectoryForYear(currentYear),
-            loadClassTeacherAssignmentsForYear(currentYear)
+            loadClassTeacherAssignmentsForYear(currentYear),
+            loadSharedClassStreamsForYear(currentYear)
           ]);
         }
+        populateAssignmentStreamOptions();
         renderTeacherDirectory();
         refreshAssignmentSummaries();
       }
@@ -1945,6 +2021,167 @@
         return out;
       }
 
+      function normalizeStreamName(value = '') {
+        return String(value || '').trim();
+      }
+
+      function normalizeStreamKey(value = '') {
+        return normalizeStreamName(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+      }
+
+      function isAcademicTeacher(typeLabel = teacherTypeSelect?.value || teacherConfig?.teacherType || '') {
+        return String(typeLabel || '').trim().toLowerCase() === 'academic teacher';
+      }
+
+      function getWorkerDisplayName(workerId, fallback = 'Teacher') {
+        if (workerId && workerNameCache.has(workerId)) {
+          return workerNameCache.get(workerId);
+        }
+        return String(fallback || workerId || 'Teacher').trim();
+      }
+
+      function getClassStreamManagerWorkerId(entry = {}) {
+        if (entry?.ownerWorkerId) return String(entry.ownerWorkerId).trim();
+        const firstStream = Object.values(entry?.streams || {}).find((stream) => stream && (stream.addedBy || stream.ownerWorkerId));
+        return String(firstStream?.addedBy || firstStream?.ownerWorkerId || '').trim();
+      }
+
+      function getClassStreamManagerName(entry = {}) {
+        if (entry?.ownerName) return String(entry.ownerName).trim();
+        const ownerId = getClassStreamManagerWorkerId(entry);
+        if (ownerId) {
+          return getWorkerDisplayName(ownerId, '');
+        }
+        const firstStream = Object.values(entry?.streams || {}).find((stream) => stream && (stream.addedByName || stream.ownerName));
+        return String(firstStream?.addedByName || firstStream?.ownerName || '').trim();
+      }
+
+      function getSharedClassEntry(className = '') {
+        const classDisplay = toDisplayClass(className);
+        return sharedClassStreams[classDisplay] || null;
+      }
+
+      function canManageStreamsForClass(className = '', classEntry = getSharedClassEntry(className)) {
+        if (isAcademicTeacher()) return true;
+        const ownerWorkerId = getClassStreamManagerWorkerId(classEntry || {});
+        if (!ownerWorkerId) return true;
+        return ownerWorkerId === currentWorkerId;
+      }
+
+      function buildTeachingClaimKey(className = '', streamName = '', subjectName = '') {
+        const classDisplay = toDisplayClass(className);
+        const streamLabel = normalizeStreamName(streamName).toUpperCase();
+        const subjectLabel = normalizeSubjectLabel(subjectName).toUpperCase();
+        return `${classDisplay.toUpperCase()}::${streamLabel}::${subjectLabel}`;
+      }
+
+      function extractTeacherClaimsFromMappings(mappings = [], workerId = '', teacherName = '') {
+        const claims = [];
+        (mappings || []).forEach((mapping) => {
+          const classDisplay = toDisplayClass(mapping?.class || '');
+          if (!classDisplay) return;
+          uniqueSubjects(mapping?.subjects || []).forEach((subject) => {
+            claims.push({
+              key: buildTeachingClaimKey(classDisplay, '', subject),
+              className: classDisplay,
+              stream: '',
+              subject,
+              workerId,
+              teacherName
+            });
+          });
+          (mapping?.streams || []).filter((stream) => stream && stream.name).forEach((stream) => {
+            const streamName = normalizeStreamName(stream.name);
+            uniqueSubjects(stream.subjects || []).forEach((subject) => {
+              claims.push({
+                key: buildTeachingClaimKey(classDisplay, streamName, subject),
+                className: classDisplay,
+                stream: streamName,
+                subject,
+                workerId,
+                teacherName
+              });
+            });
+          });
+        });
+        return claims;
+      }
+
+      function findTeachingConflict(className = '', streamName = '', subjectName = '', ignoreWorkerId = currentWorkerId) {
+        const key = buildTeachingClaimKey(className, streamName, subjectName);
+        for (const [workerId, cfg] of Object.entries(allTeacherConfigsCache || {})) {
+          if (!cfg || workerId === ignoreWorkerId) continue;
+          const teacherName = getWorkerDisplayName(
+            workerId,
+            cfg?.name || cfg?.teacherName || cfg?.fullName || workerId
+          );
+          const claims = extractTeacherClaimsFromMappings(cfg?.classSubjectMappings || [], workerId, teacherName);
+          const hit = claims.find((claim) => claim.key === key);
+          if (hit) return hit;
+        }
+        return null;
+      }
+
+      function mergeStreamsForClass(className = '', teacherStreams = []) {
+        const classDisplay = toDisplayClass(className);
+        if (!classDisplay) return [];
+        const classEntry = getSharedClassEntry(classDisplay) || { className: classDisplay, streams: {} };
+        const teacherStreamMap = new Map();
+        (teacherStreams || []).filter((stream) => stream && stream.name).forEach((stream) => {
+          const key = normalizeStreamKey(stream.streamKey || stream.name);
+          if (!key) return;
+          teacherStreamMap.set(key, {
+            ...stream,
+            name: normalizeStreamName(stream.name),
+            streamKey: key,
+            subjects: uniqueSubjects(stream.subjects || []),
+            studentIds: Array.isArray(stream.studentIds) ? stream.studentIds.slice() : [],
+            studentNames: Array.isArray(stream.studentNames) ? stream.studentNames.slice() : []
+          });
+        });
+
+        const merged = [];
+        Object.values(classEntry.streams || {})
+          .filter((stream) => stream && (stream.name || stream.streamKey))
+          .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+          .forEach((sharedStream) => {
+            const key = normalizeStreamKey(sharedStream.streamKey || sharedStream.name);
+            const teacherStream = teacherStreamMap.get(key) || {};
+            teacherStreamMap.delete(key);
+            merged.push({
+              name: normalizeStreamName(sharedStream.name || teacherStream.name),
+              streamKey: key,
+              subjects: uniqueSubjects(teacherStream.subjects || []),
+              studentIds: Array.isArray(sharedStream.studentIds) ? sharedStream.studentIds.slice() : [],
+              studentNames: Array.isArray(sharedStream.studentNames) ? sharedStream.studentNames.slice() : [],
+              addedBy: sharedStream.addedBy || '',
+              addedByName: sharedStream.addedByName || getWorkerDisplayName(sharedStream.addedBy || '', ''),
+              ownerWorkerId: getClassStreamManagerWorkerId(classEntry),
+              ownerName: getClassStreamManagerName(classEntry),
+              shared: true,
+              canManage: canManageStreamsForClass(classDisplay, classEntry)
+            });
+          });
+
+        teacherStreamMap.forEach((teacherStream, key) => {
+          merged.push({
+            name: normalizeStreamName(teacherStream.name),
+            streamKey: key,
+            subjects: uniqueSubjects(teacherStream.subjects || []),
+            studentIds: Array.isArray(teacherStream.studentIds) ? teacherStream.studentIds.slice() : [],
+            studentNames: Array.isArray(teacherStream.studentNames) ? teacherStream.studentNames.slice() : [],
+            addedBy: teacherStream.addedBy || currentWorkerId || '',
+            addedByName: teacherStream.addedByName || buildWorkerSnapshot().name || '',
+            ownerWorkerId: getClassStreamManagerWorkerId(classEntry) || currentWorkerId || '',
+            ownerName: getClassStreamManagerName(classEntry) || buildWorkerSnapshot().name || '',
+            shared: false,
+            canManage: canManageStreamsForClass(classDisplay, classEntry)
+          });
+        });
+
+        return merged;
+      }
+
       function sanitizeSubjectKey(value = '') {
         return String(value || '').trim().replace(/[.#$\[\]/]/g, '_');
       }
@@ -1955,7 +2192,10 @@
         (mappings || []).forEach((mapping) => {
           const classDisplay = toDisplayClass(mapping?.class || '');
           if (!classDisplay) return;
-          const subjects = uniqueSubjects(mapping?.subjects || []);
+          const subjects = uniqueSubjects([
+            ...(mapping?.subjects || []),
+            ...((mapping?.streams || []).flatMap((stream) => stream?.subjects || []))
+          ]);
           subjects.forEach((subject) => {
             const key = sanitizeSubjectKey(subject);
             if (!key) return;
@@ -1998,6 +2238,76 @@
           });
         } catch (err) {
           console.warn('Failed to load custom subject catalog', err?.message || err);
+        }
+      }
+
+      async function loadWorkerNameCacheForYear(year) {
+        workerNameCache = new Map();
+        try {
+          const snap = await scopedOrSocratesLegacy(`years/${year}/workers`, 'workers');
+          snap.forEach((child) => {
+            const profile = child.val()?.profile || child.val() || {};
+            const fullName = (
+              profile.fullNameUpper ||
+              profile.fullName ||
+              [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ')
+            ).trim();
+            if (fullName) {
+              workerNameCache.set(child.key, fullName);
+            }
+          });
+        } catch (error) {
+          console.warn('Failed to load worker names', error);
+        }
+      }
+
+      async function loadAllTeacherConfigsForYear(year) {
+        try {
+          const snap = await scopedOrSocratesLegacy(`years/${year}/teachers_config`, 'teachers_config');
+          allTeacherConfigsCache = snap.exists() ? (snap.val() || {}) : {};
+        } catch (error) {
+          console.warn('Failed to load teacher configs', error);
+          allTeacherConfigsCache = {};
+        }
+      }
+
+      async function loadSharedClassStreamsForYear(year) {
+        try {
+          const snap = await scopedOrSocratesLegacy(`years/${year}/classStreams`, `years/${year}/classStreams`);
+          const raw = snap.exists() ? (snap.val() || {}) : {};
+          const next = {};
+          Object.values(raw || {}).forEach((entry) => {
+            if (!entry || typeof entry !== 'object') return;
+            const classDisplay = toDisplayClass(entry.className || entry.class || '');
+            if (!classDisplay) return;
+            const streams = {};
+            Object.values(entry.streams || {}).forEach((stream) => {
+              const name = normalizeStreamName(stream?.name || stream?.streamKey || '');
+              const streamKey = normalizeStreamKey(stream?.streamKey || name);
+              if (!name || !streamKey) return;
+              streams[streamKey] = {
+                name,
+                streamKey,
+                studentIds: Array.isArray(stream.studentIds) ? stream.studentIds.slice() : [],
+                studentNames: Array.isArray(stream.studentNames) ? stream.studentNames.slice() : [],
+                addedBy: String(stream.addedBy || '').trim(),
+                addedByName: String(stream.addedByName || '').trim(),
+                updatedAt: stream.updatedAt || 0
+              };
+            });
+            const ownerWorkerId = String(entry.ownerWorkerId || '').trim() || getClassStreamManagerWorkerId({ streams });
+            next[classDisplay] = {
+              className: classDisplay,
+              ownerWorkerId,
+              ownerName: String(entry.ownerName || getWorkerDisplayName(ownerWorkerId, '') || '').trim(),
+              streams,
+              updatedAt: entry.updatedAt || 0
+            };
+          });
+          sharedClassStreams = next;
+        } catch (error) {
+          console.warn('Failed to load shared class streams', error);
+          sharedClassStreams = {};
         }
       }
 
@@ -2145,7 +2455,7 @@
         if (!classSubjectMappings) return;
         const cardIndex = classSubjectMap.length;
         const classDisplay = toDisplayClass(existingClass);
-        classSubjectMap[cardIndex] = { class: classDisplay, subjects: existingSubjects.slice(), streams: [] };
+        classSubjectMap[cardIndex] = { class: classDisplay, subjects: uniqueSubjects(existingSubjects), streams: [] };
         const card = document.createElement('div');
         card.className = 'class-mapping-card';
         card.dataset.index = cardIndex;
@@ -2166,6 +2476,7 @@
               <button type="button" class="btn btn-secondary add-stream-btn" data-card="${cardIndex}" style="padding:9px 14px;font-size:0.85rem;white-space:nowrap;">
                 + Add Stream
               </button>
+              <div class="stream-permission-note" id="stream-permission-note-${cardIndex}">Select a class first.</div>
             </div>
           </div>
           <div class="form-group" style="margin-top:14px;">
@@ -2185,19 +2496,40 @@
         classSubjectMappings.appendChild(card);
         const selectEl = card.querySelector('.class-select');
         selectEl.addEventListener('change', (e) => {
+          const previousClass = classSubjectMap[cardIndex]?.class || '';
           updateSubjectsForClass(cardIndex, e.target.value);
-          updateStreamSubjectsForCard(cardIndex);
+          syncStreamsForCard(cardIndex, toDisplayClass(previousClass) === toDisplayClass(e.target.value) ? null : []);
         });
         card.querySelector('.add-stream-btn').addEventListener('click', () => {
-          addStreamToCard(cardIndex);
+          const mapping = classSubjectMap[cardIndex];
+          if (!mapping?.class) {
+            toast('Select a class before adding a stream.', 'warning');
+            return;
+          }
+          if (!canManageStreamsForClass(mapping.class)) {
+            const ownerName = getClassStreamManagerName(getSharedClassEntry(mapping.class) || {}) || 'another teacher';
+            toast(`Streams for ${mapping.class} are already managed by ${ownerName}.`, 'warning');
+            return;
+          }
+          addStreamToCard(cardIndex, {
+            name: '',
+            subjects: [],
+            studentIds: [],
+            studentNames: [],
+            addedBy: currentWorkerId || '',
+            addedByName: buildWorkerSnapshot().name || '',
+            ownerWorkerId: getClassStreamManagerWorkerId(getSharedClassEntry(mapping.class) || {}) || currentWorkerId || '',
+            ownerName: getClassStreamManagerName(getSharedClassEntry(mapping.class) || {}) || buildWorkerSnapshot().name || '',
+            shared: false,
+            canManage: true
+          });
         });
         if (classDisplay) {
           updateSubjectsForClass(cardIndex, classDisplay, existingSubjects);
+          syncStreamsForCard(cardIndex, existingStreams);
+        } else {
+          updateAddStreamControls(cardIndex);
         }
-        // Restore saved streams
-        (existingStreams || []).forEach((stream) => {
-          if (stream && stream.name) addStreamToCard(cardIndex, stream);
-        });
       }
 
       window.removeClassMapping = function (index) {
@@ -2214,6 +2546,71 @@
         return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       }
 
+      function formatStudentRosterPreview(studentNames = []) {
+        if (!Array.isArray(studentNames) || !studentNames.length) return 'No students saved for this stream yet.';
+        return studentNames.slice(0, 5).join(', ') + (studentNames.length > 5 ? ` +${studentNames.length - 5} more` : '');
+      }
+
+      function updateStreamRosterSummary(cardIndex, streamIndex) {
+        const stream = classSubjectMap[cardIndex]?.streams?.[streamIndex];
+        const badge = document.getElementById(`stream-student-badge-${cardIndex}-${streamIndex}`);
+        const rosterCount = document.getElementById(`stream-roster-count-${cardIndex}-${streamIndex}`);
+        const rosterNames = document.getElementById(`stream-roster-names-${cardIndex}-${streamIndex}`);
+        const studentCount = Array.isArray(stream?.studentIds) ? stream.studentIds.length : 0;
+        const names = Array.isArray(stream?.studentNames) ? stream.studentNames : [];
+        if (badge) badge.textContent = studentCount > 0 ? `${studentCount} student(s) selected` : 'No students selected';
+        if (rosterCount) rosterCount.textContent = studentCount > 0 ? `${studentCount} saved student(s)` : 'No saved students yet';
+        if (rosterNames) rosterNames.textContent = formatStudentRosterPreview(names);
+      }
+
+      function updateAddStreamControls(cardIndex) {
+        const mapping = classSubjectMap[cardIndex];
+        const btn = document.querySelector(`.add-stream-btn[data-card="${cardIndex}"]`);
+        const note = document.getElementById(`stream-permission-note-${cardIndex}`);
+        if (!btn || !note) return;
+        if (!mapping?.class) {
+          btn.disabled = true;
+          note.textContent = 'Select a class first.';
+          return;
+        }
+        const classEntry = getSharedClassEntry(mapping.class);
+        const canManage = canManageStreamsForClass(mapping.class, classEntry);
+        const ownerName = getClassStreamManagerName(classEntry || {});
+        btn.disabled = !canManage;
+        if (!classEntry || !Object.keys(classEntry.streams || {}).length) {
+          note.textContent = 'No saved streams yet. The first saved stream makes you the manager for this class.';
+          return;
+        }
+        if (canManage) {
+          note.textContent = isAcademicTeacher()
+            ? 'Academic can add or maintain streams for this class.'
+            : 'You manage the saved streams for this class.';
+          return;
+        }
+        note.textContent = `Streams for this class are already managed by ${ownerName || 'another teacher'}.`;
+      }
+
+      function syncStreamsForCard(cardIndex, teacherStreamsOverride = null) {
+        const mapping = classSubjectMap[cardIndex];
+        const streamsSection = document.getElementById(`streams-section-${cardIndex}`);
+        const streamsList = document.getElementById(`streams-list-${cardIndex}`);
+        if (!mapping || !streamsSection || !streamsList) return;
+        const teacherStreams = Array.isArray(teacherStreamsOverride)
+          ? teacherStreamsOverride
+          : (mapping.streams || []).filter((stream) => stream && stream.name);
+        const mergedStreams = mapping.class ? mergeStreamsForClass(mapping.class, teacherStreams) : [];
+        mapping.streams = [];
+        streamsList.innerHTML = '';
+        if (!mergedStreams.length) {
+          streamsSection.style.display = 'none';
+          updateAddStreamControls(cardIndex);
+          return;
+        }
+        mergedStreams.forEach((stream) => addStreamToCard(cardIndex, stream));
+        streamsSection.style.display = '';
+        updateAddStreamControls(cardIndex);
+      }
+
       function addStreamToCard(cardIndex, existingStream = {}) {
         const streamsSection = document.getElementById(`streams-section-${cardIndex}`);
         const streamsList = document.getElementById(`streams-list-${cardIndex}`);
@@ -2222,15 +2619,27 @@
         if (!mapping) return;
         if (!Array.isArray(mapping.streams)) mapping.streams = [];
         const streamIndex = mapping.streams.length;
+        const normalizedName = normalizeStreamName(existingStream.name || '');
+        const classEntry = getSharedClassEntry(mapping.class);
+        const canManage = typeof existingStream.canManage === 'boolean'
+          ? existingStream.canManage
+          : canManageStreamsForClass(mapping.class, classEntry);
         mapping.streams.push({
-          name: existingStream.name || '',
-          streamKey: existingStream.streamKey || '',
-          subjects: existingStream.subjects ? existingStream.subjects.slice() : [],
+          name: normalizedName,
+          streamKey: existingStream.streamKey || normalizeStreamKey(normalizedName),
+          subjects: uniqueSubjects(existingStream.subjects ? existingStream.subjects.slice() : []),
           studentIds: existingStream.studentIds ? existingStream.studentIds.slice() : [],
-          studentNames: existingStream.studentNames ? existingStream.studentNames.slice() : []
+          studentNames: existingStream.studentNames ? existingStream.studentNames.slice() : [],
+          addedBy: existingStream.addedBy || '',
+          addedByName: existingStream.addedByName || '',
+          ownerWorkerId: existingStream.ownerWorkerId || getClassStreamManagerWorkerId(classEntry || {}) || '',
+          ownerName: existingStream.ownerName || getClassStreamManagerName(classEntry || {}) || '',
+          shared: existingStream.shared === true,
+          canManage
         });
         const existingStudentCount = (existingStream.studentIds || []).length;
         const studentBadgeText = existingStudentCount > 0 ? `${existingStudentCount} student(s) selected` : 'No students selected';
+        const ownerText = mapping.streams[streamIndex].ownerName || mapping.streams[streamIndex].addedByName || '';
         const streamCard = document.createElement('div');
         streamCard.className = 'stream-card';
         streamCard.dataset.cardIndex = cardIndex;
@@ -2238,10 +2647,10 @@
         streamCard.innerHTML = `
           <div class="stream-card-head">
             <div class="stream-name-wrap">
-              <input type="text" class="stream-name-input" placeholder="Stream name, e.g. 7A, 7 Blue, Red" value="${safeHtml(existingStream.name || '')}">
+              <input type="text" class="stream-name-input" placeholder="Stream name, e.g. 7A, 7 Blue, Red" value="${safeHtml(normalizedName)}" ${canManage ? '' : 'readonly'}>
               <span class="stream-name-hint">Give this stream a name (e.g. 7A, 7 Blue)</span>
             </div>
-            <button type="button" class="stream-remove-btn">Remove Stream</button>
+            <button type="button" class="stream-remove-btn" ${canManage ? '' : 'disabled'}>Remove Stream</button>
           </div>
           <div>
             <span class="stream-subjects-label">Subjects you teach in this stream *</span>
@@ -2251,15 +2660,22 @@
           </div>
           <div class="stream-students-wrap">
             <button type="button" class="btn stream-students-btn" style="padding:8px 14px;font-size:0.85rem;">
-              Select Students for this Stream
+              ${canManage ? 'Manage Stream Students' : 'View Stream Students'}
             </button>
             <span class="stream-student-badge" id="stream-student-badge-${cardIndex}-${streamIndex}">${studentBadgeText}</span>
           </div>
+          <button type="button" class="stream-roster-card" id="stream-roster-card-${cardIndex}-${streamIndex}">
+            <span class="stream-roster-label">Saved students</span>
+            <span class="stream-roster-count" id="stream-roster-count-${cardIndex}-${streamIndex}">${existingStudentCount > 0 ? `${existingStudentCount} saved student(s)` : 'No saved students yet'}</span>
+            <span class="stream-roster-names" id="stream-roster-names-${cardIndex}-${streamIndex}">${safeHtml(formatStudentRosterPreview(existingStream.studentNames || []))}</span>
+          </button>
+          <div class="stream-owner-note">${canManage ? 'You can maintain this stream roster.' : `Managed by ${safeHtml(ownerText || 'another teacher')}. Only the manager or Academic can edit its roster or delete it.`}</div>
         `;
         streamsList.appendChild(streamCard);
         streamsSection.style.display = '';
 
         populateStreamSubjects(cardIndex, streamIndex, existingStream.subjects || []);
+        updateStreamRosterSummary(cardIndex, streamIndex);
 
         streamCard.querySelector('.stream-remove-btn').addEventListener('click', () => {
           removeStreamFromCard(cardIndex, streamIndex, streamCard);
@@ -2268,18 +2684,28 @@
         streamCard.querySelector('.stream-name-input').addEventListener('input', (e) => {
           const s = mapping.streams[streamIndex];
           if (s) {
-            s.name = e.target.value.trim();
-            s.streamKey = s.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+            s.name = normalizeStreamName(e.target.value);
+            s.streamKey = normalizeStreamKey(s.name);
           }
         });
 
         streamCard.querySelector('.stream-students-btn').addEventListener('click', () => {
           openStudentPicker(cardIndex, streamIndex);
         });
+
+        streamCard.querySelector('.stream-roster-card').addEventListener('click', () => {
+          openStudentPicker(cardIndex, streamIndex);
+        });
       }
 
       function removeStreamFromCard(cardIndex, streamIndex, streamCardEl) {
         const mapping = classSubjectMap[cardIndex];
+        const targetStream = mapping?.streams?.[streamIndex];
+        if (targetStream && !targetStream.canManage) {
+          const ownerName = targetStream.ownerName || targetStream.addedByName || 'another teacher';
+          toast(`Only ${ownerName} or Academic can delete this stream.`, 'warning');
+          return;
+        }
         if (mapping?.streams) mapping.streams[streamIndex] = null;
         streamCardEl.remove();
         const streamsList = document.getElementById(`streams-list-${cardIndex}`);
@@ -2287,6 +2713,7 @@
         if (streamsList && streamsList.querySelectorAll('.stream-card').length === 0 && streamsSection) {
           streamsSection.style.display = 'none';
         }
+        updateAddStreamControls(cardIndex);
       }
 
       function populateStreamSubjects(cardIndex, streamIndex, preselected = []) {
@@ -2315,7 +2742,19 @@
             <label for="ss-${cardIndex}-${streamIndex}-${subject.replace(/\s+/g,'_')}">${safeHtml(subject)}</label>
           `;
           grid.appendChild(item);
-          item.querySelector('input').addEventListener('change', () => syncStreamSubjects(cardIndex, streamIndex));
+          item.querySelector('input').addEventListener('change', (event) => {
+            const mapping = classSubjectMap[cardIndex];
+            const stream = mapping?.streams?.[streamIndex];
+            if (event.target.checked) {
+              const conflict = findTeachingConflict(mapping?.class || '', stream?.name || '', subject);
+              if (conflict) {
+                event.target.checked = false;
+                toast(`${subject} for ${mapping?.class} ${stream?.name || ''} is already assigned to ${conflict.teacherName}.`, 'warning');
+                return;
+              }
+            }
+            syncStreamSubjects(cardIndex, streamIndex);
+          });
         });
         syncStreamSubjects(cardIndex, streamIndex);
       }
@@ -2334,6 +2773,7 @@
           if (!stream) return;
           populateStreamSubjects(cardIndex, streamIndex, stream.subjects || []);
         });
+        updateAddStreamControls(cardIndex);
       }
 
       // ---- Student Picker ----
@@ -2341,6 +2781,7 @@
       let _pickerTarget = { cardIndex: -1, streamIndex: -1 };
       let _pickerData = [];
       let _currentPickerSelection = new Set(); // live in-session selection
+      let _pickerReadOnly = false;
 
       async function openStudentPicker(cardIndex, streamIndex) {
         _pickerTarget = { cardIndex, streamIndex };
@@ -2356,10 +2797,16 @@
         const title = document.getElementById('studentPickerTitle');
         const countEl = document.getElementById('studentPickerCount');
         const searchEl = document.getElementById('studentPickerSearch');
-        if (title) title.textContent = `Select students for ${mapping.class} \u2014 ${streamName}`;
+        _pickerReadOnly = !stream?.canManage;
+        if (title) title.textContent = `${_pickerReadOnly ? 'View' : 'Select'} students for ${mapping.class} \u2014 ${streamName}`;
         if (searchEl) searchEl.value = '';
         if (list) list.innerHTML = '<p style="color:rgba(255,255,255,0.6);">Loading students...</p>';
         if (countEl) countEl.textContent = '0 selected';
+        const saveBtn = document.getElementById('saveStudentPickerBtn');
+        if (saveBtn) {
+          saveBtn.disabled = _pickerReadOnly;
+          saveBtn.textContent = _pickerReadOnly ? 'View Only' : 'Save Students';
+        }
         modal?.classList.add('is-open');
         // Seed the in-session selection from whatever was previously saved for this stream
         _currentPickerSelection = new Set(stream?.studentIds || []);
@@ -2410,7 +2857,7 @@
           const item = document.createElement('div');
           item.className = 'student-picker-item';
           item.innerHTML = `
-            <input type="checkbox" id="sp-${student.id}" value="${safeHtml(student.id)}" ${isChecked ? 'checked' : ''}>
+            <input type="checkbox" id="sp-${student.id}" value="${safeHtml(student.id)}" ${isChecked ? 'checked' : ''} ${_pickerReadOnly ? 'disabled' : ''}>
             <label for="sp-${student.id}">
               <strong>${safeHtml(student.name)}</strong>
               <span style="color:rgba(255,255,255,0.55);font-size:0.8rem;margin-left:6px;">(${safeHtml(student.admissionNumber)})</span>
@@ -2437,6 +2884,10 @@
       }
 
       function saveStudentPicker() {
+        if (_pickerReadOnly) {
+          closeStudentPicker();
+          return;
+        }
         const { cardIndex, streamIndex } = _pickerTarget;
         if (cardIndex < 0 || streamIndex < 0) return;
         // _currentPickerSelection is the live set maintained across all search renders
@@ -2450,8 +2901,7 @@
           s.studentIds = selectedIds;
           s.studentNames = selectedNames;
         }
-        const badge = document.getElementById(`stream-student-badge-${cardIndex}-${streamIndex}`);
-        if (badge) badge.textContent = selectedIds.length > 0 ? `${selectedIds.length} student(s) selected` : 'No students selected';
+        updateStreamRosterSummary(cardIndex, streamIndex);
         closeStudentPicker();
         toast(`${selectedIds.length} student(s) assigned to stream.`, 'success');
       }
@@ -2461,6 +2911,7 @@
         _pickerTarget = { cardIndex: -1, streamIndex: -1 };
         _pickerData = [];
         _currentPickerSelection = new Set();
+        _pickerReadOnly = false;
       }
 
       function wireStudentPickerButtons() {
@@ -2498,7 +2949,15 @@
             <label for="subject-${cardIndex}-${subject}">${subject}</label>
           `;
           subjectsGrid.appendChild(item);
-          item.querySelector('input').addEventListener('change', () => {
+          item.querySelector('input').addEventListener('change', (event) => {
+            if (event.target.checked) {
+              const conflict = findTeachingConflict(classDisplay, '', subject);
+              if (conflict) {
+                event.target.checked = false;
+                toast(`${subject} for ${classDisplay} is already assigned to ${conflict.teacherName}.`, 'warning');
+                return;
+              }
+            }
             updateClassSubjectMap(cardIndex, subject ? classDisplay : '');
           });
         });
@@ -2532,6 +2991,12 @@
           mainDashboard?.classList.add('hidden');
           setupSection?.classList.remove('hidden');
           toggleSetupReminder(false);
+        });
+      }
+
+      if (teacherTypeSelect) {
+        teacherTypeSelect.addEventListener('change', () => {
+          classSubjectMap.forEach((_, index) => updateAddStreamControls(index));
         });
       }
 
@@ -2733,7 +3198,10 @@
       });
 
       if (assignmentClassSelect) {
-        assignmentClassSelect.addEventListener('change', refreshAssignmentSummaries);
+        assignmentClassSelect.addEventListener('change', () => {
+          populateAssignmentStreamOptions();
+          refreshAssignmentSummaries();
+        });
       }
 
       if (assignmentStreamSelect) {
@@ -2777,7 +3245,14 @@
             toast('Please select your teacher type', 'warning');
             return;
           }
-          const validMappings = classSubjectMap.filter((m) => m && m.class && m.subjects && m.subjects.length);
+          const validMappings = classSubjectMap.filter((m) => {
+            if (!m || !m.class) return false;
+            const baseSubjects = uniqueSubjects(m.subjects || []);
+            const streamSubjects = (m.streams || [])
+              .filter((stream) => stream && stream.name)
+              .flatMap((stream) => uniqueSubjects(stream.subjects || []));
+            return baseSubjects.length > 0 || streamSubjects.length > 0 || (m.streams || []).some((stream) => stream && stream.name);
+          });
           if (!validMappings.length) {
             toast('Please add at least one class with subjects', 'warning');
             return;
@@ -2789,22 +3264,52 @@
               toast('Each stream must have a name (e.g. 7A, 7 Blue). Please name all streams.', 'warning');
               return;
             }
+            const streamNames = (m.streams || [])
+              .filter((s) => s && s.name)
+              .map((s) => normalizeStreamKey(s.name));
+            const duplicateStream = streamNames.find((key, idx) => key && streamNames.indexOf(key) !== idx);
+            if (duplicateStream) {
+              toast(`Each stream in ${m.class} must have a unique name.`, 'warning');
+              return;
+            }
           }
           // Normalize mappings: include filtered streams (skip null slots from removed streams)
           const normalizedMappings = validMappings.map((m) => ({
             class: toDisplayClass(m.class),
-            subjects: m.subjects,
+            subjects: uniqueSubjects(m.subjects || []),
             streams: (m.streams || []).filter((s) => s && s.name).map((s) => ({
-              name: s.name,
-              streamKey: s.streamKey || s.name.toLowerCase().replace(/[^a-z0-9]/g, ''),
-              subjects: s.subjects && s.subjects.length ? s.subjects : m.subjects,
+              name: normalizeStreamName(s.name),
+              streamKey: s.streamKey || normalizeStreamKey(s.name),
+              subjects: uniqueSubjects(s.subjects || []),
               studentIds: s.studentIds || [],
-              studentNames: s.studentNames || []
+              studentNames: s.studentNames || [],
+              addedBy: s.addedBy || currentWorkerId || '',
+              addedByName: s.addedByName || buildWorkerSnapshot().name || '',
+              ownerWorkerId: s.ownerWorkerId || '',
+              ownerName: s.ownerName || ''
             }))
           }));
+          const currentTeacherName = buildWorkerSnapshot().name || getWorkerDisplayName(currentWorkerId, currentWorkerId);
+          const pendingClaims = extractTeacherClaimsFromMappings(normalizedMappings, currentWorkerId, currentTeacherName);
+          const duplicateOwnClaim = pendingClaims.find((claim, index) => pendingClaims.findIndex((item) => item.key === claim.key) !== index);
+          if (duplicateOwnClaim) {
+            const scopeLabel = duplicateOwnClaim.stream ? `${duplicateOwnClaim.className} ${duplicateOwnClaim.stream}` : duplicateOwnClaim.className;
+            toast(`You selected ${duplicateOwnClaim.subject} more than once for ${scopeLabel}.`, 'warning');
+            return;
+          }
+          const conflict = pendingClaims.find((claim) => findTeachingConflict(claim.className, claim.stream, claim.subject, currentWorkerId));
+          if (conflict) {
+            const owner = findTeachingConflict(conflict.className, conflict.stream, conflict.subject, currentWorkerId);
+            const scopeLabel = conflict.stream ? `${conflict.className} ${conflict.stream}` : conflict.className;
+            toast(`${conflict.subject} for ${scopeLabel} is already assigned to ${owner?.teacherName || 'another teacher'}.`, 'warning');
+            return;
+          }
           // Build all-classes list (base classes for profile display)
           const allClasses = [...new Set(normalizedMappings.map((m) => toDisplayClass(m.class)))];
-          const allSubjects = [...new Set(normalizedMappings.flatMap((m) => m.subjects))];
+          const allSubjects = [...new Set(normalizedMappings.flatMap((m) => [
+            ...(m.subjects || []),
+            ...((m.streams || []).flatMap((stream) => stream.subjects || []))
+          ]))];
           const payload = {
             teacherType,
             classSubjectMappings: normalizedMappings,
@@ -2818,6 +3323,10 @@
             await persistSubjectCatalogFromMappings(normalizedMappings);
             // Write shared classStreams so timetable and other pages can use them
             await persistClassStreams(normalizedMappings);
+            await Promise.all([
+              loadAllTeacherConfigsForYear(currentYear),
+              loadSharedClassStreamsForYear(currentYear)
+            ]);
             await loadCustomSubjectCatalogForYear();
             teacherConfig = payload;
             localStorage.setItem('somap_role', teacherType);
@@ -2837,25 +3346,39 @@
           const classDisplay = toDisplayClass(mapping?.class || '');
           if (!classDisplay) return;
           const streams = (mapping.streams || []).filter((s) => s && s.name);
-          if (!streams.length) return;
+          const classEntry = getSharedClassEntry(classDisplay) || { className: classDisplay, streams: {} };
+          if (!canManageStreamsForClass(classDisplay, classEntry)) return;
           // Firebase key-safe class key
           const classKey = classDisplay.replace(/[.#$\[\]/\s]/g, '_');
+          if (!streams.length) {
+            updates[schoolPath(`years/${currentYear}/classStreams/${classKey}`)] = null;
+            if (isSocratesSchool(school?.id)) {
+              updates[`years/${currentYear}/classStreams/${classKey}`] = null;
+            }
+            delete sharedClassStreams[classDisplay];
+            return;
+          }
           const streamMap = {};
+          const ownerWorkerId = getClassStreamManagerWorkerId(classEntry) || currentWorkerId || '';
+          const ownerName = getClassStreamManagerName(classEntry) || buildWorkerSnapshot().name || getWorkerDisplayName(ownerWorkerId, '');
           streams.forEach((s) => {
-            const sk = s.streamKey || s.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const sk = s.streamKey || normalizeStreamKey(s.name);
             if (!sk) return;
+            const existingStream = classEntry.streams?.[sk] || {};
             streamMap[sk] = {
               name: s.name,
               streamKey: sk,
-              subjects: s.subjects || [],
-              studentIds: s.studentIds || [],
-              studentNames: s.studentNames || [],
-              addedBy: currentWorkerId || '',
+              studentIds: s.studentIds || existingStream.studentIds || [],
+              studentNames: s.studentNames || existingStream.studentNames || [],
+              addedBy: existingStream.addedBy || s.addedBy || ownerWorkerId,
+              addedByName: existingStream.addedByName || s.addedByName || ownerName,
               updatedAt: firebase.database.ServerValue.TIMESTAMP
             };
           });
           const entry = {
             className: classDisplay,
+            ownerWorkerId,
+            ownerName,
             streams: streamMap,
             updatedAt: firebase.database.ServerValue.TIMESTAMP
           };
@@ -2863,6 +3386,21 @@
           if (isSocratesSchool(school?.id)) {
             updates[`years/${currentYear}/classStreams/${classKey}`] = entry;
           }
+          sharedClassStreams[classDisplay] = {
+            className: classDisplay,
+            ownerWorkerId,
+            ownerName,
+            streams: Object.fromEntries(Object.entries(streamMap).map(([streamKey, stream]) => [streamKey, {
+              name: stream.name,
+              streamKey,
+              studentIds: Array.isArray(stream.studentIds) ? stream.studentIds.slice() : [],
+              studentNames: Array.isArray(stream.studentNames) ? stream.studentNames.slice() : [],
+              addedBy: stream.addedBy,
+              addedByName: stream.addedByName,
+              updatedAt: Date.now()
+            }])),
+            updatedAt: Date.now()
+          };
         });
         if (Object.keys(updates).length) {
           await db.ref().update(updates);
@@ -2871,7 +3409,12 @@
 
       async function setup() {
         currentYear = String(getYear());
-        await loadCustomSubjectCatalogForYear();
+        await Promise.all([
+          loadCustomSubjectCatalogForYear(),
+          loadWorkerNameCacheForYear(currentYear),
+          loadAllTeacherConfigsForYear(currentYear),
+          loadSharedClassStreamsForYear(currentYear)
+        ]);
         initYearSelector();
         classSubjectMap = [];
         if (classSubjectMappings) classSubjectMappings.innerHTML = '';

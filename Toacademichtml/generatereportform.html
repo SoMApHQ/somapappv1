@@ -1307,6 +1307,32 @@
       return raw;
     }
 
+    function buildTeacherAssignmentKeys(className, streamName, subject){
+      const subjectCanon = canonicalSubjectName(subject || '');
+      const subjectUpper = String(subjectCanon || '').trim().toUpperCase();
+      if (!subjectUpper) return [];
+      const classCanon = normalizeDisplayClass(className || '');
+      const streamCanon = sanitizeStreamFilter(streamName || '');
+      const keys = [];
+      if (classCanon && streamCanon) {
+        keys.push(`${String(classCanon).toUpperCase()}::${String(streamCanon).toUpperCase()}::${subjectUpper}`);
+        keys.push(`${String(streamCanon).toUpperCase()}::${subjectUpper}`);
+      }
+      if (classCanon) {
+        keys.push(`${String(classCanon).toUpperCase()}::${subjectUpper}`);
+      }
+      return keys;
+    }
+
+    function reportClassLabel(studentOrClass, maybeStream){
+      if (studentOrClass && typeof studentOrClass === 'object') {
+        const stream = sanitizeStreamFilter(studentOrClass.stream || '');
+        return stream || normalizeDisplayClass(studentOrClass.class || state.className || '');
+      }
+      const stream = sanitizeStreamFilter(maybeStream || '');
+      return stream || normalizeDisplayClass(studentOrClass || state.className || '');
+    }
+
     // Monthly attempted-only helpers (reuse existing monthly loader)
     async function getMonthSubjects(studentId, monthName){
       const className = state.classKey || state.className;
@@ -1726,32 +1752,28 @@
             const streams = Array.isArray(mapping?.streams) ? mapping.streams.filter((s) => s && s.name) : [];
 
             // Register teacher under a given class key + list of subjects
-            const registerSubjects = (classKey, subjectList) => {
+            const registerSubjects = (classKey, streamName, subjectList) => {
               if (!classKey) return;
-              const keyUp = classKey.toUpperCase();
               (subjectList || []).forEach((subjectRaw) => {
                 const subjectCanon = canonicalSubjectName(subjectRaw || '');
                 if (!subjectCanon) return;
-                const subjectUpper = String(subjectCanon).trim().toUpperCase();
-                if (!subjectUpper) return;
-                const csKey = `${keyUp}::${subjectUpper}`;
-                if (!state.teacherByClassSubject.has(csKey)) {
-                  state.teacherByClassSubject.set(csKey, teacherName);
-                }
+                buildTeacherAssignmentKeys(classKey, streamName, subjectCanon).forEach((key) => {
+                  if (!key || state.teacherByClassSubject.has(key)) return;
+                  state.teacherByClassSubject.set(key, teacherName);
+                });
               });
             };
 
-            if (!streams.length) {
+            registerSubjects(classCanon, '', Array.isArray(mapping?.subjects) ? mapping.subjects : []);
+            if (false) {
               // No streams — register under the base class
-              registerSubjects(classCanon, Array.isArray(mapping?.subjects) ? mapping.subjects : []);
+              registerSubjects(classCanon, '', Array.isArray(mapping?.subjects) ? mapping.subjects : []);
             } else {
               // Has streams — each stream is its own independent class; register separately.
               // The base class ("Class 3") is NOT registered here: different teachers teach it.
               streams.forEach((stream) => {
-                const streamSubjects = (stream.subjects && stream.subjects.length)
-                  ? stream.subjects
-                  : (Array.isArray(mapping?.subjects) ? mapping.subjects : []);
-                registerSubjects(stream.name, streamSubjects);
+                const streamSubjects = Array.isArray(stream?.subjects) ? stream.subjects : [];
+                registerSubjects(classCanon, stream.name, streamSubjects);
               });
             }
           });
@@ -1767,10 +1789,10 @@
           const legacyClass = normalizeDisplayClass(value?.class || value?.className || value?.classLevel || value?.grade || '');
           if (!subjectUpper) return;
           if (legacyClass) {
-            const classSubjectKey = `${legacyClass.toUpperCase()}::${subjectUpper}`;
-            if (!state.teacherByClassSubject.has(classSubjectKey)) {
-              state.teacherByClassSubject.set(classSubjectKey, name);
-            }
+            buildTeacherAssignmentKeys(legacyClass, '', subject).forEach((key) => {
+              if (!key || state.teacherByClassSubject.has(key)) return;
+              state.teacherByClassSubject.set(key, name);
+            });
           }
         });
       } catch (e) {
@@ -1963,9 +1985,9 @@
             classSel.value = state.classKey;
           }
           const previewClassBadge = document.getElementById('previewClassBadge');
-          if (previewClassBadge) previewClassBadge.textContent = state.className || 'Class -';
+          if (previewClassBadge) previewClassBadge.textContent = reportClassLabel({ class: state.className, stream: state.stream }) || 'Class -';
           const previewClassName = document.getElementById('previewClassName');
-          if (previewClassName) previewClassName.textContent = state.className || '-';
+          if (previewClassName) previewClassName.textContent = reportClassLabel({ class: state.className, stream: state.stream }) || '-';
           dbClass = state.classKey || state.className;
           persistToSession();
         };
@@ -3979,12 +4001,17 @@
       return 'Immediate academic support required. Schedule remedial sessions.';
     }
 
-    function getTeacherName(subject, className){
-      const subjectCanon = canonicalSubjectName(subject || '');
-      const subjectUpper = String(subjectCanon || '').trim().toUpperCase();
-      const classCanon = normalizeDisplayClass(className || state.className || '');
-      const classSubjectKey = `${String(classCanon || '').toUpperCase()}::${subjectUpper}`;
-      if (state.teacherByClassSubject.has(classSubjectKey)) return state.teacherByClassSubject.get(classSubjectKey);
+    function getTeacherName(subject, classOrStudent, streamName){
+      const className = classOrStudent && typeof classOrStudent === 'object'
+        ? (classOrStudent.class || state.className || '')
+        : (classOrStudent || state.className || '');
+      const stream = classOrStudent && typeof classOrStudent === 'object'
+        ? (classOrStudent.stream || state.stream || '')
+        : (streamName || state.stream || '');
+      const keys = buildTeacherAssignmentKeys(className, stream, subject);
+      for (const key of keys) {
+        if (state.teacherByClassSubject.has(key)) return state.teacherByClassSubject.get(key);
+      }
       return 'Teacher';
     }
 
@@ -4015,7 +4042,7 @@
           const rec = stu.subjectStats.subjectMap[subject];
           if (rec){
             rec.position = stu.subjectPositions[subject];
-            rec.teacher = getTeacherName(subject, state.className);
+            rec.teacher = getTeacherName(subject, stu);
           }
         });
       });
@@ -4141,7 +4168,7 @@
             <td class="px-4 py-3 text-slate-300">${escapeHtml(dobFormatted)}</td>
             <td class="px-4 py-3 text-slate-300">${escapeHtml(s.parentName || '-')}</td>
             <td class="px-4 py-3 text-slate-300">${escapeHtml(s.parentContact || '-')}</td>
-            <td class="px-4 py-3">${escapeHtml(normalizeDisplayClass(s.class || state.className || ''))}</td>
+            <td class="px-4 py-3">${escapeHtml(reportClassLabel(s))}</td>
             <td class="px-4 py-3">${s.avg.toFixed(1)}%</td>
             <td class="px-4 py-3"><span class="status-pill ${pillClass}">Grade ${s.grade}</span></td>
             <td class="px-4 py-3">
@@ -4188,7 +4215,7 @@
       const s = state.filtered.find(x => x.adm === state.selectedAdm);
       const cohortSize = state.students.length || state.filtered.length;
       const classAvg = classAveragePct();
-      const currentClass = normalizeDisplayClass(state.className || s?.class || '');
+      const currentClass = reportClassLabel(s || { class: state.className, stream: state.stream });
       document.getElementById('previewBranch').textContent = state.branch || 'School';
       document.getElementById('previewClassBadge').textContent = currentClass || 'Class -';
       document.getElementById('previewExam').textContent = `Exam ${state.examType || '-'}`;
@@ -4235,7 +4262,7 @@
       document.getElementById('previewStudentName').textContent = s.name || s.adm;
       document.getElementById('previewGender').textContent = s.gender || 'Gender';
       document.getElementById('previewAdm').textContent = `ADM ${s.adm}`;
-      document.getElementById('previewClassName').textContent = normalizeDisplayClass(s.class || state.className || '-');
+      document.getElementById('previewClassName').textContent = reportClassLabel(s) || '-';
       document.getElementById('previewExamScope').textContent = examScopeLabel();
       document.getElementById('previewDob').textContent = formatDate(s.dob);
       document.getElementById('previewReporting').textContent = formatDate(s.reportingDate);
@@ -4313,10 +4340,11 @@
     function renderPreviewSubjectsTable(subjects){
       const normalized = toNormalizedRows(subjects);
       const overall = studentPercentFrom(subjects);
+      const selectedStudent = state.filtered.find((student) => student.adm === state.selectedAdm) || null;
       const tbody = document.getElementById('previewSubjects');
       if (tbody){
         tbody.innerHTML = normalized.map((entry, idx) => {
-          const teacher = entry.teacher || getTeacherName(entry.subject, state.className);
+          const teacher = entry.teacher || getTeacherName(entry.subject, selectedStudent || state.className, selectedStudent?.stream || state.stream);
           return `
           <tr>
             <td>${idx + 1}</td><td>${escapeHtml(entry.subject)}</td>
@@ -4624,7 +4652,7 @@ function toNormalizedRows(subjects){
       const subjects = (student.subjectStats?.subjects || []).map(entry => {
         const history = (detail.subjects?.[entry.subject] || []).slice();
         const trend = trendFromPoints(history);
-        const teacher = entry.teacher || getTeacherName(entry.subject, state.className);
+        const teacher = entry.teacher || getTeacherName(entry.subject, student);
         const classAttempts = classList
           .map(peer => peer.subjectStats?.subjectMap?.[entry.subject])
           .filter(rec => attemptedItem(rec));
@@ -5054,7 +5082,7 @@ function toNormalizedRows(subjects){
     async function drawReportCard(doc, s){
       const margin = 12;
       const headerY = 10;
-      const className = normalizeDisplayClass(state.className || s.class || '');
+      const className = reportClassLabel(s || { class: state.className, stream: state.stream });
       const monthLabel = state.month === 'All' ? 'All Months' : (s.monthLabel || MONTH_LABELS[state.month] || state.month || '-');
       const cohortSize = state.students.length || state.filtered.length || 0;
       const classAvg = classAveragePct();
@@ -5068,7 +5096,7 @@ function toNormalizedRows(subjects){
       const classTeacher = classTeacherAssignment?.classTeacher || null;
       const assistantTeacher = classTeacherAssignment?.assistantTeacher || null;
       const subjectRows = normalizedSubjects.map((entry, index) => {
-        const teacher = entry.teacher || getTeacherName(entry.subject, state.className);
+        const teacher = entry.teacher || getTeacherName(entry.subject, s);
         return [
           index + 1,
           entry.subject,
