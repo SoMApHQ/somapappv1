@@ -350,28 +350,31 @@
 
   async function reloadAll({ reason = 'refresh', withAutoGenerate = false } = {}) {
     setBusyStatus(`Loading ${reason.replace(/-/g, ' ')}...`);
-    detachWatchers();
-    state.previewByGroup = {};
-    state.dirtySettings.clear();
-    state.viewer = await loadViewerContext();
-    await loadSchoolBranding();
-    const source = await loadTeacherSources();
-    state.teachers = source.teachers;
-    state.teacherMap = indexBy(source.teachers, 'workerId');
-    state.subjectCatalog = source.subjectCatalog;
-    state.schemeHoursByClass = await loadSchemeHoursMap();
-    state.sourceConfigHash = buildSourceConfigHash(source);
-    await loadTimetableRecords();
-    ensureSettingsShape();
-    populateGroupSelector();
-    subscribeToSourceChanges();
-    renderAll();
-    if (withAutoGenerate) {
-      await maybeAutoRegenerateAll('source-refresh');
-    } else {
-      await maybeAutoRegenerateCurrent('render-only');
+    try {
+      detachWatchers();
+      state.previewByGroup = {};
+      state.dirtySettings.clear();
+      state.viewer = await loadViewerContext();
+      await loadSchoolBranding();
+      const source = await loadTeacherSources();
+      state.teachers = source.teachers;
+      state.teacherMap = indexBy(source.teachers, 'workerId');
+      state.subjectCatalog = source.subjectCatalog;
+      state.schemeHoursByClass = await loadSchemeHoursMap();
+      state.sourceConfigHash = buildSourceConfigHash(source);
+      await loadTimetableRecords();
+      ensureSettingsShape();
+      populateGroupSelector();
+      subscribeToSourceChanges();
+      renderAll();
+      if (withAutoGenerate) {
+        await maybeAutoRegenerateAll('source-refresh');
+      } else {
+        await maybeAutoRegenerateCurrent('render-only');
+      }
+    } finally {
+      setBusyStatus('');
     }
-    setBusyStatus('');
   }
 
   async function loadViewerContext() {
@@ -1121,7 +1124,12 @@
       state.autoGenerating = true;
       try {
         for (const groupId of staleGroups) {
-          await generateGroup(groupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false, autoReason: reason });
+          try {
+            await generateGroup(groupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false, autoReason: reason });
+          } catch (error) {
+            console.warn(`Auto-save for ${groupId} failed; keeping live preview only.`, error);
+            await generateGroup(groupId, { saveMode: 'none', silent: true, openPreview: false, autoReason: reason });
+          }
         }
         renderAll();
       } finally {
