@@ -796,6 +796,26 @@
         const termKey = getTermFromMonth(nairobiNow.getMonth());
         const timetableLessons = [];
 
+        // Build a set of all class/stream names this teacher is assigned to,
+        // so we can detect whether the timetable in Firebase actually covers them.
+        const teacherClasses = new Set();
+        for (const mapping of classSubjectMappings) {
+          const streams = (mapping.streams || []).filter(s => s && s.name);
+          if (streams.length > 0) {
+            streams.forEach(s => teacherClasses.add(s.name));
+          } else {
+            const cls = mapping.class || mapping.className || '';
+            if (cls) teacherClasses.add(cls);
+          }
+        }
+
+        // timetableCoverageFound = true means Firebase has a saved timetable grid that
+        // includes at least one of this teacher's classes.  When true we trust the grid
+        // result — zero lessons means the teacher is genuinely free today (OPEN slots).
+        // The fallback to classSubjectMappings is only valid when the timetable hasn't
+        // been generated/saved yet.
+        let timetableCoverageFound = false;
+
         try {
           const ttSnap = await schoolRef(`years/${year}/timetable/generated/${termKey}`).once('value');
           const ttData = ttSnap.val() || {};
@@ -803,6 +823,9 @@
             const grid = groupData.grid || {};
             const slots = Array.isArray(groupData.slots) ? groupData.slots : [];
             for (const [className, days] of Object.entries(grid)) {
+              if (!timetableCoverageFound && teacherClasses.has(className)) {
+                timetableCoverageFound = true;
+              }
               const daySlots = (days && days[result.dayName]) || {};
               for (const [slotId, cell] of Object.entries(daySlots)) {
                 if (cell && String(cell.teacherId || '').trim() === String(state.workerId || '').trim() && cell.subject && cell.type !== 'fixed') {
@@ -822,9 +845,10 @@
           console.warn('Timetable load failed:', err);
         }
 
-        // Fallback: if timetable has no lessons for this teacher (e.g. timetable not yet saved
-        // to Firebase), derive expected lessons from classSubjectMappings so the plan check still runs.
-        if (timetableLessons.length === 0 && classSubjectMappings.length > 0) {
+        // Fallback: only when the timetable has NOT been saved to Firebase for this teacher's
+        // classes yet.  If the timetable IS there but shows zero lessons, that means the
+        // teacher is genuinely free today — we must NOT invent phantom lessons from config.
+        if (timetableLessons.length === 0 && !timetableCoverageFound && classSubjectMappings.length > 0) {
           for (const mapping of classSubjectMappings) {
             const streams = (mapping.streams || []).filter(s => s && s.name);
             const subjects = mapping.subjects || [];

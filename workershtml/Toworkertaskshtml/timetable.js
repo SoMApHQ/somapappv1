@@ -544,18 +544,24 @@
   }
 
   function subscribeToSourceChanges() {
+    // Firebase .on('value') fires IMMEDIATELY with the current snapshot when first attached.
+    // We skip that initial fire so we only react to actual subsequent changes,
+    // which prevents an infinite reloadAll → subscribeToSourceChanges → immediate fire → reloadAll loop.
     ['workers', 'teachers_config', 'classStreams'].forEach((pathSegment) => {
       const ref = state.db.ref(window.SOMAP.P(`years/${state.year}/${pathSegment}`));
-      const handler = () => scheduleRefresh();
+      let initialFired = false;
+      const handler = () => { if (!initialFired) { initialFired = true; return; } scheduleRefresh(); };
       ref.on('value', handler);
       state.watchers.push(() => ref.off('value', handler));
     });
     const catalogRef = state.db.ref(window.SOMAP.P(`subjectCatalog/${state.year}`));
-    const catalogHandler = () => scheduleRefresh();
+    let catalogInitialFired = false;
+    const catalogHandler = () => { if (!catalogInitialFired) { catalogInitialFired = true; return; } scheduleRefresh(); };
     catalogRef.on('value', catalogHandler);
     state.watchers.push(() => catalogRef.off('value', catalogHandler));
     const schemeRef = state.db.ref(`schemes/${state.schoolId}/templates/${state.year}`);
-    const schemeHandler = () => scheduleRefresh();
+    let schemeInitialFired = false;
+    const schemeHandler = () => { if (!schemeInitialFired) { schemeInitialFired = true; return; } scheduleRefresh(); };
     schemeRef.on('value', schemeHandler);
     state.watchers.push(() => schemeRef.off('value', schemeHandler));
   }
