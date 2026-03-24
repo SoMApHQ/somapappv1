@@ -1255,10 +1255,8 @@
   }
 
   async function persistGenerated(groupId, payload) {
-    await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/generated/${state.activeTerm}/${groupId}`)).set({
-      ...payload,
-      isSaved: undefined
-    });
+    const { isSaved, ...persistablePayload } = payload || {};
+    await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/generated/${state.activeTerm}/${groupId}`)).set(persistablePayload);
   }
 
   function addLockedPlacement() {
