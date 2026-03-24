@@ -223,9 +223,9 @@
     });
     els.teacherClassFilter?.addEventListener('change', renderTeacherTable);
     els.refreshButton?.addEventListener('click', () => reloadAll({ reason: 'manual-refresh', withAutoGenerate: true }));
-    els.regenerateButton?.addEventListener('click', () => generateGroup(state.activeGroupId, { saveMode: 'validOnly', silent: false, openPreview: true }));
-    els.previewGenerateButton?.addEventListener('click', () => generateGroup(state.activeGroupId, { saveMode: 'validOnly', silent: false, openPreview: true }));
-    els.generateAllButton?.addEventListener('click', () => generateAllGroups({ saveMode: 'validOnly', silent: false }));
+    els.regenerateButton?.addEventListener('click', () => generateGroup(state.activeGroupId, { saveMode: 'draftIfInvalid', silent: false, openPreview: true }));
+    els.previewGenerateButton?.addEventListener('click', () => generateGroup(state.activeGroupId, { saveMode: 'draftIfInvalid', silent: false, openPreview: true }));
+    els.generateAllButton?.addEventListener('click', () => generateAllGroups({ saveMode: 'draftIfInvalid', silent: false }));
     els.saveSettingsButton?.addEventListener('click', saveCurrentSettings);
     els.addSlotButton?.addEventListener('click', () => {
       mutateSettings((settings) => {
