@@ -363,6 +363,7 @@
     state.sourceConfigHash = buildSourceConfigHash(source);
     await loadTimetableRecords();
     ensureSettingsShape();
+    populateGroupSelector();
     subscribeToSourceChanges();
     renderAll();
     if (withAutoGenerate) {
@@ -651,11 +652,11 @@
     const requirementSummary = summarizeRequirementSources(requirementRows);
     const classLoadAudit = buildClassLoadAudit(groupId, settings, settings.slots || []);
     const alerts = [];
-    if (generated && generated.sourceConfigHash && generated.sourceConfigHash !== state.sourceConfigHash) {
+    if (isTimetableStale(groupId, generated, settings)) {
       alerts.push({
         type: 'warning',
         title: 'Teacher setup changed',
-        body: 'Saved timetable data is older than the current teacher class and subject setup. The module is regenerating a fresh preview.'
+        body: 'Saved timetable data is older than the current timetable setup. The module is regenerating a fresh preview.'
       });
     }
     if (requirementSummary.fallbackCount > 0) {
@@ -1086,7 +1087,7 @@
     const current = displayTimetable;
     const summary = current?.validationSummary || blankValidationSummary();
     if (els.generatedStatusBadge) {
-      const stale = Boolean(saved?.sourceConfigHash && saved.sourceConfigHash !== state.sourceConfigHash);
+      const stale = isTimetableStale(state.activeGroupId, saved);
       let label = 'No generated timetable';
       let className = 'tt-pill tt-pill--warning';
       if (current?.isSaved && current?.isValid && !stale) {
@@ -1113,20 +1114,19 @@
     if (state.autoGenerating) return;
     const staleGroups = GROUP_ORDER.filter((groupId) => {
       const generated = state.generatedByGroup[groupId];
-      return !generated || generated.sourceConfigHash !== state.sourceConfigHash;
+      return isTimetableStale(groupId, generated);
     });
     if (!staleGroups.length) return;
     if (state.viewer.canManage) {
       state.autoGenerating = true;
       try {
         for (const groupId of staleGroups) {
-          await generateGroup(groupId, { saveMode: 'validOnly', silent: true, openPreview: false, autoReason: reason });
+          await generateGroup(groupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false, autoReason: reason });
         }
         renderAll();
       } finally {
         state.autoGenerating = false;
       }
-      toast(`Timetable source changed. Regenerated ${staleGroups.length} group(s).`, 'info');
       return;
     }
     await maybeAutoRegenerateCurrent(reason);
@@ -1134,7 +1134,7 @@
 
   async function maybeAutoRegenerateCurrent(reason) {
     const generated = state.generatedByGroup[state.activeGroupId];
-    if (!generated || generated.sourceConfigHash !== state.sourceConfigHash) {
+    if (isTimetableStale(state.activeGroupId, generated)) {
       await generateGroup(state.activeGroupId, { saveMode: 'none', silent: true, openPreview: false, autoReason: reason });
       renderAll();
     }
@@ -2008,6 +2008,7 @@
       classLoadAudit: engineResult.validation.classLoadAudit,
       sourceTeacherCount: teachers.length,
       sourceConfigHash: state.sourceConfigHash,
+      generationConfigHash: buildGenerationConfigHash(groupId, settings),
       status: validationSummary.isValid ? 'valid' : 'draft-invalid',
       isSaved: Boolean(isSaved)
     };
@@ -2037,9 +2038,9 @@
 
   async function ensureTimetableForExport(groupId) {
     let timetable = getDisplayTimetable(groupId);
-    if (timetable && timetable.termKey === state.activeTerm && timetable.sourceConfigHash === state.sourceConfigHash) return timetable;
+    if (timetable && !isTimetableStale(groupId, timetable)) return timetable;
     if (state.viewer.canManage) {
-      timetable = await generateGroup(groupId, { saveMode: 'validOnly', silent: true, openPreview: false });
+      timetable = await generateGroup(groupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false });
       return timetable;
     }
     if (timetable) return timetable;
@@ -2718,7 +2719,8 @@
       validationSummary: {
         ...blankValidationSummary(),
         ...(raw.validationSummary || raw.validation?.summary || {})
-      }
+      },
+      generationConfigHash: String(raw.generationConfigHash || '')
     };
   }
 
@@ -2913,8 +2915,8 @@
 
   function describeGeneratedFreshness(timetable) {
     if (!timetable) return 'No generated timetable available.';
-    if (timetable.sourceConfigHash && timetable.sourceConfigHash !== state.sourceConfigHash) {
-      return 'Saved timetable is older than the current teacher configuration.';
+    if (isTimetableStale(timetable.groupId || state.activeGroupId, timetable)) {
+      return 'Saved timetable is older than the current timetable configuration.';
     }
     return timetable.isSaved ? 'Saved timetable matches the current teacher setup.' : 'Live preview uses the current source data.';
   }
@@ -2943,15 +2945,132 @@
       schoolId: state.schoolId,
       year: state.year,
       termKey: state.activeTerm,
-      teachers: source.teachers.map((teacher) => ({
+      teachers: (source.teachers || []).map((teacher) => ({
         workerId: teacher.workerId,
         name: teacher.name,
         teacherType: teacher.teacherType,
-        mappings: teacher.classSubjectMappings
-      })),
-      subjectCatalog: source.subjectCatalog,
+        classes: sortStrings(teacher.classes || []),
+        subjects: sortStrings(teacher.subjects || []),
+        mappings: canonicalizeTeacherMappings(teacher.classSubjectMappings || [])
+      })).sort((left, right) => String(left.workerId).localeCompare(String(right.workerId), 'en', { sensitivity: 'base' })),
+      classStreams: canonicalizeClassStreams(state.classStreams),
+      subjectCatalog: canonicalizeSubjectCatalog(source.subjectCatalog),
       schemeHoursByClass: state.schemeHoursByClass
     }));
+  }
+
+  function buildGenerationConfigHash(groupId, settings = getSettingsForGroup(groupId)) {
+    const normalizedSettings = normalizeSettings(settings, groupId, state.teachers, state.subjectCatalog);
+    return hashString(stableStringify({
+      groupId,
+      sourceConfigHash: state.sourceConfigHash,
+      classes: [...(GROUPS[groupId]?.classes || [])],
+      slots: (normalizedSettings.slots || []).map((slot) => ({
+        id: String(slot.id || ''),
+        start: String(slot.start || ''),
+        end: String(slot.end || ''),
+        label: String(slot.label || ''),
+        isTeaching: slot.isTeaching !== false
+      })),
+      periodRequirements: canonicalizePeriodRequirements(normalizedSettings.periodRequirements || {}),
+      lockedCells: canonicalizeLockedCells(normalizedSettings.lockedCells || []),
+      subjectAbbreviations: canonicalizeSimpleMap(normalizedSettings.subjectAbbreviations || {}),
+      subjectColors: canonicalizeSimpleMap(normalizedSettings.subjectColors || {})
+    }));
+  }
+
+  function isTimetableStale(groupId, timetable, settings = getSettingsForGroup(groupId)) {
+    if (!timetable) return true;
+    if (normalizeTermKey(timetable.termKey || state.activeTerm) !== state.activeTerm) return true;
+    const expectedGenerationHash = buildGenerationConfigHash(groupId, settings);
+    if (timetable.generationConfigHash) {
+      return String(timetable.generationConfigHash) !== String(expectedGenerationHash);
+    }
+    return String(timetable.sourceConfigHash || '') !== String(state.sourceConfigHash || '');
+  }
+
+  function canonicalizeTeacherMappings(mappings) {
+    return (mappings || [])
+      .map((mapping) => ({
+        class: normalizeClassName(mapping.class || ''),
+        baseClass: normalizeClassName(mapping.baseClass || mapping.class || ''),
+        streamName: String(mapping.streamName || '').trim(),
+        streamKey: String(mapping.streamKey || '').trim(),
+        subjects: sortStrings((mapping.subjects || []).map(normalizeSubjectName).filter(Boolean))
+      }))
+      .sort((left, right) =>
+        `${left.baseClass}|${left.class}|${left.streamName}|${left.subjects.join('|')}`.localeCompare(
+          `${right.baseClass}|${right.class}|${right.streamName}|${right.subjects.join('|')}`,
+          'en',
+          { sensitivity: 'base' }
+        )
+      );
+  }
+
+  function canonicalizeClassStreams(classStreams) {
+    const result = {};
+    Object.keys(classStreams || {}).sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' })).forEach((className) => {
+      result[className] = (classStreams[className] || [])
+        .map((stream) => ({
+          name: String(stream.name || '').trim(),
+          streamKey: String(stream.streamKey || '').trim(),
+          subjects: sortStrings((stream.subjects || []).map(normalizeSubjectName).filter(Boolean))
+        }))
+        .sort((left, right) => `${left.name}|${left.streamKey}`.localeCompare(`${right.name}|${right.streamKey}`, 'en', { sensitivity: 'base' }));
+    });
+    return result;
+  }
+
+  function canonicalizeSubjectCatalog(catalog) {
+    const result = {};
+    Object.keys(catalog || {}).sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' })).forEach((className) => {
+      result[className] = sortStrings(Object.keys(catalog[className] || {}));
+    });
+    return result;
+  }
+
+  function canonicalizePeriodRequirements(periodRequirements) {
+    const result = {};
+    Object.keys(periodRequirements || {}).sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' })).forEach((className) => {
+      result[className] = {};
+      Object.keys(periodRequirements[className] || {}).sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' })).forEach((subject) => {
+        result[className][subject] = Number(periodRequirements[className][subject] || 0);
+      });
+    });
+    return result;
+  }
+
+  function canonicalizeLockedCells(lockedCells) {
+    return (lockedCells || [])
+      .map((cell) => ({
+        className: normalizeClassName(cell.className || cell.class || ''),
+        day: String(cell.day || ''),
+        slotId: String(cell.slotId || ''),
+        type: cell.type === 'fixed' ? 'fixed' : 'teaching',
+        subject: normalizeSubjectName(cell.subject || ''),
+        teacherId: String(cell.teacherId || ''),
+        label: String(cell.label || '')
+      }))
+      .sort((left, right) =>
+        `${left.className}|${left.day}|${left.slotId}|${left.type}|${left.subject}|${left.teacherId}|${left.label}`.localeCompare(
+          `${right.className}|${right.day}|${right.slotId}|${right.type}|${right.subject}|${right.teacherId}|${right.label}`,
+          'en',
+          { sensitivity: 'base' }
+        )
+      );
+  }
+
+  function canonicalizeSimpleMap(map) {
+    const result = {};
+    Object.keys(map || {}).sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' })).forEach((key) => {
+      result[key] = String(map[key] || '');
+    });
+    return result;
+  }
+
+  function sortStrings(values) {
+    return Array.from(new Set((values || []).map((value) => String(value || '').trim()).filter(Boolean)))
+      .sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' }));
   }
 
   async function scopedOrSocratesLegacy(scopedPath, legacyPath) {

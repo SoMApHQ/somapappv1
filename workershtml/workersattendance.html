@@ -730,6 +730,27 @@
       return String(str || '').trim().replace(/[.#$/\[\]]/g, '_');
     }
 
+    function normalizeClassKey(value) {
+      return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    }
+
+    function dedupeLessons(lessons) {
+      const seen = new Set();
+      return (lessons || []).filter((lesson) => {
+        const key = [
+          normalizeClassKey(lesson.className),
+          String(lesson.subject || '').trim().toLowerCase(),
+          String(lesson.start || '').trim(),
+          String(lesson.end || '').trim(),
+          String(lesson.slotLabel || '').trim(),
+          lesson.fromConfig ? 'config' : 'grid'
+        ].join('|');
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
     async function checkTeacherReadiness() {
       const result = {
         ready: true,
@@ -799,13 +820,20 @@
         // Build a set of all class/stream names this teacher is assigned to,
         // so we can detect whether the timetable in Firebase actually covers them.
         const teacherClasses = new Set();
+        const teacherClassKeys = new Set();
         for (const mapping of classSubjectMappings) {
           const streams = (mapping.streams || []).filter(s => s && s.name);
           if (streams.length > 0) {
-            streams.forEach(s => teacherClasses.add(s.name));
+            streams.forEach((s) => {
+              teacherClasses.add(s.name);
+              teacherClassKeys.add(normalizeClassKey(s.name));
+            });
           } else {
             const cls = mapping.class || mapping.className || '';
-            if (cls) teacherClasses.add(cls);
+            if (cls) {
+              teacherClasses.add(cls);
+              teacherClassKeys.add(normalizeClassKey(cls));
+            }
           }
         }
 
@@ -823,7 +851,8 @@
             const grid = groupData.grid || {};
             const slots = Array.isArray(groupData.slots) ? groupData.slots : [];
             for (const [className, days] of Object.entries(grid)) {
-              if (!timetableCoverageFound && teacherClasses.has(className)) {
+              const classKey = normalizeClassKey(className);
+              if (!timetableCoverageFound && (teacherClasses.has(className) || teacherClassKeys.has(classKey))) {
                 timetableCoverageFound = true;
               }
               const daySlots = (days && days[result.dayName]) || {};
@@ -840,6 +869,12 @@
                 }
               }
             }
+          }
+          if (!timetableCoverageFound) {
+            const teacherLegendMatch = Object.values(ttData).some((groupData) =>
+              (groupData?.teacherLegend || []).some((teacher) => String(teacher.workerId || '').trim() === String(state.workerId || '').trim())
+            );
+            if (teacherLegendMatch) timetableCoverageFound = true;
           }
         } catch (err) {
           console.warn('Timetable load failed:', err);
@@ -868,11 +903,11 @@
           }
         }
 
-        result.todayLessons = timetableLessons;
+        result.todayLessons = dedupeLessons(timetableLessons);
 
         // 4. Check lesson plans for each lesson today (today's date only — lesson plans are daily)
-        if (timetableLessons.length > 0) {
-          const uniqueClasses = [...new Set(timetableLessons.map(l => l.className))];
+        if (result.todayLessons.length > 0) {
+          const uniqueClasses = [...new Set(result.todayLessons.map(l => l.className))];
           const plansByClass = {};
           for (const cls of uniqueClasses) {
             try {
@@ -884,7 +919,7 @@
             }
           }
 
-          for (const lesson of timetableLessons) {
+          for (const lesson of result.todayLessons) {
             const plans = plansByClass[lesson.className] || [];
             const hasPlan = plans.some(p => {
               // Must belong to this teacher (teacherId stored on save)
