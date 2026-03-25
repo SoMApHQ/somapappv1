@@ -711,6 +711,7 @@
               <button class="btn reject" data-action="reject_in" data-worker="${row.id}" ${!row.record?.checkInTs ? 'disabled' : ''}>Reject IN</button>
               <button class="btn approve" data-action="approve_out" data-worker="${row.id}" ${!row.record?.checkOutTs ? 'disabled' : ''}>Approve OUT</button>
               <button class="btn reject" data-action="reject_out" data-worker="${row.id}" ${!row.record?.checkOutTs ? 'disabled' : ''}>Reject OUT</button>
+              ${hasRecord ? `<button class="btn" data-action="delete_record" data-worker="${row.id}" style="background:rgba(251,113,133,0.15);border:1px solid rgba(251,113,133,0.5);color:#fb7185;" title="Futa rekodi ya leo kabisa">🗑️ Delete Record</button>` : ''}
             </div>
           `;
           els.list.appendChild(div);
@@ -819,6 +820,22 @@
         showToast(`${kindLabel} ${verb}`, isApprove ? 'success' : 'warning');
       };
 
+      const deleteRecord = async ({ targetWorker }) => {
+        const { monthKey, todayKey } = latestKeys;
+        if (!monthKey || !todayKey) return;
+        const name = els.list.querySelector(`[data-worker="${targetWorker}"] h4`)?.textContent || targetWorker;
+        if (!confirm(`Futa kabisa rekodi ya mahudhurio ya leo ya ${name}?\n\nHii itafuta check-in na check-out yote. Hawezi kuonekana kwenye orodha ya idhini. Haiwezi kutenduliwa.`)) return;
+        const scopedRef = db.ref(SOMAP.P(`years/${currentYear}/workerAttendance/${targetWorker}/${monthKey}/${todayKey}`));
+        const legacyRef = db.ref(`attendance/${targetWorker}/${monthKey}/${todayKey}`);
+        const presentRef = db.ref(SOMAP.P(`years/${currentYear}/dashboard/presentWorkers/${todayKey}/${targetWorker}`));
+        await Promise.all([
+          scopedRef.remove(),
+          legacyRef.remove().catch(() => null),
+          presentRef.remove().catch(() => null)
+        ]);
+        showToast(`Rekodi ya ${name} imefutwa. Anaweza kufanya check-in upya.`, 'success');
+      };
+
       if (els.list && !els.list.hasAttribute('data-listening')) {
         els.list.setAttribute('data-listening', 'true');
         els.list.addEventListener('click', async (event) => {
@@ -827,13 +844,17 @@
           const targetWorker = btn.dataset.worker;
           const action = btn.dataset.action;
           if (!targetWorker || !action) return;
-        try {
-          await applyDecision({ targetWorker, action });
-          await render();
-        } catch (err) {
-          console.error('Failed to update approval', err);
-          showToast('Imeshindwa kuhifadhi maamuzi. Jaribu tena.', 'error');
-        }
+          try {
+            if (action === 'delete_record') {
+              await deleteRecord({ targetWorker });
+            } else {
+              await applyDecision({ targetWorker, action });
+            }
+            await render();
+          } catch (err) {
+            console.error('Failed to update approval', err);
+            showToast('Imeshindwa kuhifadhi maamuzi. Jaribu tena.', 'error');
+          }
         });
       }
 
