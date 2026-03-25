@@ -847,9 +847,17 @@
         try {
           const ttSnap = await schoolRef(`years/${year}/timetable/generated/${termKey}`).once('value');
           const ttData = ttSnap.val() || {};
+          const myWorkerIdNorm = String(state.workerId || '').trim().toLowerCase();
           for (const [, groupData] of Object.entries(ttData)) {
             const grid = groupData.grid || {};
             const slots = Array.isArray(groupData.slots) ? groupData.slots : [];
+            const legend = Array.isArray(groupData.teacherLegend) ? groupData.teacherLegend : [];
+
+            // Find this teacher's entry in the saved legend — gives us their number for robust matching
+            const legendEntry = legend.find(t => String(t.workerId || '').trim().toLowerCase() === myWorkerIdNorm);
+            const myNumber = legendEntry ? String(legendEntry.number) : null;
+            if (legendEntry) timetableCoverageFound = true;
+
             for (const [className, days] of Object.entries(grid)) {
               const classKey = normalizeClassKey(className);
               if (!timetableCoverageFound && (teacherClasses.has(className) || teacherClassKeys.has(classKey))) {
@@ -857,7 +865,11 @@
               }
               const daySlots = (days && days[result.dayName]) || {};
               for (const [slotId, cell] of Object.entries(daySlots)) {
-                if (cell && String(cell.teacherId || '').trim() === String(state.workerId || '').trim() && cell.subject && cell.type !== 'fixed') {
+                if (!cell || cell.type === 'fixed' || !cell.subject) continue;
+                // Match by teacherId (primary) OR by teacherNumber via legend (fallback for ID format mismatches)
+                const byId = String(cell.teacherId || '').trim().toLowerCase() === myWorkerIdNorm;
+                const byNumber = myNumber !== null && String(cell.teacherNumber || '') === myNumber;
+                if (byId || byNumber) {
                   const slotInfo = slots.find(s => s.id === slotId) || {};
                   timetableLessons.push({
                     className,
@@ -869,12 +881,6 @@
                 }
               }
             }
-          }
-          if (!timetableCoverageFound) {
-            const teacherLegendMatch = Object.values(ttData).some((groupData) =>
-              (groupData?.teacherLegend || []).some((teacher) => String(teacher.workerId || '').trim() === String(state.workerId || '').trim())
-            );
-            if (teacherLegendMatch) timetableCoverageFound = true;
           }
         } catch (err) {
           console.warn('Timetable load failed:', err);
