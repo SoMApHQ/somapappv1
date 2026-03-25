@@ -194,7 +194,8 @@
       'validationSummaryPanel', 'validationDetails', 'requirementAuditTableBody', 'classLoadAuditTableBody', 'teacherClassFilter', 'teacherTableBody', 'settingsStatusChip',
       'saveSettingsButton', 'addSlotButton', 'resetSlotsButton', 'slotEditor', 'periodRequirementsEditor',
       'subjectOptionsEditor', 'lockedCellsEditor', 'previewStatusChip', 'previewGenerateButton', 'saveDraftInvalidButton',
-      'previewShell', 'pdfMetaPanel', 'printNotesPanel', 'pdfCurrentButton', 'pdfAllButton', 'pdfPrintButton'
+      'previewShell', 'pdfMetaPanel', 'printNotesPanel', 'pdfCurrentButton', 'pdfAllButton', 'pdfPrintButton',
+      'allGroupsShell'
     ].forEach((id) => {
       els[toCamel(id)] = document.getElementById(id);
     });
@@ -621,6 +622,7 @@
     renderSettings();
     renderPreview();
     renderPdfPanel();
+    renderAllGroupsPreview();
     renderHeaderStatus(displayTimetable);
   }
 
@@ -999,6 +1001,66 @@
         </div>
       </article>
     `;
+  }
+
+  function renderAllGroupsPreview() {
+    if (!els.allGroupsShell) return;
+    const groups = GROUP_ORDER.map((groupId) => ({ groupId, preview: getDisplayTimetable(groupId) }));
+    const hasAny = groups.some(({ preview }) => preview);
+    if (!hasAny) {
+      els.allGroupsShell.innerHTML = '<div class="tt-preview-empty">No timetables generated yet. Use "Generate All Groups" to create them.</div>';
+      return;
+    }
+    els.allGroupsShell.innerHTML = groups.map(({ groupId, preview }) => {
+      if (!preview) {
+        return `
+          <article class="tt-card tt-all-group-block">
+            <div class="tt-card__head">
+              <div>
+                <div class="tt-card__eyebrow">Group</div>
+                <h2>${escapeHtml(GROUPS[groupId].title)}</h2>
+              </div>
+              <span class="tt-inline-status tt-pill--warning">Not generated</span>
+            </div>
+            <div class="tt-preview-empty">No timetable saved for this group yet.</div>
+          </article>`;
+      }
+      const summary = preview.validationSummary || blankValidationSummary();
+      return `
+        <article class="tt-card tt-all-group-block">
+          <div class="tt-card__head">
+            <div>
+              <div class="tt-card__eyebrow">Group</div>
+              <h2>${escapeHtml(GROUPS[groupId].title)}</h2>
+            </div>
+            <span class="tt-inline-status ${summary.isValid ? 'tt-pill--success' : 'tt-pill--warning'}">${escapeHtml(summary.isValid ? 'Valid' : 'Has issues')}</span>
+          </div>
+          <div class="tt-all-group-meta">
+            <span><strong>Term:</strong> ${escapeHtml(termLabel(preview.termKey || state.activeTerm))}</span>
+            <span><strong>Generated:</strong> ${escapeHtml(formatDateTime(preview.generatedAt))}</span>
+            <span><strong>Status:</strong> ${escapeHtml(preview.isSaved ? 'Saved' : 'Draft')}</span>
+          </div>
+          ${renderCombinedPreviewTable(preview)}
+          <div class="tt-card__eyebrow" style="margin-top:14px;">Teacher Legend</div>
+          <div class="tt-legend-grid">
+            ${(preview.teacherLegend || []).map((t) => `
+              <div class="tt-legend-card">
+                <strong>${escapeHtml(`${t.number}. ${t.name}`)}</strong>
+                <small>${escapeHtml(`${t.teacherType} | ${t.classes.join(', ') || 'No classes'} | ${t.subjects.join(', ') || 'No subjects'}`)}</small>
+              </div>
+            `).join('')}
+          </div>
+          <div class="tt-card__eyebrow" style="margin-top:14px;">Subject Legend</div>
+          <div class="tt-subject-legend">
+            ${(preview.subjectLegend || []).map((s) => `
+              <span class="tt-subject-pill">
+                <span class="tt-subject-pill__dot" style="background:${escapeAttr(s.color)}"></span>
+                ${escapeHtml(`${s.abbreviation} = ${s.subject}`)}
+              </span>
+            `).join('')}
+          </div>
+        </article>`;
+    }).join('');
   }
 
   function renderCombinedPreviewTable(preview) {
