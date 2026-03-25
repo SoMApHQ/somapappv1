@@ -160,6 +160,7 @@
               <th>Late (dakika)</th>
               <th>Early (dakika)</th>
               <th>Approval</th>
+              <th class="admin-col" style="display:none;"></th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -1342,6 +1343,32 @@
       return record?.checkOutTs ? 'pending' : '--';
     }
 
+    function isHeadTeacher() {
+      const role = (state.profile?.role || localStorage.getItem('role') || sessionStorage.getItem('role') || '').toLowerCase();
+      return role.includes('head') || role.includes('management') || role.includes('academic');
+    }
+
+    async function deleteAttendanceRecord(dayKey, source) {
+      const label = formatDayKey(dayKey);
+      if (!confirm(`Futa kabisa rekodi ya mahudhurio ya ${label}?\n\nHii haiwezi kutenduliwa.`)) return;
+      try {
+        const scopedRef = schoolRef(scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}/${dayKey}`));
+        const legacyRef = db.ref(`attendance/${state.workerId}/${state.monthKey}/${dayKey}`);
+        if (source === 'legacy') {
+          await legacyRef.remove();
+        } else {
+          await scopedRef.remove();
+          // Also clean legacy path in case both exist
+          await legacyRef.remove().catch(() => null);
+        }
+        toast(`Rekodi ya ${label} imefutwa.`, 'success');
+        await refreshAll();
+      } catch (err) {
+        console.error('Delete attendance record failed:', err);
+        toast('Hitilafu ya kufuta rekodi. Jaribu tena.', 'error');
+      }
+    }
+
     async function renderTable() {
       const now = new Date();
       const monthText = now.toLocaleString('sw-TZ', {
@@ -1364,11 +1391,23 @@
       );
       const data = snap.val() || {};
       const dayKeys = Object.keys(data).sort();
+      const isAdmin = isHeadTeacher();
+
+      // Show/hide the admin action column header
+      document.querySelectorAll('.admin-col').forEach(el => {
+        el.style.display = isAdmin ? '' : 'none';
+      });
+
       dayKeys.forEach(dayKey => {
         const record = data[dayKey] || {};
         const row = document.createElement('tr');
         const inStatus = statusFromLegacy(record, 'in');
         const outStatus = statusFromLegacy(record, 'out');
+        const adminCell = isAdmin
+          ? `<td style="text-align:center;">
+               <button title="Futa rekodi hii" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:1rem;padding:2px 6px;border-radius:6px;opacity:0.7;" data-daykey="${dayKey}" class="del-att-btn">🗑️</button>
+             </td>`
+          : '';
         row.innerHTML = `
           <td>${formatDayKey(dayKey)}${source === 'legacy' ? ' *' : ''}</td>
           <td>${formatTs(record.checkInTs)}</td>
@@ -1376,7 +1415,11 @@
           <td>${record.lateMinutes || 0}</td>
           <td>${record.earlyMinutes || 0}</td>
           <td>IN: <span class="pill ${inStatus === 'approved' ? 'success' : inStatus === 'rejected' ? 'danger' : inStatus === 'pending' ? 'warning' : 'info'}">${inStatus}</span> • OUT: <span class="pill ${outStatus === 'approved' ? 'success' : outStatus === 'rejected' ? 'danger' : outStatus === 'pending' ? 'warning' : 'info'}">${outStatus}</span></td>
+          ${adminCell}
         `;
+        if (isAdmin) {
+          row.querySelector('.del-att-btn')?.addEventListener('click', () => deleteAttendanceRecord(dayKey, source));
+        }
         attendanceTable.appendChild(row);
       });
     }
