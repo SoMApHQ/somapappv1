@@ -351,6 +351,48 @@
 
     let latestFoodInvoice = null;
 
+    async function fetchApprovedWorkers(dateStr) {
+        try {
+            const year = getSelectedYear();
+            const school = getCurrentSchoolId();
+            const aliases = schoolAliasList(school);
+            const allSchools = await getAllSchoolIds();
+            const candidates = uniqueList([...aliases, ...allSchools]);
+            const monthKey = dateStr.substring(0, 7);
+            const dayKey = dateStr;
+
+            let attendanceData = {};
+            for (const s of candidates) {
+                const snap = await db.ref(`schools/${s}/years/${year}/workerAttendance`).once('value');
+                if (snap.exists()) { attendanceData = snap.val() || {}; break; }
+            }
+            if (!Object.keys(attendanceData).length) {
+                const snap = await db.ref(`years/${year}/workerAttendance`).once('value');
+                if (snap.exists()) attendanceData = snap.val() || {};
+            }
+
+            let workersData = {};
+            for (const s of candidates) {
+                const snap = await db.ref(`schools/${s}/years/${year}/workers`).once('value');
+                if (snap.exists()) { workersData = snap.val() || {}; break; }
+            }
+            if (!Object.keys(workersData).length) {
+                const snap = await db.ref(`years/${year}/workers`).once('value');
+                if (snap.exists()) workersData = snap.val() || {};
+            }
+
+            const approved = [];
+            Object.entries(attendanceData).forEach(([id, months]) => {
+                const record = months?.[monthKey]?.[dayKey] || null;
+                if (!record || record.approved !== true) return;
+                const profile = workersData[id]?.profile || {};
+                const name = profile.fullNameUpper || profile.name || id;
+                approved.push(name);
+            });
+            return approved;
+        } catch (_) { return []; }
+    }
+
     async function downloadFoodInvoicePdf(invoice) {
         if (!invoice) { Swal.fire('No invoice', 'Load food invoice first.', 'warning'); return; }
         const jsPdf = window.jspdf?.jsPDF;
@@ -408,6 +450,8 @@
             else { doc.setTextColor(...colors.brand1); doc.setFontSize(9); doc.text('SoMAp', boxX+8, boxY+logoBox/2+3); }
             y += h + 16;
         };
+
+        const approvedWorkers = await fetchApprovedWorkers(invoice.date || todayYmdLocal());
 
         const lines = Array.isArray(invoice.lines) ? invoice.lines : [];
         const pricedLine = lines.find(l=>Number(l.unitPrice||0)>0||Number(l.total||0)>0) || lines[0];
@@ -572,6 +616,42 @@
             y += 36;
         }
         y += 8;
+
+        // ── APPROVED WORKERS TABLE ──
+        if (approvedWorkers.length) {
+            ensureSpace(30);
+            doc.setFillColor(3, 105, 161);
+            doc.roundedRect(margin, y, contentWidth, 26, 6, 6, 'F');
+            doc.setTextColor(248, 250, 252);
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(11);
+            doc.text(`WAFANYAKAZI WALIOIDHINISHWA NA MKUU WA SHULE (${approvedWorkers.length})`, margin+10, y+17);
+            y += 30;
+            // 4-column compact name table
+            const cols4 = 4;
+            const cw4 = contentWidth / cols4;
+            for (let i = 0; i < approvedWorkers.length; i += cols4) {
+                const rowNames = approvedWorkers.slice(i, i + cols4);
+                const rowH = 16;
+                ensureSpace(rowH + 2);
+                if (y + rowH + 2 > pageHeight - margin) { doc.addPage(); y = margin; drawHeader(true); }
+                const bg = (Math.floor(i / cols4) % 2 === 0) ? [232,244,253] : [255,255,255];
+                doc.setFillColor(...bg);
+                doc.rect(margin, y, contentWidth, rowH, 'F');
+                doc.setDrawColor(186, 220, 240);
+                doc.rect(margin, y, contentWidth, rowH);
+                doc.setFont('helvetica', 'normal');
+                doc.setTextColor(...colors.text);
+                doc.setFontSize(8);
+                rowNames.forEach((name, j) => {
+                    const num = i + j + 1;
+                    doc.text(`${num}. ${name}`, margin + j * cw4 + 4, y + 11);
+                });
+                y += rowH;
+            }
+            y += 10;
+        }
+
         ensureSpace(56);
         doc.setDrawColor(148,163,184);
         const lw = contentWidth/2 - 26;
