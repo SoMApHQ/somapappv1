@@ -74,6 +74,63 @@
     return raw.replace(/\s+/g, ' ');
   }
 
+  function getBaseClassName(value, options = {}) {
+    const allowGraduated = options.allowGraduated !== false;
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+
+    const normalized = normalizeClassName(raw, { allowGraduated });
+    if (CLASS_OPTIONS.includes(normalized)) {
+      if (!allowGraduated && normalized === 'Graduated') return '';
+      return normalized;
+    }
+
+    const lower = raw.toLowerCase().replace(/\s+/g, ' ').trim();
+    const inlineStreamMatch = lower.match(/^(?:class\s*)?([1-7])(?:\s*[-_/]?\s*[a-z]{1,4})?(?:\s+.*)?$/i);
+    if (inlineStreamMatch) return `Class ${inlineStreamMatch[1]}`;
+
+    const compactStreamMatch = lower.replace(/[^a-z0-9]/g, '').match(/^(?:class)?([1-7])[a-z]{1,4}$/);
+    if (compactStreamMatch) return `Class ${compactStreamMatch[1]}`;
+
+    return normalized;
+  }
+
+  function buildClassMatcherTokens(value, options = {}) {
+    const raw = String(value || '').trim();
+    if (!raw) return [];
+
+    const base = getBaseClassName(raw, options);
+    const candidates = [
+      raw.replace(/\s+/g, ' '),
+      normalizeClassName(raw, options),
+      base
+    ].filter(Boolean);
+    const tokens = new Set();
+
+    candidates.forEach((candidate) => {
+      const lowered = String(candidate || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      if (!lowered) return;
+      tokens.add(lowered);
+      tokens.add(lowered.replace(/[^a-z0-9]/g, ''));
+    });
+
+    const baseMatch = String(base || '').match(/^Class\s+([1-7])$/i);
+    if (baseMatch) {
+      const digit = baseMatch[1];
+      tokens.add(`class ${digit}`);
+      tokens.add(`class${digit}`);
+      tokens.add(digit);
+    }
+
+    return Array.from(tokens);
+  }
+
+  function classesEquivalent(left, right, options = {}) {
+    const leftTokens = new Set(buildClassMatcherTokens(left, options));
+    if (!leftTokens.size) return false;
+    return buildClassMatcherTokens(right, options).some((token) => leftTokens.has(token));
+  }
+
   function normalizeClassMappings(mappings = []) {
     const result = [];
     (mappings || []).forEach((mapping) => {
@@ -446,6 +503,8 @@
     CLASS_OPTIONS,
     SUBJECTS_BY_CLASS,
     normalizeClassName,
+    getBaseClassName,
+    classesEquivalent,
     normalizeSubjectName,
     normalizeTeacherConfig,
     normalizeClassMappings,

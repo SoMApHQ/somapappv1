@@ -625,6 +625,46 @@
       return String(value || '').replace(/[.#$/\[\]]/g, '_');
     }
 
+    function normalizeSubjectName(value) {
+      if (ClassUtils.normalizeSubjectName) return ClassUtils.normalizeSubjectName(value);
+      return String(value || '').trim().replace(/\s+/g, ' ');
+    }
+
+    function classMatches(left, right) {
+      if (ClassUtils.classesEquivalent) return ClassUtils.classesEquivalent(left, right);
+      return safeKey(left) === safeKey(right);
+    }
+
+    function subjectMatches(left, right) {
+      return normalizeSubjectName(left).toLowerCase() === normalizeSubjectName(right).toLowerCase();
+    }
+
+    function hasSelectOption(select, value) {
+      return Array.from(select.options || []).some((option) => option.value === value);
+    }
+
+    function resolvePreferredClassValue(className) {
+      const incoming = String(className || '').trim();
+      const filtered = String(filterClass.value || '').trim();
+      const baseClass = ClassUtils.getBaseClassName ? ClassUtils.getBaseClassName(incoming) : incoming;
+      const matchingOption = Array.from(schemeClass.options || []).find((option) => classMatches(option.value, incoming));
+
+      if (filtered && classMatches(filtered, incoming) && hasSelectOption(schemeClass, filtered)) return filtered;
+      if (incoming && hasSelectOption(schemeClass, incoming)) return incoming;
+      if (baseClass && hasSelectOption(schemeClass, baseClass)) return baseClass;
+      if (matchingOption) return matchingOption.value;
+      return incoming;
+    }
+
+    function resolvePreferredSubjectValue(subjectName) {
+      const incoming = normalizeSubjectName(subjectName);
+      const filtered = String(filterSubject.value || '').trim();
+
+      if (filtered && subjectMatches(filtered, incoming) && hasSelectOption(schemeSubject, filtered)) return filtered;
+      const matchingOption = Array.from(schemeSubject.options || []).find((option) => subjectMatches(option.value, incoming));
+      return matchingOption ? matchingOption.value : incoming;
+    }
+
     function ensureWorker() {
       if (!workerId) {
         toast('Please login first.');
@@ -1030,8 +1070,8 @@
       currentTemplateId = data.templateId || data.fromTemplateId || currentTemplateId;
       currentSourcePdf = data.sourcePdf || data.pdf || null;
       currentStructuredRows = data.rows || data.parsedTemplate?.rows || currentStructuredRows || null;
-      schemeClass.value = data.className || '';
-      schemeSubject.value = data.subjectName || data.subjectKey || '';
+      schemeClass.value = resolvePreferredClassValue(data.className || '');
+      schemeSubject.value = resolvePreferredSubjectValue(data.subjectName || data.subjectKey || '');
       schemeTerm.value = data.termKey || 'term1';
       academicYear.value = data.year || '';
       totalWeeks.value = data.totalWeeks || Object.keys(data.rows || {}).length || 12;
@@ -1403,17 +1443,28 @@
       }
 
       let templates = [];
-      if (term) {
-        const snap = await db.ref(`schemes/${schoolId}/templates/${year}/${safeKey(cls)}/${safeKey(subj)}/${term}`).once('value');
-        templates = Object.values(snap.val() || {});
-      } else {
-        const snap = await db.ref(`schemes/${schoolId}/templates/${year}/${safeKey(cls)}/${safeKey(subj)}`).once('value');
-        const byTerm = snap.val() || {};
-        Object.values(byTerm).forEach(termNode => {
-          Object.values(termNode || {}).forEach(t => templates.push(t));
+      const snap = await db.ref(`schemes/${schoolId}/templates/${year}`).once('value');
+      const byYear = snap.val() || {};
+      Object.entries(byYear).forEach(([storedClassKey, bySubject]) => {
+        Object.entries(bySubject || {}).forEach(([storedSubjectKey, byTerm]) => {
+          Object.entries(byTerm || {}).forEach(([storedTermKey, byTemplates]) => {
+            if (term && storedTermKey !== term) return;
+            Object.values(byTemplates || {}).forEach((template) => {
+              const hydrated = {
+                ...template,
+                year: template?.year || year,
+                classKey: template?.classKey || storedClassKey,
+                subjectKey: template?.subjectKey || storedSubjectKey,
+                termKey: template?.termKey || storedTermKey
+              };
+              if (!classMatches(hydrated.className || hydrated.classKey, cls)) return;
+              if (!subjectMatches(hydrated.subjectName || hydrated.subjectKey, subj)) return;
+              templates.push(hydrated);
+            });
+          });
         });
-      }
-      templatesCache = templates;
+      });
+      templatesCache = templates.sort((a, b) => (b.meta?.createdAt || 0) - (a.meta?.createdAt || 0));
       renderTemplates();
     }
 
@@ -1504,8 +1555,8 @@
       const term = filterTerm.value;
       const year = filterYear.value;
       const filtered = teacherSchemesCache.filter(s => {
-        if (cls && s.className !== cls && s.classKey !== safeKey(cls)) return false;
-        if (subj && s.subjectName !== subj && s.subjectKey !== safeKey(subj)) return false;
+        if (cls && !classMatches(s.className || s.classKey, cls)) return false;
+        if (subj && !subjectMatches(s.subjectName || s.subjectKey, subj)) return false;
         if (term && s.termKey !== term) return false;
         if (year && s.year !== year) return false;
         return true;
@@ -1552,8 +1603,8 @@
       const scheme = teacherSchemesCache.find(s =>
         s.schemeId === meta.id &&
         s.year === meta.year &&
-        (s.classKey === meta.class || safeKey(s.className) === meta.class) &&
-        (s.subjectKey === meta.subject || safeKey(s.subjectName) === meta.subject) &&
+        (s.classKey === meta.class || classMatches(s.className || s.classKey, meta.class)) &&
+        (s.subjectKey === meta.subject || subjectMatches(s.subjectName || s.subjectKey, meta.subject)) &&
         s.termKey === meta.term
       );
       if (!scheme) return;
@@ -1599,6 +1650,8 @@
         year,
         className: cls,
         classKey: safeKey(cls),
+        baseClassName: ClassUtils.getBaseClassName ? ClassUtils.getBaseClassName(cls) : cls,
+        baseClassKey: safeKey(ClassUtils.getBaseClassName ? ClassUtils.getBaseClassName(cls) : cls),
         subjectName: subj,
         subjectKey: safeKey(subj),
         termKey: term,

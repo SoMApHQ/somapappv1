@@ -334,10 +334,11 @@
             <th>Rows</th>
             <th>Prepared By</th>
             <th>File</th>
+            <th>Action</th>
           </tr>
         </thead>
         <tbody id="templatesTable">
-            <tr><td colspan="7" class="muted">Loading...</td></tr>
+            <tr><td colspan="9" class="muted">Loading...</td></tr>
           </tbody>
         </table>
       </div>
@@ -421,6 +422,20 @@
 
     function safeKey(value) {
       return String(value || '').replace(/[.#$/\[\]]/g, '_');
+    }
+
+    function normalizeSubjectName(value) {
+      if (ClassUtils.normalizeSubjectName) return ClassUtils.normalizeSubjectName(value);
+      return String(value || '').trim().replace(/\s+/g, ' ');
+    }
+
+    function classMatches(left, right) {
+      if (ClassUtils.classesEquivalent) return ClassUtils.classesEquivalent(left, right);
+      return safeKey(left) === safeKey(right);
+    }
+
+    function subjectMatches(left, right) {
+      return normalizeSubjectName(left).toLowerCase() === normalizeSubjectName(right).toLowerCase();
     }
 
     function toast(msg, type = 'info') {
@@ -657,6 +672,7 @@
       const termKey = uploadTerm.value;
       const year = uploadYear.value.trim();
       const classKey = safeKey(className);
+      const baseClassName = ClassUtils.getBaseClassName ? ClassUtils.getBaseClassName(className) : className;
       const subjectKey = safeKey(subjectName);
       const hoursPerWeek = Number(uploadHours.value) || 0;
       const file = uploadFile.files[0];
@@ -713,6 +729,8 @@
           year,
           className,
           classKey,
+          baseClassName,
+          baseClassKey: safeKey(baseClassName),
           subjectName,
           subjectKey,
           termKey,
@@ -784,7 +802,7 @@
 
     function renderTemplates() {
       if (!templatesCache.length) {
-        templatesTable.innerHTML = '<tr><td colspan="7" class="muted">No schemes uploaded yet.</td></tr>';
+        templatesTable.innerHTML = '<tr><td colspan="9" class="muted">No schemes uploaded yet.</td></tr>';
         return;
       }
       const y = filterYear.value;
@@ -793,14 +811,14 @@
       const t = filterTerm.value;
       const rows = templatesCache.filter(row => {
         if (y !== 'all' && row.year !== y) return false;
-        if (c !== 'all' && row.className !== c && row.classKey !== safeKey(c)) return false;
-        if (s !== 'all' && row.subjectName !== s && row.subjectKey !== safeKey(s)) return false;
+        if (c !== 'all' && !classMatches(row.className || row.classKey, c)) return false;
+        if (s !== 'all' && !subjectMatches(row.subjectName || row.subjectKey, s)) return false;
         if (t !== 'all' && row.termKey !== t) return false;
         return true;
       });
 
       if (!rows.length) {
-        templatesTable.innerHTML = '<tr><td colspan="7" class="muted">No schemes match your filters.</td></tr>';
+        templatesTable.innerHTML = '<tr><td colspan="9" class="muted">No schemes match your filters.</td></tr>';
         return;
       }
 
@@ -813,9 +831,43 @@
           <td>${row.hoursPerWeek || '-'}</td>
           <td>${row.rows ? Object.keys(row.rows).length : 0}</td>
           <td>${row.preparedBy?.name || ''}</td>
-          <td><a href="${row.pdf?.url || '#'}" target="_blank" style="color:#c7d2fe;text-decoration:underline;">Open</a></td>
+          <td>${row.pdf?.url ? `<a href="${row.pdf.url}" target="_blank" style="color:#c7d2fe;text-decoration:underline;">Open</a>` : '-'}</td>
+          <td>
+            <button
+              type="button"
+              class="delete-template-btn"
+              data-id="${row.templateId || ''}"
+              data-year="${row.year || ''}"
+              data-class="${row.classKey || safeKey(row.className)}"
+              data-subject="${row.subjectKey || safeKey(row.subjectName)}"
+              data-term="${row.termKey || ''}"
+              style="padding:8px 12px;border-radius:10px;border:1px solid rgba(239,68,68,0.5);background:rgba(239,68,68,0.14);color:#fecaca;cursor:pointer;"
+            >Delete</button>
+          </td>
         </tr>
       `).join('');
+
+      templatesTable.querySelectorAll('.delete-template-btn').forEach((btn) => {
+        btn.addEventListener('click', () => deleteTemplate(btn.dataset));
+      });
+    }
+
+    async function deleteTemplate(meta) {
+      if (!meta?.id || !meta?.year || !meta?.class || !meta?.subject || !meta?.term) {
+        toast('This scheme record is missing delete information.', 'error');
+        return;
+      }
+      if (!confirm('Delete this uploaded scheme permanently from the academic templates list?')) return;
+
+      const path = `schemes/${schoolId}/templates/${meta.year}/${meta.class}/${meta.subject}/${meta.term}/${meta.id}`;
+      try {
+        await db.ref(path).remove();
+        toast('Uploaded scheme deleted.', 'success');
+        await loadTemplates();
+      } catch (err) {
+        console.error('Delete template failed:', err);
+        toast('Failed to delete the uploaded scheme. Try again.', 'error');
+      }
     }
 
     (async function init() {

@@ -13,6 +13,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="../firebase.js"></script>
+  <script src="../shared/academic-class-utils.js"></script>
   <style>
     :root {
       --bg: #0b1220;
@@ -731,8 +732,61 @@
       return String(str || '').trim().replace(/[.#$/\[\]]/g, '_');
     }
 
+    const ClassUtils = window.SomapAcademicClassUtils || {};
+
+    function normalizeSubjectName(value) {
+      if (ClassUtils.normalizeSubjectName) return ClassUtils.normalizeSubjectName(value);
+      return String(value || '').trim().replace(/\s+/g, ' ');
+    }
+
+    function getBaseClassName(value) {
+      if (ClassUtils.getBaseClassName) return ClassUtils.getBaseClassName(value);
+      return String(value || '').trim().replace(/\s+/g, ' ');
+    }
+
     function normalizeClassKey(value) {
       return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    }
+
+    function classesEquivalent(left, right) {
+      if (ClassUtils.classesEquivalent) return ClassUtils.classesEquivalent(left, right);
+      return normalizeClassKey(left) === normalizeClassKey(right);
+    }
+
+    function subjectMatches(left, right) {
+      return normalizeSubjectName(left).toLowerCase() === normalizeSubjectName(right).toLowerCase();
+    }
+
+    function collectClassAliases(...values) {
+      const aliases = new Set();
+      values.flat().forEach((value) => {
+        const raw = String(value || '').trim().replace(/\s+/g, ' ');
+        if (!raw) return;
+        aliases.add(raw);
+        const base = getBaseClassName(raw);
+        if (base) aliases.add(base);
+      });
+      return Array.from(aliases);
+    }
+
+    function flattenTeacherSchemes(schemesData) {
+      const entries = [];
+      Object.entries(schemesData || {}).forEach(([storedClassKey, bySubject]) => {
+        Object.entries(bySubject || {}).forEach(([storedSubjectKey, byTerm]) => {
+          Object.entries(byTerm || {}).forEach(([storedTermKey, schemes]) => {
+            Object.values(schemes || {}).forEach((scheme) => {
+              entries.push({
+                className: scheme?.className || storedClassKey,
+                classKey: scheme?.classKey || storedClassKey,
+                subjectName: scheme?.subjectName || storedSubjectKey,
+                subjectKey: scheme?.subjectKey || storedSubjectKey,
+                termKey: scheme?.termKey || storedTermKey
+              });
+            });
+          });
+        });
+      });
+      return entries;
     }
 
     function dedupeLessons(lessons) {
@@ -813,6 +867,38 @@
         }
       }
 
+      if (classSubjectMappings.length) {
+        const schemeEntries = flattenTeacherSchemes(schemesData);
+        const normalizedMissingSchemes = [];
+        const normalizedMissingKeys = new Set();
+
+        for (const mapping of classSubjectMappings) {
+          const cls = mapping.class || mapping.className || '';
+          const streams = (mapping.streams || []).filter((stream) => stream && stream.name);
+          const classAliases = collectClassAliases(cls, streams.map((stream) => stream.name));
+          const subjects = Array.from(new Set([
+            ...(mapping.subjects || []),
+            ...streams.flatMap((stream) => stream.subjects || [])
+          ].map(normalizeSubjectName).filter(Boolean)));
+          const displayClass = getBaseClassName(cls || classAliases[0] || '') || cls || classAliases[0] || '';
+
+          for (const subj of subjects) {
+            const hasScheme = schemeEntries.some((entry) => {
+              if (!subjectMatches(entry.subjectName || entry.subjectKey, subj)) return false;
+              return classAliases.some((alias) => classesEquivalent(entry.className || entry.classKey, alias));
+            });
+            if (!hasScheme) {
+              const missingKey = `${displayClass}|${subj}`;
+              if (normalizedMissingKeys.has(missingKey)) continue;
+              normalizedMissingKeys.add(missingKey);
+              normalizedMissingSchemes.push(`${displayClass} - ${subj}`);
+            }
+          }
+        }
+
+        result.missingSchemes = normalizedMissingSchemes;
+      }
+
       // 3. Timetable + lesson plan checks (weekdays only)
       if (!result.isWeekend) {
         const termKey = getTermFromMonth(nairobiNow.getMonth());
@@ -837,6 +923,7 @@
             }
           }
         }
+        const teacherClassAliases = Array.from(new Set(Array.from(teacherClasses).flatMap((className) => collectClassAliases(className))));
 
         // timetableCoverageFound = true means Firebase has a saved timetable grid that
         // includes at least one of this teacher's classes.  When true we trust the grid
@@ -862,6 +949,9 @@
             for (const [className, days] of Object.entries(grid)) {
               const classKey = normalizeClassKey(className);
               if (!timetableCoverageFound && (teacherClasses.has(className) || teacherClassKeys.has(classKey))) {
+                timetableCoverageFound = true;
+              }
+              if (!timetableCoverageFound && teacherClassAliases.some((alias) => classesEquivalent(alias, className))) {
                 timetableCoverageFound = true;
               }
               const daySlots = (days && days[result.dayName]) || {};
