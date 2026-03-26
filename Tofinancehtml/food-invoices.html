@@ -355,43 +355,44 @@
         try {
             const year = getSelectedYear();
             const school = getCurrentSchoolId();
-            const aliases = schoolAliasList(school);
-            const allSchools = await getAllSchoolIds();
-            const candidates = uniqueList([...aliases, ...allSchools]);
             const monthKey = dateStr.substring(0, 7);
             const dayKey = dateStr;
 
+            // For Socrates (default school) data lives at root; try root first, then school-prefixed
+            const attCandidates = [
+                `years/${year}/workerAttendance`,
+                `schools/${school}/years/${year}/workerAttendance`
+            ];
             let attendanceData = {};
-            for (const s of candidates) {
-                const snap = await db.ref(`schools/${s}/years/${year}/workerAttendance`).once('value');
-                if (snap.exists()) { attendanceData = snap.val() || {}; break; }
-            }
-            if (!Object.keys(attendanceData).length) {
-                const snap = await db.ref(`years/${year}/workerAttendance`).once('value');
-                if (snap.exists()) attendanceData = snap.val() || {};
+            for (const path of attCandidates) {
+                const snap = await db.ref(path).once('value');
+                const val = snap.exists() ? (snap.val() || {}) : {};
+                if (Object.keys(val).length) { attendanceData = val; break; }
             }
 
+            const workerCandidates = [
+                `years/${year}/workers`,
+                `schools/${school}/years/${year}/workers`
+            ];
             let workersData = {};
-            for (const s of candidates) {
-                const snap = await db.ref(`schools/${s}/years/${year}/workers`).once('value');
-                if (snap.exists()) { workersData = snap.val() || {}; break; }
-            }
-            if (!Object.keys(workersData).length) {
-                const snap = await db.ref(`years/${year}/workers`).once('value');
-                if (snap.exists()) workersData = snap.val() || {};
+            for (const path of workerCandidates) {
+                const snap = await db.ref(path).once('value');
+                const val = snap.exists() ? (snap.val() || {}) : {};
+                if (Object.keys(val).length) { workersData = val; break; }
             }
 
             const approved = [];
             Object.entries(attendanceData).forEach(([id, months]) => {
                 const record = months?.[monthKey]?.[dayKey] || null;
-                const inStatus = record.checkInStatus || (record.approved === true ? 'approved' : 'other');
+                if (!record) return;
+                const inStatus = record.checkInStatus || (record.approved === true ? 'approved' : '');
                 if (inStatus !== 'approved') return;
                 const profile = workersData[id]?.profile || {};
                 const name = profile.fullNameUpper || profile.name || id;
                 approved.push(name);
             });
             return approved;
-        } catch (_) { return []; }
+        } catch (e) { console.error('fetchApprovedWorkers', e); return []; }
     }
 
     async function downloadFoodInvoicePdf(invoice) {
