@@ -11,11 +11,7 @@
   <!-- Icons & UI helpers -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-
-  <!-- jsPDF + autotable -->
-  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.5.25/dist/jspdf.plugin.autotable.min.js"></script>
+  <!-- Export libraries are loaded on demand to keep first paint fast on slow networks. -->
 
   <!-- Firebase compat (v9 compat libs) -->
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
@@ -1045,7 +1041,7 @@
       }
       return normalizeExamRegistryItems(discovered);
     }
-    async function loadExamRegistry() {
+    async function loadExamRegistry({ includeDiscovery = false } = {}) {
       const localItems = readLocalExamRegistry();
       let remoteItems = [];
       try {
@@ -1054,9 +1050,12 @@
       } catch (_) {
         remoteItems = [];
       }
-      const discovered = await discoverCustomExamsFromData({ year: state.year, className: state.className || state.classKey });
+      const discovered = includeDiscovery
+        ? await discoverCustomExamsFromData({ year: state.year, className: state.className || state.classKey })
+        : [];
       customExamRegistryCache = normalizeExamRegistryItems([...(remoteItems || []), ...(localItems || []), ...(discovered || [])]);
       writeLocalExamRegistry(customExamRegistryCache);
+      return customExamRegistryCache;
     }
     function examLabelFromKey(rawKey) {
       const key = String(rawKey || '').trim();
@@ -1193,6 +1192,17 @@
       scoresMonthly: new Map(),   // key: `${year}::${class}::${mon}` -> { [adm]: { [subject]: {score,max} } }
       attendanceMonthly: new Map(),// key: `${year}::${class}::${mon}` -> { [adm]: {present,absent,days} }
       lastKey: null
+    };
+    const RUNTIME = {
+      loadSeq: 0,
+      scriptPromises: new Map(),
+      studentDetailsMap: null,
+      studentDetailsPromise: null,
+      financeSummaryCache: new Map()
+    };
+    const EXPORT_LIBS = {
+      jspdf: 'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js',
+      autotable: 'https://cdn.jsdelivr.net/npm/jspdf-autotable@3.5.25/dist/jspdf.plugin.autotable.min.js'
     };
 
     const SomapSub = () => window.SomapSubjects || {};
@@ -1461,7 +1471,11 @@
       await loadExamRegistry();
       populateSelectors();
       attachListeners();
-      loadTeachers().then(loadAllData);
+      loadAllData();
+      refreshTeachersInBackground();
+      loadExamRegistry({ includeDiscovery: true })
+        .then(() => renderExamSelectors())
+        .catch((err) => console.warn('[Report] custom exam discovery skipped', err?.message || err));
     }
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -1572,6 +1586,61 @@
       ss.setItem('schoolBranch', state.branch);
     }
 
+    function loadScriptOnce(src, isReady){
+      if (typeof isReady === 'function' && isReady()) return Promise.resolve();
+      if (RUNTIME.scriptPromises.has(src)) return RUNTIME.scriptPromises.get(src);
+      const promise = new Promise((resolve, reject) => {
+        const existing = Array.from(document.scripts).find((script) => script.src === src);
+        if (existing) {
+          existing.addEventListener('load', () => resolve(), { once: true });
+          existing.addEventListener('error', () => reject(new Error(`Could not load ${src}`)), { once: true });
+          return;
+        }
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = true;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error(`Could not load ${src}`));
+        document.head.appendChild(script);
+      }).then(() => {
+        if (typeof isReady === 'function' && !isReady()) {
+          throw new Error(`Library loaded but did not initialize: ${src}`);
+        }
+      });
+      RUNTIME.scriptPromises.set(src, promise);
+      return promise;
+    }
+
+    async function ensurePdfLibsLoaded(){
+      await loadScriptOnce(EXPORT_LIBS.jspdf, () => Boolean(window.jspdf?.jsPDF));
+      await loadScriptOnce(EXPORT_LIBS.autotable, () => Boolean(window.jspdf?.jsPDF && typeof window.jspdf.jsPDF.API?.autoTable === 'function'));
+    }
+
+    function serializeCsvRows(rows){
+      const list = Array.isArray(rows) ? rows : [];
+      if (!list.length) return '';
+      const headers = [];
+      const seen = new Set();
+      list.forEach((row) => {
+        Object.keys(row || {}).forEach((key) => {
+          if (seen.has(key)) return;
+          seen.add(key);
+          headers.push(key);
+        });
+      });
+      const escapeCell = (value) => {
+        const text = value == null ? '' : String(value);
+        return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+      };
+      const lines = [
+        headers.map(escapeCell).join(',')
+      ];
+      list.forEach((row) => {
+        lines.push(headers.map((header) => escapeCell(row?.[header])).join(','));
+      });
+      return lines.join('\r\n');
+    }
+
     async function preloadLogo(){
       const logoDataUrl = await loadImageAsDataURL(SCHOOL_LOGO_PATH) || await loadImageAsDataURL(LOGO_PATH) || await loadImageAsDataURL('../images/somap-logo.png');
       if (logoDataUrl) {
@@ -1580,6 +1649,17 @@
         const img = document.getElementById('previewLogo');
         if (img) img.src = logoDataUrl;
       }
+    }
+
+    function refreshTeachersInBackground(){
+      loadTeachers()
+        .then(() => {
+          if (!state.students.length) return;
+          assignPositions(state.students, state.subjects || []);
+          renderTable();
+          updatePreview();
+        })
+        .catch((err) => console.warn('[Report] teacher load skipped', err?.message || err));
     }
 
     function populateSelectors(){
@@ -1605,9 +1685,24 @@
       classSel.appendChild(opt);
       classSel.disabled = true;
 
-      // Exam + Month
+      renderExamSelectors();
+      document.getElementById('studentSelect').innerHTML = '<option value="">No records</option>';
+
+      // Other inputs
+      document.getElementById('streamInput').value = state.stream || '';
+      document.getElementById('branchInput').value = state.branch || '';
+    }
+
+    function renderExamSelectors(){
       const examSel = document.getElementById('examType');
-      const examOptions = getAllExamOptions();
+      let examOptions = getAllExamOptions();
+      const hasCurrentSelection = examOptions.some((item) => (
+        normalizeExamLabel(item.label) === normalizeExamLabel(state.examType) ||
+        String(item.key || '').toLowerCase() === String(state.examKey || '').toLowerCase()
+      ));
+      if (!hasCurrentSelection && state.examType) {
+        examOptions = [...examOptions, { label: state.examType, key: state.examKey || slugifyExamKey(state.examType), builtIn: false }];
+      }
       examSel.innerHTML = examOptions.map(item => `<option value="${String(item.label).replace(/"/g, '&quot;')}">${item.builtIn ? item.label : `${item.label} (Custom)`}</option>`).join('');
       examSel.value = examOptions.some(item => normalizeExamLabel(item.label) === normalizeExamLabel(state.examType))
         ? normalizeExamLabel(state.examType)
@@ -1615,11 +1710,6 @@
       state.examType = examSel.value;
       state.examKey = getExamKeyFromLabel(state.examType);
       populateMonthOptions();
-      document.getElementById('studentSelect').innerHTML = '<option value="">No records</option>';
-
-      // Other inputs
-      document.getElementById('streamInput').value = state.stream || '';
-      document.getElementById('branchInput').value = state.branch || '';
     }
 
     function populateMonthOptions(){
@@ -1655,7 +1745,7 @@
         state.subjects = subjectListForClass(state.className, state.year);
         document.getElementById('previewYear').textContent = state.year;
         document.getElementById('previewYearBadge').textContent = String(state.year);
-        persistToSession(); loadTeachers().then(loadAllData);
+        persistToSession(); loadAllData(); refreshTeachersInBackground();
       });
       document.getElementById('classSelect').addEventListener('change', e => {
         state.classKey = normalizeDisplayClass(e.target.value);
@@ -1682,7 +1772,10 @@
         persistToSession(); updatePreview();
       });
       document.getElementById('applyFilters').addEventListener('click', applyFilters);
-      document.getElementById('refreshBtn').addEventListener('click', () => loadTeachers().then(loadAllData));
+      document.getElementById('refreshBtn').addEventListener('click', () => {
+        loadAllData();
+        refreshTeachersInBackground();
+      });
       document.getElementById('downloadPreviewPdf').addEventListener('click', () => {
         if (!state.selectedAdm) return Swal.fire('Select student', 'Choose a student first.', 'info');
         generateSinglePdf(state.selectedAdm);
@@ -1994,6 +2087,7 @@
     }
 
     async function loadAllData(){
+      const loadToken = ++RUNTIME.loadSeq;
       try {
         document.getElementById('bulkCount').textContent = '...';
         await loadSharedClassStreamsForYear(state.year);
@@ -2014,8 +2108,10 @@
           monthRaw: state.monthRaw,
           stream: state.stream || ''
         });
-        await loadClassTeacherAssignmentsForYear(state.year);
-        await loadCustomSubjectsForYear(state.year);
+        await Promise.all([
+          loadClassTeacherAssignmentsForYear(state.year),
+          loadCustomSubjectsForYear(state.year)
+        ]);
         state.subjects = subjectListForClass(state.className, state.year) || state.subjects || [];
         let dbClass = state.classKey || state.className;
         let rosterSource = 'cached';
@@ -2095,11 +2191,12 @@
           stream: state.stream || ''
         });
 
-        let [attendance, fees, scoresRaw, detailsMap] = await Promise.all([
+        let [attendance, fees, scoresRaw] = await Promise.all([
           fetchAttendance(state.year, state.month, dbClass, state.examKey, state.monthRaw),
-          fetchFees(state.year, dbClass, students),
-          fetchScores({year: state.year, className: dbClass, examKey: state.examKey, month: state.month, rawMonth: state.monthRaw}),
-          fetchStudentDetailsMap()
+          fetchFees(state.year, dbClass, students, {
+            eagerAdmissions: state.parentMode && state.parentAdm ? [state.parentAdm] : []
+          }),
+          fetchScores({year: state.year, className: dbClass, examKey: state.examKey, month: state.month, rawMonth: state.monthRaw})
         ]);
         console.log('[Report] scoresRaw student count', Object.keys(scoresRaw || {}).length);
 
@@ -2127,19 +2224,23 @@
             stream: state.stream,
             scoresMap: scoresRaw,
             attendanceMap: attendance,
-            detailsMap
+            detailsMap: {}
           });
           if (fallbackStudents.length) {
             console.log('[Report] rebuilt roster from score/attendance data', fallbackStudents.length);
             students = fallbackStudents;
-            fees = await fetchFees(state.year, dbClass, students);
+            fees = await fetchFees(state.year, dbClass, students, {
+              eagerAdmissions: state.parentMode && state.parentAdm ? [state.parentAdm] : []
+            });
           }
           if (!students.length && Object.keys(summaryData).length) {
             const summaryStudents = buildStudentsFromSummary(summaryData, dbClass, state.stream);
             if (summaryStudents.length) {
               console.log('[Report] rebuilt roster from summary data', summaryStudents.length);
               students = summaryStudents;
-              fees = await fetchFees(state.year, dbClass, students);
+              fees = await fetchFees(state.year, dbClass, students, {
+                eagerAdmissions: state.parentMode && state.parentAdm ? [state.parentAdm] : []
+              });
             }
           }
         }
@@ -2151,13 +2252,12 @@
             scoresRaw = summaryScores;
           }
         }
+        if (loadToken !== RUNTIME.loadSeq) return;
         state.reportWindow = state.reportWindow || { months: [], records: [], detailsByAdm: {}, mergedScores: {}, summary: null };
         state.reportWindow.summary = summaryData;
-        const detailLookup = buildNormalizedValueLookup(detailsMap || {});
         state.rawStudents = {};
         students.forEach(stu => {
-          const extra = pickMapValueByCandidates(detailsMap || {}, detailLookup, getStudentLookupCandidates(stu.adm, stu)) || {};
-          const mergedSource = { ...(stu.meta || {}), ...stu, ...extra };
+          const mergedSource = { ...(stu.meta || {}), ...stu };
           state.rawStudents[stu.adm] = {
             ...stu,
             name: resolveStudentName(mergedSource, stu.adm),
@@ -2181,10 +2281,169 @@
         state.reportWindow.mergedScores = scoreSync.remappedScores;
         computeStudents(attendance, fees, scoreSync.remappedScores, {}, {});
         applyFilters();
+        scheduleStudentDetailsHydration(loadToken);
+        scheduleSelectedFinanceHydration(loadToken, state.selectedAdm);
       } catch (e) {
+        if (loadToken !== RUNTIME.loadSeq) return;
         console.error(e);
         Swal.fire('Load error', `Could not load class data. ${e?.message || 'Check your Firebase paths.'}`, 'error');
       }
+    }
+
+    async function fetchStudentDetailsMapCached(){
+      if (RUNTIME.studentDetailsMap) return RUNTIME.studentDetailsMap;
+      if (RUNTIME.studentDetailsPromise) return RUNTIME.studentDetailsPromise;
+      RUNTIME.studentDetailsPromise = fetchStudentDetailsMap()
+        .then((map) => {
+          RUNTIME.studentDetailsMap = map || {};
+          return RUNTIME.studentDetailsMap;
+        })
+        .finally(() => {
+          RUNTIME.studentDetailsPromise = null;
+        });
+      return RUNTIME.studentDetailsPromise;
+    }
+
+    function mergeIdentityFields(target, source, admFallback = ''){
+      if (!target || !source) return false;
+      let changed = false;
+      const updates = {
+        name: resolveStudentName(source, admFallback),
+        parentName: resolveParentName(source),
+        parentContact: resolveParentContact(source),
+        gender: resolveStudentGender(source),
+        dob: resolveStudentDob(source),
+        reportingDate: resolveReportingDate(source),
+        photoUrl: resolveStudentPhoto(source)
+      };
+      Object.entries(updates).forEach(([key, value]) => {
+        const next = String(value || '').trim();
+        if (!next) return;
+        if (String(target[key] || '').trim() === next) return;
+        target[key] = next;
+        changed = true;
+      });
+      return changed;
+    }
+
+    function applyStudentDetailsToState(detailsMap){
+      const detailLookup = buildNormalizedValueLookup(detailsMap || {});
+      let changed = false;
+      Object.entries(state.rawStudents || {}).forEach(([adm, rawStudent]) => {
+        const extra = pickMapValueByCandidates(detailsMap || {}, detailLookup, getStudentLookupCandidates(adm, rawStudent)) || {};
+        if (!extra || typeof extra !== 'object' || !Object.keys(extra).length) return;
+        const mergedSource = { ...(rawStudent.meta || {}), ...extra };
+        if (mergeIdentityFields(rawStudent, mergedSource, adm)) changed = true;
+        rawStudent.meta = { ...(rawStudent.meta || {}), ...extra };
+      });
+      (state.students || []).forEach((student) => {
+        const rawStudent = state.rawStudents?.[student.adm];
+        if (!rawStudent) return;
+        ['name', 'parentName', 'parentContact', 'gender', 'dob', 'reportingDate', 'photoUrl'].forEach((key) => {
+          if (String(student[key] || '').trim() === String(rawStudent[key] || '').trim()) return;
+          student[key] = rawStudent[key];
+          changed = true;
+        });
+      });
+      return changed;
+    }
+
+    function scheduleStudentDetailsHydration(loadToken){
+      window.setTimeout(async () => {
+        try {
+          const detailsMap = await fetchStudentDetailsMapCached();
+          if (loadToken !== RUNTIME.loadSeq) return;
+          if (!Object.keys(detailsMap || {}).length) return;
+          const changed = applyStudentDetailsToState(detailsMap);
+          if (!changed) return;
+          renderStudentSelect();
+          renderTable();
+          updatePreview();
+        } catch (err) {
+          console.warn('[Report] detail hydration skipped', err?.message || err);
+        }
+      }, 0);
+    }
+
+    async function loadFinanceSummaryForStudent(student, year){
+      if (!student || !window.SOMAP_FINANCE?.loadStudentYearSummary) return null;
+      const adm = normalizeAdm(student?.adm || student?.admissionNo || '');
+      if (!adm) return null;
+      const cacheKey = `${year}::${adm}`;
+      if (RUNTIME.financeSummaryCache.has(cacheKey)) {
+        return RUNTIME.financeSummaryCache.get(cacheKey);
+      }
+      const keys = [normalizeAdm(student?.id), normalizeAdm(student?.admissionNo), adm].filter(Boolean);
+      let summary = null;
+      for (const key of keys) {
+        if (!key) continue;
+        try {
+          summary = await window.SOMAP_FINANCE.loadStudentYearSummary(key, year);
+        } catch (_) {}
+        if (summary) break;
+      }
+      const parsed = summary ? buildFinanceEntryFromRaw(summary, year) : null;
+      RUNTIME.financeSummaryCache.set(cacheKey, parsed);
+      return parsed;
+    }
+
+    function applyFinanceEntryToStudent(adm, entry){
+      if (!adm || !entry) return false;
+      let changed = false;
+      const student = (state.students || []).find((item) => item.adm === adm);
+      if (!student) return false;
+      const rawStudent = state.rawStudents?.[adm] || null;
+      const applyTo = (target, pairs) => {
+        if (!target) return;
+        pairs.forEach(([key, value]) => {
+          const current = target[key];
+          const sameValue = Array.isArray(value)
+            ? JSON.stringify(current || []) === JSON.stringify(value)
+            : current === value;
+          if (sameValue) return;
+          target[key] = value;
+          changed = true;
+        });
+      };
+      const nextPairs = [
+        ['totalFee', entry.required],
+        ['paid', entry.paid],
+        ['balance', entry.balance],
+        ['feePlanName', entry.planName || 'Not set'],
+        ['debtStatus', entry.debtStatus || 'OK'],
+        ['debtTone', entry.debtTone || 'ok'],
+        ['debtHint', entry.debtHint || 'No overdue debt.'],
+        ['debtNow', toNum(entry.debtNow || 0)],
+        ['nextDueLabel', entry.nextDueLabel || '-'],
+        ['feeSchedule', Array.isArray(entry.schedule) ? entry.schedule : []]
+      ];
+      applyTo(student, nextPairs);
+      applyTo(rawStudent, nextPairs);
+      return changed;
+    }
+
+    function scheduleSelectedFinanceHydration(loadToken, adm){
+      const selectedAdm = normalizeAdm(adm);
+      if (!selectedAdm) return;
+      window.setTimeout(async () => {
+        try {
+          if (loadToken !== RUNTIME.loadSeq) return;
+          const student = (state.students || []).find((item) => item.adm === selectedAdm);
+          if (!student) return;
+          const hasSchedule = Array.isArray(student.feeSchedule) && student.feeSchedule.length > 0;
+          const hasPlan = String(student.feePlanName || '').trim() && String(student.feePlanName || '').trim() !== 'Not set';
+          if (hasSchedule && hasPlan) return;
+          const entry = await loadFinanceSummaryForStudent(student, state.year);
+          if (loadToken !== RUNTIME.loadSeq) return;
+          if (!entry) return;
+          if (!applyFinanceEntryToStudent(selectedAdm, entry)) return;
+          updateMetrics();
+          renderTable();
+          updatePreview();
+        } catch (err) {
+          console.warn('[Report] finance hydration skipped', err?.message || err);
+        }
+      }, 0);
     }
 
     async function loadAllStudentsFromDb(yearOverride){
@@ -3182,10 +3441,15 @@
         nextDueLabel: debtMeta.nextDueLabel
       };
     }
-    async function fetchFees(year, className, students = []){
+    async function fetchFees(year, className, students = [], options = {}){
       try{
         const out = {};
         const outByNormalized = {};
+        const eagerAdmissions = new Set(
+          (Array.isArray(options?.eagerAdmissions) ? options.eagerAdmissions : [])
+            .map(normalizeAdm)
+            .filter(Boolean)
+        );
         const [
           financeSnap,
           annualSnap,
@@ -3303,7 +3567,11 @@
           };
           out[adm] = entry;
           outByNormalized[normalizeFeeKey(adm)] = entry;
-          if ((!raw || (required <= 0 && paid <= 0 && balance <= 0)) && window.SOMAP_FINANCE?.loadStudentYearSummary) {
+          if (
+            eagerAdmissions.has(adm) &&
+            (!raw || (required <= 0 && paid <= 0 && balance <= 0)) &&
+            window.SOMAP_FINANCE?.loadStudentYearSummary
+          ) {
             missingViaCore.push({ adm, stu, classFee: classFeeRow });
           }
         });
@@ -3329,48 +3597,6 @@
               balance: base.balance > 0 ? base.balance : Math.max(0, (base.required > 0 ? base.required : fallbackRequired) - (base.paid > 0 ? base.paid : fallbackPaid))
             };
             outByNormalized[normalizeFeeKey(adm)] = out[adm];
-          }));
-        }
-        if ((students || []).length && window.SOMAP_FINANCE?.loadStudentYearSummary) {
-          await Promise.all((students || []).map(async (stu) => {
-            const adm = normalizeAdm(stu?.adm || stu?.admissionNo || '');
-            if (!adm) return;
-            const keys = [normalizeAdm(stu?.id), normalizeAdm(stu?.admissionNo), adm].filter(Boolean);
-            let summary = null;
-            for (const key of keys) {
-              if (!key) continue;
-              try { summary = await window.SOMAP_FINANCE.loadStudentYearSummary(key, year); } catch (_) {}
-              if (summary) break;
-            }
-            if (!summary) return;
-            const existing = out[adm] || outByNormalized[normalizeFeeKey(adm)] || {};
-            const fromSummary = buildFinanceEntryFromRaw(summary, year);
-            const required = fromSummary.required > 0 ? fromSummary.required : Math.max(0, toNum(existing.required || 0));
-            const paid = (existing.paid != null && existing.paid > 0) ? existing.paid : (fromSummary.paid > 0 ? fromSummary.paid : Math.max(0, toNum(existing.paid || 0)));
-            const balance = Math.max(0, required - paid);
-            const schedule = (fromSummary.schedule && fromSummary.schedule.length)
-              ? fromSummary.schedule
-              : (Array.isArray(existing.schedule) ? existing.schedule : []);
-            const planName = (fromSummary.planName && fromSummary.planName !== 'Not set')
-              ? fromSummary.planName
-              : (existing.planName || 'Not set');
-            const debtMeta = financeStatusFromSchedule(schedule, paid, balance);
-            const merged = {
-              ...existing,
-              ...fromSummary,
-              required,
-              paid,
-              balance,
-              schedule,
-              planName,
-              debtStatus: debtMeta.status,
-              debtTone: debtMeta.tone,
-              debtHint: debtMeta.hint,
-              debtNow: debtMeta.debtNow,
-              nextDueLabel: debtMeta.nextDueLabel
-            };
-            out[adm] = merged;
-            outByNormalized[normalizeFeeKey(adm)] = merged;
           }));
         }
         return out;
@@ -4143,6 +4369,7 @@
       updateMetrics();
       renderTable();
       updatePreview();
+      scheduleSelectedFinanceHydration(RUNTIME.loadSeq, state.selectedAdm);
     }
 
     function sortStudents(arr, sortBy){
@@ -4177,7 +4404,12 @@
         if (s.adm === state.selectedAdm) opt.selected = true;
         sel.appendChild(opt);
       });
-      sel.addEventListener('change', e => { state.selectedAdm = e.target.value; updatePreview(); renderTable(); });
+      sel.onchange = (e) => {
+        state.selectedAdm = e.target.value;
+        updatePreview();
+        renderTable();
+        scheduleSelectedFinanceHydration(RUNTIME.loadSeq, state.selectedAdm);
+      };
       document.getElementById('bulkCount').textContent = state.filtered.length;
     }
 
@@ -4244,7 +4476,12 @@
       }).join('');
     }
 
-    function setSelectedStudent(adm){ state.selectedAdm = adm; updatePreview(); renderTable(); }
+    function setSelectedStudent(adm){
+      state.selectedAdm = adm;
+      updatePreview();
+      renderTable();
+      scheduleSelectedFinanceHydration(RUNTIME.loadSeq, state.selectedAdm);
+    }
 
     function studentsForClassAverages(){
       return (state.students || []).filter(s => (s.attemptedCount || s.subjectStats?.attemptedCount || 0) > 0);
@@ -5121,6 +5358,7 @@ function toNormalizedRows(subjects){
 
     /* -------------------------- EXPORTS -------------------------- */
     async function generateSinglePdf(adm){
+      await ensurePdfLibsLoaded();
       const s = state.students.find(x => x.adm === adm);
       if (!s) return Swal.fire('Not found', 'Student not found.', 'info');
       const doc = new window.jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -5131,6 +5369,7 @@ function toNormalizedRows(subjects){
 
     async function downloadBulkReportCards(){
       if (!state.filtered.length) return Swal.fire('No students', 'Filter first.', 'info');
+      await ensurePdfLibsLoaded();
       const doc = new window.jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       for (let i = 0; i < state.filtered.length; i++) { if (i>0) doc.addPage(); await drawReportCard(doc, state.filtered[i]); }
       const monthSlug = (state.month === 'All' ? 'Annual' : state.month);
@@ -5384,6 +5623,7 @@ function toNormalizedRows(subjects){
 
     async function downloadSummaryPdf(){
       if (!state.filtered.length) return Swal.fire('No data', 'No students to export.', 'info');
+      await ensurePdfLibsLoaded();
       const doc = new window.jspdf.jsPDF({ orientation:'landscape', unit:'mm', format:'a4' });
       doc.setFontSize(13); doc.text('Report Summary', 14, 14);
       doc.setFontSize(9); doc.text(`${state.className} | ${state.examType} (${MONTH_LABELS[state.month] || state.month}) | ${state.year}`, 14, 20);
@@ -5421,7 +5661,7 @@ function toNormalizedRows(subjects){
         });
         return base;
       });
-      const csv = Papa.unparse(rows);
+      const csv = serializeCsvRows(rows);
       const blob = new Blob([csv], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
