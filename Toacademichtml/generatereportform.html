@@ -2139,15 +2139,15 @@
           persistToSession();
         };
 
-        let students = getCachedRosterStudents(dbClass, state.year, state.stream);
+        let students = state.parentMode ? [] : getCachedRosterStudents(dbClass, state.year, '');
         console.log('[Report] cached roster count', students.length);
         if (!students.length) {
-          students = await fetchStudents(dbClass, state.stream, state.year);
+          students = await fetchStudents(dbClass, '', state.year);
           rosterSource = 'fetchStudents';
           console.log('[Report] fetchStudents count', students.length);
         }
         if (!students.length) {
-          students = await fetchStudentsLegacy(dbClass, state.stream, state.year);
+          students = await fetchStudentsLegacy(dbClass, '', state.year);
           rosterSource = 'legacy';
           console.log('[Report] fetchStudentsLegacy count', students.length);
         }
@@ -2164,10 +2164,10 @@
           console.log('[Report] alternative class names tried', alternatives);
 
           for (const alt of alternatives) {
-            let altStudents = await fetchStudents(alt, state.stream, state.year);
+            let altStudents = await fetchStudents(alt, '', state.year);
             console.log('[Report] fetchStudents alt count', alt, altStudents.length);
             if (!altStudents.length) {
-              altStudents = await fetchStudentsLegacy(alt, state.stream, state.year);
+              altStudents = await fetchStudentsLegacy(alt, '', state.year);
               console.log('[Report] fetchStudentsLegacy alt count', alt, altStudents.length);
             }
             if (altStudents.length) {
@@ -3760,6 +3760,24 @@
       return merged;
     }
 
+    function preferredDisplayMaxFromLogs(logs, fallbackMax = 100){
+      const values = (logs || [])
+        .map((log) => Number(log?.max || 0))
+        .filter((value) => isNumber(value) && value > 0);
+      if (!values.length) return Math.max(1, Number(fallbackMax || 100));
+      const counts = new Map();
+      values.forEach((value) => counts.set(value, (counts.get(value) || 0) + 1));
+      let bestValue = values[0];
+      let bestCount = counts.get(bestValue) || 0;
+      counts.forEach((count, value) => {
+        if (count > bestCount || (count === bestCount && value < bestValue)) {
+          bestValue = value;
+          bestCount = count;
+        }
+      });
+      return bestValue;
+    }
+
     function appendSyntheticExamWindowRecords(root, months, records, seen) {
       Object.entries(root || {}).forEach(([topKey, topVal]) => {
         if (!topVal || typeof topVal !== 'object' || Array.isArray(topVal)) return;
@@ -3916,7 +3934,7 @@
             const score = Number(raw?.score || 0);
             const max = Number(raw?.max || 0);
             if (!attemptedItem({ score, max })) return;
-            const current = mergedScores[adm][subject] || { score: 0, max: 0 };
+            const current = mergedScores[adm][subject] || { score: 0, max: 0, attempts: 0 };
             mergedScores[adm][subject] = { score: current.score + score, max: current.max + max };
             detailsByAdm[adm].subjects[subject] = detailsByAdm[adm].subjects[subject] || [];
             detailsByAdm[adm].subjects[subject].push({
@@ -3932,14 +3950,23 @@
           });
         });
       });
-      Object.values(detailsByAdm).forEach((entry) => {
-        Object.values(entry.subjects || {}).forEach((list) => {
+      Object.entries(detailsByAdm).forEach(([adm, entry]) => {
+        Object.entries(entry.subjects || {}).forEach(([subject, list]) => {
           list.sort((a, b) => {
             const ai = MONTHS.indexOf(a.monthKey);
             const bi = MONTHS.indexOf(b.monthKey);
             if (ai !== bi) return ai - bi;
             return String(a.examLabel || '').localeCompare(String(b.examLabel || ''));
           });
+          const merged = mergedScores?.[adm]?.[subject];
+          if (!merged) return;
+          merged.attempts = list.length;
+          if (isSyntheticWindowExam(state.examKey)) {
+            const displayMax = preferredDisplayMaxFromLogs(list, merged.max);
+            const pct = merged.max > 0 ? (merged.score * 100) / merged.max : 0;
+            merged.displayMax = displayMax;
+            merged.displayScore = (pct * displayMax) / 100;
+          }
         });
       });
       return { mergedScores, detailsByAdm };
@@ -4242,7 +4269,20 @@
         const max = Number.isFinite(rawMax) ? rawMax : 100;
         const percent = max ? (score / max) * 100 : 0;
         const attempted = attemptedItem({ ...subEntry, score, max });
-        const record = { subject, score, max, percent, attempted };
+        const rawDisplayScore = Number(subEntry.displayScore);
+        const rawDisplayMax = Number(subEntry.displayMax);
+        const displayScore = Number.isFinite(rawDisplayScore) ? rawDisplayScore : score;
+        const displayMax = Number.isFinite(rawDisplayMax) && rawDisplayMax > 0 ? rawDisplayMax : max;
+        const record = {
+          subject,
+          score,
+          max,
+          percent,
+          attempted,
+          displayScore,
+          displayMax,
+          attempts: Number(subEntry.attempts || 0)
+        };
         stats.subjects.push(record);
         stats.subjectMap[subject] = record;
         if (attempted) {
@@ -4342,11 +4382,18 @@
     /* -------------------------- VIEW -------------------------- */
     function applyFilters(){
       const search = document.getElementById('searchInput').value.trim().toLowerCase();
+      const streamFilter = sanitizeStreamFilter(document.getElementById('streamInput').value || state.stream);
+      const normalizedStream = String(streamFilter || '').toUpperCase().replace(/[\s-]/g, '');
       const sortBy = document.getElementById('sortSelect').value;
       
       let filtered = (state.students||[]).filter(s => {
         const h = [s.adm, s.name, s.parentName, s.parentContact].filter(Boolean).join(' ').toLowerCase();
-        return h.includes(search);
+        const matchesSearch = h.includes(search);
+        if (!matchesSearch) return false;
+        if (!normalizedStream) return true;
+        const studentStream = String(sanitizeStreamFilter(s.stream || '') || '').toUpperCase().replace(/[\s-]/g, '');
+        const reportLabel = String(reportClassLabel(s) || '').toUpperCase().replace(/[\s-]/g, '');
+        return studentStream.includes(normalizedStream) || reportLabel.includes(normalizedStream);
       });
       
       // In parent mode, filter to only the specific student
@@ -4635,16 +4682,20 @@
     function renderPreviewSubjectsTable(subjects){
       const normalized = toNormalizedRows(subjects);
       const overall = studentPercentFrom(subjects);
+      const displayOverall = overallDisplaySummary(subjects);
       const selectedStudent = state.filtered.find((student) => student.adm === state.selectedAdm) || null;
       const tbody = document.getElementById('previewSubjects');
       if (tbody){
         tbody.innerHTML = normalized.map((entry, idx) => {
           const teacher = entry.teacher || getTeacherName(entry.subject, selectedStudent || state.className, selectedStudent?.stream || state.stream);
+          const scoreText = entry.attempted ? entry.dispScore.toFixed(1) : '-';
+          const maxText = entry.attempted ? formatNumber(entry.dispMax) : '-';
+          const pctText = entry.attempted ? entry.pct.toFixed(1) : '-';
           return `
           <tr>
             <td>${idx + 1}</td><td>${escapeHtml(entry.subject)}</td>
-            <td class="num">${entry.dispScore.toFixed(1)}</td><td class="num">${formatNumber(entry.dispMax)}</td>
-            <td class="num">${entry.pct.toFixed(1)}</td>
+            <td class="num">${scoreText}</td><td class="num">${maxText}</td>
+            <td class="num">${pctText}</td>
             <td class="num">${entry.position || '-'}</td>
             <td>${escapeHtml(teacher)}</td>
           </tr>`;
@@ -4653,10 +4704,10 @@
       const totalScoreEl = document.getElementById('previewTotalScore');
       const totalMaxEl = document.getElementById('previewTotalMax');
       const totalPctEl = document.getElementById('previewTotalPct');
-      if (totalScoreEl) totalScoreEl.textContent = overall.total.toFixed(1);
-      if (totalMaxEl) totalMaxEl.textContent = overall.max.toFixed(0);
+      if (totalScoreEl) totalScoreEl.textContent = displayOverall.score.toFixed(1);
+      if (totalMaxEl) totalMaxEl.textContent = formatNumber(displayOverall.max);
       if (totalPctEl) totalPctEl.textContent = `${overall.pct.toFixed(1)}%`;
-      return { normalized, overall };
+      return { normalized, overall, displayOverall };
     }
 
     function resetPreviewTotals(){
@@ -4668,37 +4719,52 @@
       if (totalPctEl) totalPctEl.textContent = '0%';
     }
 
-function toNormalizedRows(subjects){
-  return (subjects || []).map(entry => {
-    // Raw values coming from Firebase (same structure as scoresheet)
-    const rawScore = Number(entry?.score) || 0;
-    const rawMaxVal = Number(entry?.max);
-    
-    // If max is missing/invalid, fall back to 100 (but keep it as a real "max")
-    const safeMax = Number.isFinite(rawMaxVal) && rawMaxVal > 0 ? rawMaxVal : 100;
-    
-    // Percentage based on score/max
-    const pct = safeMax > 0 ? (rawScore / safeMax) * 100 : 0;
-    
-    // What we actually DISPLAY in the table and PDF:
-    //  - Score = real score from scoresheet
-    //  - Max   = real max from scoresheet
-    const dispScore = rawScore;
-    const dispMax   = safeMax;
-    
-    return {
-      ...entry,
-      rawScore,
-      rawMax: safeMax,
-      pct,
-      dispScore,
-      dispMax
-    };
-  });
-}
+    function overallDisplaySummary(subjects){
+      const overall = studentPercentFrom(subjects);
+      if (!isSyntheticWindowExam(state.examKey)) {
+        return { score: overall.total, max: overall.max, pct: overall.pct };
+      }
+      const normalizedMax = 50;
+      return {
+        score: (overall.pct * normalizedMax) / 100,
+        max: normalizedMax,
+        pct: overall.pct
+      };
+    }
 
-    function bestSubject(s){ const x = [...s.subjectStats.subjects].sort((a,b) => b.percent - a.percent)[0]; return x ? `${x.subject} ${x.percent.toFixed(0)}%` : '-'; }
-    function lowestSubject(s){ const x = [...s.subjectStats.subjects].sort((a,b) => a.percent - b.percent)[0]; return x ? `${x.subject} ${x.percent.toFixed(0)}%` : '-'; }
+    function toNormalizedRows(subjects){
+      return (subjects || []).map(entry => {
+        const rawScore = Number(entry?.score) || 0;
+        const rawMaxVal = Number(entry?.max);
+        const safeMax = Number.isFinite(rawMaxVal) && rawMaxVal > 0 ? rawMaxVal : 100;
+        const pct = safeMax > 0 ? (rawScore / safeMax) * 100 : 0;
+        const syntheticDisplayScore = Number(entry?.displayScore);
+        const syntheticDisplayMax = Number(entry?.displayMax);
+        const dispScore = Number.isFinite(syntheticDisplayScore) ? syntheticDisplayScore : rawScore;
+        const dispMax = Number.isFinite(syntheticDisplayMax) && syntheticDisplayMax > 0 ? syntheticDisplayMax : safeMax;
+
+        return {
+          ...entry,
+          rawScore,
+          rawMax: safeMax,
+          pct,
+          dispScore,
+          dispMax
+        };
+      });
+    }
+
+    function attemptedSubjectsOnly(subjects){
+      return (subjects || []).filter((entry) => attemptedItem(entry));
+    }
+    function bestSubject(s){
+      const x = [...attemptedSubjectsOnly(s.subjectStats.subjects)].sort((a,b) => b.percent - a.percent)[0];
+      return x ? `${x.subject} ${x.percent.toFixed(0)}%` : '-';
+    }
+    function lowestSubject(s){
+      const x = [...attemptedSubjectsOnly(s.subjectStats.subjects)].sort((a,b) => a.percent - b.percent)[0];
+      return x ? `${x.subject} ${x.percent.toFixed(0)}%` : '-';
+    }
     function buildExamPerformanceSeries(student){
       const detail = state.reportWindow?.detailsByAdm?.[student?.adm] || { subjects: {} };
       const grouped = new Map();
@@ -4864,10 +4930,10 @@ function toNormalizedRows(subjects){
       const items = [];
       if (student.attendancePercent < 85) items.push('Mzazi afuatilie mahudhurio ya kila siku kwa ukaribu zaidi kwa sababu kutokuwepo darasani kunapunguza mwendelezo wa somo.');
       if ((student.balance || 0) > 0.5) items.push(`Mzazi akamilishe salio la ada la TSh ${formatCurrency(student.balance)} ili mwanafunzi asiingie kwenye hatari ya kusimamishwa masomo.`);
-      (model.subjects || []).filter(item => item.studentPct < 50).slice(0, 3).forEach(item => {
+      (model.subjects || []).filter(item => item.examsDone > 0 && item.studentPct < 50).slice(0, 3).forEach(item => {
         items.push(`${item.subject}: apewe muda wa ziada na mwalimu wa ${item.teacher}, afanye marudio ya maswali ya mitihani aliyofanya na kusahihishiwa hatua kwa hatua.`);
       });
-      (model.subjects || []).filter(item => item.trend.delta < -5).slice(0, 2).forEach(item => {
+      (model.subjects || []).filter(item => item.examsDone > 0 && item.trend.delta < -5).slice(0, 2).forEach(item => {
         items.push(`${item.subject}: mwenendo unashuka, hivyo walimu na mzazi waweke ufuatiliaji wa wiki kwa wiki na kazi fupi za nyumbani.`);
       });
       if (!items.length) items.push('Aendelee na juhudi hizi, ahifadhi nidhamu ya darasa, na apewe kazi za kumjenga zaidi katika masomo anayoongoza.');
@@ -4875,8 +4941,9 @@ function toNormalizedRows(subjects){
     }
     function buildWrittenReportConclusion(student, examSeries, subjects){
       const overallTrend = trendFromPoints(examSeries);
-      const best = (subjects || [])[0];
-      const support = [...(subjects || [])].sort((a, b) => a.studentPct - b.studentPct)[0];
+      const attemptedSubjects = (subjects || []).filter((item) => item.examsDone > 0);
+      const best = attemptedSubjects[0];
+      const support = [...attemptedSubjects].sort((a, b) => a.studentPct - b.studentPct)[0];
       const latest = examSeries[examSeries.length - 1];
       if (!examSeries.length) {
         return 'Hakuna hitimisho la kuaminika kwa sasa kwa sababu hakuna historia ya mitihani iliyokusanywa ndani ya dirisha hili.';
@@ -4964,7 +5031,7 @@ function toNormalizedRows(subjects){
           examsDone: history.length,
           history
         };
-      }).sort((a, b) => b.studentPct - a.studentPct);
+      }).filter((item) => item.examsDone > 0).sort((a, b) => b.studentPct - a.studentPct);
       const best = subjects[0];
       const support = [...subjects].sort((a, b) => a.studentPct - b.studentPct)[0];
       const months = (state.reportWindow?.months || []).map(m => MONTH_LABELS[m] || m).join(', ');
@@ -5386,6 +5453,7 @@ function toNormalizedRows(subjects){
       const posLabel = (s.overallPosition && s.overallPosition !== '-') ? `${s.overallPosition}/${cohortSize}` : `-/${cohortSize}`;
       const normalizedSubjects = toNormalizedRows(s.subjectStats.subjects);
       const overall = studentPercentFrom(s.subjectStats.subjects);
+      const displayOverall = overallDisplaySummary(s.subjectStats.subjects);
       const annualOverride = (state.examKey === 'annual' && isNumber(s.annualPct)) ? s.annualPct : null;
       const overallPct = annualOverride !== null ? annualOverride : overall.pct;
       const overallGrade = gradeFromPercent(overallPct);
@@ -5397,9 +5465,9 @@ function toNormalizedRows(subjects){
         return [
           index + 1,
           entry.subject,
-          entry.dispScore.toFixed(1),
-          formatNumber(entry.dispMax),
-          entry.pct.toFixed(1),
+          entry.attempted ? entry.dispScore.toFixed(1) : '-',
+          entry.attempted ? formatNumber(entry.dispMax) : '-',
+          entry.attempted ? entry.pct.toFixed(1) : '-',
           entry.position || '-',
           teacher
         ];
@@ -5515,7 +5583,7 @@ function toNormalizedRows(subjects){
         startY: tableStartY,
         head: [["#","Subject","Score","Max","%","Pos","Teacher"]],
         body: subjectRows,
-        foot: [["","Totals", overall.total.toFixed(1), overall.max.toFixed(0), `${overallPct.toFixed(1)}%`, posLabel, '']],
+        foot: [["","Totals", displayOverall.score.toFixed(1), formatNumber(displayOverall.max), `${overallPct.toFixed(1)}%`, posLabel, '']],
         styles: { fontSize: 8.8, textColor: [15, 23, 42], lineWidth: 0.1, cellPadding: 2.1 },
         headStyles: { fillColor: [30, 64, 175], textColor: 255, fontSize: 9.1 },
         footStyles: { fillColor: [226, 232, 240], textColor: [15, 23, 42], fontStyle: 'bold' },
