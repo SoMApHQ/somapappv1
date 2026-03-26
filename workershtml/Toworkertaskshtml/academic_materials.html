@@ -10,6 +10,8 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="../../firebase.js"></script>
@@ -153,6 +155,14 @@
 
     button:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(0,0,0,0.25); }
     button:active { transform: translateY(0); }
+
+    .secondary-action {
+      width: auto;
+      min-width: 170px;
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.26);
+      box-shadow: none;
+    }
 
     .table-wrap {
       overflow-x: auto;
@@ -312,6 +322,7 @@
       <div class="inline" style="justify-content:space-between; width:100%; gap:12px; flex-wrap:wrap;">
         <h2>Uploaded Schemes</h2>
         <div class="inline" style="gap:8px;">
+          <button type="button" id="downloadSchemesReportBtn" class="secondary-action">Download PDF Report</button>
           <select id="filterYear"><option value="all">All Years</option></select>
           <select id="filterClass"><option value="all">All Classes</option></select>
           <select id="filterSubject"><option value="all">All Subjects</option></select>
@@ -370,6 +381,7 @@
     const allowedRoles = ['Academic Teacher', 'Assistant Headteacher'];
     const school = (typeof SOMAP !== 'undefined' && SOMAP.getSchool) ? SOMAP.getSchool() : null;
     const schoolId = (school && school.id) || window.currentSchoolId || localStorage.getItem('somap.currentSchoolId') || localStorage.getItem('currentSchoolId') || localStorage.getItem('schoolId') || 'socrates-school';
+    const schoolName = (school && school.name) || localStorage.getItem('schoolName') || (schoolId === 'socrates-school' ? 'Socrates School' : 'School');
     const schoolRef = (path) => (typeof SOMAP !== 'undefined' && typeof SOMAP.P === 'function') ? db.ref(SOMAP.P(path)) : db.ref(path);
     const getYear = () => (typeof window !== 'undefined' && window.somapYearContext?.getSelectedYear) ? window.somapYearContext.getSelectedYear() : new Date().getFullYear();
     const isSocratesSchool = (id) => ['socrates-school', 'default', 'socrates'].includes(String(id || '').toLowerCase());
@@ -405,6 +417,7 @@
     const filterClass = document.getElementById('filterClass');
     const filterSubject = document.getElementById('filterSubject');
     const filterTerm = document.getElementById('filterTerm');
+    const downloadSchemesReportBtn = document.getElementById('downloadSchemesReportBtn');
     const preparedByLabel = document.getElementById('preparedByLabel');
     const schoolTag = document.getElementById('schoolTag');
     const accessNotice = document.getElementById('accessNotice');
@@ -419,6 +432,9 @@
     let templatesCache = [];
     let extractedTemplateDraft = null;
     let parseInFlight = null;
+    let workerNameCache = new Map();
+    let allTeacherConfigsCache = {};
+    let schoolLogoDataUrlPromise = null;
 
     function safeKey(value) {
       return String(value || '').replace(/[.#$/\[\]]/g, '_');
@@ -436,6 +452,463 @@
 
     function subjectMatches(left, right) {
       return normalizeSubjectName(left).toLowerCase() === normalizeSubjectName(right).toLowerCase();
+    }
+
+    function normalizeClassName(value) {
+      if (ClassUtils.normalizeClassName) return ClassUtils.normalizeClassName(value);
+      return String(value || '').trim().replace(/\s+/g, ' ');
+    }
+
+    function getBaseClassName(value) {
+      if (ClassUtils.getBaseClassName) return ClassUtils.getBaseClassName(value);
+      return normalizeClassName(value);
+    }
+
+    function getWorkerDisplayName(uid, fallback = 'Teacher') {
+      if (uid && workerNameCache.has(uid)) return workerNameCache.get(uid);
+      return String(fallback || uid || 'Teacher').trim();
+    }
+
+    function getFilteredTemplateRows() {
+      const y = filterYear.value;
+      const c = filterClass.value;
+      const s = filterSubject.value;
+      const t = filterTerm.value;
+
+      return templatesCache.filter((row) => {
+        if (y !== 'all' && row.year !== y) return false;
+        if (c !== 'all' && !classMatches(row.className || row.classKey || row.baseClassName, c)) return false;
+        if (s !== 'all' && !subjectMatches(row.subjectName || row.subjectKey, s)) return false;
+        if (t !== 'all' && row.termKey !== t) return false;
+        return true;
+      });
+    }
+
+    async function loadWorkerNameCacheForYear(year) {
+      workerNameCache = new Map();
+      try {
+        const snap = await scopedOrLegacy(`years/${year}/workers`, 'workers');
+        snap.forEach((child) => {
+          const profile = child.val()?.profile || child.val() || {};
+          const fullName = (
+            profile.fullNameUpper ||
+            profile.fullName ||
+            [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ')
+          ).trim();
+          if (fullName) workerNameCache.set(child.key, fullName);
+        });
+      } catch (error) {
+        console.warn('Failed to load worker names', error);
+      }
+    }
+
+    async function loadAllTeacherConfigsForYear(year) {
+      try {
+        const snap = await scopedOrLegacy(`years/${year}/teachers_config`, 'teachers_config');
+        allTeacherConfigsCache = snap.exists() ? (snap.val() || {}) : {};
+      } catch (error) {
+        console.warn('Failed to load teacher configs', error);
+        allTeacherConfigsCache = {};
+      }
+    }
+
+    async function getSchoolLogoDataUrl() {
+      if (schoolLogoDataUrlPromise) return schoolLogoDataUrlPromise;
+
+      schoolLogoDataUrlPromise = (async () => {
+        let logoUrl = '../../images/somap-logo.png.jpg';
+
+        try {
+          const snap = await schoolRef('profile/logoUrl').once('value');
+          if (snap.exists() && snap.val()) {
+            logoUrl = snap.val();
+          }
+        } catch (error) {
+          console.warn('Failed to resolve school logo', error);
+        }
+
+        try {
+          const response = await fetch(logoUrl, { credentials: 'omit' });
+          const blob = await response.blob();
+          return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        } catch (error) {
+          console.warn('Failed to load school logo', error);
+          return null;
+        }
+      })();
+
+      return schoolLogoDataUrlPromise;
+    }
+
+    function buildTeacherCoverageMap(year) {
+      const map = new Map();
+      Object.entries(allTeacherConfigsCache || {}).forEach(([uid, rawConfig]) => {
+        const cfg = ClassUtils.normalizeTeacherConfig
+          ? ClassUtils.normalizeTeacherConfig(rawConfig || {}, { includeGraduated: true })
+          : (rawConfig || {});
+        const teacherName = getWorkerDisplayName(
+          uid,
+          cfg?.name || cfg?.teacherName || cfg?.fullName || rawConfig?.name || rawConfig?.teacherName || rawConfig?.fullName || uid
+        );
+
+        (cfg.classSubjectMappings || []).forEach((mapping) => {
+          const className = getBaseClassName(mapping.baseClass || mapping.class || mapping.className || '');
+          if (!className || className === 'Graduated') return;
+          const subjects = Array.from(new Set((mapping.subjects || []).map(normalizeSubjectName).filter(Boolean)));
+          subjects.forEach((subject) => {
+            const key = `${year}|${className}|${subject}`;
+            const existing = map.get(key) || [];
+            if (!existing.some((entry) => entry.uid === uid)) {
+              existing.push({ uid, teacherName });
+            }
+            map.set(key, existing);
+          });
+        });
+      });
+      return map;
+    }
+
+    function buildReportData() {
+      const visibleRows = getFilteredTemplateRows();
+      const reportYear = filterYear.value !== 'all' ? String(filterYear.value) : String(getYear());
+      const reportTerm = filterTerm.value;
+      const reportClass = filterClass.value;
+      const reportSubject = filterSubject.value;
+
+      const yearRows = visibleRows.filter((row) => String(row.year || '') === reportYear);
+      const selectedClasses = (reportClass !== 'all'
+        ? [getBaseClassName(reportClass)]
+        : ALL_CLASSES
+      ).filter(Boolean);
+      const teacherCoverageMap = buildTeacherCoverageMap(reportYear);
+      const availableByClass = new Map();
+      const missingRows = [];
+      const classSummaries = [];
+
+      yearRows.forEach((row) => {
+        const className = getBaseClassName(row.baseClassName || row.className || row.classKey || '');
+        const subjectName = normalizeSubjectName(row.subjectName || row.subjectKey || '');
+        if (!className || !subjectName) return;
+        const key = `${className}|${subjectName}`;
+        if (!availableByClass.has(className)) availableByClass.set(className, new Map());
+        const subjectMap = availableByClass.get(className);
+        const subjectBucket = subjectMap.get(key) || [];
+        subjectBucket.push(row);
+        subjectMap.set(key, subjectBucket);
+      });
+
+      selectedClasses.forEach((className) => {
+        let expectedSubjects = [...(SUBJECTS_BY_CLASS[className] || [])];
+        if (reportSubject !== 'all') {
+          expectedSubjects = expectedSubjects.filter((subject) => subjectMatches(subject, reportSubject));
+        }
+
+        const subjectMap = availableByClass.get(className) || new Map();
+        const missingSubjects = [];
+        expectedSubjects.forEach((subject) => {
+          const key = `${className}|${normalizeSubjectName(subject)}`;
+          const records = subjectMap.get(key) || [];
+          const hasMatch = reportTerm === 'all'
+            ? records.length > 0
+            : records.some((row) => row.termKey === reportTerm);
+          if (!hasMatch) {
+            const teacherEntries = teacherCoverageMap.get(`${reportYear}|${className}|${normalizeSubjectName(subject)}`) || [];
+            const teacherNames = teacherEntries.length
+              ? teacherEntries.map((entry) => entry.teacherName).join(', ')
+              : 'No teacher assigned';
+            missingSubjects.push(subject);
+            missingRows.push({
+              year: reportYear,
+              className,
+              subjectName: normalizeSubjectName(subject),
+              term: reportTerm === 'all' ? 'Any Term' : termLabel(reportTerm),
+              assignedTeacher: teacherNames,
+              status: teacherEntries.length ? 'Missing upload' : 'Unassigned'
+            });
+          }
+        });
+
+        const distinctSubjectsCovered = new Set(
+          Array.from(subjectMap.keys())
+            .map((key) => key.split('|')[1])
+            .filter(Boolean)
+        );
+        const uploadedCount = Array.from(subjectMap.values()).reduce((sum, records) => {
+          if (reportTerm === 'all') return sum + records.length;
+          return sum + records.filter((row) => row.termKey === reportTerm).length;
+        }, 0);
+
+        classSummaries.push({
+          className,
+          uploadedCount,
+          subjectsCovered: expectedSubjects.length ? expectedSubjects.length - missingSubjects.length : distinctSubjectsCovered.size,
+          expectedCount: expectedSubjects.length,
+          missingCount: missingSubjects.length,
+          missingSubjects
+        });
+      });
+
+      return {
+        reportYear,
+        visibleRows,
+        availableRows: visibleRows.sort((a, b) => {
+          const classA = getBaseClassName(a.baseClassName || a.className || '');
+          const classB = getBaseClassName(b.baseClassName || b.className || '');
+          return `${a.year}|${classA}|${a.subjectName}|${a.termKey}`.localeCompare(`${b.year}|${classB}|${b.subjectName}|${b.termKey}`);
+        }),
+        missingRows,
+        classSummaries,
+        filters: {
+          year: filterYear.value,
+          className: filterClass.value,
+          subjectName: filterSubject.value,
+          term: filterTerm.value
+        }
+      };
+    }
+
+    function drawSummaryCards(doc, cards, startY, pageWidth, marginX) {
+      const gap = 12;
+      const columns = 2;
+      const cardWidth = (pageWidth - (marginX * 2) - gap) / columns;
+      const cardHeight = 70;
+      let y = startY;
+
+      cards.forEach((card, index) => {
+        const column = index % columns;
+        if (index > 0 && column === 0) y += cardHeight + gap;
+        const x = marginX + ((cardWidth + gap) * column);
+
+        doc.setFillColor(card.fill[0], card.fill[1], card.fill[2]);
+        doc.roundedRect(x, y, cardWidth, cardHeight, 12, 12, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.text(card.title, x + 12, y + 18);
+        doc.setFontSize(20);
+        doc.text(String(card.value), x + 12, y + 42);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        const lines = doc.splitTextToSize(card.note || '', cardWidth - 24);
+        doc.text(lines, x + 12, y + 58);
+      });
+
+      doc.setTextColor(0, 0, 0);
+      return y + cardHeight;
+    }
+
+    async function downloadSchemesReport() {
+      const jsPdfLib = window.jspdf;
+      if (!jsPdfLib || !jsPdfLib.jsPDF) {
+        toast('PDF library not loaded.', 'error');
+        return;
+      }
+
+      const originalLabel = downloadSchemesReportBtn.textContent;
+      try {
+        downloadSchemesReportBtn.disabled = true;
+        downloadSchemesReportBtn.textContent = 'Preparing PDF...';
+
+        const reportData = buildReportData();
+        await Promise.all([
+          loadWorkerNameCacheForYear(reportData.reportYear),
+          loadAllTeacherConfigsForYear(reportData.reportYear)
+        ]);
+        const enrichedReportData = buildReportData();
+        const logoDataUrl = await getSchoolLogoDataUrl();
+
+        const doc = new jsPdfLib.jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const pageHeight = doc.internal.pageSize.getHeight();
+        const marginX = 32;
+        const today = new Date().toLocaleDateString('en-GB');
+        let y = 30;
+
+        doc.setFillColor(28, 37, 65);
+        doc.roundedRect(marginX, y, pageWidth - (marginX * 2), 96, 16, 16, 'F');
+        if (logoDataUrl) {
+          try {
+            doc.addImage(logoDataUrl, 'PNG', marginX + 18, y + 16, 58, 58);
+          } catch (error) {
+            console.warn('Logo render failed', error);
+          }
+        }
+
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(24);
+        doc.text('Academic Schemes Availability Report', marginX + 90, y + 32);
+        doc.setFontSize(14);
+        doc.text(schoolName, marginX + 90, y + 54);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.text(`Generated: ${today}`, marginX + 90, y + 74);
+        doc.text(`Prepared by: ${preparedByLabel.textContent.replace('Prepared by: ', '') || 'Academic Office'}`, marginX + 235, y + 74);
+        doc.text(`Analysis year: ${enrichedReportData.reportYear}`, pageWidth - 170, y + 74);
+
+        y += 118;
+        doc.setTextColor(31, 41, 55);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(12);
+        doc.text('Report Filters', marginX, y);
+        y += 14;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.text(
+          `Year: ${filterYear.value === 'all' ? `All Years (missing check uses ${enrichedReportData.reportYear})` : filterYear.value} | Class: ${filterClass.value === 'all' ? 'All Classes' : filterClass.value} | Subject: ${filterSubject.value === 'all' ? 'All Subjects' : filterSubject.value} | Term: ${filterTerm.value === 'all' ? 'All Terms' : termLabel(filterTerm.value)}`,
+          marginX,
+          y
+        );
+
+        y += 22;
+        const summaryCards = [
+          {
+            title: 'Visible Uploaded Schemes',
+            value: enrichedReportData.availableRows.length,
+            note: 'Records matching the current report scope.',
+            fill: [79, 70, 229]
+          },
+          {
+            title: 'Classes Reviewed',
+            value: enrichedReportData.classSummaries.length,
+            note: 'Classes checked against expected subject lists.',
+            fill: [14, 116, 144]
+          },
+          {
+            title: 'Missing Schemes',
+            value: enrichedReportData.missingRows.length,
+            note: 'Missing class-subject uploads highlighted in red below.',
+            fill: [220, 38, 38]
+          },
+          {
+            title: 'Coverage',
+            value: `${enrichedReportData.classSummaries.reduce((sum, item) => sum + item.subjectsCovered, 0)}/${enrichedReportData.classSummaries.reduce((sum, item) => sum + item.expectedCount, 0) || 0}`,
+            note: 'Covered expected subjects across selected classes.',
+            fill: [22, 163, 74]
+          }
+        ];
+        y = drawSummaryCards(doc, summaryCards, y, pageWidth, marginX) + 24;
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.setTextColor(31, 41, 55);
+        doc.text('Class Coverage Summary', marginX, y);
+        y += 10;
+
+        const classSummaryBody = enrichedReportData.classSummaries.map((item) => [
+          item.className,
+          item.uploadedCount,
+          `${item.subjectsCovered}/${item.expectedCount || 0}`,
+          item.missingCount,
+          item.missingSubjects.join(', ') || 'Complete'
+        ]);
+
+        doc.autoTable({
+          head: [['Class', 'Uploaded Schemes', 'Subject Coverage', 'Missing', 'Missing Subjects']],
+          body: classSummaryBody,
+          startY: y,
+          margin: { left: marginX, right: marginX },
+          styles: { fontSize: 9, cellPadding: 6, overflow: 'linebreak' },
+          headStyles: { fillColor: [55, 65, 81], textColor: 255 },
+          alternateRowStyles: { fillColor: [245, 247, 255] },
+          didParseCell: (hookData) => {
+            if (hookData.section === 'body' && hookData.column.index === 3 && Number(hookData.cell.raw || 0) > 0) {
+              hookData.cell.styles.textColor = [220, 38, 38];
+              hookData.cell.styles.fontStyle = 'bold';
+            }
+            if (hookData.section === 'body' && hookData.column.index === 4 && String(hookData.cell.raw || '') !== 'Complete') {
+              hookData.cell.styles.textColor = [185, 28, 28];
+            }
+          }
+        });
+
+        y = doc.lastAutoTable.finalY + 22;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.text('Uploaded Schemes List', marginX, y);
+
+        doc.autoTable({
+          head: [['Year', 'Class', 'Subject', 'Term', 'Hours', 'Rows', 'Prepared By']],
+          body: enrichedReportData.availableRows.map((row) => [
+            row.year || '',
+            row.className || row.baseClassName || '',
+            row.subjectName || row.subjectKey || '',
+            termLabel(row.termKey),
+            row.hoursPerWeek || '-',
+            row.rows ? Object.keys(row.rows).length : 0,
+            row.preparedBy?.name || ''
+          ]),
+          startY: y + 8,
+          margin: { left: marginX, right: marginX },
+          styles: { fontSize: 8.5, cellPadding: 5, overflow: 'linebreak' },
+          headStyles: { fillColor: [79, 70, 229], textColor: 255 },
+          alternateRowStyles: { fillColor: [244, 244, 255] }
+        });
+
+        y = doc.lastAutoTable.finalY + 18;
+        if (y > pageHeight - 170) {
+          doc.addPage();
+          y = 34;
+        }
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.setTextColor(185, 28, 28);
+        doc.text('Missing Schemes To Be Uploaded', marginX, y);
+        doc.setTextColor(31, 41, 55);
+
+        doc.autoTable({
+          head: [['Year', 'Class', 'Subject', 'Term Scope', 'Assigned Teacher', 'Status']],
+          body: enrichedReportData.missingRows.length
+            ? enrichedReportData.missingRows.map((row) => [
+                row.year,
+                row.className,
+                row.subjectName,
+                row.term,
+                row.assignedTeacher,
+                row.status
+              ])
+            : [['-', '-', '-', '-', 'All expected schemes are available in this scope.', 'Complete']],
+          startY: y + 8,
+          margin: { left: marginX, right: marginX },
+          styles: { fontSize: 8.8, cellPadding: 5, overflow: 'linebreak' },
+          headStyles: { fillColor: [220, 38, 38], textColor: 255 },
+          alternateRowStyles: { fillColor: [255, 244, 244] },
+          didParseCell: (hookData) => {
+            if (hookData.section === 'body' && hookData.column.index === 5) {
+              const text = String(hookData.cell.raw || '').toLowerCase();
+              if (text.includes('missing') || text.includes('unassigned')) {
+                hookData.cell.styles.textColor = [185, 28, 28];
+                hookData.cell.styles.fontStyle = 'bold';
+              } else if (text.includes('complete')) {
+                hookData.cell.styles.textColor = [22, 163, 74];
+                hookData.cell.styles.fontStyle = 'bold';
+              }
+            }
+          },
+          didDrawPage: () => {
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(8);
+            doc.setTextColor(75, 85, 99);
+            doc.text(`${schoolName} | Schemes Availability Report | ${enrichedReportData.reportYear}`, marginX, pageHeight - 14);
+            doc.text(`Generated by SoMAp`, pageWidth - 110, pageHeight - 14);
+          }
+        });
+
+        const fileName = `schemes-availability-report-${schoolId}-${enrichedReportData.reportYear}.pdf`.replace(/\s+/g, '-').toLowerCase();
+        doc.save(fileName);
+      } catch (error) {
+        console.error('Failed to generate schemes report', error);
+        toast(error?.message || 'Failed to generate the PDF report.', 'error');
+      } finally {
+        downloadSchemesReportBtn.disabled = false;
+        downloadSchemesReportBtn.textContent = originalLabel;
+      }
     }
 
     function toast(msg, type = 'info') {
@@ -782,6 +1255,7 @@
     filterClass.addEventListener('change', () => renderTemplates());
     filterSubject.addEventListener('change', () => renderTemplates());
     filterTerm.addEventListener('change', () => renderTemplates());
+    downloadSchemesReportBtn?.addEventListener('click', downloadSchemesReport);
 
     async function loadTemplates() {
       const snap = await db.ref(`schemes/${schoolId}/templates`).once('value');
@@ -805,17 +1279,7 @@
         templatesTable.innerHTML = '<tr><td colspan="9" class="muted">No schemes uploaded yet.</td></tr>';
         return;
       }
-      const y = filterYear.value;
-      const c = filterClass.value;
-      const s = filterSubject.value;
-      const t = filterTerm.value;
-      const rows = templatesCache.filter(row => {
-        if (y !== 'all' && row.year !== y) return false;
-        if (c !== 'all' && !classMatches(row.className || row.classKey, c)) return false;
-        if (s !== 'all' && !subjectMatches(row.subjectName || row.subjectKey, s)) return false;
-        if (t !== 'all' && row.termKey !== t) return false;
-        return true;
-      });
+      const rows = getFilteredTemplateRows();
 
       if (!rows.length) {
         templatesTable.innerHTML = '<tr><td colspan="9" class="muted">No schemes match your filters.</td></tr>';
