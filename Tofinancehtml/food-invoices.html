@@ -351,48 +351,55 @@
 
     let latestFoodInvoice = null;
 
+    function buildAttendanceKeys(dateStr) {
+        const normalized = normalizeDateCandidates(dateStr)[0] || todayYmdLocal();
+        const compact = normalized.replace(/-/g, '');
+        return {
+            normalized,
+            monthKey: compact.slice(0, 6),
+            dayKey: compact
+        };
+    }
+
     async function fetchApprovedWorkers(dateStr) {
         try {
             const year = getSelectedYear();
             const school = getCurrentSchoolId();
-            const monthKey = dateStr.substring(0, 7);
-            const dayKey = dateStr;
+            const aliases = schoolAliasList(school);
+            const allSchools = await getAllSchoolIds();
+            const candidates = uniqueList([...aliases, ...allSchools]);
+            const { monthKey, dayKey } = buildAttendanceKeys(dateStr);
 
-            // For Socrates (default school) data lives at root; try root first, then school-prefixed
-            const attCandidates = [
+            const attendanceRead = await readFirstExisting([
+                ...candidates.map(s => `schools/${s}/years/${year}/workerAttendance`),
                 `years/${year}/workerAttendance`,
-                `schools/${school}/years/${year}/workerAttendance`
-            ];
-            let attendanceData = {};
-            for (const path of attCandidates) {
-                const snap = await db.ref(path).once('value');
-                const val = snap.exists() ? (snap.val() || {}) : {};
-                if (Object.keys(val).length) { attendanceData = val; break; }
-            }
-
-            const workerCandidates = [
+                'attendance'
+            ]);
+            const workersRead = await readFirstExisting([
+                ...candidates.map(s => `schools/${s}/years/${year}/workers`),
                 `years/${year}/workers`,
-                `schools/${school}/years/${year}/workers`
-            ];
-            let workersData = {};
-            for (const path of workerCandidates) {
-                const snap = await db.ref(path).once('value');
-                const val = snap.exists() ? (snap.val() || {}) : {};
-                if (Object.keys(val).length) { workersData = val; break; }
-            }
+                'workers'
+            ]);
 
+            const attendanceData = attendanceRead.snap?.exists() ? (attendanceRead.snap.val() || {}) : {};
+            const workersData = workersRead.snap?.exists() ? (workersRead.snap.val() || {}) : {};
             const approved = [];
+
             Object.entries(attendanceData).forEach(([id, months]) => {
                 const record = months?.[monthKey]?.[dayKey] || null;
-                if (!record) return;
-                const inStatus = record.checkInStatus || (record.approved === true ? 'approved' : '');
+                if (!record?.checkInTs) return;
+                const inStatus = String(record.checkInStatus || (record.approved === true ? 'approved' : '')).toLowerCase();
                 if (inStatus !== 'approved') return;
                 const profile = workersData[id]?.profile || {};
-                const name = profile.fullNameUpper || profile.name || id;
-                approved.push(name);
+                const name = String(profile.fullNameUpper || profile.name || id || '').trim();
+                if (name) approved.push(name);
             });
-            return approved;
-        } catch (e) { console.error('fetchApprovedWorkers', e); return []; }
+
+            return uniqueList(approved).sort((a, b) => a.localeCompare(b));
+        } catch (e) {
+            console.error('fetchApprovedWorkers', e);
+            return [];
+        }
     }
 
     async function downloadFoodInvoicePdf(invoice) {
@@ -629,26 +636,34 @@
             doc.setFontSize(11);
             doc.text(`WAFANYAKAZI WALIOIDHINISHWA NA MKUU WA SHULE (${approvedWorkers.length})`, margin+10, y+17);
             y += 30;
-            // 4-column compact name table
-            const cols4 = 4;
-            const cw4 = contentWidth / cols4;
-            for (let i = 0; i < approvedWorkers.length; i += cols4) {
-                const rowNames = approvedWorkers.slice(i, i + cols4);
-                const rowH = 16;
-                ensureSpace(rowH + 2);
-                if (y + rowH + 2 > pageHeight - margin) { doc.addPage(); y = margin; drawHeader(true); }
-                const bg = (Math.floor(i / cols4) % 2 === 0) ? [232,244,253] : [255,255,255];
-                doc.setFillColor(...bg);
-                doc.rect(margin, y, contentWidth, rowH, 'F');
-                doc.setDrawColor(186, 220, 240);
-                doc.rect(margin, y, contentWidth, rowH);
-                doc.setFont('helvetica', 'normal');
-                doc.setTextColor(...colors.text);
-                doc.setFontSize(8);
-                rowNames.forEach((name, j) => {
-                    const num = i + j + 1;
-                    doc.text(`${num}. ${name}`, margin + j * cw4 + 4, y + 11);
+            const workerCols = approvedWorkers.length >= 16 ? 4 : approvedWorkers.length >= 7 ? 3 : 2;
+            const workerColW = contentWidth / workerCols;
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(8);
+            for (let i = 0; i < approvedWorkers.length; i += workerCols) {
+                const rowNames = approvedWorkers.slice(i, i + workerCols);
+                const wrappedCells = rowNames.map((name, j) => {
+                    const label = `${i + j + 1}. ${name}`;
+                    return doc.splitTextToSize(label, workerColW - 10);
                 });
+                const rowH = Math.max(18, ...wrappedCells.map(lines => lines.length * 9 + 8));
+                ensureSpace(rowH + 2);
+                if (y + rowH + 2 > pageHeight - margin) {
+                    doc.addPage();
+                    y = margin;
+                    drawHeader(true);
+                }
+                for (let j = 0; j < workerCols; j++) {
+                    const x = margin + j * workerColW;
+                    const bg = Math.floor(i / workerCols) % 2 === 0 ? [239, 246, 255] : [255, 255, 255];
+                    doc.setFillColor(...bg);
+                    doc.setDrawColor(186, 220, 240);
+                    doc.rect(x, y, workerColW, rowH, 'FD');
+                    const lines = wrappedCells[j] || [];
+                    if (!lines.length) continue;
+                    doc.setTextColor(...colors.text);
+                    doc.text(lines, x + 5, y + 11);
+                }
                 y += rowH;
             }
             y += 10;
