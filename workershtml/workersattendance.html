@@ -700,6 +700,95 @@
       );
     }
 
+    function normalizeRoleKey(value) {
+      return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    }
+
+    function getCurrentRoleKey() {
+      return normalizeRoleKey(
+        state.profile?.role ||
+        localStorage.getItem('role') ||
+        sessionStorage.getItem('role') || ''
+      );
+    }
+
+    function roleAliasSet(roleKey) {
+      const normalized = normalizeRoleKey(roleKey);
+      const aliases = new Set(normalized ? [normalized] : []);
+      const add = (value) => { if (value) aliases.add(normalizeRoleKey(value)); };
+      switch (normalized) {
+        case 'teacher':
+        case 'teachers':
+          add('teacher'); add('teachers');
+          break;
+        case 'driver':
+        case 'drivers':
+          add('driver'); add('drivers');
+          break;
+        case 'cook':
+        case 'cooks':
+          add('cook'); add('cooks');
+          break;
+        case 'guard':
+        case 'security':
+          add('guard'); add('security');
+          break;
+        case 'cleaner':
+        case 'cleaners':
+          add('cleaner'); add('cleaners');
+          break;
+        case 'accountant':
+        case 'accountants':
+          add('accountant'); add('accountants');
+          break;
+        case 'headteacher':
+        case 'head_teacher':
+          add('headteacher'); add('head_teacher');
+          break;
+        case 'manager':
+        case 'management':
+          add('manager'); add('management');
+          break;
+        default:
+          if (normalized.endsWith('s')) add(normalized.slice(0, -1));
+          else if (normalized) add(`${normalized}s`);
+          break;
+      }
+      return aliases;
+    }
+
+    function roleMatchesTarget(roleKey, targetKey) {
+      const normalizedTarget = normalizeRoleKey(targetKey || 'all');
+      if (!normalizedTarget || normalizedTarget === 'all') return true;
+      const roleAliases = roleAliasSet(roleKey);
+      const targetAliases = roleAliasSet(normalizedTarget);
+      for (const alias of roleAliases) {
+        if (targetAliases.has(alias)) return true;
+      }
+      return false;
+    }
+
+    function directorTaskTargetsCurrentWorker(task) {
+      const mode = normalizeRoleKey(task?.targetMode || '');
+      if (mode === 'workers') {
+        const targetIds = Array.isArray(task?.targetWorkerIds) ? task.targetWorkerIds.map(String) : [];
+        return targetIds.includes(String(state.workerId || ''));
+      }
+      return roleMatchesTarget(getCurrentRoleKey(), task?.targetRole || 'all');
+    }
+
+    function describeDirectorTaskTarget(task) {
+      const mode = normalizeRoleKey(task?.targetMode || '');
+      if (mode === 'workers') {
+        const workers = Array.isArray(task?.targetWorkers) ? task.targetWorkers : [];
+        if (workers.length === 1) {
+          return `${workers[0]?.name || 'Worker'} • ${workers[0]?.role || ''}`.replace(/\s+•\s*$/, '');
+        }
+        if (workers.length > 1) return `${workers.length} selected workers`;
+      }
+      return task?.targetLabel || task?.targetRole || 'wote';
+    }
+
     function updateWorkerMetaLine() {
       if (!workerMetaLine) return;
       const now = new Date();
@@ -1683,8 +1772,14 @@
     }
 
     function isHeadTeacher() {
-      const role = (state.profile?.role || localStorage.getItem('role') || sessionStorage.getItem('role') || '').toLowerCase();
-      return role.includes('head') || role.includes('management') || role.includes('academic');
+      const role = getCurrentRoleKey();
+      if (!role || role === 'head_finance') return false;
+      return role === 'headteacher' ||
+        role === 'head_teacher' ||
+        role === 'headmaster' ||
+        role === 'head_mistress' ||
+        role === 'management' ||
+        role === 'academic';
     }
 
     async function deleteAttendanceRecord(dayKey, source) {
@@ -1798,9 +1893,7 @@
     }
 
     async function maybeShowAdminPanel() {
-      const role = (state.profile?.role || '').toLowerCase();
-      const isHead = role.includes('head');
-      if (!isHead) {
+      if (!isHeadTeacher()) {
         adminPanel.style.display = 'none';
         return;
       }
@@ -2020,7 +2113,10 @@
     async function loadDirectorTasksForToday(year, dayKey) {
       try {
         const snap = await schoolRef(`years/${year}/directorTasks/${dayKey}`).once('value');
-        return snap.val() || {};
+        const tasks = snap.val() || {};
+        return Object.fromEntries(
+          Object.entries(tasks).filter(([, task]) => directorTaskTargetsCurrentWorker(task))
+        );
       } catch (e) { return {}; }
     }
 
@@ -2040,7 +2136,7 @@
               <input type="checkbox" name="director_task" value="${id}" checked>
               <div>
                 <span style="color:#e2e8f0;font-weight:600;">${t.task || String(t)}</span>
-                <div style="font-size:0.78rem;color:#94a3b8;">Imeongezwa na: ${t.addedBy || 'Mkurugenzi'} &bull; Kwa: ${t.targetRole || 'wote'}</div>
+                <div style="font-size:0.78rem;color:#94a3b8;">Imeongezwa na: ${t.addedBy || 'Mkurugenzi'} &bull; Kwa: ${describeDirectorTaskTarget(t)}</div>
               </div>
             </label>`).join('');
         } else {
@@ -2244,7 +2340,7 @@
               <input type="checkbox" name="hf_director_task" value="${id}" checked>
               <div>
                 <span style="color:#e2e8f0;font-weight:600;">${t.task || String(t)}</span>
-                <div style="font-size:0.78rem;color:#94a3b8;">Imeongezwa na: ${t.addedBy || 'Mkurugenzi'} &bull; Kwa: ${t.targetRole || 'wote'}</div>
+                <div style="font-size:0.78rem;color:#94a3b8;">Imeongezwa na: ${t.addedBy || 'Mkurugenzi'} &bull; Kwa: ${describeDirectorTaskTarget(t)}</div>
               </div>
             </label>`).join('');
         } else {
@@ -2394,11 +2490,7 @@
         tasks = snap.val() || {};
       } catch (e) { return; }
 
-      const role = (state.profile?.role || localStorage.getItem('role') || sessionStorage.getItem('role') || '').toLowerCase();
-      const relevant = Object.entries(tasks).filter(([, t]) => {
-        const target = (t.targetRole || 'all').toLowerCase();
-        return target === 'all' || role.includes(target);
-      });
+      const relevant = Object.entries(tasks).filter(([, task]) => directorTaskTargetsCurrentWorker(task));
       if (!relevant.length) return;
 
       // Load existing reports

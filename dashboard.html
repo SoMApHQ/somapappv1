@@ -1176,18 +1176,27 @@
               <!-- Add Task Form -->
               <div style="background:rgba(30,41,59,0.6);border:1px solid rgba(148,163,184,0.15);border-radius:0.8rem;padding:1rem;margin-bottom:1rem;">
                 <h3 style="margin:0 0 10px;font-size:0.88rem;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;">Add Task for Today</h3>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-                  <select id="hub-task-target" style="flex:0 0 auto;background:rgba(15,23,42,0.9);border:1px solid rgba(148,163,184,0.3);color:#e2e8f0;border-radius:0.55rem;padding:7px 10px;font-size:0.83rem;">
-                    <option value="all">All Workers</option>
-                    <option value="accountant">Accountant</option>
-                    <option value="teacher">Teachers</option>
-                    <option value="headteacher">Head Teacher</option>
-                    <option value="driver">Driver</option>
-                    <option value="cook">Cook</option>
-                    <option value="security">Security</option>
-                  </select>
-                  <input type="text" id="hub-task-text" placeholder="Task description..." style="flex:1;min-width:160px;background:rgba(15,23,42,0.9);border:1px solid rgba(148,163,184,0.3);color:#e2e8f0;border-radius:0.55rem;padding:7px 10px;font-size:0.83rem;">
-                  <button type="button" onclick="saveDirectorTask()" style="background:linear-gradient(135deg,#10b981,#38bdf8);color:#020617;border:none;border-radius:0.55rem;padding:7px 16px;font-weight:800;cursor:pointer;font-size:0.83rem;white-space:nowrap;">+ Add</button>
+                <div style="display:grid;gap:8px;">
+                  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <select id="hub-task-mode" style="flex:0 0 auto;background:rgba(15,23,42,0.9);border:1px solid rgba(148,163,184,0.3);color:#e2e8f0;border-radius:0.55rem;padding:7px 10px;font-size:0.83rem;">
+                      <option value="all">All Workers</option>
+                      <option value="role">By Role / Group</option>
+                      <option value="workers">Individual / Selected Group</option>
+                    </select>
+                    <select id="hub-task-role" style="display:none;flex:0 0 auto;min-width:180px;background:rgba(15,23,42,0.9);border:1px solid rgba(148,163,184,0.3);color:#e2e8f0;border-radius:0.55rem;padding:7px 10px;font-size:0.83rem;"></select>
+                    <input type="text" id="hub-task-text" placeholder="Task description..." style="flex:1;min-width:160px;background:rgba(15,23,42,0.9);border:1px solid rgba(148,163,184,0.3);color:#e2e8f0;border-radius:0.55rem;padding:7px 10px;font-size:0.83rem;">
+                    <button type="button" onclick="saveDirectorTask()" style="background:linear-gradient(135deg,#10b981,#38bdf8);color:#020617;border:none;border-radius:0.55rem;padding:7px 16px;font-weight:800;cursor:pointer;font-size:0.83rem;white-space:nowrap;">+ Add</button>
+                  </div>
+                  <div id="hub-worker-picker-wrap" style="display:none;background:rgba(15,23,42,0.5);border:1px solid rgba(148,163,184,0.16);border-radius:0.7rem;padding:10px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                      <div>
+                        <div style="font-size:0.78rem;font-weight:700;color:#e2e8f0;">Choose one or more workers</div>
+                        <div id="hub-worker-summary" style="font-size:0.75rem;color:#94a3b8;">No workers selected.</div>
+                      </div>
+                      <button type="button" id="hub-worker-clear" style="background:rgba(148,163,184,0.12);border:1px solid rgba(148,163,184,0.24);color:#e2e8f0;border-radius:999px;padding:4px 10px;font-size:0.74rem;cursor:pointer;">Clear</button>
+                    </div>
+                    <div id="hub-worker-list" style="display:grid;gap:6px;max-height:210px;overflow-y:auto;padding-right:4px;"></div>
+                  </div>
                 </div>
               </div>
 
@@ -4021,9 +4030,265 @@
         try { return sessionStorage.getItem('somap_selected_year') || String(new Date().getFullYear()); } catch(_){ return String(new Date().getFullYear()); }
       }
 
+      const HUB_ROLE_COLORS = {
+        all: '#a855f7',
+        accountant: '#fbbf24',
+        teacher: '#34d399',
+        headteacher: '#e879f9',
+        head_finance: '#22d3ee',
+        driver: '#38bdf8',
+        cook: '#f97316',
+        guard: '#94a3b8',
+        security: '#94a3b8',
+        cleaner: '#14b8a6',
+        secretary: '#f472b6',
+        manager: '#c084fc',
+        management: '#c084fc',
+        academic: '#60a5fa',
+        hr: '#fb7185',
+      };
+      let hubWorkersCache = [];
+      let hubWorkerMap = {};
+
+      function hubEscapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;',
+        }[ch]));
+      }
+
+      function hubNormalizeRole(value) {
+        return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+      }
+
+      function hubRoleVariants(roleKey) {
+        const normalized = hubNormalizeRole(roleKey);
+        const variants = new Set(normalized ? [normalized] : []);
+        const add = (value) => { if (value) variants.add(hubNormalizeRole(value)); };
+        switch (normalized) {
+          case 'teacher':
+          case 'teachers':
+            add('teacher'); add('teachers');
+            break;
+          case 'driver':
+          case 'drivers':
+            add('driver'); add('drivers');
+            break;
+          case 'cook':
+          case 'cooks':
+            add('cook'); add('cooks');
+            break;
+          case 'guard':
+          case 'security':
+            add('guard'); add('security');
+            break;
+          case 'cleaner':
+          case 'cleaners':
+            add('cleaner'); add('cleaners');
+            break;
+          case 'accountant':
+          case 'accountants':
+            add('accountant'); add('accountants');
+            break;
+          case 'headteacher':
+          case 'head_teacher':
+            add('headteacher'); add('head_teacher');
+            break;
+          case 'manager':
+          case 'management':
+            add('manager'); add('management');
+            break;
+          default:
+            if (normalized.endsWith('s')) add(normalized.slice(0, -1));
+            else if (normalized) add(`${normalized}s`);
+            break;
+        }
+        return variants;
+      }
+
+      function hubRoleLabel(roleKey) {
+        const normalized = hubNormalizeRole(roleKey);
+        const labels = {
+          all: 'All Workers',
+          accountant: 'Accountant',
+          accountants: 'Accountants',
+          teacher: 'Teacher',
+          teachers: 'Teachers',
+          headteacher: 'Head Teacher',
+          head_teacher: 'Head Teacher',
+          head_finance: 'Head Finance',
+          driver: 'Driver',
+          drivers: 'Drivers',
+          cook: 'Cook',
+          cooks: 'Cooks',
+          guard: 'Guard',
+          security: 'Security',
+          cleaner: 'Cleaner',
+          cleaners: 'Cleaners',
+          secretary: 'Secretary',
+          manager: 'Manager',
+          management: 'Management',
+          academic: 'Academic',
+          hr: 'HR',
+        };
+        if (labels[normalized]) return labels[normalized];
+        return normalized
+          .split('_')
+          .filter(Boolean)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(' ') || 'Worker';
+      }
+
+      function hubGetWorkerName(worker) {
+        const profile = worker?.profile || {};
+        return profile.fullNameUpper || [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ') || worker?.id || 'Worker';
+      }
+
+      function hubWorkerRoleKey(worker) {
+        return hubNormalizeRole(worker?.profile?.role || worker?.role || '');
+      }
+
+      function hubReadWorkersFromSnapshot(snap) {
+        const rows = [];
+        if (snap && typeof snap.forEach === 'function') {
+          snap.forEach((child) => {
+            const value = child.val() || {};
+            rows.push({
+              id: child.key,
+              profile: value.profile || {},
+            });
+          });
+        }
+        rows.sort((a, b) => hubGetWorkerName(a).localeCompare(hubGetWorkerName(b), 'sw-TZ'));
+        return rows;
+      }
+
+      function hubIndexWorkers(workers) {
+        hubWorkersCache = workers.slice();
+        hubWorkerMap = workers.reduce((map, worker) => {
+          map[String(worker.id)] = {
+            id: String(worker.id),
+            name: hubGetWorkerName(worker),
+            role: hubWorkerRoleKey(worker),
+          };
+          return map;
+        }, {});
+      }
+
+      function hubGetSelectedWorkerIds() {
+        return [...document.querySelectorAll('#hub-worker-list input[type="checkbox"]:checked')].map((el) => el.value);
+      }
+
+      function hubUpdateWorkerSummary() {
+        const summaryEl = document.getElementById('hub-worker-summary');
+        if (!summaryEl) return;
+        const selectedWorkers = hubGetSelectedWorkerIds().map((id) => hubWorkerMap[id]).filter(Boolean);
+        if (!selectedWorkers.length) {
+          summaryEl.textContent = 'No workers selected.';
+          return;
+        }
+        if (selectedWorkers.length === 1) {
+          const worker = selectedWorkers[0];
+          summaryEl.textContent = `${worker.name} • ${hubRoleLabel(worker.role)}`;
+          return;
+        }
+        summaryEl.textContent = `${selectedWorkers.length} workers selected.`;
+      }
+
+      function hubClearWorkerSelection() {
+        document.querySelectorAll('#hub-worker-list input[type="checkbox"]').forEach((el) => { el.checked = false; });
+        hubUpdateWorkerSummary();
+      }
+
+      function hubUpdateTargetModeUI() {
+        const mode = document.getElementById('hub-task-mode')?.value || 'all';
+        const roleSelect = document.getElementById('hub-task-role');
+        const workerWrap = document.getElementById('hub-worker-picker-wrap');
+        if (roleSelect) roleSelect.style.display = mode === 'role' ? '' : 'none';
+        if (workerWrap) workerWrap.style.display = mode === 'workers' ? '' : 'none';
+      }
+
+      function hubDescribeTarget(task, workerMap = hubWorkerMap) {
+        const mode = hubNormalizeRole(task?.targetMode || '');
+        if (mode === 'workers') {
+          const workerIds = Array.isArray(task?.targetWorkerIds) ? task.targetWorkerIds.map(String) : [];
+          const selectedWorkers = (Array.isArray(task?.targetWorkers) ? task.targetWorkers : [])
+            .map((worker) => ({
+              id: String(worker?.id || ''),
+              name: worker?.name || workerMap[String(worker?.id || '')]?.name || 'Worker',
+              role: hubNormalizeRole(worker?.role || workerMap[String(worker?.id || '')]?.role || ''),
+            }));
+          const resolvedWorkers = selectedWorkers.length
+            ? selectedWorkers
+            : workerIds.map((id) => workerMap[id] || { id, name: id, role: '' });
+          return {
+            label: resolvedWorkers.length === 1
+              ? `${resolvedWorkers[0].name} • ${hubRoleLabel(resolvedWorkers[0].role)}`
+              : `${resolvedWorkers.length} selected workers`,
+            details: resolvedWorkers.map((worker) => `${worker.name}${worker.role ? ` • ${hubRoleLabel(worker.role)}` : ''}`),
+            color: '#22d3ee',
+          };
+        }
+        const roleKey = hubNormalizeRole(task?.targetRole || 'all');
+        return {
+          label: hubRoleLabel(roleKey || 'all'),
+          details: [],
+          color: HUB_ROLE_COLORS[roleKey || 'all'] || '#94a3b8',
+        };
+      }
+
+      async function loadHubTargetOptions() {
+        const roleSelect = document.getElementById('hub-task-role');
+        const workerList = document.getElementById('hub-worker-list');
+        const selectedIds = new Set(hubGetSelectedWorkerIds());
+        const currentRoleValue = roleSelect?.value || '';
+        const year = hubYear();
+        try {
+          const workersSnap = await hubSchoolRef(`years/${year}/workers`).once('value');
+          const workers = hubReadWorkersFromSnapshot(workersSnap);
+          hubIndexWorkers(workers);
+          if (roleSelect) {
+            const roles = [...new Set(workers.map((worker) => hubWorkerRoleKey(worker)).filter(Boolean))]
+              .sort((a, b) => hubRoleLabel(a).localeCompare(hubRoleLabel(b), 'sw-TZ'));
+            roleSelect.innerHTML = roles.length
+              ? roles.map((role) => `<option value="${hubEscapeHtml(role)}">${hubEscapeHtml(hubRoleLabel(role))}</option>`).join('')
+              : '<option value="">No roles found</option>';
+            if (roles.includes(currentRoleValue)) roleSelect.value = currentRoleValue;
+          }
+          if (workerList) {
+            workerList.innerHTML = workers.length
+              ? workers.map((worker) => {
+                  const workerName = hubGetWorkerName(worker);
+                  const workerRole = hubWorkerRoleKey(worker);
+                  return `
+                    <label style="display:flex;align-items:center;gap:10px;background:rgba(30,41,59,0.6);border:1px solid rgba(148,163,184,0.14);border-radius:0.65rem;padding:8px 10px;cursor:pointer;">
+                      <input type="checkbox" value="${hubEscapeHtml(worker.id)}" ${selectedIds.has(String(worker.id)) ? 'checked' : ''}>
+                      <span style="display:grid;gap:2px;">
+                        <span style="font-size:0.82rem;font-weight:700;color:#e2e8f0;">${hubEscapeHtml(workerName)}</span>
+                        <span style="font-size:0.74rem;color:#94a3b8;">${hubEscapeHtml(hubRoleLabel(workerRole || 'worker'))}</span>
+                      </span>
+                    </label>`;
+                }).join('')
+              : '<div style="color:rgba(148,163,184,0.7);font-size:0.8rem;">No workers found for this year.</div>';
+          }
+        } catch (e) {
+          if (workerList) workerList.innerHTML = '<div style="color:#fb7185;font-size:0.8rem;">Failed to load workers.</div>';
+        } finally {
+          hubUpdateWorkerSummary();
+          hubUpdateTargetModeUI();
+        }
+      }
+
       function openHubModal() {
         const m = document.getElementById('hub-modal-overlay');
-        if (m) { m.style.display = 'flex'; loadHubTasks(); }
+        if (m) {
+          m.style.display = 'flex';
+          loadHubTargetOptions();
+          loadHubTasks();
+        }
       }
       function closeHubModal() {
         const m = document.getElementById('hub-modal-overlay');
@@ -4035,21 +4300,46 @@
       });
 
       async function saveDirectorTask() {
-        const target = document.getElementById('hub-task-target')?.value || 'all';
+        const mode = document.getElementById('hub-task-mode')?.value || 'all';
         const taskText = (document.getElementById('hub-task-text')?.value || '').trim();
         if (!taskText) { alert('Andika kazi kwanza.'); return; }
         const year = hubYear();
         const dayKey = hubTodayKey();
         const addedBy = auth.currentUser?.displayName || auth.currentUser?.email || 'Director';
-        const task = { task: taskText, targetRole: target, addedBy, addedAt: Date.now() };
+        const task = { task: taskText, targetMode: mode, addedBy, addedAt: Date.now() };
+        if (mode === 'role') {
+          const targetRole = document.getElementById('hub-task-role')?.value || '';
+          if (!targetRole) { alert('Chagua role/group kwanza.'); return; }
+          task.targetRole = targetRole;
+          task.targetLabel = hubRoleLabel(targetRole);
+        } else if (mode === 'workers') {
+          const targetWorkerIds = hubGetSelectedWorkerIds();
+          if (!targetWorkerIds.length) { alert('Chagua mfanyakazi mmoja au zaidi.'); return; }
+          task.targetWorkerIds = targetWorkerIds;
+          task.targetWorkers = targetWorkerIds
+            .map((workerId) => hubWorkerMap[workerId])
+            .filter(Boolean)
+            .map((worker) => ({
+              id: worker.id,
+              name: worker.name,
+              role: worker.role,
+            }));
+          task.targetLabel = task.targetWorkers.length === 1
+            ? `${task.targetWorkers[0].name} • ${hubRoleLabel(task.targetWorkers[0].role)}`
+            : `${task.targetWorkers.length} selected workers`;
+        } else {
+          task.targetRole = 'all';
+          task.targetLabel = 'All Workers';
+        }
         try {
           await hubSchoolRef(`years/${year}/directorTasks/${dayKey}`).push(task);
           document.getElementById('hub-task-text').value = '';
+          if (mode === 'workers') hubClearWorkerSelection();
           loadHubTasks();
         } catch (e) { alert('Imeshindikana kuhifadhi: ' + (e.message || e)); }
       }
 
-      async function loadHubTasks() {
+      async function loadHubTasksLegacy() {
         const listEl = document.getElementById('hub-tasks-list');
         if (!listEl) return;
         const year = hubYear();
@@ -4103,9 +4393,81 @@
         }
       }
 
-      // Load hub tasks when the page initializes
+      document.getElementById('hub-task-mode')?.addEventListener('change', hubUpdateTargetModeUI);
+      document.getElementById('hub-worker-list')?.addEventListener('change', hubUpdateWorkerSummary);
+      document.getElementById('hub-worker-clear')?.addEventListener('click', hubClearWorkerSelection);
+      if (window.somapYearContext && typeof somapYearContext.onYearChanged === 'function') {
+        somapYearContext.onYearChanged(() => {
+          loadHubTargetOptions();
+          loadHubTasks();
+        });
+      }
+
+      async function loadHubTasks() {
+        const listEl = document.getElementById('hub-tasks-list');
+        if (!listEl) return;
+        const year = hubYear();
+        const dayKey = hubTodayKey();
+        listEl.innerHTML = '<div style="color:rgba(148,163,184,0.7);font-size:0.85rem;padding:4px 0;">Inapakia...</div>';
+        try {
+          const [tasksSnap, allReportsSnap, workersSnap] = await Promise.all([
+            hubSchoolRef(`years/${year}/directorTasks/${dayKey}`).once('value'),
+            hubSchoolRef(`years/${year}/directorTaskReports/${dayKey}`).once('value'),
+            hubSchoolRef(`years/${year}/workers`).once('value'),
+          ]);
+          const tasks = tasksSnap.val() || {};
+          const allReports = allReportsSnap.val() || {};
+          hubIndexWorkers(hubReadWorkersFromSnapshot(workersSnap));
+          const entries = Object.entries(tasks).sort((a, b) => Number(b?.[1]?.addedAt || 0) - Number(a?.[1]?.addedAt || 0));
+          const badge = document.getElementById('hub-task-count-badge');
+          if (badge) {
+            if (entries.length) { badge.style.display = ''; badge.textContent = entries.length; }
+            else { badge.style.display = 'none'; }
+          }
+          if (!entries.length) {
+            listEl.innerHTML = '<div style="color:rgba(148,163,184,0.6);font-size:0.85rem;padding:8px 0;">Hakuna kazi zilizoongezwa leo.</div>';
+            return;
+          }
+          listEl.innerHTML = entries.map(([taskId, task]) => {
+            const reports = allReports[taskId] || {};
+            const reportEntries = Object.entries(reports);
+            const doneCount = reportEntries.filter(([, report]) => report.done).length;
+            const targetMeta = hubDescribeTarget(task, hubWorkerMap);
+            const roleColor = targetMeta.color || HUB_ROLE_COLORS[hubNormalizeRole(task.targetRole || 'all')] || '#94a3b8';
+            const reportsHtml = reportEntries.length ? `
+              <div style="margin-top:8px;display:grid;gap:4px;">
+                ${reportEntries.map(([workerId, report]) => `
+                  <div style="background:rgba(255,255,255,0.05);border-radius:6px;padding:6px 10px;font-size:0.78rem;">
+                    <span style="color:#e2e8f0;font-weight:700;">${hubEscapeHtml(hubWorkerMap[workerId]?.name || workerId)}</span>
+                    <span style="color:rgba(148,163,184,0.65);">${hubEscapeHtml(hubWorkerMap[workerId]?.role ? ` • ${hubRoleLabel(hubWorkerMap[workerId].role)}` : '')}</span>
+                    <span style="color:${report.done ? '#34d399' : '#fb7185'};font-weight:700;">${report.done ? '✓ Imekamilika' : '✕ Haijamaliziwa'}</span>
+                    <span style="color:rgba(148,163,184,0.8);margin-left:8px;">${hubEscapeHtml(report.explanation || '')}</span>
+                    <span style="color:rgba(148,163,184,0.5);margin-left:8px;">${report.reportedAt ? new Date(report.reportedAt).toLocaleTimeString('sw-TZ') : ''}</span>
+                  </div>`).join('')}
+              </div>` : `<div style="font-size:0.78rem;color:rgba(148,163,184,0.5);margin-top:4px;">Bado hakuna ripoti kutoka kwa wafanyakazi.</div>`;
+            return `<div style="background:rgba(15,23,42,0.6);border:1px solid rgba(148,163,184,0.18);border-left:3px solid ${roleColor};border-radius:0.75rem;padding:12px 14px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">
+                <div>
+                  <span style="font-size:0.72rem;background:rgba(${roleColor === '#fbbf24' ? '251,191,36' : roleColor === '#22d3ee' ? '34,211,238' : '168,85,247'},0.15);color:${roleColor};border-radius:999px;padding:2px 8px;font-weight:700;">${hubEscapeHtml(targetMeta.label)}</span>
+                  <p style="margin:6px 0 2px;font-size:0.9rem;font-weight:700;color:#e2e8f0;">${hubEscapeHtml(task.task)}</p>
+                  <p style="margin:0;font-size:0.75rem;color:rgba(148,163,184,0.7);">Imeongezwa na: ${hubEscapeHtml(task.addedBy || 'Director')} &bull; ${task.addedAt ? new Date(task.addedAt).toLocaleTimeString('sw-TZ') : ''}</p>
+                  ${targetMeta.details.length > 1 ? `<div style="margin-top:6px;font-size:0.74rem;color:rgba(148,163,184,0.82);">${hubEscapeHtml(targetMeta.details.join(', '))}</div>` : ''}
+                </div>
+                <span style="font-size:0.8rem;font-weight:700;color:${doneCount > 0 ? '#34d399' : '#94a3b8'};">${doneCount}/${reportEntries.length} wameripoti</span>
+              </div>
+              ${reportsHtml}
+            </div>`;
+          }).join('');
+        } catch (e) {
+          listEl.innerHTML = '<div style="color:#fb7185;font-size:0.85rem;">Hitilafu kupakia kazi.</div>';
+        }
+      }
+
       auth.onAuthStateChanged((user) => {
-        if (user) loadHubTasks();
+        if (user) {
+          loadHubTargetOptions();
+          loadHubTasks();
+        }
       });
 
       // =====================================================================
