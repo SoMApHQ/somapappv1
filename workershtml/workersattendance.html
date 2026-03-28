@@ -1823,29 +1823,40 @@
         const outstanding = Number(entry.outstanding || 0);
         if (outstanding <= 0) return;
 
-        // Find overdue schedule items (status contains "Overdue")
+        // Find overdue schedule items — with year correction for custom plans that store wrong-year toTS
         const scheduleItems = entry.finance?.scheduleItems || [];
+        const now = Date.now();
+        const correctYear = Number(year) || new Date().getFullYear();
+
+        function correctedToTS(item) {
+          let ts = item.toTS || 0;
+          if (ts <= 0) return 0;
+          const d = new Date(ts);
+          if (d.getFullYear() < 2020) {
+            // Year looks wrong (pre-2020 due to custom plan timestamp bug) — fix year, keep month/day
+            ts = new Date(correctYear, d.getMonth(), d.getDate()).getTime();
+          }
+          return ts;
+        }
+
         const overdueItems = scheduleItems.filter(item => {
           const remaining = Math.max(0, (item.amount || 0) - (item.paidAllocated || 0));
-          return remaining > 0 && /overdue/i.test(item.status || '');
+          if (remaining <= 0) return false;
+          if (!/overdue/i.test(item.status || '')) return false;
+          // Verify corrected deadline is actually in the past (not a future installment misclassified)
+          const ts = correctedToTS(item);
+          return ts > 0 && ts < now;
         });
         if (overdueItems.length === 0) return;
 
         // Skip students who were successfully reached (parent answered, not unreachable again)
         if (reachable.has(sid) && !notReachable.has(sid)) return;
 
-        // Debt-till date = toTS of the last overdue installment period
-        const lastOverdueTs = overdueItems[overdueItems.length - 1]?.toTS || 0;
-        let debtTillDate = new Date(lastOverdueTs);
-        if (lastOverdueTs > 0 && debtTillDate.getFullYear() < 2020) {
-          // toTS year looks wrong (pre-2020) — month/day are correct, fix the year
-          const correctYear = Number(year) || new Date().getFullYear();
-          debtTillDate = new Date(correctYear, debtTillDate.getMonth(), debtTillDate.getDate());
-        }
-        const debtTill = lastOverdueTs
-          ? debtTillDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
-          : '-';
-        const debtTillTs = lastOverdueTs > 0 ? debtTillDate.getTime() : 0;
+        // Debt-till date = corrected toTS of the last truly-overdue installment period
+        const lastCorrectedTs = correctedToTS(overdueItems[overdueItems.length - 1]);
+        const debtTillDate = new Date(lastCorrectedTs);
+        const debtTill = debtTillDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' });
+        const debtTillTs = lastCorrectedTs;
         const periodDebt = Number(entry.finance?.periodDebtValue || 0);
 
         debtors.push({
