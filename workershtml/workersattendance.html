@@ -14,6 +14,11 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="../firebase.js"></script>
   <script src="../shared/academic-class-utils.js"></script>
+  <script>
+    // Required by finance_math.js for anchor enrollment year
+    var SOMAP_DEFAULT_YEAR = new Date().getFullYear();
+    var SOMAP_ALLOWED_YEARS = Array.from({length: 10}, (_, i) => SOMAP_DEFAULT_YEAR - 2 + i);
+  </script>
   <script src="../shared/finance_math.js"></script>
   <style>
     :root {
@@ -1810,20 +1815,32 @@
         return [];
       }
 
-      // 3. Filter students with Overdue debt-till
+      // 3. Filter students with overdue schedule items (same logic as mhasibu.html debtors)
       const debtors = [];
       Object.entries(entries || {}).forEach(([sid, entry]) => {
         const student = entry.student || {};
         if (student.isGraduated) return;
         const outstanding = Number(entry.outstanding || 0);
         if (outstanding <= 0) return;
-        const label = String(entry.finance?.periodDebtLabel || '');
-        const periodDebt = Number(entry.finance?.periodDebtValue || 0);
-        if (!label.includes('Overdue') || periodDebt <= 0) return;
-        // Skip students who were successfully reached (unless marked unreachable again)
+
+        // Find overdue schedule items (status contains "Overdue")
+        const scheduleItems = entry.finance?.scheduleItems || [];
+        const overdueItems = scheduleItems.filter(item => {
+          const remaining = Math.max(0, (item.amount || 0) - (item.paidAllocated || 0));
+          return remaining > 0 && /overdue/i.test(item.status || '');
+        });
+        if (overdueItems.length === 0) return;
+
+        // Skip students who were successfully reached (parent answered, not unreachable again)
         if (reachable.has(sid) && !notReachable.has(sid)) return;
 
-        const dateMatch = label.match(/(\d+\/\d+\/\d+)/);
+        // Debt-till date = toTS of the last overdue installment period
+        const lastOverdueTs = overdueItems[overdueItems.length - 1]?.toTS || 0;
+        const debtTill = lastOverdueTs
+          ? new Date(lastOverdueTs).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
+          : '-';
+        const periodDebt = Number(entry.finance?.periodDebtValue || 0);
+
         debtors.push({
           studentId: sid,
           name: String(
@@ -1832,11 +1849,11 @@
           ).trim() || sid,
           classLevel: student.classLevel || student.className || '-',
           phone: student.primaryParentContact || String(entry.parentContact || '').trim() || '-',
-          debtTill: dateMatch ? dateMatch[1] : '-',
+          debtTill,
           debtAmount: periodDebt,
           balance: outstanding,
           isNotReachable: notReachable.has(sid),
-          debtTillTs: dateMatch ? (new Date(dateMatch[1]).getTime() || 0) : 0,
+          debtTillTs: lastOverdueTs,
         });
       });
 
