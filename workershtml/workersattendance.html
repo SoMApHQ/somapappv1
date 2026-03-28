@@ -2140,9 +2140,9 @@
         return [];
       }
 
-      // Build broader debtors list: ALL students with outstanding > 0
-      // (head_finance uses a wider net than the strict schedule check used by accountant,
-      //  so she always has students to call from the ~168 current debtors pool)
+      // Build debtors list: students with actual current debt (overdue installment > 0)
+      // Same strict logic as accountant PLUS a fallback for simple plans whose raw
+      // schedule items show a past-due toTS (e.g. "Full Year", "1-installment", etc.)
       const debtors = [];
       const now = Date.now();
       const correctYear = Number(year) || new Date().getFullYear();
@@ -2153,7 +2153,6 @@
         const outstanding = Number(entry.outstanding || 0);
         if (outstanding <= 0) return;
 
-        // Try to compute overdue installment amount (same as accountant) for accurate debtAmount
         function fixTS(ts) {
           if (!ts || ts <= 0) return 0;
           const d = new Date(ts);
@@ -2190,22 +2189,36 @@
         }
 
         const scheduleItems = buildCorrectSchedule();
+        const paidConsumed = Number(entry.finance?.paidAmount || 0) - Number(entry.finance?.credit || 0);
+
+        // -- Path 1: rebuilt schedule (same as accountant) --
         const expectedToDate = scheduleItems.reduce((sum, item) => {
           const ts = fixTS(item.toTS);
           return sum + (ts > 0 && ts < now ? (item.amount || 0) : 0);
         }, 0);
-        const paidConsumed = Number(entry.finance?.paidAmount || 0) - Number(entry.finance?.credit || 0);
         const correctedDebtTillNow = Math.max(0, expectedToDate - paidConsumed);
-
-        // For head_finance: include ALL students with outstanding > 0 (not just those with strict schedule debt)
-        // Students with schedule debt get priority via earlier debtTillTs; others get debtTillTs=0 (sorted last)
         const dueByToday = scheduleItems.filter(item => { const ts = fixTS(item.toTS); return ts > 0 && ts < now; });
-        const lastDueTs = dueByToday.length > 0 ? fixTS(dueByToday[dueByToday.length - 1].toTS) : 0;
+
+        // -- Path 2: fallback — raw schedule items show past-due toTS even if plan wasn't rebuilt --
+        const rawItems = entry.finance?.scheduleItems || [];
+        const rawOverdue = rawItems.filter(item => { const ts = fixTS(item.toTS || 0); return ts > 0 && ts < now; });
+        const rawExpectedToDate = rawOverdue.reduce((sum, item) => sum + (item.amount || 0), 0);
+        const rawDebtTillNow = Math.max(0, rawExpectedToDate - paidConsumed);
+
+        // Include only if there is genuine current debt via either path
+        const hasCurrentDebt = correctedDebtTillNow > 0 || rawDebtTillNow > 0;
+        if (!hasCurrentDebt) return;
+
+        // Determine the best overdue date and debt amount to display
+        const allDueItems = dueByToday.length > 0 ? dueByToday : rawOverdue;
+        const lastDueTs = allDueItems.length > 0
+          ? fixTS(allDueItems[allDueItems.length - 1].toTS)
+          : 0;
         const debtTillDate = lastDueTs ? new Date(lastDueTs) : null;
         const debtTill = debtTillDate
           ? debtTillDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
-          : (student.paymentPlan || 'Outstanding');
-        const debtAmount = correctedDebtTillNow > 0 ? correctedDebtTillNow : outstanding;
+          : '-';
+        const debtAmount = correctedDebtTillNow > 0 ? correctedDebtTillNow : rawDebtTillNow;
 
         debtors.push({
           studentId: sid,
@@ -2219,7 +2232,7 @@
           debtAmount,
           balance: outstanding,
           isNotReachable: notReachable.has(sid),
-          debtTillTs: lastDueTs, // 0 for students without clear schedule → sorted last
+          debtTillTs: lastDueTs,
         });
       });
 
