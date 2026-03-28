@@ -2236,12 +2236,10 @@
         return [];
       }
 
-      // Build debtors list using entry.finance.periodDebtValue — the EXACT same value
-      // finance.html uses for "Debt (current)". Computed by finance_math.js buildSchedule +
-      // allocatePayments. Students with no overdue installment (debt_till="-", current=0)
-      // will have periodDebtValue = 0 and are excluded.
+      // Build debtors list using the same corrected schedule logic as accountant call list.
+      // This avoids shared/finance_math.js misclassifying some Swahili installment plans and
+      // incorrectly marking yearly balance as current debt.
       const debtors = [];
-      const now = Date.now();
 
       Object.entries(entries || {}).forEach(([sid, entry]) => {
         const student = entry.student || {};
@@ -2249,22 +2247,60 @@
         const outstanding = Number(entry.outstanding || 0);
         if (outstanding <= 0) return;
 
-        // Use finance.html's authoritative "Debt (current)" value
-        const periodDebtValue = Number(entry.finance?.periodDebtValue || 0);
-        if (periodDebtValue <= 0) return;
+        const now = Date.now();
+        const correctYear = Number(year) || new Date().getFullYear();
 
-        // Find last past-due schedule item for display date and sorting
-        const scheduleItems = entry.finance?.scheduleItems || [];
-        const dueByToday = scheduleItems.filter(item => {
-          const ts = Number(item.toTS || 0);
+        function fixTS(ts) {
+          if (!ts || ts <= 0) return 0;
+          const d = new Date(ts);
+          if (d.getFullYear() < 2020) {
+            return new Date(correctYear, d.getMonth(), d.getDate()).getTime();
+          }
+          return ts;
+        }
+
+        function buildCorrectSchedule() {
+          const raw = entry.finance?.scheduleItems || [];
+          const plan = (student.paymentPlan || '').toLowerCase();
+          const cls = (student.classLevel || student.className || '').toLowerCase();
+          const isSix = plan.includes('(6)') || /\b6\s*inst/i.test(plan);
+          const isFour = plan.includes('(4)') || /\b4\s*inst/i.test(plan);
+          const expectedCount = isSix ? 6 : isFour ? 4 : 0;
+          if (expectedCount === 0 || raw.length === expectedCount) return raw;
+          const sixWins = [[[12,1],[1,10]],[[3,1],[3,15]],[[4,1],[4,15]],[[5,1],[5,15]],[[7,1],[7,15]],[[9,1],[9,15]]];
+          const fourWins = [[[12,1],[1,10]],[[3,1],[3,15]],[[4,1],[4,15]],[[5,1],[5,15]]];
+          const sixWeights = { 'class 5':[44,23,22,32,26,17], 'class 6':[236,115,110,160,160,100] };
+          const wins = isSix ? sixWins : fourWins;
+          const weights = isSix ? (sixWeights[cls] || [44,13,12,22,22,16]) : [328,180,176,132];
+          const wSum = weights.reduce((a, b) => a + b, 0);
+          const carry = Math.max(0, Number(student.carryAmount || 0));
+          const base = Math.max(0, Number(student.feePerYear || 0) - carry);
+          const amts = weights.map((w) => Math.floor(base * w / wSum));
+          let rem = base - amts.reduce((a, b) => a + b, 0);
+          for (let i = 0; i < amts.length && rem > 0; i += 1, rem -= 1) amts[i] += 1;
+          if (carry > 0 && amts.length) amts[0] += carry;
+          return wins.map((w, i) => ({
+            toTS: new Date(w[1][0] === 12 ? correctYear - 1 : correctYear, w[1][0] - 1, w[1][1], 23, 59, 59, 999).getTime(),
+            amount: amts[i] || 0,
+          }));
+        }
+
+        const scheduleItems = buildCorrectSchedule();
+        const expectedToDate = scheduleItems.reduce((sum, item) => {
+          const ts = fixTS(item.toTS);
+          return sum + (ts > 0 && ts < now ? (item.amount || 0) : 0);
+        }, 0);
+        const paidConsumed = Number(entry.finance?.paidAmount || 0) - Number(entry.finance?.credit || 0);
+        const correctedDebtTillNow = Math.max(0, expectedToDate - paidConsumed);
+        if (correctedDebtTillNow <= 0) return;
+
+        const dueByToday = scheduleItems.filter((item) => {
+          const ts = fixTS(item.toTS);
           return ts > 0 && ts < now;
         });
-        const lastDueTs = dueByToday.length > 0
-          ? Number(dueByToday[dueByToday.length - 1].toTS)
-          : 0;
-        const debtTill = lastDueTs
-          ? new Date(lastDueTs).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
-          : (entry.finance?.periodDebtLabel || '-');
+        if (!dueByToday.length) return;
+        const lastDueTs = fixTS(dueByToday[dueByToday.length - 1].toTS);
+        const debtTill = new Date(lastDueTs).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' });
 
         debtors.push({
           studentId: sid,
@@ -2275,7 +2311,7 @@
           classLevel: student.classLevel || student.className || '-',
           phone: student.primaryParentContact || String(entry.parentContact || '').trim() || '-',
           debtTill,
-          debtAmount: periodDebtValue,
+          debtAmount: correctedDebtTillNow,
           balance: outstanding,
           isNotReachable: notReachable.has(sid),
           debtTillTs: lastDueTs,
