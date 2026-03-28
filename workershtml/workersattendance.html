@@ -2140,7 +2140,9 @@
         return [];
       }
 
-      // Build full debtors list (same logic as accountant)
+      // Build broader debtors list: ALL students with outstanding > 0
+      // (head_finance uses a wider net than the strict schedule check used by accountant,
+      //  so she always has students to call from the ~168 current debtors pool)
       const debtors = [];
       const now = Date.now();
       const correctYear = Number(year) || new Date().getFullYear();
@@ -2151,6 +2153,7 @@
         const outstanding = Number(entry.outstanding || 0);
         if (outstanding <= 0) return;
 
+        // Try to compute overdue installment amount (same as accountant) for accurate debtAmount
         function fixTS(ts) {
           if (!ts || ts <= 0) return 0;
           const d = new Date(ts);
@@ -2193,13 +2196,16 @@
         }, 0);
         const paidConsumed = Number(entry.finance?.paidAmount || 0) - Number(entry.finance?.credit || 0);
         const correctedDebtTillNow = Math.max(0, expectedToDate - paidConsumed);
-        if (correctedDebtTillNow <= 0) return;
 
+        // For head_finance: include ALL students with outstanding > 0 (not just those with strict schedule debt)
+        // Students with schedule debt get priority via earlier debtTillTs; others get debtTillTs=0 (sorted last)
         const dueByToday = scheduleItems.filter(item => { const ts = fixTS(item.toTS); return ts > 0 && ts < now; });
-        if (dueByToday.length === 0) return;
-        const lastDueTs = fixTS(dueByToday[dueByToday.length - 1].toTS);
-        const debtTillDate = new Date(lastDueTs);
-        const debtTill = debtTillDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' });
+        const lastDueTs = dueByToday.length > 0 ? fixTS(dueByToday[dueByToday.length - 1].toTS) : 0;
+        const debtTillDate = lastDueTs ? new Date(lastDueTs) : null;
+        const debtTill = debtTillDate
+          ? debtTillDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
+          : (student.paymentPlan || 'Outstanding');
+        const debtAmount = correctedDebtTillNow > 0 ? correctedDebtTillNow : outstanding;
 
         debtors.push({
           studentId: sid,
@@ -2210,14 +2216,16 @@
           classLevel: student.classLevel || student.className || '-',
           phone: student.primaryParentContact || String(entry.parentContact || '').trim() || '-',
           debtTill,
-          debtAmount: correctedDebtTillNow,
+          debtAmount,
           balance: outstanding,
           isNotReachable: notReachable.has(sid),
-          debtTillTs: lastDueTs,
+          debtTillTs: lastDueTs, // 0 for students without clear schedule → sorted last
         });
       });
 
-      // Sort same priority as accountant
+      // Sort: 1) not reachable, 2) never called, 3) previously answered
+      // Within each group: students with known overdue schedule dates first (sorted by oldest date),
+      // then students with outstanding but no schedule date (sorted by balance descending)
       function callPriority(d) {
         if (d.isNotReachable) return 0;
         if (!reachable.has(d.studentId)) return 1;
@@ -2226,10 +2234,16 @@
       debtors.sort((a, b) => {
         const pa = callPriority(a), pb = callPriority(b);
         if (pa !== pb) return pa - pb;
-        return a.debtTillTs - b.debtTillTs;
+        // Both have schedule dates: oldest first
+        if (a.debtTillTs > 0 && b.debtTillTs > 0) return a.debtTillTs - b.debtTillTs;
+        // One has a schedule date, the other doesn't: schedule date goes first
+        if (a.debtTillTs > 0) return -1;
+        if (b.debtTillTs > 0) return 1;
+        // Neither has a schedule date: largest outstanding first
+        return b.balance - a.balance;
       });
 
-      // Load accountant's plan for today to exclude their 60 students
+      // Load accountant's plan for today to exclude their students
       const accountantStudentIds = new Set();
       try {
         const accPlanSnap = await schoolRef(`years/${year}/accountantCheckinPlan/${todayKey}`).once('value');
@@ -2239,13 +2253,18 @@
         }
       } catch (e) { /* non-fatal */ }
 
-      // If accountant hasn't checked in yet, reserve first 60 for them and take 61-120
-      // If accountant has checked in, skip their specific students
+      // Exclude accountant's students.
+      // If accountant hasn't checked in yet (no plan), assume they will take the first
+      // min(60, total) students from the sorted list so we skip those positions.
       let available;
       if (accountantStudentIds.size > 0) {
+        // Accountant has a plan — exclude exactly their students
         available = debtors.filter(d => !accountantStudentIds.has(d.studentId));
       } else {
-        available = debtors.slice(60); // reserve first 60 for accountant
+        // Accountant hasn't checked in — skip the first (up to 60) students from the sorted list
+        // so head_finance takes a non-overlapping slice
+        const accSliceSize = Math.min(60, debtors.length);
+        available = debtors.slice(accSliceSize);
       }
 
       return available.slice(0, 60);
