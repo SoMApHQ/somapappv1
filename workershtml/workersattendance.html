@@ -1973,6 +1973,593 @@
       return role.includes('head_finance');
     }
 
+    function financeCallDateFromYMD(y, m, d, endOfDay = false) {
+      if (endOfDay) return new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
+      return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+    }
+
+    function financeCallParseScheduleTS(raw, endOfDay = false, academicYear = new Date().getFullYear()) {
+      if (raw == null) return 0;
+      const toBoundary = (y, m, d) => endOfDay
+        ? new Date(y, m - 1, d, 23, 59, 59, 999).getTime()
+        : new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+
+      if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+
+      if (Array.isArray(raw) && raw.length >= 2) {
+        const m = Number(raw[0]);
+        const d = Number(raw[1]);
+        if (Number.isFinite(m) && Number.isFinite(d) && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+          const y = m === 12 ? academicYear - 1 : academicYear;
+          return toBoundary(y, m, d);
+        }
+        return 0;
+      }
+
+      if (typeof raw === 'object') {
+        const month = Number(raw[0] ?? raw.month ?? raw.m);
+        const day = Number(raw[1] ?? raw.day ?? raw.d);
+        if (Number.isFinite(month) && Number.isFinite(day)) {
+          const y = month === 12 ? academicYear - 1 : academicYear;
+          return toBoundary(y, month, day);
+        }
+      }
+
+      const value = String(raw).trim();
+      if (!value) return 0;
+
+      const ymdMatch = value.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+      if (ymdMatch) {
+        return toBoundary(Number(ymdMatch[1]), Number(ymdMatch[2]), Number(ymdMatch[3]));
+      }
+
+      const mdyMatch = value.match(/^(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}))?$/);
+      if (mdyMatch) {
+        const m = Number(mdyMatch[1]);
+        const d = Number(mdyMatch[2]);
+        let y = Number(mdyMatch[3]);
+        if (!Number.isFinite(y)) y = m === 12 ? academicYear - 1 : academicYear;
+        return toBoundary(y, m, d);
+      }
+
+      const ts = Date.parse(value);
+      if (!Number.isFinite(ts)) return 0;
+      const dt = new Date(ts);
+      return toBoundary(dt.getFullYear(), dt.getMonth() + 1, dt.getDate());
+    }
+
+    function financeCallApportion(total, weights) {
+      if (!Array.isArray(weights) || !weights.length) return [];
+      const cleanTotal = Math.max(0, Math.round(Number(total) || 0));
+      const sumW = weights.reduce((a, b) => a + b, 0);
+      if (sumW <= 0) return weights.map(() => 0);
+      const amounts = weights.map((w) => Math.floor((Math.max(0, Number(w) || 0) * cleanTotal) / sumW));
+      let rem = cleanTotal - amounts.reduce((a, b) => a + b, 0);
+      if (rem > 0) {
+        const sortedIdx = [...weights.keys()].sort((a, b) => (weights[b] || 0) - (weights[a] || 0));
+        for (let i = 0; i < rem; i += 1) amounts[sortedIdx[i % sortedIdx.length]] += 1;
+      }
+      return amounts;
+    }
+
+    const financeCallInstallmentConfigs = {
+      lower: {
+        weights: [44, 13, 12, 22, 22, 16],
+        labels: ['Inst 1', 'Inst 2', 'Inst 3', 'Inst 4', 'Inst 5', 'Inst 6'],
+        windows: [
+          { from: [12, 1], to: [1, 10] },
+          { from: [3, 1], to: [3, 15] },
+          { from: [4, 1], to: [4, 15] },
+          { from: [5, 1], to: [5, 15] },
+          { from: [7, 1], to: [7, 15] },
+          { from: [9, 1], to: [9, 15] },
+        ],
+      },
+      class4_7: {
+        weights: [27, 20, 20, 15],
+        labels: ['Inst 1', 'Inst 2', 'Inst 3', 'Inst 4'],
+        windows: [
+          { from: [12, 1], to: [1, 10] },
+          { from: [3, 1], to: [3, 15] },
+          { from: [4, 1], to: [4, 15] },
+          { from: [5, 1], to: [5, 15] },
+        ],
+      },
+      class5: {
+        weights: [44, 23, 22, 32, 26, 17],
+        labels: ['Inst 1', 'Inst 2', 'Inst 3', 'Inst 4', 'Inst 5', 'Inst 6'],
+        windows: [
+          { from: [12, 1], to: [1, 10] },
+          { from: [3, 1], to: [3, 15] },
+          { from: [4, 1], to: [4, 15] },
+          { from: [5, 1], to: [5, 15] },
+          { from: [7, 1], to: [7, 15] },
+          { from: [9, 1], to: [9, 15] },
+        ],
+      },
+      class6: {
+        weights: [236, 115, 110, 160, 160, 100],
+        labels: ['Inst 1', 'Inst 2', 'Inst 3', 'Inst 4', 'Inst 5', 'Inst 6'],
+        windows: [
+          { from: [12, 1], to: [1, 10] },
+          { from: [3, 1], to: [3, 15] },
+          { from: [4, 1], to: [4, 15] },
+          { from: [5, 1], to: [5, 15] },
+          { from: [7, 1], to: [7, 15] },
+          { from: [9, 1], to: [9, 15] },
+        ],
+      },
+      monthly: {
+        weights: [2, 1, 1, 1, 1, 1, 2, 1, 1, 1],
+        labels: ['Jan (2 months)', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul (2 months)', 'Aug', 'Sep', 'Oct'],
+        windows: [
+          { from: [1, 1], to: [1, 10] },
+          { from: [2, 1], to: [2, 10] },
+          { from: [3, 1], to: [3, 10] },
+          { from: [4, 1], to: [4, 10] },
+          { from: [5, 1], to: [5, 10] },
+          { from: [6, 1], to: [6, 10] },
+          { from: [7, 1], to: [7, 10] },
+          { from: [8, 1], to: [8, 10] },
+          { from: [9, 1], to: [9, 10] },
+          { from: [10, 1], to: [10, 10] },
+        ],
+      },
+      '2inst': {
+        weights: [1, 1],
+        labels: ['1st Half', '2nd Half'],
+        windows: [
+          { from: [1, 1], to: [1, 10] },
+          { from: [7, 1], to: [7, 5] },
+        ],
+      },
+      full: {
+        weights: [1],
+        labels: ['Full Year'],
+        windows: [
+          { from: [1, 1], to: [1, 10] },
+        ],
+      },
+    };
+
+    function financeCallGetConfig(student) {
+      const plan = String(student?.paymentPlan || '').toLowerCase();
+      const cls = String(student?.classLevel || student?.className || '').toLowerCase();
+      const isFourInst = plan.includes('(4)') || /\b4\s*inst/.test(plan) || /mku\.?\s*4/.test(plan);
+      const isSixInst = plan.includes('(6)') || /\b6\s*inst/.test(plan) || /dirisha la malipo\s*\(6\)/.test(plan);
+      if (plan.includes('monthly') || plan.includes('mwezi')) return financeCallInstallmentConfigs.monthly;
+      if (plan.includes('2')) return financeCallInstallmentConfigs['2inst'];
+      if (plan.includes('full')) return financeCallInstallmentConfigs.full;
+      if (isFourInst || (plan.includes('inst') && (cls === 'class 4' || cls === 'class 7'))) return financeCallInstallmentConfigs.class4_7;
+      if (isSixInst || plan.includes('inst')) {
+        if (cls === 'class 1' || cls === 'class 2' || cls === 'class 3') return financeCallInstallmentConfigs.lower;
+        if (cls === 'class 5') return financeCallInstallmentConfigs.class5;
+        if (cls === 'class 6') return financeCallInstallmentConfigs.class6;
+      }
+      if (cls === 'class 1' || cls === 'class 2' || cls === 'class 3') return financeCallInstallmentConfigs.lower;
+      if (cls === 'class 4' || cls === 'class 7') return financeCallInstallmentConfigs.class4_7;
+      if (cls === 'class 5') return financeCallInstallmentConfigs.class5;
+      if (cls === 'class 6') return financeCallInstallmentConfigs.class6;
+      return financeCallInstallmentConfigs.lower;
+    }
+
+    function financeCallBuildSchedule(student, academicYear) {
+      if (!student || student.isGraduated) return { items: [], periodLabelNow: '-', expectedToDate: 0 };
+
+      if (Array.isArray(student._customSchedule) && student._customSchedule.length) {
+        const custom = student._customSchedule
+          .filter((it) => it && it.label && it.from && it.to)
+          .map((it, idx) => ({
+            key: `custom${idx + 1}`,
+            label: String(it.label || 'Item'),
+            fromTS: financeCallParseScheduleTS(it.from, false, academicYear),
+            toTS: financeCallParseScheduleTS(it.to, true, academicYear),
+            amount: Math.max(0, Math.round(Number(it.amount) || 0)),
+            carryComponent: Math.max(0, Number(it.carryComponent || 0)),
+            paidAllocated: 0,
+            status: 'Pending',
+          }));
+        let lastDueIndex = -1;
+        let expectedToDate = 0;
+        const now = Date.now();
+        custom.forEach((it, idx) => {
+          if (Number(it.toTS || 0) < now) {
+            lastDueIndex = idx;
+            expectedToDate += Math.max(0, Number(it.amount || 0));
+          }
+        });
+        return { items: custom, periodLabelNow: lastDueIndex >= 0 ? custom[lastDueIndex].label : '-', expectedToDate };
+      }
+
+      const classDefaultPlanId = String(student?._classDefaults?.defaultPlanId || student?._classDefaults?.defaultPlan || '').trim();
+      const overridePlanId = String(student?.override?.planId || '').trim();
+      const hasExplicitPlanOverride = Boolean(overridePlanId) && (!classDefaultPlanId || overridePlanId !== classDefaultPlanId);
+      const hasPlanSchedule = Array.isArray(student._planSchedule) && student._planSchedule.length > 0;
+      const planName = String(student.paymentPlan || '').toLowerCase();
+      const isDifferentPlanType = planName.includes('monthly') || planName.includes('mwezi') || planName.includes('full');
+
+      if (student._classInstallments && typeof student._classInstallments === 'object' &&
+          (!hasExplicitPlanOverride || !isDifferentPlanType)) {
+        const rawRows = Array.isArray(student._classInstallments)
+          ? student._classInstallments
+          : Object.values(student._classInstallments || {});
+        const rows = rawRows.filter((row) => row && row.active !== false);
+        if (rows.length) {
+          const sorted = rows.slice().sort((a, b) => {
+            const aw = Array.isArray(a?.window?.from) ? a.window.from : (a?.window?.from && typeof a.window.from === 'object' ? [Number(a.window.from[0] ?? a.window.from['0']), Number(a.window.from[1] ?? a.window.from['1'])] : []);
+            const bw = Array.isArray(b?.window?.from) ? b.window.from : (b?.window?.from && typeof b.window.from === 'object' ? [Number(b.window.from[0] ?? b.window.from['0']), Number(b.window.from[1] ?? b.window.from['1'])] : []);
+            const aTs = aw.length >= 2 ? financeCallParseScheduleTS(aw, false, academicYear) : 0;
+            const bTs = bw.length >= 2 ? financeCallParseScheduleTS(bw, false, academicYear) : 0;
+            return aTs - bTs;
+          });
+
+          const monthlyPlan = planName.includes('monthly') || planName.includes('mwezi') ||
+            sorted.some((row) => String(row?.label || '').includes('Monthly:'));
+          const schedule = sorted.map((row, idx) => {
+            const fallback = financeCallGetConfig(student).windows?.[idx] || { from: [1, 1], to: [1, 10] };
+            const fromPair = Array.isArray(row?.window?.from) ? row.window.from : null;
+            const toPair = Array.isArray(row?.window?.to) ? row.window.to : null;
+            const fromTS = financeCallParseScheduleTS(fromPair || fallback.from, false, academicYear);
+            let toTS = financeCallParseScheduleTS(toPair || fallback.to, true, academicYear);
+            if (monthlyPlan && toTS > 0 && new Date(toTS).getDate() !== 10) {
+              const dt = new Date(toTS);
+              toTS = financeCallDateFromYMD(dt.getFullYear(), dt.getMonth() + 1, 10, true);
+            }
+            return {
+              key: row.id || `classinst${idx + 1}`,
+              label: row.label || `Inst ${idx + 1}`,
+              fromTS,
+              toTS,
+              amount: Math.max(0, Math.round(Number(row.amount) || 0)),
+              carryComponent: 0,
+              paidAllocated: 0,
+              status: 'Pending',
+            };
+          });
+
+          const carryAmount = Math.max(0, Number(student.carryAmount || 0));
+          if (carryAmount > 0 && schedule.length) {
+            schedule[0].amount += carryAmount;
+            schedule[0].carryComponent = Math.max(0, Number(schedule[0].carryComponent || 0)) + carryAmount;
+          }
+
+          const studentBaseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - carryAmount)) || 0));
+          const plannedTotal = schedule.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
+          const plannedBase = Math.max(0, plannedTotal - carryAmount);
+          if (studentBaseFee > 0 && plannedBase > 0) {
+            const tolerance = Math.max(100, Math.round(studentBaseFee * 0.01));
+            if (Math.abs(plannedBase - studentBaseFee) > tolerance) {
+              const ratio = studentBaseFee / plannedBase;
+              schedule.forEach((row) => {
+                const carryPart = Math.max(0, Number(row.carryComponent || 0));
+                const basePart = Math.max(0, Number(row.amount || 0) - carryPart);
+                row.amount = Math.max(0, Math.floor(basePart * ratio) + carryPart);
+              });
+              const afterTotal = schedule.reduce((sum, row) => sum + Math.max(0, Number(row.amount || 0)), 0);
+              const diff = (studentBaseFee + carryAmount) - afterTotal;
+              if (schedule.length) {
+                const last = schedule[schedule.length - 1];
+                last.amount = Math.max(0, Number(last.amount || 0) + diff);
+              }
+            }
+          }
+
+          let lastDueIndex = -1;
+          let expectedToDate = 0;
+          const now = Date.now();
+          schedule.forEach((it, idx) => {
+            if (Number(it.toTS || 0) < now) {
+              lastDueIndex = idx;
+              expectedToDate += Math.max(0, Number(it.amount || 0));
+            }
+          });
+          return { items: schedule, periodLabelNow: lastDueIndex >= 0 ? schedule[lastDueIndex].label : '-', expectedToDate };
+        }
+      }
+
+      if (hasPlanSchedule) {
+        const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
+        const carryAmount = Math.max(0, Number(student.carryAmount || 0));
+        const rawExplicit = student._planSchedule.map((row) => Math.max(0, Number(row?.amount) || 0));
+        const explicitSum = rawExplicit.reduce((a, b) => a + b, 0);
+        const hasExplicitAmounts = rawExplicit.some((amt) => amt > 0) && explicitSum > 0;
+        let amounts = [];
+
+        if (hasExplicitAmounts) {
+          amounts = rawExplicit.slice();
+          if (baseFee > 0) {
+            const tolerance = Math.max(100, Math.round(baseFee * 0.01));
+            if (Math.abs(explicitSum - baseFee) > tolerance) {
+              const ratio = baseFee / explicitSum;
+              amounts = amounts.map((amt) => Math.floor(amt * ratio));
+              let rem = baseFee - amounts.reduce((a, b) => a + b, 0);
+              for (let i = 0; i < amounts.length && rem > 0; i += 1) {
+                amounts[i] += 1;
+                rem -= 1;
+              }
+            }
+          }
+        } else {
+          let weights = student._planSchedule.map((row) => Math.max(0, Number(row?.weight) || 0));
+          if (!weights.some((weight) => weight > 0)) weights = weights.map(() => 1);
+          amounts = financeCallApportion(baseFee, weights);
+        }
+
+        if (carryAmount > 0) {
+          if (amounts.length) amounts[0] += carryAmount;
+          else amounts = [carryAmount];
+        }
+
+        const monthlyPlan = planName.includes('monthly') || planName.includes('monthyl') || planName.includes('mwezi') ||
+          student._planSchedule.some((row) => String(row.label || '').includes('Monthly:'));
+        const schedule = student._planSchedule.map((row, i) => {
+          let toTS = financeCallParseScheduleTS(row.to, true, academicYear);
+          if (monthlyPlan && toTS > 0 && new Date(toTS).getDate() !== 10) {
+            const dt = new Date(toTS);
+            toTS = financeCallDateFromYMD(dt.getFullYear(), dt.getMonth() + 1, 10, true);
+          }
+          return {
+            key: row?.id || row?.key || `inst${i + 1}`,
+            label: row?.label || `Inst ${i + 1}`,
+            fromTS: financeCallParseScheduleTS(row?.from, false, academicYear),
+            toTS,
+            amount: Math.max(0, Number(amounts[i] || 0)),
+            carryComponent: 0,
+            paidAllocated: 0,
+            status: 'Pending',
+          };
+        });
+
+        if (carryAmount > 0 && schedule.length) {
+          schedule[0].carryComponent = Math.max(0, Number(schedule[0].carryComponent || 0)) + carryAmount;
+        }
+
+        let lastDueIndex = -1;
+        let expectedToDate = 0;
+        const now = Date.now();
+        schedule.forEach((it, idx) => {
+          if (Number(it.toTS || 0) < now) {
+            lastDueIndex = idx;
+            expectedToDate += Math.max(0, Number(it.amount || 0));
+          }
+        });
+        return { items: schedule, periodLabelNow: lastDueIndex >= 0 ? schedule[lastDueIndex].label : '-', expectedToDate };
+      }
+
+      const config = financeCallGetConfig(student);
+      const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
+      const carryAmount = Math.max(0, Number(student.carryAmount || 0));
+      const amounts = financeCallApportion(baseFee, config.weights);
+      if (carryAmount > 0) {
+        if (amounts.length) amounts[0] += carryAmount;
+        else amounts.push(carryAmount);
+      }
+
+      const schedule = config.labels.map((label, i) => {
+        const fromM = config.windows[i].from[0];
+        const fromD = config.windows[i].from[1];
+        const toM = config.windows[i].to[0];
+        const toD = config.windows[i].to[1];
+        const fromY = fromM === 12 ? academicYear - 1 : academicYear;
+        const toY = toM === 12 ? academicYear - 1 : academicYear;
+        return {
+          key: `inst${i + 1}`,
+          label,
+          fromTS: financeCallDateFromYMD(fromY, fromM, fromD, false),
+          toTS: financeCallDateFromYMD(toY, toM, toD, true),
+          amount: Math.max(0, Number(amounts[i] || 0)),
+          carryComponent: 0,
+          paidAllocated: 0,
+          status: 'Pending',
+        };
+      });
+
+      if (carryAmount > 0 && schedule.length) {
+        schedule[0].carryComponent = Math.max(0, Number(schedule[0].carryComponent || 0)) + carryAmount;
+      }
+
+      let lastDueIndex = -1;
+      let expectedToDate = 0;
+      const now = Date.now();
+      schedule.forEach((it, idx) => {
+        if (Number(it.toTS || 0) < now) {
+          lastDueIndex = idx;
+          expectedToDate += Math.max(0, Number(it.amount || 0));
+        }
+      });
+      return { items: schedule, periodLabelNow: lastDueIndex >= 0 ? schedule[lastDueIndex].label : '-', expectedToDate };
+    }
+
+    function financeCallAllocatePayments(student, schedule) {
+      const payList = [];
+      Object.values(student?.payments || {}).forEach((payment) => {
+        payList.push({
+          amount: Math.max(0, Math.round(Number(payment?.amount) || 0)),
+          ts: Number(payment?.timestamp) || 0,
+        });
+      });
+      payList.sort((a, b) => a.ts - b.ts);
+      let pot = payList.reduce((sum, payment) => sum + payment.amount, 0);
+      const totalPaid = pot;
+      let prevDebt = Math.max(0, Math.round(Number(student?.previousDebt) || 0));
+      const toPrev = Math.min(prevDebt, pot);
+      prevDebt -= toPrev;
+      pot -= toPrev;
+
+      for (const item of schedule.items) {
+        const need = Math.max(0, Number(item.amount || 0) - Number(item.paidAllocated || 0));
+        if (need <= 0) continue;
+        if (pot <= 0) break;
+        const use = Math.min(need, pot);
+        item.paidAllocated += use;
+        pot -= use;
+      }
+
+      const credit = Math.max(0, pot);
+      const now = Date.now();
+      for (const item of schedule.items) {
+        const allocated = Math.max(0, Number(item.paidAllocated || 0));
+        const expected = Math.max(0, Number(item.amount || 0));
+        if (allocated >= expected) item.status = 'Cleared';
+        else if (Number(item.toTS || 0) < now) item.status = allocated > 0 ? 'Partially Paid (Overdue)' : 'Overdue';
+        else item.status = allocated > 0 ? 'Partially Paid' : 'Pending';
+      }
+
+      const expectedToDate = schedule.items
+        .filter((item) => Number(item.toTS || 0) < now)
+        .reduce((sum, item) => sum + Math.max(0, Number(item.amount || 0)), 0);
+      const paidConsumed = totalPaid - credit;
+      const debtTillNow = Math.max(0, expectedToDate - paidConsumed);
+      return { scheduleItems: schedule.items, prevDebtAfter: prevDebt, credit, totalPaid, debtTillNow };
+    }
+
+    function financeCallNormalizeDeadlineExtensionRows(source) {
+      if (!source || typeof source !== 'object') return [];
+      return Object.entries(source).map(([id, raw]) => {
+        const row = raw && typeof raw === 'object' ? raw : {};
+        return {
+          id,
+          ...row,
+          oldDeadlineTs: Number(row.oldDeadlineTs || row.sourceOverdueTs || 0),
+          newDeadlineTs: Number(row.newDeadlineTs || row.extendedDeadlineTs || 0),
+          approvedAt: Number(row.approvedAt || row.createdAt || row.updatedAt || 0),
+          status: String(row.status || 'approved').trim().toLowerCase(),
+        };
+      }).filter((row) => row.newDeadlineTs > 0);
+    }
+
+    function financeCallAttachDeadlineExtensions(entries, extensionBuckets) {
+      const buckets = extensionBuckets && typeof extensionBuckets === 'object' ? extensionBuckets : {};
+      Object.entries(entries || {}).forEach(([sid, entry]) => {
+        const student = entry?.student;
+        if (!student || typeof student !== 'object') return;
+        const adm = String(student.admissionNumber || student.admissionNo || '').trim();
+        const fromId = financeCallNormalizeDeadlineExtensionRows(buckets[sid] || {});
+        const fromAdm = adm ? financeCallNormalizeDeadlineExtensionRows(buckets[adm] || {}) : [];
+        student._deadlineExtensions = [...fromId, ...fromAdm]
+          .sort((a, b) => Number(a.createdAt || a.approvedAt || 0) - Number(b.createdAt || b.approvedAt || 0));
+      });
+    }
+
+    function financeCallGetNextInstallmentStartTs(scheduleItems, overdueThroughTs) {
+      if (!Array.isArray(scheduleItems) || !scheduleItems.length || !(Number(overdueThroughTs) > 0)) return 0;
+      const matchIndex = scheduleItems.findIndex((item) => Number(item?.toTS || 0) === Number(overdueThroughTs));
+      if (matchIndex < 0) {
+        const later = scheduleItems
+          .map((item) => Number(item?.fromTS || 0))
+          .filter((ts) => ts > Number(overdueThroughTs))
+          .sort((a, b) => a - b);
+        return later[0] || 0;
+      }
+      for (let idx = matchIndex + 1; idx < scheduleItems.length; idx += 1) {
+        const fromTs = Number(scheduleItems[idx]?.fromTS || 0);
+        if (fromTs > 0) return fromTs;
+      }
+      return 0;
+    }
+
+    function financeCallPickLatestDeadlineExtension(student, overdueThroughTs) {
+      const list = Array.isArray(student?._deadlineExtensions) ? student._deadlineExtensions : [];
+      if (!list.length || !(Number(overdueThroughTs) > 0)) return null;
+      const matches = list
+        .filter((row) => row.status === 'approved')
+        .filter((row) => Number(row.oldDeadlineTs || 0) > 0 ? Number(row.oldDeadlineTs) === Number(overdueThroughTs) : true)
+        .sort((a, b) => Number(b.approvedAt || b.createdAt || 0) - Number(a.approvedAt || a.createdAt || 0));
+      return matches[0] || null;
+    }
+
+    function financeCallComputeDebtorRecord(studentId, entry, academicYear) {
+      const student = entry?.student || {};
+      if (student.isGraduated) return null;
+      const outstanding = Math.max(0, Number(entry?.outstanding || 0));
+      if (outstanding <= 0) return null;
+
+      const feePerYear = Math.max(0, Number(student.feePerYear) || 0);
+      const schedule = financeCallBuildSchedule(student, academicYear);
+      const alloc = financeCallAllocatePayments(student, schedule);
+      const yearBalance = Math.max(0, feePerYear - Math.max(0, alloc.totalPaid));
+      const carryAmount = Math.max(0, Number(student.carryAmount || 0));
+      const totalPaid = Math.max(0, Number(alloc.totalPaid || 0));
+      const carryOutstanding = Math.max(0, carryAmount - totalPaid);
+      const hasCarryOutstanding = carryOutstanding > 0;
+      const paidAfterCarry = Math.max(0, totalPaid - carryAmount);
+      const nowTs = Date.now();
+      const overdueRowsForBase = (alloc.scheduleItems || [])
+        .filter((item) => Number(item.toTS || 0) > 0 && Number(item.toTS || 0) < nowTs)
+        .sort((a, b) => Number(a.toTS || 0) - Number(b.toTS || 0));
+      const overdueBaseExpected = overdueRowsForBase.reduce((sum, item) => {
+        const totalExpected = Math.max(0, Number(item.amount || 0));
+        const carryPart = Math.max(0, Number(item.carryComponent || 0));
+        return sum + Math.max(0, totalExpected - carryPart);
+      }, 0);
+      const overdueBaseOutstanding = Math.max(0, overdueBaseExpected - paidAfterCarry);
+      const overdueRows = (alloc.scheduleItems || []).filter((item) => {
+        const remaining = Math.max(0, Number(item.amount || 0) - Number(item.paidAllocated || 0));
+        return Number(item.toTS || 0) > 0 && Number(item.toTS || 0) < nowTs && remaining > 0;
+      });
+      const latestOverdue = overdueRows.length
+        ? overdueRows.reduce((latest, row) => Number(row.toTS || 0) > Number(latest.toTS || 0) ? row : latest, overdueRows[0])
+        : null;
+      const overdueThroughTsRaw = latestOverdue ? Number(latestOverdue.toTS || 0) : 0;
+      const isOverdueDebtBase = overdueThroughTsRaw > 0 && Number(alloc.debtTillNow || 0) > 0;
+      const nextInstallmentStartTs = financeCallGetNextInstallmentStartTs(alloc.scheduleItems || [], overdueThroughTsRaw);
+      const extensionRecord = isOverdueDebtBase ? financeCallPickLatestDeadlineExtension(student, overdueThroughTsRaw) : null;
+      let overdueThroughTs = overdueThroughTsRaw;
+      if (extensionRecord && Number(extensionRecord.newDeadlineTs || 0) > 0) {
+        overdueThroughTs = Number(extensionRecord.newDeadlineTs || 0);
+        if (nextInstallmentStartTs > 0) overdueThroughTs = Math.min(overdueThroughTs, nextInstallmentStartTs - 1);
+      }
+      const extensionActive = isOverdueDebtBase && overdueThroughTs > 0 && nowTs <= overdueThroughTs;
+      const isOverdueDebt = isOverdueDebtBase && !extensionActive;
+      const prevYearNum = Number.isFinite(Number(academicYear)) ? Number(academicYear) - 1 : new Date().getFullYear() - 1;
+      const carryOverdueTs = new Date(prevYearNum, 11, 31, 23, 59, 59, 999).getTime();
+      const effectivelyCarryDebt = (hasCarryOutstanding || (carryAmount > 0 && yearBalance > 0 && yearBalance <= carryAmount + 100)) && !isOverdueDebt;
+      const debtTillNowCapped = Math.min(Math.max(0, Number(alloc.debtTillNow || 0)), Math.max(0, Number(yearBalance || 0)));
+      const debtForCollection = (isOverdueDebt || overdueRows.length > 0)
+        ? debtTillNowCapped
+        : Math.max(0, (hasCarryOutstanding ? carryOutstanding : 0) + overdueBaseOutstanding);
+      const debtForDisplay = debtForCollection > 0 ? debtForCollection : (effectivelyCarryDebt && yearBalance > 0 ? yearBalance : 0);
+      const finalDebtTillTs = (debtForDisplay > 0 && effectivelyCarryDebt) ? carryOverdueTs : Number(overdueThroughTs || 0);
+      if (!(debtForDisplay > 0) || !(finalDebtTillTs > 0)) return null;
+
+      return {
+        studentId,
+        name: String(student.fullName || [student.firstName, student.middleName, student.lastName].filter(Boolean).join(' ')).trim() || studentId,
+        classLevel: student.classLevel || student.className || '-',
+        phone: student.primaryParentContact || String(entry?.parentContact || '').trim() || '-',
+        debtTill: new Date(finalDebtTillTs).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' }),
+        debtAmount: debtForDisplay,
+        balance: outstanding,
+        debtTillTs: finalDebtTillTs,
+      };
+    }
+
+    async function buildCurrentDebtDebtors(year) {
+      if (!window.SomapFinance) return [];
+      let entries = {};
+      try {
+        entries = await window.SomapFinance.getYearFinanceEntries(year);
+      } catch (e) {
+        console.warn('Finance entries load failed', e);
+        return [];
+      }
+
+      try {
+        const extSnap = await schoolRef(`financeDeadlineExtensions/${year}`).once('value');
+        financeCallAttachDeadlineExtensions(entries, extSnap.val() || {});
+      } catch (e) {
+        console.warn('Finance deadline extensions load failed', e);
+      }
+
+      const debtors = [];
+      const academicYear = Number(year) || new Date().getFullYear();
+      Object.entries(entries || {}).forEach(([studentId, entry]) => {
+        const debtor = financeCallComputeDebtorRecord(studentId, entry, academicYear);
+        if (debtor) debtors.push(debtor);
+      });
+      return debtors;
+    }
+
     async function buildAccountantCallList(year, todayKey) {
       // 1. Load all past call reports to know who was reachable vs unreachable
       let allReports = {};
@@ -2105,6 +2692,51 @@
         const pa = callPriority(a), pb = callPriority(b);
         if (pa !== pb) return pa - pb;
         return a.debtTillTs - b.debtTillTs;
+      });
+
+      return debtors.slice(0, 60);
+    }
+
+    async function buildAccountantCallList(year, todayKey) {
+      let allReports = {};
+      try {
+        const snap = await schoolRef(`years/${year}/accountantCallReports`).once('value');
+        allReports = snap.val() || {};
+      } catch (e) { /* non-fatal */ }
+
+      const reachable = new Set();
+      const notReachable = new Set();
+      Object.entries(allReports).forEach(([dayK, dayReports]) => {
+        if (dayK === todayKey) return;
+        Object.entries(dayReports || {}).forEach(([sid, report]) => {
+          if (report.status === 'available') {
+            reachable.add(sid);
+            notReachable.delete(sid);
+          } else if (report.status === 'not_available' && !reachable.has(sid)) {
+            notReachable.add(sid);
+          }
+        });
+      });
+
+      const debtors = await buildCurrentDebtDebtors(year);
+      debtors.forEach((debtor) => {
+        debtor.isNotReachable = notReachable.has(debtor.studentId);
+      });
+
+      function callPriority(debtor) {
+        if (debtor.isNotReachable) return 0;
+        if (!reachable.has(debtor.studentId)) return 1;
+        return 2;
+      }
+
+      debtors.sort((a, b) => {
+        const pa = callPriority(a);
+        const pb = callPriority(b);
+        if (pa !== pb) return pa - pb;
+        if (a.debtTillTs > 0 && b.debtTillTs > 0) return a.debtTillTs - b.debtTillTs;
+        if (a.debtTillTs > 0) return -1;
+        if (b.debtTillTs > 0) return 1;
+        return b.balance - a.balance;
       });
 
       return debtors.slice(0, 60);
@@ -2357,6 +2989,64 @@
         const accSliceSize = Math.min(60, debtors.length);
         available = debtors.slice(accSliceSize);
       }
+
+      return available.slice(0, 60);
+    }
+
+    async function buildHeadFinanceCallList(year, todayKey) {
+      let allHFReports = {};
+      try {
+        const snap = await schoolRef(`years/${year}/headFinanceCallReports`).once('value');
+        allHFReports = snap.val() || {};
+      } catch (e) { /* non-fatal */ }
+
+      const reachable = new Set();
+      const notReachable = new Set();
+      Object.entries(allHFReports).forEach(([dayK, dayReports]) => {
+        if (dayK === todayKey) return;
+        Object.entries(dayReports || {}).forEach(([sid, report]) => {
+          if (report.status === 'available') {
+            reachable.add(sid);
+            notReachable.delete(sid);
+          } else if (report.status === 'not_available' && !reachable.has(sid)) {
+            notReachable.add(sid);
+          }
+        });
+      });
+
+      const debtors = await buildCurrentDebtDebtors(year);
+      debtors.forEach((debtor) => {
+        debtor.isNotReachable = notReachable.has(debtor.studentId);
+      });
+
+      function callPriority(debtor) {
+        if (debtor.isNotReachable) return 0;
+        if (!reachable.has(debtor.studentId)) return 1;
+        return 2;
+      }
+
+      debtors.sort((a, b) => {
+        const pa = callPriority(a);
+        const pb = callPriority(b);
+        if (pa !== pb) return pa - pb;
+        if (a.debtTillTs > 0 && b.debtTillTs > 0) return a.debtTillTs - b.debtTillTs;
+        if (a.debtTillTs > 0) return -1;
+        if (b.debtTillTs > 0) return 1;
+        return b.balance - a.balance;
+      });
+
+      const accountantStudentIds = new Set();
+      try {
+        const accPlanSnap = await schoolRef(`years/${year}/accountantCheckinPlan/${todayKey}`).once('value');
+        const accPlan = accPlanSnap.val();
+        if (accPlan && Array.isArray(accPlan.callList)) {
+          accPlan.callList.forEach((student) => accountantStudentIds.add(student.studentId));
+        }
+      } catch (e) { /* non-fatal */ }
+
+      const available = accountantStudentIds.size > 0
+        ? debtors.filter((debtor) => !accountantStudentIds.has(debtor.studentId))
+        : debtors.slice(Math.min(60, debtors.length));
 
       return available.slice(0, 60);
     }
