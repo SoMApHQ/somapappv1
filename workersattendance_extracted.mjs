@@ -2250,19 +2250,61 @@
         return [];
       }
 
-      try {
-        const extSnap = await schoolRef(`financeDeadlineExtensions/${year}`).once('value');
-        financeCallAttachDeadlineExtensions(entries, extSnap.val() || {});
-      } catch (e) {
-        console.warn('Finance deadline extensions load failed', e);
+      function parseDebtTillTs(label, finance) {
+        const numericTs = Number(finance?.overdueThroughTs || finance?.originalOverdueThroughTs || 0);
+        if (numericTs > 0) return numericTs;
+        const text = String(label || '').trim();
+        if (!text || text === '-') return 0;
+        const dateMatch = text.match(/(\d{1,2}\/\d{1,2}\/\d{4})/g);
+        const lastDate = dateMatch && dateMatch.length ? dateMatch[dateMatch.length - 1] : text;
+        const parsed = new Date(lastDate);
+        const ts = parsed.getTime();
+        return Number.isFinite(ts) ? ts : 0;
       }
 
       const debtors = [];
-      const academicYear = Number(year) || new Date().getFullYear();
       Object.entries(entries || {}).forEach(([studentId, entry]) => {
         try {
-          const debtor = financeCallComputeDebtorRecord(studentId, entry, academicYear);
-          if (debtor) debtors.push(debtor);
+          const student = entry?.student || {};
+          if (student.isGraduated) return;
+
+          const finance = entry?.finance || {};
+          const outstanding = Math.max(0, Number(entry?.outstanding ?? finance?.balance ?? 0));
+          if (outstanding <= 0) return;
+
+          const periodDebtValue = Math.max(0, Number(finance?.periodDebtValue ?? finance?.debtTillNow ?? 0));
+          const periodDebtLabel = String(finance?.periodDebtLabel || '').trim();
+          const scheduleItems = Array.isArray(finance?.scheduleItems) ? finance.scheduleItems : [];
+          const overdueItems = scheduleItems.filter((item) => {
+            const remaining = Math.max(0, Number(item?.amount || 0) - Number(item?.paidAllocated || 0));
+            return remaining > 0 && /overdue/i.test(String(item?.status || ''));
+          });
+          const latestOverdueTs = overdueItems.reduce((max, item) => {
+            const ts = Number(item?.toTS || 0);
+            return ts > max ? ts : max;
+          }, 0);
+
+          const debtTillTs = parseDebtTillTs(periodDebtLabel, finance) || latestOverdueTs;
+          const hasDebtTill = debtTillTs > 0 || (periodDebtLabel && periodDebtLabel !== '-');
+          const isCurrentDebt = periodDebtValue > 0 || overdueItems.length > 0 || hasDebtTill;
+          if (!isCurrentDebt) return;
+
+          const debtTill = periodDebtLabel && periodDebtLabel !== '-'
+            ? periodDebtLabel
+            : (debtTillTs > 0
+              ? new Date(debtTillTs).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
+              : '-');
+
+          debtors.push({
+            studentId,
+            name: String(student.fullName || [student.firstName, student.middleName, student.lastName].filter(Boolean).join(' ')).trim() || studentId,
+            classLevel: student.classLevel || student.className || '-',
+            phone: student.primaryParentContact || String(entry?.parentContact || '').trim() || '-',
+            debtTill,
+            debtAmount: periodDebtValue > 0 ? Math.min(periodDebtValue, outstanding) : outstanding,
+            balance: outstanding,
+            debtTillTs,
+          });
         } catch (e) {
           console.warn('Skipping malformed finance debtor row', studentId, e);
         }
