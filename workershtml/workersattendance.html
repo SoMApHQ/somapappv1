@@ -1823,41 +1823,43 @@
         const outstanding = Number(entry.outstanding || 0);
         if (outstanding <= 0) return;
 
-        // Find overdue schedule items — with year correction for custom plans that store wrong-year toTS
+        // Mirror finance_math.js debtTillNow = max(0, expectedToDate - paidConsumed),
+        // but recompute expectedToDate with year-corrected toTS so future installments
+        // (misclassified as past due to 2001 bug) don't inflate the period debt.
         const scheduleItems = entry.finance?.scheduleItems || [];
         const now = Date.now();
         const correctYear = Number(year) || new Date().getFullYear();
 
-        function correctedToTS(item) {
-          let ts = item.toTS || 0;
-          if (ts <= 0) return 0;
+        function fixTS(ts) {
+          if (!ts || ts <= 0) return 0;
           const d = new Date(ts);
           if (d.getFullYear() < 2020) {
-            // Year looks wrong (pre-2020 due to custom plan timestamp bug) — fix year, keep month/day
-            ts = new Date(correctYear, d.getMonth(), d.getDate()).getTime();
+            return new Date(correctYear, d.getMonth(), d.getDate()).getTime();
           }
           return ts;
         }
 
-        const overdueItems = scheduleItems.filter(item => {
-          const remaining = Math.max(0, (item.amount || 0) - (item.paidAllocated || 0));
-          if (remaining <= 0) return false;
-          if (!/overdue/i.test(item.status || '')) return false;
-          // Verify corrected deadline is actually in the past (not a future installment misclassified)
-          const ts = correctedToTS(item);
-          return ts > 0 && ts < now;
-        });
-        if (overdueItems.length === 0) return;
+        const expectedToDate = scheduleItems.reduce((sum, item) => {
+          const ts = fixTS(item.toTS);
+          return sum + (ts > 0 && ts < now ? (item.amount || 0) : 0);
+        }, 0);
+        const paidConsumed = Number(entry.finance?.paidAmount || 0) - Number(entry.finance?.credit || 0);
+        const correctedDebtTillNow = Math.max(0, expectedToDate - paidConsumed);
+
+        // If no actual overdue period debt (matches finance.html "Debt till" being empty), skip
+        if (correctedDebtTillNow <= 0) return;
 
         // Skip students who were successfully reached (parent answered, not unreachable again)
         if (reachable.has(sid) && !notReachable.has(sid)) return;
 
-        // Debt-till date = corrected toTS of the last truly-overdue installment period
-        const lastCorrectedTs = correctedToTS(overdueItems[overdueItems.length - 1]);
-        const debtTillDate = new Date(lastCorrectedTs);
+        // Debt-till date = last installment deadline that has passed (for display and sorting)
+        const dueByToday = scheduleItems.filter(item => { const ts = fixTS(item.toTS); return ts > 0 && ts < now; });
+        if (dueByToday.length === 0) return;
+        const lastDueTs = fixTS(dueByToday[dueByToday.length - 1].toTS);
+        const debtTillDate = new Date(lastDueTs);
         const debtTill = debtTillDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' });
-        const debtTillTs = lastCorrectedTs;
-        const periodDebt = Number(entry.finance?.periodDebtValue || 0);
+        const debtTillTs = lastDueTs;
+        const periodDebt = correctedDebtTillNow;
 
         debtors.push({
           studentId: sid,
