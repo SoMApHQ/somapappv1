@@ -880,8 +880,8 @@
         </div>
     </div>
     <!-- ===== CALL LIST PANEL ===== -->
-    <div id="call-list-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:900;" onclick="if(event.target===this)closeCallListPanel()"></div>
-    <div id="call-list-panel" style="display:none;position:fixed;top:0;right:0;bottom:0;width:min(720px,100%);background:#fff;z-index:901;box-shadow:-4px 0 24px rgba(0,0,0,0.18);overflow-y:auto;flex-direction:column;">
+    <div id="call-list-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:900;"></div>
+    <div id="call-list-panel" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;width:100%;background:#fff;z-index:901;box-shadow:none;overflow-y:auto;flex-direction:column;">
       <div style="background:linear-gradient(135deg,#dc2626,#ef4444);color:#fff;padding:16px 18px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:10;">
         <div>
           <h2 style="margin:0;font-size:1.15rem;font-weight:800;"><i class="fas fa-phone-alt mr-2"></i>Orodha ya Kupiga Simu Leo</h2>
@@ -889,6 +889,7 @@
         </div>
         <div style="display:flex;gap:8px;align-items:center;">
           <span id="call-list-progress-badge" style="background:rgba(255,255,255,0.2);border-radius:999px;padding:4px 12px;font-size:0.82rem;font-weight:700;"></span>
+          <button onclick="exportCallListPDF()" style="background:rgba(255,255,255,0.18);border:1.5px solid rgba(255,255,255,0.5);color:#fff;border-radius:8px;padding:6px 14px;cursor:pointer;font-weight:700;font-size:0.82rem;display:flex;align-items:center;gap:6px;"><i class="fas fa-file-pdf"></i> PDF</button>
           <button onclick="closeCallListPanel()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-weight:700;">✕</button>
         </div>
       </div>
@@ -1637,15 +1638,13 @@
         return db.ref(path);
     }
 
-    function getMaxPaymentDate(debtTill) {
-        // Parse debt till date "M/D/YYYY"
-        if (!debtTill || debtTill === '-') return null;
-        const parts = debtTill.split('/');
-        if (parts.length !== 3) return null;
-        const base = new Date(Number(parts[2]), Number(parts[0]) - 1, Number(parts[1]));
-        if (isNaN(base.getTime())) return null;
-        base.setDate(base.getDate() + 4); // max 4 extra days
-        return base;
+    function getMaxPaymentDate() {
+        // Max = today (day parent was called) + 4 days.
+        // e.g. called on 28 March → parent can pay any day up to 1 April inclusive.
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        today.setDate(today.getDate() + 4);
+        return today;
     }
 
     async function openCallListPanel() {
@@ -1659,6 +1658,147 @@
     function closeCallListPanel() {
         document.getElementById('call-list-panel').style.display = 'none';
         document.getElementById('call-list-overlay').style.display = 'none';
+    }
+
+    async function exportCallListPDF() {
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        const pageW = doc.internal.pageSize.getWidth();
+        const pageH = doc.internal.pageSize.getHeight();
+
+        // ── Header background ──
+        doc.setFillColor(220, 38, 38); // red
+        doc.rect(0, 0, pageW, 28, 'F');
+
+        // ── Logo ──
+        try {
+            const logoImg = await loadImageAsDataURL('images/somap-logo.png.jpg');
+            doc.addImage(logoImg, 'JPEG', 6, 4, 20, 20);
+        } catch(e) { /* logo not available */ }
+
+        // ── Title ──
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(16);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Orodha ya Kupiga Simu Leo', 32, 13);
+        doc.setFontSize(9);
+        doc.setFont('helvetica', 'normal');
+        const dateLabel = new Date().toLocaleDateString('sw-TZ', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+        doc.text(dateLabel, 32, 20);
+
+        // ── Progress badge ──
+        const badge = document.getElementById('call-list-progress-badge');
+        if (badge && badge.textContent.trim()) {
+            doc.setFontSize(9);
+            doc.text(badge.textContent.trim(), pageW - 8, 16, { align: 'right' });
+        }
+
+        // ── School name (right side) ──
+        doc.setFontSize(8);
+        doc.text('SoMAp School Management', pageW - 8, 22, { align: 'right' });
+
+        // ── Collect table data from the rendered tbody ──
+        const tbody = document.getElementById('call-list-tbody');
+        const rows = tbody ? Array.from(tbody.querySelectorAll('tr')) : [];
+
+        const headers = ['#', 'Jina / Name', 'Darasa', 'Simu / Phone', 'Deni Till', 'TZS', 'Hali / Status', 'Maelezo'];
+        const colWidths = [8, 52, 28, 28, 22, 24, 30, 40];
+        const startX = 8;
+        let y = 34;
+        const rowH = 8;
+
+        // ── Table header row ──
+        doc.setFillColor(239, 68, 68);
+        doc.rect(startX, y, pageW - startX * 2, rowH, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(8);
+        doc.setFont('helvetica', 'bold');
+        let x = startX + 1;
+        headers.forEach((h, i) => {
+            doc.text(h, x, y + 5.5);
+            x += colWidths[i];
+        });
+        y += rowH;
+
+        // ── Table rows ──
+        rows.forEach((tr, idx) => {
+            if (y + rowH > pageH - 10) {
+                doc.addPage();
+                y = 10;
+            }
+            const tds = tr.querySelectorAll('td');
+            if (!tds.length) return;
+
+            // Alternating row bg
+            if (idx % 2 === 0) {
+                doc.setFillColor(255, 245, 245);
+            } else {
+                doc.setFillColor(255, 255, 255);
+            }
+            doc.rect(startX, y, pageW - startX * 2, rowH, 'F');
+
+            // Status-based left border colour
+            const statusCell = tr.querySelector(`select`) || null;
+            let statusVal = '';
+            if (statusCell) statusVal = statusCell.value;
+            // Also try data from cache
+            const rowBg = tr.style.backgroundColor;
+            if (rowBg && rowBg.includes('240,253,244')) {
+                doc.setFillColor(34, 197, 94);
+                doc.rect(startX, y, 2, rowH, 'F');
+            } else if (rowBg && rowBg.includes('254,249,195')) {
+                doc.setFillColor(234, 179, 8);
+                doc.rect(startX, y, 2, rowH, 'F');
+            }
+
+            doc.setTextColor(30, 30, 30);
+            doc.setFontSize(7.5);
+            doc.setFont('helvetica', 'normal');
+            x = startX + 3;
+            const cellData = [];
+            tds.forEach((td) => {
+                // Get visible text, skip inputs/selects inner values for columns 0-5
+                cellData.push(td.innerText.replace(/\n+/g, ' ').trim().substring(0, 40));
+            });
+            // Map: pad to 8 columns
+            while (cellData.length < 8) cellData.push('');
+            cellData.slice(0, 8).forEach((txt, i) => {
+                doc.text(txt, x, y + 5.5, { maxWidth: colWidths[i] - 2 });
+                x += colWidths[i];
+            });
+
+            // Bottom border line
+            doc.setDrawColor(229, 231, 235);
+            doc.line(startX, y + rowH, pageW - startX, y + rowH);
+            y += rowH;
+        });
+
+        // ── Footer ──
+        doc.setFillColor(220, 38, 38);
+        doc.rect(0, pageH - 10, pageW, 10, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(7.5);
+        doc.setFont('helvetica', 'normal');
+        doc.text('SoMAp School Management System — Ripoti ya Simu za Madeni', pageW / 2, pageH - 5, { align: 'center' });
+
+        const fileName = `call-list-${todayKeyMhasibu()}.pdf`;
+        doc.save(fileName);
+    }
+
+    function loadImageAsDataURL(src) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth || img.width;
+                canvas.height = img.naturalHeight || img.height;
+                canvas.getContext('2d').drawImage(img, 0, 0);
+                resolve(canvas.toDataURL('image/jpeg'));
+            };
+            img.onerror = reject;
+            img.src = src;
+        });
     }
 
     async function loadCallListForPanel() {
