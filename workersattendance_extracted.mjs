@@ -1,349 +1,4 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mahudhurio ya Kazi | SoMAp</title>
-  <link rel="stylesheet" href="../css/workers.css">
-  <script src="../somapappv1multischool/js/context.js"></script>
-  <script src="../Todashboardhtml/yearContext.js"></script>
-  <script src="../js/school-logo.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
-  <script src="../firebase.js"></script>
-  <script src="../shared/academic-class-utils.js"></script>
-  <script>
-    // Required by finance_math.js for anchor enrollment year
-    var SOMAP_DEFAULT_YEAR = new Date().getFullYear();
-    var SOMAP_ALLOWED_YEARS = Array.from({length: 10}, (_, i) => SOMAP_DEFAULT_YEAR - 2 + i);
-  </script>
-  <script src="../shared/finance_math.js"></script>
-  <style>
-    :root {
-      --bg: #0b1220;
-      --panel: rgba(255, 255, 255, 0.08);
-      --glass: rgba(255, 255, 255, 0.06);
-      --border: rgba(255, 255, 255, 0.12);
-      --ink: #e2e8f0;
-      --muted: #94a3b8;
-      --accent: #22d3ee;
-      --accent-2: #6366f1;
-      --success: #34d399;
-      --warning: #fbbf24;
-      --danger: #fb7185;
-      --card-shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
-    }
-    body { background: radial-gradient(circle at 20% 20%, rgba(34,211,238,0.14), transparent 28%), radial-gradient(circle at 80% 10%, rgba(99,102,241,0.16), transparent 24%), #0b1220; color: var(--ink); font-family: 'Inter', system-ui, -apple-system, sans-serif; }
-    main.page { max-width: 1100px; margin: 0 auto; padding: 22px 16px 48px; }
-    .page__hero { display:flex; justify-content:space-between; gap:16px; align-items:center; flex-wrap:wrap; margin-bottom:20px; }
-    .brand { display:flex; gap:14px; align-items:center; }
-    .brand__logo { width:64px; height:64px; border-radius:18px; border:1px solid var(--border); background:var(--glass); object-fit:contain; padding:8px; box-shadow:var(--card-shadow); }
-    .brand__eyebrow { margin:0; color:var(--muted); font-weight:600; letter-spacing:0.2px; }
-    .brand h1 { margin:2px 0; font-size:1.6rem; color:#fff; }
-    .brand__school { margin:0; color:var(--muted); }
-    .context { display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap; }
-    .context__chip { background:var(--glass); border:1px solid var(--border); border-radius:14px; padding:12px 14px; min-width:220px; box-shadow:var(--card-shadow); backdrop-filter: blur(16px); }
-    .context__chip label { font-size:0.9rem; color:var(--muted); display:block; margin-bottom:6px; }
-    .context__chip select { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:12px; background:rgba(255,255,255,0.06); color:var(--ink); }
-    .context__wifi { font-size:0.95rem; color:var(--muted); line-height:1.4; }
-    .summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:18px; }
-    .stat-card { background:var(--glass); border:1px solid var(--border); border-radius:16px; padding:14px; box-shadow:var(--card-shadow); backdrop-filter: blur(18px); }
-    .stat-label { color:var(--muted); font-size:0.9rem; margin-bottom:6px; }
-    .stat-value { font-size:1.7rem; font-weight:800; color:#fff; }
-    .stat-accent { color:var(--accent); }
-    .stat-warning { color:var(--warning); }
-    .stat-danger { color:var(--danger); }
-    .stat-success { color:var(--success); }
-    .workers-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:12px; }
-    .workers-card { background:var(--glass); border:1px solid var(--border); border-radius:18px; padding:16px; box-shadow:var(--card-shadow); backdrop-filter: blur(18px); }
-    .workers-card__header h2 { margin:0 0 4px; color:#fff; }
-    .workers-card__subtitle { margin:0; color:var(--muted); }
-    .workers-card__content { display:grid; gap:10px; margin-top:12px; }
-    .workers-btn { padding:12px 16px; border-radius:12px; border:1px solid rgba(255,255,255,0.12); background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#0b1220; font-weight:800; cursor:pointer; box-shadow:0 12px 24px rgba(99,102,241,0.35); }
-    .workers-btn.secondary { background:rgba(255,255,255,0.06); color:var(--ink); border:1px solid var(--border); box-shadow:none; }
-    .workers-table { width:100%; border-collapse:collapse; }
-    .workers-table th, .workers-table td { padding:10px 8px; border-bottom:1px solid var(--border); font-size:0.95rem; color:var(--ink); }
-    .workers-table th { text-align:left; color:var(--muted); font-weight:700; }
-    .pill { display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:999px; font-size:0.85rem; border:1px solid var(--border); background:rgba(255,255,255,0.06); }
-    .pill.success { background:rgba(52,211,153,0.15); border-color:rgba(52,211,153,0.5); color:#bbf7d0; }
-    .pill.warning { background:rgba(251,191,36,0.15); border-color:rgba(251,191,36,0.5); color:#fcd34d; }
-    .pill.danger { background:rgba(251,113,133,0.15); border-color:rgba(251,113,133,0.5); color:#fecdd3; }
-    .pill.info { background:rgba(99,102,241,0.18); border-color:rgba(99,102,241,0.45); color:#c7d2fe; }
-    .admin-actions { display:flex; gap:6px; flex-wrap:wrap; }
-    .hint { font-size:0.9rem; color:var(--muted); }
-    .mini-modal-overlay { position:fixed; inset:0; background:rgba(2,6,23,0.7); display:flex; align-items:center; justify-content:center; padding:16px; z-index:9999; }
-    .mini-modal-card { width:min(520px,100%); background:rgba(15,23,42,0.95); border:1px solid var(--border); border-radius:14px; box-shadow:var(--card-shadow); padding:14px; display:grid; gap:10px; }
-    .mini-modal-card h3 { margin:0; color:#fff; font-size:1.05rem; }
-    .mini-modal-card p { margin:0; color:var(--muted); font-size:0.92rem; }
-    .mini-modal-card textarea { min-height:100px; resize:vertical; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--ink); padding:10px; font:inherit; }
-    .mini-modal-actions { display:flex; justify-content:flex-end; gap:8px; }
-    .mini-modal-btn { border:1px solid var(--border); border-radius:10px; padding:8px 12px; font-weight:700; cursor:pointer; background:rgba(255,255,255,0.08); color:var(--ink); }
-    .mini-modal-btn.primary { background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#0b1220; border-color:rgba(255,255,255,0.2); }
-    @media (max-width: 640px) {
-      .brand h1 { font-size:1.3rem; }
-      .context__chip { width:100%; }
-    }
-    /* ===== ACCOUNTANT CHECK-IN MODAL ===== */
-    #acc-checkin-overlay {
-      position: fixed; inset: 0;
-      background: rgba(2,6,23,0.93);
-      backdrop-filter: blur(12px);
-      z-index: 10000;
-      flex-direction: column;
-      overflow-y: auto;
-      padding: 20px 16px 40px;
-    }
-    #acc-checkin-modal {
-      max-width: 860px;
-      margin: 0 auto;
-      width: 100%;
-    }
-    .acc-modal-card {
-      background: var(--glass);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 18px;
-      margin-bottom: 14px;
-      backdrop-filter: blur(16px);
-    }
-    .acc-modal-card h3 {
-      margin: 0 0 12px;
-      font-size: 1rem;
-      font-weight: 800;
-    }
-    .acc-task-label {
-      display: flex;
-      gap: 10px;
-      align-items: flex-start;
-      padding: 7px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.07);
-      cursor: pointer;
-    }
-    .acc-task-label:last-child { border-bottom: none; }
-    .acc-task-label input[type="checkbox"] {
-      margin-top: 2px;
-      flex-shrink: 0;
-      width: 17px;
-      height: 17px;
-      accent-color: var(--accent);
-    }
-    .acc-student-row {
-      padding: 5px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-      font-size: 0.83rem;
-      color: var(--ink);
-    }
-    .acc-student-row:last-child { border-bottom: none; }
-  </style>
-</head>
-<body>
-  <main class="page">
-    <header class="page__hero">
-      <div class="brand">
-        <img id="school-logo-display" alt="School logo" class="brand__logo">
-        <div>
-          <p class="brand__eyebrow">SoMAp Workers</p>
-          <h1>Mahudhurio | Attendance</h1>
-          <p class="brand__school" id="schoolNameDisplay"></p>
-          <p class="hint" id="workerMetaLine"></p>
-        </div>
-      </div>
-      <div class="context">
-        <div class="context__chip">
-          <label for="yearSelect">Mwaka wa masomo</label>
-          <select id="yearSelect" data-somap-year-select></select>
-          <p class="hint" id="currentYearLabel"></p>
-        </div>
-        <div class="context__chip context__wifi" id="wifiStatus">Wi-Fi verification (beta) inatumika kuthibitisha uko shule.</div>
-      </div>
-    </header>
 
-    <section class="summary-grid">
-      <div class="stat-card">
-        <div class="stat-label">Siku ulizohudhuria</div>
-        <div class="stat-value stat-success" id="statPresent">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Spoti za kuchelewa</div>
-        <div class="stat-value stat-warning" id="statLate">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Kuondoka mapema</div>
-        <div class="stat-value stat-danger" id="statEarly">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Faini mwezi huu (TZS)</div>
-        <div class="stat-value stat-accent" id="statFines">0</div>
-      </div>
-    </section>
-
-    <section class="workers-grid">
-      <div class="workers-card">
-        <header class="workers-card__header">
-          <h2>Check-In</h2>
-          <p class="workers-card__subtitle">Wi-Fi ya shule pekee. Hakuna GPS wala picha.</p>
-        </header>
-        <div class="workers-card__content">
-          <button id="checkInBtn" class="workers-btn">Check-In Sasa</button>
-          <p class="hint">Lazima kabla ya 07:30 (Africa/Nairobi). Baada ya hapo sababu ya kuchelewa inahitajika na entry husubiri idhini ya headteacher.</p>
-        </div>
-      </div>
-
-      <div class="workers-card">
-        <header class="workers-card__header">
-          <h2>Check-Out</h2>
-          <p class="workers-card__subtitle">Ondoka kwa nidhamu (muda rasmi 16:00)</p>
-        </header>
-        <div class="workers-card__content">
-          <button id="checkOutBtn" class="workers-btn secondary">Check-Out Sasa</button>
-          <p class="hint">Ukiondoka kabla au baada ya 16:00, sababu inahitajika na check-out husubiri idhini ya headteacher.</p>
-        </div>
-      </div>
-    </section>
-
-    <section class="workers-card" style="margin-top:18px;">
-      <header class="workers-card__header">
-        <h2>Mahudhurio ya Mwezi</h2>
-        <p id="monthLabel" class="workers-card__subtitle"></p>
-      </header>
-      <div class="workers-card__content">
-        <table class="workers-table" id="attendanceTable">
-          <thead>
-            <tr>
-              <th>Siku</th>
-              <th>Check-In</th>
-              <th>Check-Out</th>
-              <th>Late (dakika)</th>
-              <th>Early (dakika)</th>
-              <th>Approval</th>
-              <th class="admin-col" style="display:none;"></th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- ===== ACCOUNTANT CHECK-IN MODAL ===== -->
-    <div id="acc-checkin-overlay" style="display:none;">
-      <div id="acc-checkin-modal">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;gap:12px;flex-wrap:wrap;">
-          <div>
-            <h2 style="color:#fff;margin:0;font-size:1.5rem;font-weight:800;">Unakuja kufanya nini leo?</h2>
-            <p style="color:#94a3b8;margin:4px 0 0;font-size:0.93rem;">You are checking in for what? What have you come to do today?</p>
-          </div>
-          <button id="acc-fullscreen-btn" class="mini-modal-btn" style="white-space:nowrap;">⛶ Full Screen</button>
-        </div>
-
-        <!-- Mandatory Tasks -->
-        <div class="acc-modal-card">
-          <h3 style="color:#22d3ee;">Kazi za Lazima Leo (Mandatory Tasks)</h3>
-          <label class="acc-task-label">
-            <input type="checkbox" name="mandatory_task" value="callParents" checked>
-            <div><span style="color:#e2e8f0;font-weight:600;">1. Piga simu wazazi wenye madeni</span><div style="font-size:0.78rem;color:#94a3b8;">Call parents with Debt Till — orodha hapa chini</div></div>
-          </label>
-          <label class="acc-task-label">
-            <input type="checkbox" name="mandatory_task" value="foodPurchase" checked>
-            <div><span style="color:#e2e8f0;font-weight:600;">2. Nunua vitu vya chakula</span><div style="font-size:0.78rem;color:#94a3b8;">Purchase food items for the school</div></div>
-          </label>
-          <label class="acc-task-label">
-            <input type="checkbox" name="mandatory_task" value="fuel" checked>
-            <div><span style="color:#e2e8f0;font-weight:600;">3. Weka mafuta kwenye gari</span><div style="font-size:0.78rem;color:#94a3b8;">Put fuel in the school van</div></div>
-          </label>
-          <label class="acc-task-label">
-            <input type="checkbox" name="mandatory_task" value="payslips" checked>
-            <div><span style="color:#e2e8f0;font-weight:600;">4. Jaza payslips</span><div style="font-size:0.78rem;color:#94a3b8;">Fill payslips for staff</div></div>
-          </label>
-          <label class="acc-task-label">
-            <input type="checkbox" name="mandatory_task" value="foodExpenses" checked>
-            <div><span style="color:#e2e8f0;font-weight:600;">5. Rekodi matumizi ya chakula</span><div style="font-size:0.78rem;color:#94a3b8;">Record food expenses</div></div>
-          </label>
-        </div>
-
-        <!-- Director Tasks (shown if any) -->
-        <div id="acc-director-tasks-section" class="acc-modal-card" style="display:none;">
-          <h3 style="color:#fbbf24;">Kazi Zilizoongezwa na Mkurugenzi / Director</h3>
-          <div id="acc-director-tasks-list"></div>
-        </div>
-
-        <!-- Call list preview -->
-        <div class="acc-modal-card">
-          <h3 style="color:#6366f1;">Orodha ya Wazazi wa Kupigwa Simu Leo (Call List)</h3>
-          <div id="acc-call-list-loading" style="color:#94a3b8;font-size:0.88rem;">Inapakia orodha...</div>
-          <div id="acc-call-list-preview" style="display:none;"></div>
-        </div>
-
-        <div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:4px;">
-          <button id="acc-checkin-cancel-btn" class="mini-modal-btn">Ghairi / Cancel</button>
-          <button id="acc-checkin-confirm-btn" class="workers-btn">Nathibitisha — Nitatimiza Kazi Hizi ✓</button>
-        </div>
-      </div>
-    </div>
-    <!-- ===== END ACCOUNTANT MODAL ===== -->
-
-    <!-- ===== HEAD FINANCE CHECK-IN MODAL ===== -->
-    <div id="hf-checkin-overlay" style="display:none;">
-      <div id="acc-checkin-modal">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;gap:12px;flex-wrap:wrap;">
-          <div>
-            <h2 style="color:#fff;margin:0;font-size:1.5rem;font-weight:800;">Mkuu wa Fedha — Kazi za Leo</h2>
-            <p style="color:#94a3b8;margin:4px 0 0;font-size:0.93rem;">Head of Finance — What have you come to do today?</p>
-          </div>
-          <button id="hf-fullscreen-btn" class="mini-modal-btn" style="white-space:nowrap;">⛶ Full Screen</button>
-        </div>
-
-        <!-- Mandatory Tasks -->
-        <div class="acc-modal-card">
-          <h3 style="color:#22d3ee;">Kazi za Lazima Leo (Mandatory Tasks)</h3>
-          <label class="acc-task-label">
-            <input type="checkbox" name="hf_mandatory_task" value="callParents" checked>
-            <div><span style="color:#e2e8f0;font-weight:600;">1. Piga simu wazazi wenye madeni</span><div style="font-size:0.78rem;color:#94a3b8;">Call parents with Debt Till — orodha hapa chini (sehemu yako)</div></div>
-          </label>
-          <label class="acc-task-label">
-            <input type="checkbox" name="hf_mandatory_task" value="monitorFinance" checked>
-            <div><span style="color:#e2e8f0;font-weight:600;">2. Kagua ripoti za fedha</span><div style="font-size:0.78rem;color:#94a3b8;">Review daily finance reports and collections</div></div>
-          </label>
-          <label class="acc-task-label">
-            <input type="checkbox" name="hf_mandatory_task" value="expenseApproval" checked>
-            <div><span style="color:#e2e8f0;font-weight:600;">3. Thibitisha matumizi ya fedha</span><div style="font-size:0.78rem;color:#94a3b8;">Approve or review financial expenses</div></div>
-          </label>
-        </div>
-
-        <!-- Director Tasks (shown if any) -->
-        <div id="hf-director-tasks-section" class="acc-modal-card" style="display:none;">
-          <h3 style="color:#fbbf24;">Kazi Zilizoongezwa na Mkurugenzi / Director</h3>
-          <div id="hf-director-tasks-list"></div>
-        </div>
-
-        <!-- Call list preview -->
-        <div class="acc-modal-card">
-          <h3 style="color:#6366f1;">Orodha Yako ya Wazazi wa Kupigwa Simu Leo (Call List)</h3>
-          <div id="hf-call-list-loading" style="color:#94a3b8;font-size:0.88rem;">Inapakia orodha...</div>
-          <div id="hf-call-list-preview" style="display:none;"></div>
-        </div>
-
-        <div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:4px;">
-          <button id="hf-checkin-cancel-btn" class="mini-modal-btn">Ghairi / Cancel</button>
-          <button id="hf-checkin-confirm-btn" class="workers-btn">Nathibitisha — Nitatimiza Kazi Hizi ✓</button>
-        </div>
-      </div>
-    </div>
-    <!-- ===== END HEAD FINANCE MODAL ===== -->
-
-    <section class="workers-card" id="adminPanel" style="display:none; margin-top:18px;">
-      <header class="workers-card__header">
-        <h2>Headteacher - Leo</h2>
-        <p class="workers-card__subtitle">Waangalie walioingia baada ya 07:30 au hawajaingia; thibitisha au katae</p>
-      </header>
-      <div class="workers-card__content">
-        <ul id="lateList" style="list-style:none; padding-left:0; display:grid; gap:8px;"></ul>
-      </div>
-    </section>
-  </main>
-
-  <script type="module">
     import {
       todayYMD,
       yyyymm,
@@ -680,7 +335,7 @@
 
       if (schoolNameEl && state.schoolName) {
         const roleLabel = state.profile.role || localStorage.getItem('role') || '';
-        schoolNameEl.textContent = `${state.schoolName} • ${roleLabel}`.trim();
+        schoolNameEl.textContent = `${state.schoolName} â€¢ ${roleLabel}`.trim();
       }
       updateWorkerMetaLine();
     }
@@ -729,7 +384,7 @@
         (state.profile && state.profile.role) ||
         '';
       if (storedName) {
-        return storedRole ? `${storedName} • ${storedRole}` : storedName;
+        return storedRole ? `${storedName} â€¢ ${storedRole}` : storedName;
       }
 
       // 2) From loaded profile
@@ -738,7 +393,7 @@
         p.fullNameUpper ||
         [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' ');
       if (profileName) {
-        return p.role ? `${profileName} • ${p.role}` : profileName;
+        return p.role ? `${profileName} â€¢ ${p.role}` : profileName;
       }
 
       // 3) Fallbacks tied to workerId
@@ -832,7 +487,7 @@
       if (mode === 'workers') {
         const workers = Array.isArray(task?.targetWorkers) ? task.targetWorkers : [];
         if (workers.length === 1) {
-          return `${workers[0]?.name || 'Worker'} • ${workers[0]?.role || ''}`.replace(/\s+•\s*$/, '');
+          return `${workers[0]?.name || 'Worker'} â€¢ ${workers[0]?.role || ''}`.replace(/\s+â€¢\s*$/, '');
         }
         if (workers.length > 1) return `${workers.length} selected workers`;
       }
@@ -855,7 +510,7 @@
         minute: '2-digit',
         second: '2-digit'
       });
-      workerMetaLine.textContent = `${getWorkerName()} • ${datePart} • ${timePart}`;
+      workerMetaLine.textContent = `${getWorkerName()} â€¢ ${datePart} â€¢ ${timePart}`;
     }
 
     function startClock() {
@@ -1164,7 +819,7 @@
           const subjSchemes = clsSchemes[subjKey];
           const hasScheme = subjSchemes && Object.keys(subjSchemes).length > 0;
           if (!hasScheme) {
-            result.missingSchemes.push(`${cls} – ${subj}`);
+            result.missingSchemes.push(`${cls} â€“ ${subj}`);
           }
         }
       }
@@ -1229,7 +884,7 @@
 
         // timetableCoverageFound = true means Firebase has a saved timetable grid that
         // includes at least one of this teacher's classes.  When true we trust the grid
-        // result — zero lessons means the teacher is genuinely free today (OPEN slots).
+        // result â€” zero lessons means the teacher is genuinely free today (OPEN slots).
         // The fallback to classSubjectMappings is only valid when the timetable hasn't
         // been generated/saved yet.
         let timetableCoverageFound = false;
@@ -1243,7 +898,7 @@
             const slots = Array.isArray(groupData.slots) ? groupData.slots : [];
             const legend = Array.isArray(groupData.teacherLegend) ? groupData.teacherLegend : [];
 
-            // Find this teacher's entry in the saved legend — gives us their number for robust matching
+            // Find this teacher's entry in the saved legend â€” gives us their number for robust matching
             const legendEntry = legend.find(t => String(t.workerId || '').trim().toLowerCase() === myWorkerIdNorm);
             const myNumber = legendEntry ? String(legendEntry.number) : null;
             if (legendEntry) timetableCoverageFound = true;
@@ -1281,7 +936,7 @@
 
         // Fallback: only when the timetable has NOT been saved to Firebase for this teacher's
         // classes yet.  If the timetable IS there but shows zero lessons, that means the
-        // teacher is genuinely free today — we must NOT invent phantom lessons from config.
+        // teacher is genuinely free today â€” we must NOT invent phantom lessons from config.
         if (timetableLessons.length === 0 && !timetableCoverageFound && classSubjectMappings.length > 0) {
           for (const mapping of classSubjectMappings) {
             const streams = (mapping.streams || []).filter(s => s && s.name);
@@ -1304,12 +959,12 @@
 
         result.todayLessons = dedupeLessons(timetableLessons);
         // True when all lessons came from the config fallback (timetable not yet saved to Firebase).
-        // Config-based lessons list ALL subjects for the teacher — they are NOT day-specific, so
+        // Config-based lessons list ALL subjects for the teacher â€” they are NOT day-specific, so
         // we cannot use them to accurately verify today's lesson plans.  We only check plans when
         // the timetable grid was actually read from Firebase.
         result.timetableFromConfig = result.todayLessons.length > 0 && result.todayLessons.every(l => l.fromConfig);
 
-        // 4. Check lesson plans for each lesson today — ONLY when grid is from Firebase (not config fallback)
+        // 4. Check lesson plans for each lesson today â€” ONLY when grid is from Firebase (not config fallback)
         if (result.todayLessons.length > 0 && !result.timetableFromConfig) {
           const uniqueClasses = [...new Set(result.todayLessons.map(l => l.className))];
           const plansByClass = {};
@@ -1363,9 +1018,9 @@
       if (result.noTimetableSetup) {
         sections += `
           <div style="background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.4);border-radius:10px;padding:12px;margin-top:10px;">
-            <strong style="color:#fbbf24;">📋 Wasifu wa Mwalimu Haukupatikana</strong>
+            <strong style="color:#fbbf24;">ðŸ“‹ Wasifu wa Mwalimu Haukupatikana</strong>
             <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Bado hujasetup madarasa na masomo unayofundisha. Nenda Teacher Dashboard uweke madarasa yako na masomo.</p>
-            <a href="workertasks.html" target="_blank" rel="noopener" style="display:inline-block;margin-top:8px;padding:6px 14px;background:rgba(251,191,36,0.2);border:1px solid rgba(251,191,36,0.5);border-radius:8px;color:#fbbf24;text-decoration:none;font-size:0.88rem;">→ Nenda Teacher Dashboard ↗</a>
+            <a href="workertasks.html" target="_blank" rel="noopener" style="display:inline-block;margin-top:8px;padding:6px 14px;background:rgba(251,191,36,0.2);border:1px solid rgba(251,191,36,0.5);border-radius:8px;color:#fbbf24;text-decoration:none;font-size:0.88rem;">â†’ Nenda Teacher Dashboard â†—</a>
           </div>`;
       }
 
@@ -1373,13 +1028,13 @@
       if (result.missingSchemes.length > 0) {
         sections += `
           <div style="background:rgba(251,113,133,0.1);border:1px solid rgba(251,113,133,0.4);border-radius:10px;padding:12px;margin-top:10px;">
-            <strong style="color:#fb7185;">📚 Scheme za Kazi Zinazokosekana</strong>
+            <strong style="color:#fb7185;">ðŸ“š Scheme za Kazi Zinazokosekana</strong>
             <p style="margin:6px 0 4px;color:var(--muted);font-size:0.9rem;">Masomo yafuatayo bado hayana scheme ya kazi kwa mwaka ${year}. Lazima schemes zote ziwepo kabla ya kufanya check-in:</p>
             <ul style="margin:4px 0 8px 18px;padding:0;color:#fecdd3;font-size:0.88rem;">
               ${result.missingSchemes.map(s => `<li style="margin-bottom:3px;">${s}</li>`).join('')}
             </ul>
             <p style="margin:0 0 6px;color:var(--muted);font-size:0.83rem;">Huna scheme? Wasiliana na Academic Officer au Head Teacher akusaidie kupakia schemes zako.</p>
-            <a href="Toworkertaskshtml/schemes.html?${qp}" target="_blank" rel="noopener" style="display:inline-block;padding:6px 14px;background:rgba(251,113,133,0.2);border:1px solid rgba(251,113,133,0.5);border-radius:8px;color:#fb7185;text-decoration:none;font-size:0.88rem;">→ Fungua Schemes za Kazi ↗</a>
+            <a href="Toworkertaskshtml/schemes.html?${qp}" target="_blank" rel="noopener" style="display:inline-block;padding:6px 14px;background:rgba(251,113,133,0.2);border:1px solid rgba(251,113,133,0.5);border-radius:8px;color:#fb7185;text-decoration:none;font-size:0.88rem;">â†’ Fungua Schemes za Kazi â†—</a>
           </div>`;
       }
 
@@ -1387,7 +1042,7 @@
       if (!result.noTimetableSetup && result.missingSchemes.length === 0) {
         sections += `
           <div style="background:rgba(52,211,153,0.1);border:1px solid rgba(52,211,153,0.4);border-radius:10px;padding:12px;margin-top:10px;">
-            <strong style="color:#34d399;">✅ Scheme za Kazi – Zote Zipo</strong>
+            <strong style="color:#34d399;">âœ… Scheme za Kazi â€“ Zote Zipo</strong>
             <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Schemes zako zote za kazi kwa mwaka ${year} zipo. Vizuri sana!</p>
           </div>`;
       }
@@ -1395,49 +1050,49 @@
       // Timetable / lesson plan section (weekdays only)
       if (!result.isWeekend) {
         if (result.timetableFromConfig) {
-          // Timetable not yet saved to Firebase — config subjects are not day-specific, do not block
+          // Timetable not yet saved to Firebase â€” config subjects are not day-specific, do not block
           sections += `
             <div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.35);border-radius:10px;padding:12px;margin-top:10px;">
-              <strong style="color:#c7d2fe;">🗓️ Jedwali la Masaa – Bado Halijahifadhiwa</strong>
+              <strong style="color:#c7d2fe;">ðŸ—“ï¸ Jedwali la Masaa â€“ Bado Halijahifadhiwa</strong>
               <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Jedwali la masaa bado halijapakiwa kwenye mfumo. Mipango ya masomo ya leo <strong>${todaySwName} ${todayDateLabel}</strong> haiwezi kuthibitishwa hadi jedwali litakapohifadhiwa na Academic Teacher. Unaweza kuendelea kufanya check-in.</p>
             </div>`;
         } else if (result.todayLessons.length === 0) {
           sections += `
             <div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.4);border-radius:10px;padding:12px;margin-top:10px;">
-              <strong style="color:#c7d2fe;">🗓️ Jedwali la Leo (${todaySwName})</strong>
+              <strong style="color:#c7d2fe;">ðŸ—“ï¸ Jedwali la Leo (${todaySwName})</strong>
               <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Hukupatikana kwenye jedwali la masaa leo. Kama ni kosa, wasiliana na Academic / Head Teacher waboreshe jedwali.</p>
             </div>`;
         } else if (result.missingPlans.length > 0) {
           const fromConfig = result.todayLessons.every(l => l.fromConfig);
           const scheduleNote = fromConfig
-            ? `Jedwali bado halijapakiwa kikamilifu — masomo yaliyoonyeshwa yanatokana na madarasa uliyopewa.`
+            ? `Jedwali bado halijapakiwa kikamilifu â€” masomo yaliyoonyeshwa yanatokana na madarasa uliyopewa.`
             : `Kulingana na jedwali la masaa lililohifadhiwa.`;
 
           // Build per-lesson cards: missing ones get a full action card, present ones get a compact row
           const lessonCards = result.todayLessons.map(l => {
             const isMissing = result.missingPlans.some(m => m.className === l.className && m.subject === l.subject);
-            const timeStr = l.start ? `${l.start} – ${l.end}` : '';
-            const slotStr = l.slotLabel && !l.fromConfig ? ` &nbsp;·&nbsp; <em>${l.slotLabel}</em>` : '';
+            const timeStr = l.start ? `${l.start} â€“ ${l.end}` : '';
+            const slotStr = l.slotLabel && !l.fromConfig ? ` &nbsp;Â·&nbsp; <em>${l.slotLabel}</em>` : '';
             if (isMissing) {
               const lessonQp = `${qp}&class=${encodeURIComponent(l.className)}&subject=${encodeURIComponent(l.subject)}&date=${encodeURIComponent(todayDateLabel)}`;
               return `
                 <div style="background:rgba(251,113,133,0.12);border:1px solid rgba(251,113,133,0.5);border-radius:10px;padding:12px 14px;margin-bottom:8px;">
                   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">
                     <div>
-                      <div style="font-weight:700;color:#fecdd3;font-size:0.97rem;">📚 ${l.className} &nbsp;·&nbsp; ${l.subject}</div>
-                      ${timeStr ? `<div style="color:var(--muted);font-size:0.85rem;margin-top:2px;">🕐 ${timeStr}${slotStr}</div>` : ''}
-                      <div style="color:#fb7185;font-size:0.82rem;margin-top:4px;">❌ Hakuna mpango wa leo (${todayDateLabel})</div>
+                      <div style="font-weight:700;color:#fecdd3;font-size:0.97rem;">ðŸ“š ${l.className} &nbsp;Â·&nbsp; ${l.subject}</div>
+                      ${timeStr ? `<div style="color:var(--muted);font-size:0.85rem;margin-top:2px;">ðŸ• ${timeStr}${slotStr}</div>` : ''}
+                      <div style="color:#fb7185;font-size:0.82rem;margin-top:4px;">âŒ Hakuna mpango wa leo (${todayDateLabel})</div>
                     </div>
                     <a href="Toworkertaskshtml/lessonplan.html?${lessonQp}" target="_blank" rel="noopener"
                        style="flex-shrink:0;padding:6px 12px;background:rgba(251,113,133,0.22);border:1px solid rgba(251,113,133,0.6);border-radius:8px;color:#fb7185;text-decoration:none;font-size:0.85rem;font-weight:700;white-space:nowrap;">
-                      ✏️ Andika Mpango ↗
+                      âœï¸ Andika Mpango â†—
                     </a>
                   </div>
                 </div>`;
             } else {
               return `
                 <div style="background:rgba(52,211,153,0.06);border:1px solid rgba(52,211,153,0.3);border-radius:8px;padding:8px 12px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:0.88rem;">
-                  <span style="color:#bbf7d0;">✅ ${l.className} – ${l.subject}${timeStr ? ` &nbsp;·&nbsp; ${timeStr}` : ''}</span>
+                  <span style="color:#bbf7d0;">âœ… ${l.className} â€“ ${l.subject}${timeStr ? ` &nbsp;Â·&nbsp; ${timeStr}` : ''}</span>
                   <span style="color:#34d399;font-size:0.8rem;">Tayari</span>
                 </div>`;
             }
@@ -1445,7 +1100,7 @@
 
           sections += `
             <div style="background:rgba(251,113,133,0.06);border:1px solid rgba(251,113,133,0.35);border-radius:10px;padding:14px;margin-top:10px;">
-              <strong style="color:#fb7185;font-size:0.97rem;">📝 Mipango ya Masomo Inayokosekana – ${todaySwName}, ${todayDateLabel}</strong>
+              <strong style="color:#fb7185;font-size:0.97rem;">ðŸ“ Mipango ya Masomo Inayokosekana â€“ ${todaySwName}, ${todayDateLabel}</strong>
               <p style="margin:6px 0 10px;color:var(--muted);font-size:0.88rem;">
                 Una somo ${result.todayLessons.length > 1 ? `${result.todayLessons.length} ` : ''}leo kulingana na jedwali. Andaa mpango wa somo kwa kila somo lililokosekana kabla ya kufanya check-in.
                 <span style="display:block;margin-top:2px;font-size:0.82rem;opacity:0.7;">${scheduleNote}</span>
@@ -1453,10 +1108,10 @@
               ${lessonCards}
             </div>`;
         } else if (result.todayLessons.length > 0) {
-          // All plans present — this branch only reached if something else blocked, show status
+          // All plans present â€” this branch only reached if something else blocked, show status
           sections += `
             <div style="background:rgba(52,211,153,0.1);border:1px solid rgba(52,211,153,0.4);border-radius:10px;padding:12px;margin-top:10px;">
-              <strong style="color:#34d399;">✅ Mipango ya Masomo – Tayari</strong>
+              <strong style="color:#34d399;">âœ… Mipango ya Masomo â€“ Tayari</strong>
               <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Mipango yote ya masomo leo (${result.todayLessons.length}) iko tayari.</p>
             </div>`;
         }
@@ -1466,11 +1121,11 @@
       overlay.className = 'mini-modal-overlay';
       overlay.innerHTML = `
         <div class="mini-modal-card" role="dialog" aria-modal="true" style="width:min(580px,100%);max-height:82vh;overflow-y:auto;display:grid;gap:0;">
-          <h3 style="color:#fb7185;">⚠️ Huwezi Kufanya Check-In Bado</h3>
+          <h3 style="color:#fb7185;">âš ï¸ Huwezi Kufanya Check-In Bado</h3>
           <p style="color:var(--muted);font-size:0.92rem;">Kabla ya kufanya check-in, kamilisha mahitaji yafuatayo:</p>
           ${sections}
           <div class="mini-modal-actions" style="margin-top:16px;">
-            <button type="button" class="mini-modal-btn primary" data-act="close">Sawa — Nitafanya Kazi Inayohitajika</button>
+            <button type="button" class="mini-modal-btn primary" data-act="close">Sawa â€” Nitafanya Kazi Inayohitajika</button>
           </div>
         </div>`;
       document.body.appendChild(overlay);
@@ -1532,16 +1187,16 @@
                 showTeacherBlockModal(readiness);
                 return;
               }
-              // All checks passed — show brief congratulations before saving
-              toast('🎉 Hongera! Schemes na mipango ya masomo yako yote iko tayari. Unafanya check-in...', 'success');
+              // All checks passed â€” show brief congratulations before saving
+              toast('ðŸŽ‰ Hongera! Schemes na mipango ya masomo yako yote iko tayari. Unafanya check-in...', 'success');
               await new Promise(r => setTimeout(r, 1600));
             } catch (readinessErr) {
-              console.warn('Teacher readiness check failed — allowing check-in:', readinessErr);
+              console.warn('Teacher readiness check failed â€” allowing check-in:', readinessErr);
             }
             if (btn) btn.textContent = 'Inahifadhi...';
           }
 
-          // ── Head Finance-specific check-in gate ──
+          // â”€â”€ Head Finance-specific check-in gate â”€â”€
           if (role.includes('head_finance')) {
             if (btn) btn.textContent = 'Inaangalia kazi za siku...';
             const prevCheck = await checkHeadFinancePreviousDayIncomplete(systemYear);
@@ -1568,7 +1223,7 @@
             }
           }
 
-          // ── Accountant-specific check-in gate (inside same role block) ──
+          // â”€â”€ Accountant-specific check-in gate (inside same role block) â”€â”€
           if (role.includes('accountant')) {
             if (btn) btn.textContent = 'Inaangalia kazi za siku...';
             const prevCheck = await checkAccountantPreviousDayIncomplete(systemYear);
@@ -1602,7 +1257,7 @@
           return;
         }
 
-        // ── Head Finance checkout gate ──
+        // â”€â”€ Head Finance checkout gate â”€â”€
         if (direction === 'out' && isHeadFinance()) {
           if (btn) btn.textContent = 'Inathibitisha kazi...';
           const validation = await validateHeadFinanceCheckout(systemYear, dayKey);
@@ -1614,7 +1269,7 @@
           }
         }
 
-        // ── Accountant checkout gate ──
+        // â”€â”€ Accountant checkout gate â”€â”€
         if (direction === 'out' && isAccountant()) {
           if (btn) btn.textContent = 'Inathibitisha kazi...';
           const validation = await validateAccountantCheckout(systemYear, dayKey);
@@ -1626,7 +1281,7 @@
           }
         }
 
-        // ── Director task reports at checkout (all workers) ──
+        // â”€â”€ Director task reports at checkout (all workers) â”€â”€
         if (direction === 'out') {
           await handleDirectorTaskCheckout(systemYear, dayKey).catch((e) =>
             console.warn('Director task checkout handler failed', e)
@@ -1867,7 +1522,7 @@
         month: 'long',
         year: 'numeric'
       });
-      monthLabel.textContent = `${monthText} • Leo: ${todayText}`;
+      monthLabel.textContent = `${monthText} â€¢ Leo: ${todayText}`;
       attendanceTable.innerHTML = '';
       const { snap, source } = await scopedOrSocratesLegacy(
         scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}`),
@@ -1889,7 +1544,7 @@
         const outStatus = statusFromLegacy(record, 'out');
         const adminCell = isAdmin
           ? `<td style="text-align:center;">
-               <button title="Futa rekodi hii" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:1rem;padding:2px 6px;border-radius:6px;opacity:0.7;" data-daykey="${dayKey}" class="del-att-btn">🗑️</button>
+               <button title="Futa rekodi hii" style="background:none;border:none;cursor:pointer;color:var(--danger);font-size:1rem;padding:2px 6px;border-radius:6px;opacity:0.7;" data-daykey="${dayKey}" class="del-att-btn">ðŸ—‘ï¸</button>
              </td>`
           : '';
         row.innerHTML = `
@@ -1898,7 +1553,7 @@
           <td>${formatTs(record.checkOutTs)}</td>
           <td>${record.lateMinutes || 0}</td>
           <td>${record.earlyMinutes || 0}</td>
-          <td>IN: <span class="pill ${inStatus === 'approved' ? 'success' : inStatus === 'rejected' ? 'danger' : inStatus === 'pending' ? 'warning' : 'info'}">${inStatus}</span> • OUT: <span class="pill ${outStatus === 'approved' ? 'success' : outStatus === 'rejected' ? 'danger' : outStatus === 'pending' ? 'warning' : 'info'}">${outStatus}</span></td>
+          <td>IN: <span class="pill ${inStatus === 'approved' ? 'success' : inStatus === 'rejected' ? 'danger' : inStatus === 'pending' ? 'warning' : 'info'}">${inStatus}</span> â€¢ OUT: <span class="pill ${outStatus === 'approved' ? 'success' : outStatus === 'rejected' ? 'danger' : outStatus === 'pending' ? 'warning' : 'info'}">${outStatus}</span></td>
           ${adminCell}
         `;
         if (isAdmin) {
@@ -1969,7 +1624,7 @@
           li.innerHTML = `
             <div style="display:flex; justify-content:space-between; gap:8px; align-items:center;">
               <div>
-                <strong>${profile.fullNameUpper || wId}</strong> • ${profile.role || ''}
+                <strong>${profile.fullNameUpper || wId}</strong> â€¢ ${profile.role || ''}
                 <div class="hint">Late: ${todayRecord.lateMinutes || 0} mins | Early: ${todayRecord.earlyMinutes || 0} mins</div>
               </div>
               <div class="admin-actions">
@@ -2681,7 +2336,7 @@
           const expectedCount = isSix ? 6 : isFour ? 4 : 0;
           // If the item count already matches what the plan expects, trust it.
           if (expectedCount === 0 || raw.length === expectedCount) return raw;
-          // The schedule was misclassified — rebuild it using the correct windows.
+          // The schedule was misclassified â€” rebuild it using the correct windows.
           const sixWins  = [[[12,1],[1,10]],[[3,1],[3,15]],[[4,1],[4,15]],[[5,1],[5,15]],[[7,1],[7,15]],[[9,1],[9,15]]];
           const fourWins = [[[12,1],[1,10]],[[3,1],[3,15]],[[4,1],[4,15]],[[5,1],[5,15]]];
           const sixWeights  = { 'class 5':[44,23,22,32,26,17], 'class 6':[236,115,110,160,160,100] };
@@ -2739,9 +2394,9 @@
       // Sort priority: 1) never reached (not_available), 2) never called, 3) previously answered
       // Within each group, sort by oldest overdue date first.
       function callPriority(d) {
-        if (d.isNotReachable) return 0;       // didn't answer — highest priority
+        if (d.isNotReachable) return 0;       // didn't answer â€” highest priority
         if (!reachable.has(d.studentId)) return 1; // never called yet
-        return 2;                               // answered before — lowest priority
+        return 2;                               // answered before â€” lowest priority
       }
       debtors.sort((a, b) => {
         const pa = callPriority(a), pb = callPriority(b);
@@ -2848,7 +2503,7 @@
                 &bull; <span style="color:#22d3ee;">${s.phone}</span>
                 &bull; <span style="color:#fb7185;">Deni till: ${s.debtTill}</span>
                 &bull; TZS ${(s.debtAmount || 0).toLocaleString('sw-TZ')}
-                ${s.isNotReachable ? '<span style="color:#fbbf24;font-size:0.75rem;"> ↺ Haikupigwa jana</span>' : ''}
+                ${s.isNotReachable ? '<span style="color:#fbbf24;font-size:0.75rem;"> â†º Haikupigwa jana</span>' : ''}
               </div>`).join('')}
             ${extra > 0 ? `<p style="font-size:0.8rem;color:#94a3b8;margin-top:6px;">...na wanafunzi ${extra} zaidi kwenye orodha kamili.</p>` : ''}`;
         }
@@ -3036,10 +2691,10 @@
       // min(60, total) students from the sorted list so we skip those positions.
       let available;
       if (accountantStudentIds.size > 0) {
-        // Accountant has a plan — exclude exactly their students
+        // Accountant has a plan â€” exclude exactly their students
         available = debtors.filter(d => !accountantStudentIds.has(d.studentId));
       } else {
-        // Accountant hasn't checked in — skip the first (up to 60) students from the sorted list
+        // Accountant hasn't checked in â€” skip the first (up to 60) students from the sorted list
         // so head_finance takes a non-overlapping slice
         const accSliceSize = Math.min(60, debtors.length);
         available = debtors.slice(accSliceSize);
@@ -3145,7 +2800,7 @@
                 &bull; <span style="color:#22d3ee;">${s.phone}</span>
                 &bull; <span style="color:#fb7185;">Deni till: ${s.debtTill}</span>
                 &bull; TZS ${(s.debtAmount || 0).toLocaleString('sw-TZ')}
-                ${s.isNotReachable ? '<span style="color:#fbbf24;font-size:0.75rem;"> ↺ Haikupigwa jana</span>' : ''}
+                ${s.isNotReachable ? '<span style="color:#fbbf24;font-size:0.75rem;"> â†º Haikupigwa jana</span>' : ''}
               </div>`).join('')}
             ${extra > 0 ? `<p style="font-size:0.8rem;color:#94a3b8;margin-top:6px;">...na wanafunzi ${extra} zaidi kwenye orodha kamili.</p>` : ''}`;
         }
@@ -3292,7 +2947,7 @@
           message: `Ulifanya kazi hii leo? Toa maelezo mafupi ya ulivyofanya.`,
           placeholder: 'Maelezo ya kazi uliyofanya...',
         });
-        if (explanation === null) continue; // worker skipped — don't block
+        if (explanation === null) continue; // worker skipped â€” don't block
         try {
           await schoolRef(`years/${year}/directorTaskReports/${dayKey}/${taskId}/${state.workerId}`).set({
             done: !!explanation.trim(),
@@ -3378,9 +3033,4 @@
     }
 
     boot();
-  </script>
-</body>
-</html>
-
-
-
+  
