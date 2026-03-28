@@ -1014,13 +1014,22 @@
           color:'#3b82f6',
           roles: ['teacher']
         },
-        accountant:  { 
-          title:'PAYROLL HUB � Bwalo la Malipo',     
-          sub:'Salary processing and financial management',             
+        accountant:  {
+          title:'PAYROLL HUB — Bwalo la Malipo',
+          sub:'Salary processing and financial management',
           href:'workerspayroll_admin.html',
-          icon:'??',
+          icon:'💰',
           color:'#10b981',
           roles: ['accountant', 'admin', 'hr', 'manager']
+        },
+        head_finance: {
+          title:'FINANCE HUB — Bwalo la Fedha',
+          sub:'Debt collection calls, finance oversight, and reports',
+          href:'#',
+          icon:'📞',
+          color:'#dc2626',
+          roles: ['head_finance'],
+          onclick: 'openHFCallListPanel()'
         },
         manager:     { 
           title:'APPROVALS HUB � Bwalo la Uthibitisho', 
@@ -1092,8 +1101,14 @@
             </a>
           `;
           
-          hubCard.addEventListener('click', () => {
-            window.location.href = hub.href;
+          hubCard.addEventListener('click', (e) => {
+            if (hub.onclick) {
+              e.preventDefault();
+              const fn = window[hub.onclick.replace('()', '')];
+              if (typeof fn === 'function') fn();
+            } else if (hub.href && hub.href !== '#') {
+              window.location.href = hub.href;
+            }
           });
         } else {
           console.log(`?? User cannot access ${key} hub - showing as disabled`);
@@ -1447,13 +1462,14 @@
         {key:'nssf',roles:['admin','hr','accountant'],title:'NSSF',sub:'Social security',href:'workersnssf.html',icon:'???'},
         {key:'approvals',roles:['admin','hr','manager'],title:'Approvals',sub:'Review requests',href:'workersapprovals_admin.html',icon:'?'},
         {key:'performance',roles:['admin','hr','manager'],title:'Performance',sub:'Performance tracking',href:'workersperformance.html',icon:'??'},
+        {key:'hf-calllist',roles:['head_finance'],title:'Orodha ya Simu',sub:'Piga simu wazazi wenye madeni — orodha yako ya leo',href:'#',icon:'📞',onclick:'openHFCallListPanel()'},
         {key:'ids',roles:['all'],title:'ID Cards',sub:'Generate staff ID (front & back)',href:'workersgenerateid.html?scope=self',icon:'??'},
         {key:'certificates',roles:['all'],title:'Certificates',sub:'Annual appreciation (Nov�Dec). Download your certificate.',href:'workers_certificates.html',icon:''}
       ];
 
       const allow=new Set(['all', role]);
       if (admin) allow.add('admin');
-      if (['hr','manager','accountant'].includes(role)) allow.add(role);
+      if (['hr','manager','accountant','head_finance'].includes(role)) allow.add(role);
 
       // Filter and order cards
       const ordered=[];
@@ -1463,7 +1479,14 @@
       ordered.forEach(c=>{
         const linkCard = document.createElement('a');
         linkCard.className = 'link-card';
-        linkCard.href = c.href;
+        linkCard.href = c.href || '#';
+        if (c.onclick) {
+          linkCard.addEventListener('click', (e) => {
+            e.preventDefault();
+            const fn = window[c.onclick.replace('()', '')];
+            if (typeof fn === 'function') fn();
+          });
+        }
         if (c.key === 'ids'){
           linkCard.href = 'workersgenerateid.html?scope=self&year=' + encodeURIComponent(currentYear || new Date().getFullYear()) + '&worker=' + encodeURIComponent(currentWorkerContext.workerId || '');
           linkCard.style.display = 'flex';
@@ -1477,6 +1500,17 @@
               <div class="link-title" style="margin:0;">${c.title}</div>
               <div class="link-description">${c.sub}</div>
             </div>
+          `;
+        } else if (c.key === 'hf-calllist') {
+          linkCard.style.background = 'linear-gradient(135deg,#fee2e2,#fff)';
+          linkCard.style.borderColor = '#dc2626';
+          linkCard.style.position = 'relative';
+          linkCard.innerHTML = `
+            <div class="link-icon" style="color:#dc2626;position:relative;">📞
+              <span id="hf-call-badge" style="display:none;position:absolute;top:-6px;right:-6px;background:#fbbf24;color:#0b1220;font-size:0.65rem;font-weight:900;border-radius:999px;min-width:18px;height:18px;line-height:18px;text-align:center;padding:0 3px;"></span>
+            </div>
+            <div class="link-title" style="color:#dc2626;">${c.title}</div>
+            <div class="link-description">${c.sub}</div>
           `;
         } else if (c.key === 'certificates') {
           linkCard.className = 'card hover:shadow-lg transition';
@@ -1506,6 +1540,363 @@
        BOOT
     ============================== */
     loadDashboard();
+
+    // Expose schoolRef and getYear for the HF call list non-module script
+    window._hfDashboardRef = (path) => schoolRef(path);
+    window._hfGetYear = () => getYear();
+  </script>
+
+  <!-- jsPDF for HF call list PDF export -->
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+
+  <!-- ===== HEAD FINANCE CALL LIST PANEL ===== -->
+  <div id="hf-call-list-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:900;"></div>
+  <div id="hf-call-list-panel" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;width:100%;background:#fff;z-index:901;overflow-y:auto;flex-direction:column;">
+    <div style="background:linear-gradient(135deg,#dc2626,#ef4444);color:#fff;padding:16px 18px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:10;">
+      <div>
+        <h2 style="margin:0;font-size:1.15rem;font-weight:800;">📞 Orodha ya Kupiga Simu Leo — Mkuu wa Fedha</h2>
+        <p id="hf-call-panel-date" style="margin:2px 0 0;font-size:0.82rem;opacity:0.85;"></p>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span id="hf-call-progress-badge" style="background:rgba(255,255,255,0.2);border-radius:999px;padding:4px 12px;font-size:0.82rem;font-weight:700;"></span>
+        <button onclick="exportHFCallListPDF()" style="background:rgba(255,255,255,0.18);border:1.5px solid rgba(255,255,255,0.5);color:#fff;border-radius:8px;padding:6px 14px;cursor:pointer;font-weight:700;font-size:0.82rem;display:flex;align-items:center;gap:6px;">📄 PDF</button>
+        <button onclick="closeHFCallListPanel()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-weight:700;">✕</button>
+      </div>
+    </div>
+    <div style="padding:14px 16px;">
+      <div id="hf-call-panel-loading" style="color:#6b7280;padding:20px;text-align:center;"><i class="fas fa-spinner fa-spin mr-2"></i>Inapakia orodha...</div>
+      <div id="hf-call-panel-content" style="display:none;">
+        <div id="hf-call-panel-empty" style="display:none;text-align:center;padding:30px;color:#16a34a;">
+          <span style="font-size:2rem;">✅</span><br>Umekamilisha wito wote wa leo!
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:0.83rem;" id="hf-call-table">
+          <thead>
+            <tr style="background:#f9fafb;border-bottom:2px solid #e5e7eb;">
+              <th style="padding:8px;text-align:left;color:#374151;">#</th>
+              <th style="padding:8px;text-align:left;color:#374151;">Jina / Name</th>
+              <th style="padding:8px;text-align:left;color:#374151;">Darasa</th>
+              <th style="padding:8px;text-align:left;color:#374151;">Simu / Phone</th>
+              <th style="padding:8px;text-align:left;color:#374151;">Deni Till</th>
+              <th style="padding:8px;text-align:left;color:#374151;">TZS</th>
+              <th style="padding:8px;text-align:left;color:#374151;">Hali / Status</th>
+            </tr>
+          </thead>
+          <tbody id="hf-call-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <!-- ===== END HEAD FINANCE CALL LIST PANEL ===== -->
+
+  <script>
+  // ==================== HEAD FINANCE CALL LIST PANEL ====================
+  let _hfPlanCache = null;
+  let _hfReportsCache = null;
+
+  function hfTodayKey() {
+    const d = new Date();
+    return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+  }
+
+  function hfRef(path) {
+    if (window._hfDashboardRef) return window._hfDashboardRef(path);
+    if (window.SOMAP && typeof window.SOMAP.P === 'function') return firebase.database().ref(window.SOMAP.P(path));
+    return firebase.database().ref(path);
+  }
+
+  function hfYear() {
+    if (window._hfGetYear) return String(window._hfGetYear());
+    return String(new Date().getFullYear());
+  }
+
+  function hfMaxPayDate() {
+    const d = new Date();
+    d.setHours(0,0,0,0);
+    d.setDate(d.getDate() + 4);
+    return d;
+  }
+
+  function openHFCallListPanel() {
+    const panel = document.getElementById('hf-call-list-panel');
+    const overlay = document.getElementById('hf-call-list-overlay');
+    if (!panel || !overlay) return;
+    panel.style.display = 'flex';
+    overlay.style.display = 'block';
+    loadHFCallListForPanel();
+  }
+
+  function closeHFCallListPanel() {
+    const panel = document.getElementById('hf-call-list-panel');
+    const overlay = document.getElementById('hf-call-list-overlay');
+    if (panel) panel.style.display = 'none';
+    if (overlay) overlay.style.display = 'none';
+  }
+
+  async function loadHFCallListForPanel() {
+    const year = hfYear();
+    const dayKey = hfTodayKey();
+    const dateLabel = new Date().toLocaleDateString('sw-TZ', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+    const dateEl = document.getElementById('hf-call-panel-date');
+    if (dateEl) dateEl.textContent = dateLabel;
+
+    const loadingEl = document.getElementById('hf-call-panel-loading');
+    const contentEl = document.getElementById('hf-call-panel-content');
+    if (loadingEl) loadingEl.style.display = 'block';
+    if (contentEl) contentEl.style.display = 'none';
+
+    try {
+      const [planSnap, reportsSnap] = await Promise.all([
+        hfRef(`years/${year}/headFinanceCheckinPlan/${dayKey}`).once('value'),
+        hfRef(`years/${year}/headFinanceCallReports/${dayKey}`).once('value'),
+      ]);
+      _hfPlanCache = planSnap.val();
+      _hfReportsCache = reportsSnap.val() || {};
+    } catch (e) {
+      console.warn('HF call list load error', e);
+      _hfPlanCache = null;
+      _hfReportsCache = {};
+    }
+
+    if (loadingEl) loadingEl.style.display = 'none';
+    if (contentEl) contentEl.style.display = 'block';
+    renderHFCallListPanel(year, dayKey);
+  }
+
+  function renderHFCallListPanel(year, dayKey) {
+    const plan = _hfPlanCache;
+    const reports = _hfReportsCache || {};
+    const tbody = document.getElementById('hf-call-tbody');
+    const emptyEl = document.getElementById('hf-call-panel-empty');
+    const tableEl = document.getElementById('hf-call-table');
+    const progressBadge = document.getElementById('hf-call-progress-badge');
+
+    if (!plan || !Array.isArray(plan.callList) || plan.callList.length === 0) {
+      if (tbody) tbody.innerHTML = '';
+      if (tableEl) tableEl.style.display = 'none';
+      if (emptyEl) {
+        emptyEl.style.display = 'block';
+        emptyEl.innerHTML = '<span style="font-size:1.5rem;">ℹ️</span><br><span style="color:#6b7280">Hakuna orodha ya leo. Mkuu wa Fedha hajafanya check-in bado au hakuna wanafunzi wenye madeni.</span>';
+      }
+      if (progressBadge) progressBadge.textContent = '0/0';
+      return;
+    }
+
+    const callList = plan.callList;
+    const done = callList.filter(s => reports[s.studentId] && reports[s.studentId].status).length;
+    if (progressBadge) progressBadge.textContent = `${done}/${callList.length} imekamilika`;
+
+    const badge = document.getElementById('hf-call-badge');
+    const remaining = callList.length - done;
+    if (badge) {
+      badge.style.display = remaining > 0 ? '' : 'none';
+      badge.textContent = remaining;
+    }
+
+    if (done === callList.length && callList.length > 0) {
+      if (emptyEl) emptyEl.style.display = 'block';
+      if (tableEl) tableEl.style.display = 'none';
+    } else {
+      if (emptyEl) emptyEl.style.display = 'none';
+      if (tableEl) tableEl.style.display = '';
+    }
+
+    if (!tbody) return;
+    const maxDate = hfMaxPayDate();
+    const maxDateStr = maxDate.toISOString().slice(0, 10);
+
+    tbody.innerHTML = callList.map((s, i) => {
+      const report = reports[s.studentId] || {};
+      const isDone = !!report.status;
+      const bgColor = isDone ? (report.status === 'available' ? '#f0fdf4' : '#fef9c3') : '#fff';
+
+      const statusOptions = [
+        `<option value="">-- Chagua hali --</option>`,
+        `<option value="available" ${report.status === 'available' ? 'selected' : ''}>✅ Alijibu (Available)</option>`,
+        `<option value="not_available" ${report.status === 'not_available' ? 'selected' : ''}>❌ Hakujibu (Not Available)</option>`,
+      ].join('');
+
+      const payDateRow = `<div id="hf-paydate-row-${s.studentId}" style="display:${report.status === 'available' ? 'block' : 'none'};margin-top:6px;">
+        <label style="font-size:0.75rem;color:#374151;font-weight:700;">Tarehe ya kulipa (max ${maxDateStr}):</label><br>
+        <input type="date" id="hf-paydate-${s.studentId}" value="${report.scheduledPaymentDate || ''}" max="${maxDateStr}"
+          style="border:1px solid #d1d5db;border-radius:6px;padding:4px 8px;font-size:0.8rem;width:100%;margin-top:2px;">
+      </div>`;
+
+      const notesRow = `<div style="margin-top:6px;">
+        <textarea id="hf-notes-${s.studentId}" rows="2" placeholder="Maelezo ya ziada (optional)..."
+          style="border:1px solid #d1d5db;border-radius:6px;padding:4px 8px;font-size:0.8rem;width:100%;resize:vertical;">${report.notes || ''}</textarea>
+      </div>`;
+
+      const callCount = Number(report.callAttempts || 0);
+      const callWarning = callCount >= 2
+        ? `<div style="color:#dc2626;font-size:0.75rem;font-weight:700;margin-top:4px;">⚠ Imepigwa simu mara ${callCount}. Ukumbusho wa pili utafikiwa.</div>` : '';
+
+      return `<tr style="background:${bgColor};border-bottom:1px solid #e5e7eb;" id="hf-call-row-${s.studentId}">
+        <td style="padding:8px 6px;vertical-align:top;font-weight:700;color:#6b7280;">${i + 1}</td>
+        <td style="padding:8px 6px;vertical-align:top;">
+          <strong style="color:#111827;">${s.name}</strong>
+          ${s.isNotReachable ? '<br><span style="color:#f59e0b;font-size:0.72rem;">↺ Haikupigwa jana</span>' : ''}
+          ${callWarning}
+        </td>
+        <td style="padding:8px 6px;vertical-align:top;">${s.classLevel || '-'}</td>
+        <td style="padding:8px 6px;vertical-align:top;">
+          <a href="tel:${s.phone}" style="color:#2563eb;font-weight:700;">${s.phone || '-'}</a>
+        </td>
+        <td style="padding:8px 6px;vertical-align:top;color:#dc2626;font-weight:700;">${s.debtTill || '-'}</td>
+        <td style="padding:8px 6px;vertical-align:top;">TZS ${(s.debtAmount || 0).toLocaleString('sw-TZ')}</td>
+        <td style="padding:8px 6px;vertical-align:top;min-width:220px;">
+          <select id="hf-status-${s.studentId}" onchange="onHFCallStatusChange('${s.studentId}')"
+            style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:0.82rem;width:100%;margin-bottom:4px;">${statusOptions}</select>
+          ${payDateRow}
+          ${notesRow}
+          <button type="button" onclick="saveHFCallReport('${s.studentId}','${year}','${dayKey}')"
+            style="margin-top:6px;background:#16a34a;color:#fff;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;font-weight:700;width:100%;">
+            💾 Hifadhi Ripoti
+          </button>
+          ${isDone ? `<div style="font-size:0.73rem;color:#16a34a;margin-top:3px;">✓ Imehifadhiwa ${report.reportedAt ? new Date(report.reportedAt).toLocaleTimeString('sw-TZ') : ''}</div>` : ''}
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  function onHFCallStatusChange(studentId) {
+    const sel = document.getElementById(`hf-status-${studentId}`);
+    const payDateRow = document.getElementById(`hf-paydate-row-${studentId}`);
+    if (sel && payDateRow) {
+      payDateRow.style.display = sel.value === 'available' ? 'block' : 'none';
+    }
+  }
+
+  async function saveHFCallReport(studentId, year, dayKey) {
+    const statusEl = document.getElementById(`hf-status-${studentId}`);
+    const notesEl = document.getElementById(`hf-notes-${studentId}`);
+    const payDateEl = document.getElementById(`hf-paydate-${studentId}`);
+    const status = statusEl ? statusEl.value : '';
+
+    if (!status) {
+      alert('Tafadhali chagua kama mzazi alijibu au hakujibu.');
+      return;
+    }
+
+    const existing = (_hfReportsCache || {})[studentId] || {};
+    const report = {
+      status,
+      notes: notesEl ? notesEl.value.trim() : '',
+      reportedAt: Date.now(),
+      callAttempts: (Number(existing.callAttempts || 0)) + (existing.status ? 0 : 1),
+    };
+    if (status === 'available' && payDateEl && payDateEl.value) {
+      report.scheduledPaymentDate = payDateEl.value;
+    }
+
+    try {
+      await hfRef(`years/${year}/headFinanceCallReports/${dayKey}/${studentId}`).update(report);
+      if (!_hfReportsCache) _hfReportsCache = {};
+      _hfReportsCache[studentId] = { ...(existing || {}), ...report };
+      renderHFCallListPanel(year, dayKey);
+    } catch (e) {
+      alert('Imeshindikana kuhifadhi. Jaribu tena.');
+    }
+  }
+
+  async function initHFCallListBadge() {
+    try {
+      const year = hfYear();
+      const dayKey = hfTodayKey();
+      const [planSnap, reportsSnap] = await Promise.all([
+        hfRef(`years/${year}/headFinanceCheckinPlan/${dayKey}`).once('value'),
+        hfRef(`years/${year}/headFinanceCallReports/${dayKey}`).once('value'),
+      ]);
+      const plan = planSnap.val();
+      const reports = reportsSnap.val() || {};
+      if (plan && Array.isArray(plan.callList) && plan.callList.length > 0) {
+        const done = plan.callList.filter(s => reports[s.studentId] && reports[s.studentId].status).length;
+        const remaining = plan.callList.length - done;
+        const badge = document.getElementById('hf-call-badge');
+        if (badge) {
+          badge.style.display = remaining > 0 ? '' : 'none';
+          badge.textContent = remaining;
+        }
+      }
+    } catch (e) { /* non-fatal */ }
+  }
+
+  function exportHFCallListPDF() {
+    if (!window.jspdf) return alert('PDF library not loaded yet. Please try again in a moment.');
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+
+    doc.setFillColor(220, 38, 38);
+    doc.rect(0, 0, pageW, 28, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Orodha ya Kupiga Simu Leo — Mkuu wa Fedha', 10, 13);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    const dateLabel = new Date().toLocaleDateString('sw-TZ', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+    doc.text(dateLabel, 10, 20);
+
+    const badge = document.getElementById('hf-call-progress-badge');
+    if (badge && badge.textContent.trim()) {
+      doc.text(badge.textContent.trim(), pageW - 8, 16, { align: 'right' });
+    }
+
+    const tbody = document.getElementById('hf-call-tbody');
+    const rows = tbody ? Array.from(tbody.querySelectorAll('tr')) : [];
+    const headers = ['#', 'Jina / Name', 'Darasa', 'Simu / Phone', 'Deni Till', 'TZS', 'Hali / Status', 'Maelezo'];
+    const colWidths = [8, 52, 28, 28, 22, 24, 30, 40];
+    const startX = 8;
+    let y = 34;
+    const rowH = 8;
+
+    doc.setFillColor(239, 68, 68);
+    doc.rect(startX, y, pageW - startX * 2, rowH, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'bold');
+    let x = startX + 1;
+    headers.forEach((h, i) => { doc.text(h, x, y + 5.5); x += colWidths[i]; });
+    y += rowH;
+
+    rows.forEach((tr, idx) => {
+      if (y + rowH > pageH - 10) { doc.addPage(); y = 10; }
+      const tds = tr.querySelectorAll('td');
+      if (!tds.length) return;
+      doc.setFillColor(idx % 2 === 0 ? 255 : 248, idx % 2 === 0 ? 245 : 250, idx % 2 === 0 ? 245 : 250);
+      doc.rect(startX, y, pageW - startX * 2, rowH, 'F');
+      doc.setTextColor(30, 30, 30);
+      doc.setFontSize(7.5);
+      doc.setFont('helvetica', 'normal');
+      x = startX + 3;
+      const cellData = Array.from(tds).map(td => td.innerText.replace(/\n+/g, ' ').trim().substring(0, 40));
+      while (cellData.length < 8) cellData.push('');
+      cellData.slice(0, 8).forEach((txt, i) => { doc.text(txt, x, y + 5.5, { maxWidth: colWidths[i] - 2 }); x += colWidths[i]; });
+      doc.setDrawColor(229, 231, 235);
+      doc.line(startX, y + rowH, pageW - startX, y + rowH);
+      y += rowH;
+    });
+
+    doc.setFillColor(220, 38, 38);
+    doc.rect(0, pageH - 10, pageW, 10, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(7.5);
+    doc.setFont('helvetica', 'normal');
+    doc.text('SoMAp School Management System — Mkuu wa Fedha — Ripoti ya Simu za Madeni', pageW / 2, pageH - 5, { align: 'center' });
+    doc.save(`hf-call-list-${hfTodayKey()}.pdf`);
+  }
+
+  // Initialize badge when page is ready (for head_finance role)
+  document.addEventListener('DOMContentLoaded', () => {
+    // Small delay to let Firebase auth settle
+    setTimeout(() => {
+      const role = (localStorage.getItem('role') || sessionStorage.getItem('role') || '').toLowerCase();
+      if (role.includes('head_finance')) {
+        initHFCallListBadge();
+      }
+    }, 2000);
+  });
   </script>
 </body>
 </html>

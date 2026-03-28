@@ -283,6 +283,55 @@
     </div>
     <!-- ===== END ACCOUNTANT MODAL ===== -->
 
+    <!-- ===== HEAD FINANCE CHECK-IN MODAL ===== -->
+    <div id="hf-checkin-overlay" style="display:none;">
+      <div id="acc-checkin-modal">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;gap:12px;flex-wrap:wrap;">
+          <div>
+            <h2 style="color:#fff;margin:0;font-size:1.5rem;font-weight:800;">Mkuu wa Fedha — Kazi za Leo</h2>
+            <p style="color:#94a3b8;margin:4px 0 0;font-size:0.93rem;">Head of Finance — What have you come to do today?</p>
+          </div>
+          <button id="hf-fullscreen-btn" class="mini-modal-btn" style="white-space:nowrap;">⛶ Full Screen</button>
+        </div>
+
+        <!-- Mandatory Tasks -->
+        <div class="acc-modal-card">
+          <h3 style="color:#22d3ee;">Kazi za Lazima Leo (Mandatory Tasks)</h3>
+          <label class="acc-task-label">
+            <input type="checkbox" name="hf_mandatory_task" value="callParents" checked>
+            <div><span style="color:#e2e8f0;font-weight:600;">1. Piga simu wazazi wenye madeni</span><div style="font-size:0.78rem;color:#94a3b8;">Call parents with Debt Till — orodha hapa chini (sehemu yako)</div></div>
+          </label>
+          <label class="acc-task-label">
+            <input type="checkbox" name="hf_mandatory_task" value="monitorFinance" checked>
+            <div><span style="color:#e2e8f0;font-weight:600;">2. Kagua ripoti za fedha</span><div style="font-size:0.78rem;color:#94a3b8;">Review daily finance reports and collections</div></div>
+          </label>
+          <label class="acc-task-label">
+            <input type="checkbox" name="hf_mandatory_task" value="expenseApproval" checked>
+            <div><span style="color:#e2e8f0;font-weight:600;">3. Thibitisha matumizi ya fedha</span><div style="font-size:0.78rem;color:#94a3b8;">Approve or review financial expenses</div></div>
+          </label>
+        </div>
+
+        <!-- Director Tasks (shown if any) -->
+        <div id="hf-director-tasks-section" class="acc-modal-card" style="display:none;">
+          <h3 style="color:#fbbf24;">Kazi Zilizoongezwa na Mkurugenzi / Director</h3>
+          <div id="hf-director-tasks-list"></div>
+        </div>
+
+        <!-- Call list preview -->
+        <div class="acc-modal-card">
+          <h3 style="color:#6366f1;">Orodha Yako ya Wazazi wa Kupigwa Simu Leo (Call List)</h3>
+          <div id="hf-call-list-loading" style="color:#94a3b8;font-size:0.88rem;">Inapakia orodha...</div>
+          <div id="hf-call-list-preview" style="display:none;"></div>
+        </div>
+
+        <div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:4px;">
+          <button id="hf-checkin-cancel-btn" class="mini-modal-btn">Ghairi / Cancel</button>
+          <button id="hf-checkin-confirm-btn" class="workers-btn">Nathibitisha — Nitatimiza Kazi Hizi ✓</button>
+        </div>
+      </div>
+    </div>
+    <!-- ===== END HEAD FINANCE MODAL ===== -->
+
     <section class="workers-card" id="adminPanel" style="display:none; margin-top:18px;">
       <header class="workers-card__header">
         <h2>Headteacher - Leo</h2>
@@ -1353,6 +1402,33 @@
             if (btn) btn.textContent = 'Inahifadhi...';
           }
 
+          // ── Head Finance-specific check-in gate ──
+          if (role.includes('head_finance')) {
+            if (btn) btn.textContent = 'Inaangalia kazi za siku...';
+            const prevCheck = await checkHeadFinancePreviousDayIncomplete(systemYear);
+            if (prevCheck.blocked) {
+              toast(prevCheck.message, 'error');
+              await new Promise(r => setTimeout(r, 2500));
+              return;
+            }
+            const existingHFPlanSnap = await schoolRef(`years/${systemYear}/headFinanceCheckinPlan/${dayKey}`).once('value');
+            if (!existingHFPlanSnap.val()) {
+              if (btn) btn.textContent = 'Inaandaa orodha...';
+              const [hfCallList, directorTasks] = await Promise.all([
+                buildHeadFinanceCallList(systemYear, dayKey),
+                loadDirectorTasksForToday(systemYear, dayKey),
+              ]);
+              if (btn) { btn.disabled = false; btn.textContent = 'Check-In Sasa'; }
+              const result = await showHeadFinanceCheckinModal(hfCallList, directorTasks);
+              if (!result.confirmed) {
+                toast('Check-in imeghairiwa.', 'info');
+                return;
+              }
+              if (btn) { btn.disabled = true; btn.textContent = 'Inahifadhi...'; }
+              await saveHeadFinanceCheckinPlan(systemYear, dayKey, hfCallList, result);
+            }
+          }
+
           // ── Accountant-specific check-in gate (inside same role block) ──
           if (role.includes('accountant')) {
             if (btn) btn.textContent = 'Inaangalia kazi za siku...';
@@ -1385,6 +1461,18 @@
         if (direction === 'out' && !existing.checkInTs) {
           toast('Hujafanya check-in bado.', 'warning');
           return;
+        }
+
+        // ── Head Finance checkout gate ──
+        if (direction === 'out' && isHeadFinance()) {
+          if (btn) btn.textContent = 'Inathibitisha kazi...';
+          const validation = await validateHeadFinanceCheckout(systemYear, dayKey);
+          if (!validation.valid) {
+            toast(validation.message, 'error');
+            await new Promise(r => setTimeout(r, 2500));
+            window.location.href = 'workersdashboard.html';
+            return;
+          }
         }
 
         // ── Accountant checkout gate ──
@@ -1783,6 +1871,15 @@
       return role.includes('accountant');
     }
 
+    function isHeadFinance() {
+      const role = (
+        state.profile?.role ||
+        localStorage.getItem('role') ||
+        sessionStorage.getItem('role') || ''
+      ).toLowerCase();
+      return role.includes('head_finance');
+    }
+
     async function buildAccountantCallList(year, todayKey) {
       // 1. Load all past call reports to know who was reachable vs unreachable
       let allReports = {};
@@ -2008,6 +2105,284 @@
       };
       await schoolRef(`years/${year}/accountantCheckinPlan/${dayKey}`).set(plan);
     }
+
+    // ==================== HEAD FINANCE FUNCTIONS ====================
+
+    async function buildHeadFinanceCallList(year, todayKey) {
+      // Load all past head_finance call reports for priority sorting
+      let allHFReports = {};
+      try {
+        const snap = await schoolRef(`years/${year}/headFinanceCallReports`).once('value');
+        allHFReports = snap.val() || {};
+      } catch (e) { /* non-fatal */ }
+
+      const reachable = new Set();
+      const notReachable = new Set();
+      Object.entries(allHFReports).forEach(([dayK, dayReports]) => {
+        if (dayK === todayKey) return;
+        Object.entries(dayReports || {}).forEach(([sid, report]) => {
+          if (report.status === 'available') {
+            reachable.add(sid);
+            notReachable.delete(sid);
+          } else if (report.status === 'not_available' && !reachable.has(sid)) {
+            notReachable.add(sid);
+          }
+        });
+      });
+
+      // Load finance data
+      if (!window.SomapFinance) return [];
+      let entries = {};
+      try {
+        entries = await window.SomapFinance.getYearFinanceEntries(year);
+      } catch (e) {
+        console.warn('Finance entries load failed', e);
+        return [];
+      }
+
+      // Build full debtors list (same logic as accountant)
+      const debtors = [];
+      const now = Date.now();
+      const correctYear = Number(year) || new Date().getFullYear();
+
+      Object.entries(entries || {}).forEach(([sid, entry]) => {
+        const student = entry.student || {};
+        if (student.isGraduated) return;
+        const outstanding = Number(entry.outstanding || 0);
+        if (outstanding <= 0) return;
+
+        function fixTS(ts) {
+          if (!ts || ts <= 0) return 0;
+          const d = new Date(ts);
+          if (d.getFullYear() < 2020) {
+            return new Date(correctYear, d.getMonth(), d.getDate()).getTime();
+          }
+          return ts;
+        }
+
+        function buildCorrectSchedule() {
+          const raw = entry.finance?.scheduleItems || [];
+          const plan = (student.paymentPlan || '').toLowerCase();
+          const cls  = (student.classLevel  || student.className || '').toLowerCase();
+          const isSix  = plan.includes('(6)') || /\b6\s*inst/i.test(plan);
+          const isFour = plan.includes('(4)') || /\b4\s*inst/i.test(plan);
+          const expectedCount = isSix ? 6 : isFour ? 4 : 0;
+          if (expectedCount === 0 || raw.length === expectedCount) return raw;
+          const sixWins  = [[[12,1],[1,10]],[[3,1],[3,15]],[[4,1],[4,15]],[[5,1],[5,15]],[[7,1],[7,15]],[[9,1],[9,15]]];
+          const fourWins = [[[12,1],[1,10]],[[3,1],[3,15]],[[4,1],[4,15]],[[5,1],[5,15]]];
+          const sixWeights  = { 'class 5':[44,23,22,32,26,17], 'class 6':[236,115,110,160,160,100] };
+          const wins    = isSix ? sixWins : fourWins;
+          const weights = isSix ? (sixWeights[cls] || [44,13,12,22,22,16]) : [328,180,176,132];
+          const wSum    = weights.reduce((a,b)=>a+b,0);
+          const carry   = Math.max(0, Number(student.carryAmount || 0));
+          const base    = Math.max(0, Number(student.feePerYear || 0) - carry);
+          const amts    = weights.map(w => Math.floor(base * w / wSum));
+          let rem = base - amts.reduce((a,b)=>a+b,0);
+          for (let i = 0; i < amts.length && rem > 0; i++, rem--) amts[i]++;
+          if (carry > 0 && amts.length) amts[0] += carry;
+          return wins.map((w, i) => ({
+            toTS: new Date(w[1][0] === 12 ? correctYear - 1 : correctYear, w[1][0]-1, w[1][1], 23, 59, 59, 999).getTime(),
+            amount: amts[i] || 0
+          }));
+        }
+
+        const scheduleItems = buildCorrectSchedule();
+        const expectedToDate = scheduleItems.reduce((sum, item) => {
+          const ts = fixTS(item.toTS);
+          return sum + (ts > 0 && ts < now ? (item.amount || 0) : 0);
+        }, 0);
+        const paidConsumed = Number(entry.finance?.paidAmount || 0) - Number(entry.finance?.credit || 0);
+        const correctedDebtTillNow = Math.max(0, expectedToDate - paidConsumed);
+        if (correctedDebtTillNow <= 0) return;
+
+        const dueByToday = scheduleItems.filter(item => { const ts = fixTS(item.toTS); return ts > 0 && ts < now; });
+        if (dueByToday.length === 0) return;
+        const lastDueTs = fixTS(dueByToday[dueByToday.length - 1].toTS);
+        const debtTillDate = new Date(lastDueTs);
+        const debtTill = debtTillDate.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' });
+
+        debtors.push({
+          studentId: sid,
+          name: String(
+            student.fullName ||
+            [student.firstName, student.middleName, student.lastName].filter(Boolean).join(' ')
+          ).trim() || sid,
+          classLevel: student.classLevel || student.className || '-',
+          phone: student.primaryParentContact || String(entry.parentContact || '').trim() || '-',
+          debtTill,
+          debtAmount: correctedDebtTillNow,
+          balance: outstanding,
+          isNotReachable: notReachable.has(sid),
+          debtTillTs: lastDueTs,
+        });
+      });
+
+      // Sort same priority as accountant
+      function callPriority(d) {
+        if (d.isNotReachable) return 0;
+        if (!reachable.has(d.studentId)) return 1;
+        return 2;
+      }
+      debtors.sort((a, b) => {
+        const pa = callPriority(a), pb = callPriority(b);
+        if (pa !== pb) return pa - pb;
+        return a.debtTillTs - b.debtTillTs;
+      });
+
+      // Load accountant's plan for today to exclude their 60 students
+      const accountantStudentIds = new Set();
+      try {
+        const accPlanSnap = await schoolRef(`years/${year}/accountantCheckinPlan/${todayKey}`).once('value');
+        const accPlan = accPlanSnap.val();
+        if (accPlan && Array.isArray(accPlan.callList)) {
+          accPlan.callList.forEach(s => accountantStudentIds.add(s.studentId));
+        }
+      } catch (e) { /* non-fatal */ }
+
+      // If accountant hasn't checked in yet, reserve first 60 for them and take 61-120
+      // If accountant has checked in, skip their specific students
+      let available;
+      if (accountantStudentIds.size > 0) {
+        available = debtors.filter(d => !accountantStudentIds.has(d.studentId));
+      } else {
+        available = debtors.slice(60); // reserve first 60 for accountant
+      }
+
+      return available.slice(0, 60);
+    }
+
+    function showHeadFinanceCheckinModal(callList, directorTasks) {
+      return new Promise((resolve) => {
+        const overlay = document.getElementById('hf-checkin-overlay');
+        overlay.style.display = 'flex';
+
+        const dirSection = document.getElementById('hf-director-tasks-section');
+        const dirList = document.getElementById('hf-director-tasks-list');
+        const dirEntries = Object.entries(directorTasks || {});
+        if (dirEntries.length) {
+          dirSection.style.display = '';
+          dirList.innerHTML = dirEntries.map(([id, t]) => `
+            <label class="acc-task-label">
+              <input type="checkbox" name="hf_director_task" value="${id}" checked>
+              <div>
+                <span style="color:#e2e8f0;font-weight:600;">${t.task || String(t)}</span>
+                <div style="font-size:0.78rem;color:#94a3b8;">Imeongezwa na: ${t.addedBy || 'Mkurugenzi'} &bull; Kwa: ${t.targetRole || 'wote'}</div>
+              </div>
+            </label>`).join('');
+        } else {
+          dirSection.style.display = 'none';
+        }
+
+        const loadingEl = document.getElementById('hf-call-list-loading');
+        const previewEl = document.getElementById('hf-call-list-preview');
+        loadingEl.style.display = 'none';
+        previewEl.style.display = '';
+        if (!callList.length) {
+          previewEl.innerHTML = '<p style="color:#34d399;font-size:0.88rem;">Hakuna wanafunzi wenye madeni ya sasa leo (au wote wamegawiwa mhasibu).</p>';
+        } else {
+          const shown = callList.slice(0, 10);
+          const extra = callList.length - shown.length;
+          previewEl.innerHTML = `
+            <p style="color:#fbbf24;font-weight:700;margin-bottom:8px;">Wanafunzi ${callList.length} wa kupigwa simu leo (sehemu yako):</p>
+            ${shown.map((s, i) => `
+              <div class="acc-student-row">
+                <strong>${i + 1}. ${s.name}</strong> &bull; ${s.classLevel}
+                &bull; <span style="color:#22d3ee;">${s.phone}</span>
+                &bull; <span style="color:#fb7185;">Deni till: ${s.debtTill}</span>
+                &bull; TZS ${(s.debtAmount || 0).toLocaleString('sw-TZ')}
+                ${s.isNotReachable ? '<span style="color:#fbbf24;font-size:0.75rem;"> ↺ Haikupigwa jana</span>' : ''}
+              </div>`).join('')}
+            ${extra > 0 ? `<p style="font-size:0.8rem;color:#94a3b8;margin-top:6px;">...na wanafunzi ${extra} zaidi kwenye orodha kamili.</p>` : ''}`;
+        }
+
+        document.getElementById('hf-fullscreen-btn').onclick = () => {
+          if (!document.fullscreenElement) overlay.requestFullscreen().catch(() => {});
+          else document.exitFullscreen().catch(() => {});
+        };
+        document.getElementById('hf-checkin-cancel-btn').onclick = () => {
+          overlay.style.display = 'none';
+          resolve({ confirmed: false });
+        };
+        document.getElementById('hf-checkin-confirm-btn').onclick = () => {
+          const checkedMandatory = [...document.querySelectorAll('#hf-checkin-overlay input[name="hf_mandatory_task"]:checked')].map(e => e.value);
+          const checkedDirector = [...document.querySelectorAll('#hf-checkin-overlay input[name="hf_director_task"]:checked')].map(e => e.value);
+          overlay.style.display = 'none';
+          resolve({ confirmed: true, checkedMandatory, checkedDirector });
+        };
+      });
+    }
+
+    async function saveHeadFinanceCheckinPlan(year, dayKey, callList, confirmed) {
+      const plan = {
+        workerId: state.workerId,
+        callList: callList.map(s => ({
+          studentId: s.studentId,
+          name: s.name,
+          classLevel: s.classLevel,
+          phone: s.phone,
+          debtTill: s.debtTill,
+          debtAmount: s.debtAmount || 0,
+          balance: s.balance || 0,
+        })),
+        mandatoryTasks: confirmed.checkedMandatory || [],
+        directorTaskIds: confirmed.checkedDirector || [],
+        confirmedAt: Date.now(),
+      };
+      await schoolRef(`years/${year}/headFinanceCheckinPlan/${dayKey}`).set(plan);
+    }
+
+    async function validateHeadFinanceCheckout(year, todayKey) {
+      try {
+        const planSnap = await schoolRef(`years/${year}/headFinanceCheckinPlan/${todayKey}`).once('value');
+        const plan = planSnap.val();
+        if (!plan || !Array.isArray(plan.callList) || plan.callList.length === 0) return { valid: true };
+        const reportsSnap = await schoolRef(`years/${year}/headFinanceCallReports/${todayKey}`).once('value');
+        const reports = reportsSnap.val() || {};
+        const uncalled = plan.callList.filter(s => {
+          const r = reports[s.studentId];
+          return !r || !r.status;
+        });
+        if (uncalled.length > 0) {
+          return {
+            valid: false,
+            message: `Bado una wazazi ${uncalled.length} kati ya ${plan.callList.length} ambao hukupiga simu leo. Nenda dashibodi ukamilishe orodha kwanza kabla ya checkout.`,
+          };
+        }
+        return { valid: true };
+      } catch (e) {
+        console.warn('Head finance checkout validation error', e);
+        return { valid: true };
+      }
+    }
+
+    async function checkHeadFinancePreviousDayIncomplete(year) {
+      try {
+        for (let delta = 1; delta <= 4; delta++) {
+          const d = new Date(Date.now() - delta * 86400000);
+          if (d.getDay() === 0) continue; // skip Sundays
+          const dY = String(d.getFullYear());
+          const dM = String(d.getMonth() + 1).padStart(2, '0');
+          const dD = String(d.getDate()).padStart(2, '0');
+          const dKey = `${dY}${dM}${dD}`;
+          const planSnap = await schoolRef(`years/${dY}/headFinanceCheckinPlan/${dKey}`).once('value');
+          const plan = planSnap.val();
+          if (!plan || !Array.isArray(plan.callList) || plan.callList.length === 0) break;
+          const reportsSnap = await schoolRef(`years/${dY}/headFinanceCallReports/${dKey}`).once('value');
+          const reports = reportsSnap.val() || {};
+          const uncalled = plan.callList.filter(s => { const r = reports[s.studentId]; return !r || !r.status; });
+          if (uncalled.length > 0) {
+            return {
+              blocked: true,
+              message: `Haukumaliza kazi ya ${dY}-${dM}-${dD}: wazazi ${uncalled.length} hawakupigwa simu. Nenda dashibodi ukamilishe orodha kwanza, kisha urudi kufanya check-in.`,
+            };
+          }
+          break;
+        }
+        return { blocked: false };
+      } catch (e) { return { blocked: false }; }
+    }
+
+    // ==================== END HEAD FINANCE FUNCTIONS ====================
 
     async function validateAccountantCheckout(year, todayKey) {
       try {
