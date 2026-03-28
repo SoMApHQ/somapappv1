@@ -2174,7 +2174,8 @@
       const classDefaultPlanId = String(student?._classDefaults?.defaultPlanId || student?._classDefaults?.defaultPlan || '').trim();
       const overridePlanId = String(student?.override?.planId || '').trim();
       const hasExplicitPlanOverride = Boolean(overridePlanId) && (!classDefaultPlanId || overridePlanId !== classDefaultPlanId);
-      const hasPlanSchedule = Array.isArray(student._planSchedule) && student._planSchedule.length > 0;
+      const planRows = Array.isArray(student._planSchedule) ? student._planSchedule.filter(Boolean) : [];
+      const hasPlanSchedule = planRows.length > 0;
       const planName = String(student.paymentPlan || '').toLowerCase();
       const isDifferentPlanType = planName.includes('monthly') || planName.includes('mwezi') || planName.includes('full');
 
@@ -2260,7 +2261,7 @@
       if (hasPlanSchedule) {
         const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
         const carryAmount = Math.max(0, Number(student.carryAmount || 0));
-        const rawExplicit = student._planSchedule.map((row) => Math.max(0, Number(row?.amount) || 0));
+        const rawExplicit = planRows.map((row) => Math.max(0, Number(row?.amount) || 0));
         const explicitSum = rawExplicit.reduce((a, b) => a + b, 0);
         const hasExplicitAmounts = rawExplicit.some((amt) => amt > 0) && explicitSum > 0;
         let amounts = [];
@@ -2280,7 +2281,7 @@
             }
           }
         } else {
-          let weights = student._planSchedule.map((row) => Math.max(0, Number(row?.weight) || 0));
+          let weights = planRows.map((row) => Math.max(0, Number(row?.weight) || 0));
           if (!weights.some((weight) => weight > 0)) weights = weights.map(() => 1);
           amounts = financeCallApportion(baseFee, weights);
         }
@@ -2291,8 +2292,8 @@
         }
 
         const monthlyPlan = planName.includes('monthly') || planName.includes('monthyl') || planName.includes('mwezi') ||
-          student._planSchedule.some((row) => String(row.label || '').includes('Monthly:'));
-        const schedule = student._planSchedule.map((row, i) => {
+          planRows.some((row) => String(row?.label || '').includes('Monthly:'));
+        const schedule = planRows.map((row, i) => {
           let toTS = financeCallParseScheduleTS(row.to, true, academicYear);
           if (monthlyPlan && toTS > 0 && new Date(toTS).getDate() !== 10) {
             const dt = new Date(toTS);
@@ -2554,8 +2555,12 @@
       const debtors = [];
       const academicYear = Number(year) || new Date().getFullYear();
       Object.entries(entries || {}).forEach(([studentId, entry]) => {
-        const debtor = financeCallComputeDebtorRecord(studentId, entry, academicYear);
-        if (debtor) debtors.push(debtor);
+        try {
+          const debtor = financeCallComputeDebtorRecord(studentId, entry, academicYear);
+          if (debtor) debtors.push(debtor);
+        } catch (e) {
+          console.warn('Skipping malformed finance debtor row', studentId, e);
+        }
       });
       return debtors;
     }
