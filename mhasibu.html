@@ -600,6 +600,14 @@
                       <span class="sidebar-tooltip">Food Invoices</span>
                       <span class="sidebar-expanded hidden ml-3 text-sm font-medium">Food Invoices</span>
                     </button>
+                    <!-- Call List Icon -->
+                    <button id="call-list-sidebar-btn" class="sidebar-icon flex items-center justify-center w-10 h-10 rounded-lg text-white mx-auto" onclick="openCallListPanel()"
+                            style="background: linear-gradient(135deg, #dc2626, #ef4444); position:relative; box-shadow:0 10px 24px -10px rgba(220,38,38,.7);">
+                      <i class="fas fa-phone-alt text-xl"></i>
+                      <span id="call-list-badge" style="display:none;position:absolute;top:-4px;right:-4px;background:#fbbf24;color:#0b1220;font-size:0.65rem;font-weight:900;border-radius:999px;min-width:18px;height:18px;line-height:18px;text-align:center;padding:0 3px;"></span>
+                      <span class="sidebar-tooltip">Orodha ya Simu — Debt Till</span>
+                      <span class="sidebar-expanded hidden ml-3 text-sm font-medium">Orodha ya Simu</span>
+                    </button>
                     <button class="sidebar-icon flex items-center justify-center w-10 h-10 rounded-lg text-white mx-auto" data-module="config" onclick="openPopup('Tofinancehtml/paymentedits.html')">
                         <i class="fas fa-gear text-xl"></i>
                         <span class="sidebar-tooltip">Config</span>
@@ -871,6 +879,44 @@
             </footer>
         </div>
     </div>
+    <!-- ===== CALL LIST PANEL ===== -->
+    <div id="call-list-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:900;" onclick="if(event.target===this)closeCallListPanel()"></div>
+    <div id="call-list-panel" style="display:none;position:fixed;top:0;right:0;bottom:0;width:min(720px,100%);background:#fff;z-index:901;box-shadow:-4px 0 24px rgba(0,0,0,0.18);overflow-y:auto;flex-direction:column;">
+      <div style="background:linear-gradient(135deg,#dc2626,#ef4444);color:#fff;padding:16px 18px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:10;">
+        <div>
+          <h2 style="margin:0;font-size:1.15rem;font-weight:800;"><i class="fas fa-phone-alt mr-2"></i>Orodha ya Kupiga Simu Leo</h2>
+          <p id="call-list-panel-date" style="margin:2px 0 0;font-size:0.82rem;opacity:0.85;"></p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span id="call-list-progress-badge" style="background:rgba(255,255,255,0.2);border-radius:999px;padding:4px 12px;font-size:0.82rem;font-weight:700;"></span>
+          <button onclick="closeCallListPanel()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-weight:700;">✕</button>
+        </div>
+      </div>
+      <div style="padding:14px 16px;">
+        <div id="call-list-panel-loading" style="color:#6b7280;padding:20px;text-align:center;"><i class="fas fa-spinner fa-spin mr-2"></i>Inapakia orodha...</div>
+        <div id="call-list-panel-content" style="display:none;">
+          <div id="call-list-panel-empty" style="display:none;text-align:center;padding:30px;color:#16a34a;">
+            <i class="fas fa-check-circle fa-2x mb-2"></i><br>Umekamilisha wito wote wa leo!
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:0.83rem;" id="call-list-table">
+            <thead>
+              <tr style="background:#f9fafb;border-bottom:2px solid #e5e7eb;">
+                <th style="padding:8px;text-align:left;color:#374151;">#</th>
+                <th style="padding:8px;text-align:left;color:#374151;">Jina / Name</th>
+                <th style="padding:8px;text-align:left;color:#374151;">Darasa</th>
+                <th style="padding:8px;text-align:left;color:#374151;">Simu / Phone</th>
+                <th style="padding:8px;text-align:left;color:#374151;">Deni Till</th>
+                <th style="padding:8px;text-align:left;color:#374151;">TZS</th>
+                <th style="padding:8px;text-align:left;color:#374151;">Hali / Status</th>
+              </tr>
+            </thead>
+            <tbody id="call-list-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <!-- ===== END CALL LIST PANEL ===== -->
+
     <!-- Popup -->
     <div class="popup" id="popup">
         <div class="popup-content">
@@ -920,6 +966,7 @@
             currentAccountant.name = userData.name || userData.fullName || user.displayName || user.email || 'Accountant';
             refreshFinanceScreens();
             loadAuditLog();
+            initCallListBadge();
             if (!hasBoundYearListener && yearManager && typeof yearManager.onYearChanged === 'function') {
                 hasBoundYearListener = true;
                 yearManager.onYearChanged(() => refreshFinanceScreens());
@@ -1572,6 +1619,260 @@
     });
     </script>
     <script>
+    // ==================== CALL LIST PANEL ====================
+
+    let _callListPlanCache = null;
+    let _callListReportsCache = null;
+
+    function todayKeyMhasibu() {
+        const d = new Date();
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${y}${m}${dd}`;
+    }
+
+    function schoolRefMhasibu(path) {
+        if (window.SOMAP && typeof window.SOMAP.P === 'function') return db.ref(window.SOMAP.P(path));
+        return db.ref(path);
+    }
+
+    function getMaxPaymentDate(debtTill) {
+        // Parse debt till date "M/D/YYYY"
+        if (!debtTill || debtTill === '-') return null;
+        const parts = debtTill.split('/');
+        if (parts.length !== 3) return null;
+        const base = new Date(Number(parts[2]), Number(parts[0]) - 1, Number(parts[1]));
+        if (isNaN(base.getTime())) return null;
+        base.setDate(base.getDate() + 4); // max 4 extra days
+        return base;
+    }
+
+    async function openCallListPanel() {
+        const panel = document.getElementById('call-list-panel');
+        const overlay = document.getElementById('call-list-overlay');
+        panel.style.display = 'flex';
+        overlay.style.display = 'block';
+        await loadCallListForPanel();
+    }
+
+    function closeCallListPanel() {
+        document.getElementById('call-list-panel').style.display = 'none';
+        document.getElementById('call-list-overlay').style.display = 'none';
+    }
+
+    async function loadCallListForPanel() {
+        const year = getSelectedYear();
+        const dayKey = todayKeyMhasibu();
+        const dateLabel = new Date().toLocaleDateString('sw-TZ', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+        document.getElementById('call-list-panel-date').textContent = dateLabel;
+
+        const loadingEl = document.getElementById('call-list-panel-loading');
+        const contentEl = document.getElementById('call-list-panel-content');
+        loadingEl.style.display = 'block';
+        contentEl.style.display = 'none';
+
+        try {
+            const [planSnap, reportsSnap] = await Promise.all([
+                schoolRefMhasibu(`years/${year}/accountantCheckinPlan/${dayKey}`).once('value'),
+                schoolRefMhasibu(`years/${year}/accountantCallReports/${dayKey}`).once('value'),
+            ]);
+            _callListPlanCache = planSnap.val();
+            _callListReportsCache = reportsSnap.val() || {};
+        } catch (e) {
+            console.warn('Call list load error', e);
+            _callListPlanCache = null;
+            _callListReportsCache = {};
+        }
+
+        loadingEl.style.display = 'none';
+        contentEl.style.display = 'block';
+        renderCallListPanel(year, dayKey);
+    }
+
+    function renderCallListPanel(year, dayKey) {
+        const plan = _callListPlanCache;
+        const reports = _callListReportsCache || {};
+        const tbody = document.getElementById('call-list-tbody');
+        const emptyEl = document.getElementById('call-list-panel-empty');
+        const tableEl = document.getElementById('call-list-table');
+        const progressBadge = document.getElementById('call-list-progress-badge');
+
+        if (!plan || !Array.isArray(plan.callList) || plan.callList.length === 0) {
+            tbody.innerHTML = '';
+            tableEl.style.display = 'none';
+            emptyEl.style.display = 'block';
+            emptyEl.innerHTML = '<i class="fas fa-info-circle fa-2x mb-2" style="color:#6b7280"></i><br><span style="color:#6b7280">Hakuna orodha ya leo. Mhasibu hajafanya check-in bado au hakuna wanafunzi wenye madeni.</span>';
+            progressBadge.textContent = '0/0';
+            return;
+        }
+
+        const callList = plan.callList;
+        const done = callList.filter(s => reports[s.studentId] && reports[s.studentId].status).length;
+        progressBadge.textContent = `${done}/${callList.length} imekamilika`;
+
+        // Update badge on sidebar icon
+        const badge = document.getElementById('call-list-badge');
+        const remaining = callList.length - done;
+        if (remaining > 0) {
+            badge.style.display = '';
+            badge.textContent = remaining;
+        } else {
+            badge.style.display = 'none';
+        }
+
+        if (done === callList.length && callList.length > 0) {
+            emptyEl.style.display = 'block';
+            tableEl.style.display = 'none';
+        } else {
+            emptyEl.style.display = 'none';
+            tableEl.style.display = '';
+        }
+
+        tbody.innerHTML = callList.map((s, i) => {
+            const report = reports[s.studentId] || {};
+            const isDone = !!report.status;
+            const maxDate = getMaxPaymentDate(s.debtTill);
+            const maxDateStr = maxDate ? maxDate.toISOString().slice(0, 10) : '';
+            const bgColor = isDone ? (report.status === 'available' ? '#f0fdf4' : '#fef9c3') : '#fff';
+
+            const statusOptions = [
+                `<option value="">-- Chagua hali --</option>`,
+                `<option value="available" ${report.status === 'available' ? 'selected' : ''}>✅ Alijibu (Available)</option>`,
+                `<option value="not_available" ${report.status === 'not_available' ? 'selected' : ''}>❌ Hakujibu (Not Available)</option>`,
+            ].join('');
+
+            const payDateRow = `<div id="paydate-row-${s.studentId}" style="display:${report.status === 'available' ? 'block' : 'none'};margin-top:6px;">
+                <label style="font-size:0.75rem;color:#374151;font-weight:700;">Tarehe ya kulipa (max ${maxDateStr || s.debtTill}):</label><br>
+                <input type="date" id="paydate-${s.studentId}" value="${report.scheduledPaymentDate || ''}" max="${maxDateStr}"
+                    style="border:1px solid #d1d5db;border-radius:6px;padding:4px 8px;font-size:0.8rem;width:100%;margin-top:2px;"
+                    onchange="validatePayDate('${s.studentId}','${s.debtTill}','${maxDateStr}')">
+                <span id="paydate-err-${s.studentId}" style="color:#dc2626;font-size:0.75rem;display:none;"></span>
+            </div>`;
+
+            const notesRow = `<div style="margin-top:6px;">
+                <textarea id="notes-${s.studentId}" rows="2" placeholder="Maelezo ya ziada (optional)..."
+                    style="border:1px solid #d1d5db;border-radius:6px;padding:4px 8px;font-size:0.8rem;width:100%;resize:vertical;">${report.notes || ''}</textarea>
+            </div>`;
+
+            const callCount = Number(report.callAttempts || 0);
+            const callWarning = callCount >= 2
+                ? `<div style="color:#dc2626;font-size:0.75rem;font-weight:700;margin-top:4px;">⚠ Imepigwa simu mara ${callCount}. Ukumbusho wa pili utafikiwa.</div>` : '';
+
+            return `<tr style="background:${bgColor};border-bottom:1px solid #e5e7eb;" id="call-row-${s.studentId}">
+                <td style="padding:8px 6px;vertical-align:top;font-weight:700;color:#6b7280;">${i + 1}</td>
+                <td style="padding:8px 6px;vertical-align:top;">
+                    <strong style="color:#111827;">${s.name}</strong>
+                    ${s.isNotReachable ? '<br><span style="color:#f59e0b;font-size:0.72rem;">↺ Haikupigwa jana</span>' : ''}
+                    ${callWarning}
+                </td>
+                <td style="padding:8px 6px;vertical-align:top;">${s.classLevel || '-'}</td>
+                <td style="padding:8px 6px;vertical-align:top;">
+                    <a href="tel:${s.phone}" style="color:#2563eb;font-weight:700;">${s.phone || '-'}</a>
+                </td>
+                <td style="padding:8px 6px;vertical-align:top;color:#dc2626;font-weight:700;">${s.debtTill || '-'}</td>
+                <td style="padding:8px 6px;vertical-align:top;">TZS ${(s.debtAmount || 0).toLocaleString('sw-TZ')}</td>
+                <td style="padding:8px 6px;vertical-align:top;min-width:220px;">
+                    <select id="status-${s.studentId}" onchange="onCallStatusChange('${s.studentId}','${s.debtTill}','${maxDateStr}')"
+                        style="border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font-size:0.82rem;width:100%;margin-bottom:4px;">${statusOptions}</select>
+                    ${payDateRow}
+                    ${notesRow}
+                    <button type="button" onclick="saveCallReport('${s.studentId}','${year}','${dayKey}')"
+                        style="margin-top:6px;background:#16a34a;color:#fff;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;font-weight:700;width:100%;">
+                        💾 Hifadhi Ripoti
+                    </button>
+                    ${isDone ? `<div style="font-size:0.73rem;color:#16a34a;margin-top:3px;">✓ Imehifadhiwa ${report.reportedAt ? new Date(report.reportedAt).toLocaleTimeString('sw-TZ') : ''}</div>` : ''}
+                </td>
+            </tr>`;
+        }).join('');
+    }
+
+    function onCallStatusChange(studentId, debtTill, maxDateStr) {
+        const sel = document.getElementById(`status-${studentId}`);
+        const payDateRow = document.getElementById(`paydate-row-${studentId}`);
+        if (sel && payDateRow) {
+            payDateRow.style.display = sel.value === 'available' ? 'block' : 'none';
+        }
+    }
+
+    function validatePayDate(studentId, debtTill, maxDateStr) {
+        const input = document.getElementById(`paydate-${studentId}`);
+        const errEl = document.getElementById(`paydate-err-${studentId}`);
+        if (!input || !errEl) return true;
+        if (!maxDateStr || !input.value) { errEl.style.display = 'none'; return true; }
+        const chosen = new Date(input.value);
+        const maxDate = new Date(maxDateStr);
+        if (chosen > maxDate) {
+            errEl.textContent = `❌ Tarehe hii ni mbali sana. Kiwango cha juu: ${maxDateStr}. Zaidi ya siku 4 inahitaji idhini ya mkurugenzi.`;
+            errEl.style.display = 'block';
+            return false;
+        }
+        errEl.style.display = 'none';
+        return true;
+    }
+
+    async function saveCallReport(studentId, year, dayKey) {
+        const statusEl = document.getElementById(`status-${studentId}`);
+        const notesEl = document.getElementById(`notes-${studentId}`);
+        const payDateEl = document.getElementById(`paydate-${studentId}`);
+        const status = statusEl ? statusEl.value : '';
+
+        if (!status) {
+            Swal.fire({ icon: 'warning', title: 'Chagua hali', text: 'Tafadhali chagua kama mzazi alijibu au hakujibu.', timer: 2000, showConfirmButton: false });
+            return;
+        }
+
+        if (status === 'available' && payDateEl && payDateEl.value) {
+            if (!validatePayDate(studentId, '', payDateEl.max)) return;
+        }
+
+        const existing = (_callListReportsCache || {})[studentId] || {};
+        const report = {
+            status,
+            notes: notesEl ? notesEl.value.trim() : '',
+            reportedAt: Date.now(),
+            callAttempts: (Number(existing.callAttempts || 0)) + (existing.status ? 0 : 1),
+        };
+        if (status === 'available' && payDateEl && payDateEl.value) {
+            report.scheduledPaymentDate = payDateEl.value;
+        }
+
+        try {
+            await schoolRefMhasibu(`years/${year}/accountantCallReports/${dayKey}/${studentId}`).update(report);
+            if (!_callListReportsCache) _callListReportsCache = {};
+            _callListReportsCache[studentId] = { ...(existing || {}), ...report };
+            renderCallListPanel(year, dayKey);
+            Swal.fire({ icon: 'success', title: 'Imehifadhiwa!', timer: 1200, showConfirmButton: false });
+        } catch (e) {
+            Swal.fire({ icon: 'error', title: 'Hitilafu', text: 'Imeshindikana kuhifadhi. Jaribu tena.' });
+        }
+    }
+
+    // Update the sidebar badge on page load
+    async function initCallListBadge() {
+        try {
+            const year = getSelectedYear();
+            const dayKey = todayKeyMhasibu();
+            const [planSnap, reportsSnap] = await Promise.all([
+                schoolRefMhasibu(`years/${year}/accountantCheckinPlan/${dayKey}`).once('value'),
+                schoolRefMhasibu(`years/${year}/accountantCallReports/${dayKey}`).once('value'),
+            ]);
+            const plan = planSnap.val();
+            const reports = reportsSnap.val() || {};
+            if (plan && Array.isArray(plan.callList) && plan.callList.length > 0) {
+                const done = plan.callList.filter(s => reports[s.studentId] && reports[s.studentId].status).length;
+                const remaining = plan.callList.length - done;
+                const badge = document.getElementById('call-list-badge');
+                if (badge) {
+                    badge.style.display = remaining > 0 ? '' : 'none';
+                    badge.textContent = remaining;
+                }
+            }
+        } catch (e) { /* non-fatal */ }
+    }
+
+    // =====================================================================
+
     (function initYearSelector(){
         const sel = document.querySelector('[data-somap-year-select]');
         const hint = document.getElementById('somapYearHint');
