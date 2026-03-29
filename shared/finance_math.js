@@ -213,16 +213,22 @@
   function getConfig(student){
     const plan = L(student?.paymentPlan || '');
     const cls = L(student?.classLevel || student?.className || '');
+    const isFourInst = plan.includes('(4)') || /\b4\s*inst/.test(plan) || /mku\.?\s*4/.test(plan);
+    const isSixInst = plan.includes('(6)') || /\b6\s*inst/.test(plan) || /dirisha la malipo\s*\(6\)/.test(plan);
     if (plan.includes('monthly') || plan.includes('mwezi')) return installmentConfigs.monthly || installmentConfigs.lower;
     if (plan.includes('2')) return installmentConfigs['2inst'];
     if (plan.includes('full')) return installmentConfigs.full;
-    if (plan.includes('4') || (plan.includes('inst') && (cls === 'class 4' || cls === 'class 7'))) return installmentConfigs.class4_7;
-    if (plan.includes('inst')) {
+    if (isFourInst || (plan.includes('inst') && (cls === 'class 4' || cls === 'class 7'))) return installmentConfigs.class4_7;
+    if (isSixInst || plan.includes('inst')) {
       if (cls === 'class 1' || cls === 'class 2' || cls === 'class 3') return installmentConfigs.lower;
       if (cls === 'class 5') return installmentConfigs.class5;
       if (cls === 'class 6') return installmentConfigs.class6;
     }
-    return installmentConfigs.full;
+    if (cls === 'class 1' || cls === 'class 2' || cls === 'class 3') return installmentConfigs.lower;
+    if (cls === 'class 4' || cls === 'class 7') return installmentConfigs.class4_7;
+    if (cls === 'class 5') return installmentConfigs.class5;
+    if (cls === 'class 6') return installmentConfigs.class6;
+    return installmentConfigs.lower;
   }
 
   function normalizePayments(source, targetYear){
