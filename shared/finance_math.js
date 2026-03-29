@@ -403,13 +403,81 @@
     const alloc = allocatePayments(student, schedule);
     const paidAfterPrev = Math.max(0, alloc.totalPaid - (previousDebt - alloc.prevDebtAfter));
     const yearBalance = Math.max(0, feePerYear - paidAfterPrev);
+    const carryAmount = Math.max(0, Number(student.carryAmount || 0));
+    const totalPaid = Math.max(0, Number(alloc.totalPaid || 0));
+    const carryOutstanding = Math.max(0, carryAmount - totalPaid);
+    const hasCarryOutstanding = carryOutstanding > 0;
+    const paidAfterCarry = Math.max(0, totalPaid - carryAmount);
+    const nowTs = Date.now();
+    const overdueRowsForBase = (alloc.scheduleItems || [])
+      .filter((it) => Number(it.toTS || 0) > 0 && Number(it.toTS || 0) < nowTs)
+      .sort((a, b) => Number(a.toTS || 0) - Number(b.toTS || 0));
+    const overdueBaseExpected = overdueRowsForBase.reduce((sum, it) => {
+      const totalExpected = Math.max(0, Number(it.amount || 0));
+      const carryPart = Math.max(0, Number(it.carryComponent || 0));
+      const installmentPart = Math.max(0, totalExpected - carryPart);
+      return sum + installmentPart;
+    }, 0);
+    const overdueBaseOutstanding = Math.max(0, overdueBaseExpected - paidAfterCarry);
+    const overdueRows = (alloc.scheduleItems || []).filter((it) => {
+      const remaining = Math.max(0, Number(it.amount || 0) - Number(it.paidAllocated || 0));
+      return Number(it.toTS || 0) > 0 && isPast(Number(it.toTS)) && remaining > 0;
+    });
+    const latestOverdue = overdueRows.length
+      ? overdueRows.reduce((latest, row) => (Number(row.toTS || 0) > Number(latest.toTS || 0) ? row : latest), overdueRows[0])
+      : null;
+    const overdueThroughTsRaw = latestOverdue ? Number(latestOverdue.toTS || 0) : 0;
+    const isOverdueDebtBase = overdueThroughTsRaw > 0 && alloc.debtTillNow > 0;
+    const nextInstallmentStartTs = getNextInstallmentStartTs(alloc.scheduleItems || [], overdueThroughTsRaw);
+    const extensionRecord = isOverdueDebtBase ? pickLatestDeadlineExtension(student, overdueThroughTsRaw) : null;
+    let overdueThroughTs = overdueThroughTsRaw;
+    if (extensionRecord && Number(extensionRecord.newDeadlineTs || 0) > 0) {
+      overdueThroughTs = Number(extensionRecord.newDeadlineTs);
+      if (nextInstallmentStartTs > 0) {
+        overdueThroughTs = Math.min(overdueThroughTs, nextInstallmentStartTs - 1);
+      }
+    }
+    const extensionActive = isOverdueDebtBase && overdueThroughTs > 0 && Date.now() <= overdueThroughTs;
+    const isOverdueDebt = isOverdueDebtBase && !extensionActive;
+    const selectedYear = Number(targetYear);
+    const prevYearNum = Number.isFinite(selectedYear) ? selectedYear - 1 : new Date().getFullYear() - 1;
+    const carryOverdueTs = new Date(prevYearNum, 11, 31, 23, 59, 59, 999).getTime();
+    const effectivelyCarryDebt = (hasCarryOutstanding || (carryAmount > 0 && yearBalance > 0 && yearBalance <= carryAmount + 100)) && !isOverdueDebt;
+    const periodDebtLabel = (isOverdueDebtBase && overdueThroughTs > 0)
+      ? new Date(overdueThroughTs).toLocaleDateString()
+      : (effectivelyCarryDebt ? new Date(carryOverdueTs).toLocaleDateString() : '-');
+    const overdueWindowLabel = ((isOverdueDebtBase || extensionActive) && latestOverdue)
+      ? `${new Date(Number(latestOverdue.fromTS || 0)).toLocaleDateString()} - ${new Date(Number(overdueThroughTs || latestOverdue.toTS || 0)).toLocaleDateString()}`
+      : (effectivelyCarryDebt
+          ? `Carry from ${prevYearNum} — due by ${new Date(carryOverdueTs).toLocaleDateString()}`
+          : '-');
+    const debtTillNowCapped = Math.min(
+      Math.max(0, Number(alloc.debtTillNow || 0)),
+      Math.max(0, Number(yearBalance || 0))
+    );
+    const debtForCollection = (isOverdueDebt || overdueRows.length > 0)
+      ? debtTillNowCapped
+      : Math.max(0, (hasCarryOutstanding ? carryOutstanding : 0) + overdueBaseOutstanding);
+    const debtForDisplay = debtForCollection > 0 ? debtForCollection : (effectivelyCarryDebt && yearBalance > 0 ? yearBalance : 0);
+    const finalPeriodDebtLabel = (debtForDisplay > 0 && effectivelyCarryDebt) ? new Date(carryOverdueTs).toLocaleDateString() : periodDebtLabel;
+    const finalOverdueWindowLabel = (debtForDisplay > 0 && effectivelyCarryDebt) ? `Carry from ${prevYearNum} — due by ${new Date(carryOverdueTs).toLocaleDateString()}` : overdueWindowLabel;
     return {
       feePerYear,
       previousDebt,
       paidAmount: alloc.totalPaid,
       balance: yearBalance,
-      periodDebtLabel: schedule.periodLabelNow || '-',
-      periodDebtValue: alloc.debtTillNow,
+      periodDebtLabel: finalPeriodDebtLabel,
+      periodDebtValue: debtForDisplay,
+      isOverdueDebt,
+      extensionActive,
+      extensionRecord: extensionRecord || null,
+      extensionCappedByNextInstallment: Boolean(extensionRecord && nextInstallmentStartTs > 0 && Number(extensionRecord.newDeadlineTs || 0) >= nextInstallmentStartTs),
+      nextInstallmentStartTs,
+      overdueThroughTs,
+      originalOverdueThroughTs: overdueThroughTsRaw,
+      overdueWindowLabel: finalOverdueWindowLabel,
+      hasCarryOutstanding: hasCarryOutstanding || effectivelyCarryDebt,
+      carryOutstanding,
       credit: alloc.credit,
       scheduleItems: alloc.scheduleItems
     };
