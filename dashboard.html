@@ -2064,10 +2064,14 @@
       function schoolRef(subPath) {
         return db.ref(SOMAP.P(subPath));
       }
-      const GRAD_EMAILS = new Set([
+      const SHARED_SOCRATES_ADMIN_EMAILS = new Set([
         "ssclass42023@gmail.com",
         "socratesschool2020@gmail.com",
       ]);
+      const GRAD_EMAILS = new Set(SHARED_SOCRATES_ADMIN_EMAILS);
+      const DASHBOARD_MODE_KEY = "somap_dashboard_mode";
+      const POST_CHECKIN_TARGET_KEY = "somap_post_checkin_target";
+      const HEAD_FINANCE_PREFERRED_NAME = "REHEMA JEMSI MLEKWA";
       // Language Translations
       const translations = {
         en: {
@@ -2148,6 +2152,291 @@
         if (desktopHint) desktopHint.textContent = year;
         if (mobileHint) mobileHint.textContent = year;
       }
+
+      function dashboardNormalizeRole(value) {
+        return String(value || "")
+          .trim()
+          .toLowerCase()
+          .replace(/[\s-]+/g, "_");
+      }
+
+      function getNairobiAttendanceKeys() {
+        const parts = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Africa/Nairobi",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).formatToParts(new Date());
+        const map = parts.reduce((acc, part) => {
+          if (part.type !== "literal") acc[part.type] = part.value;
+          return acc;
+        }, {});
+        const year = String(map.year || new Date().getFullYear());
+        const month = String(map.month || "01").padStart(2, "0");
+        const day = String(map.day || "01").padStart(2, "0");
+        return {
+          year,
+          month,
+          day,
+          monthKey: `${year}${month}`,
+          dayKey: `${year}${month}${day}`,
+        };
+      }
+
+      function shouldShowSharedAdminModeGate(user) {
+        const email = String(user?.email || "")
+          .trim()
+          .toLowerCase();
+        if (!email || !SHARED_SOCRATES_ADMIN_EMAILS.has(email)) return false;
+        return sessionStorage.getItem("dashboardReadOnly") !== "true";
+      }
+
+      function dashboardWorkerRowsFromSnapshot(snap) {
+        const rows = [];
+        if (!snap || typeof snap.forEach !== "function") return rows;
+        snap.forEach((child) => {
+          const raw = child.val() || {};
+          const profile =
+            raw.profile && typeof raw.profile === "object" ? raw.profile : raw;
+          rows.push({
+            id: String(child.key || ""),
+            raw,
+            profile,
+          });
+        });
+        return rows;
+      }
+
+      function dashboardWorkerNameUpper(worker) {
+        const profile = worker?.profile || {};
+        return String(
+          profile.fullNameUpper ||
+            [profile.firstName, profile.middleName, profile.lastName]
+              .filter(Boolean)
+              .join(" ") ||
+            worker?.id ||
+            ""
+        )
+          .trim()
+          .toUpperCase();
+      }
+
+      function isDashboardWorkerActive(worker) {
+        const profile = worker?.profile || {};
+        const raw = worker?.raw || {};
+        return profile.active !== false && raw.active !== false;
+      }
+
+      async function promptDashboardModeChoice() {
+        return new Promise((resolve) => {
+          let selectedMode = null;
+          Swal.fire({
+            width: 760,
+            showConfirmButton: false,
+            showCloseButton: false,
+            allowEscapeKey: false,
+            allowOutsideClick: false,
+            background: "linear-gradient(160deg, #fffaf0, #fff7ed 45%, #fef3c7 100%)",
+            padding: "2rem",
+            html: `
+              <div style="text-align:left;color:#422006;">
+                <div style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;background:rgba(245,158,11,0.14);color:#b45309;font-weight:800;font-size:0.8rem;letter-spacing:0.06em;text-transform:uppercase;">SoMAp Shared Access</div>
+                <h2 style="margin:16px 0 8px;font-size:2rem;line-height:1.1;color:#7c2d12;">Who are you today?</h2>
+                <p style="margin:0 0 18px;color:#9a3412;font-size:1rem;">Choose how you want to enter SoMAp today.</p>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;">
+                  <button type="button" id="dashboardModeDirectorBtn" style="text-align:left;padding:18px 18px 20px;border-radius:22px;border:1px solid rgba(148,163,184,0.22);background:linear-gradient(145deg,#ffffff,#f8fafc);box-shadow:0 18px 34px rgba(15,23,42,0.12);cursor:pointer;">
+                    <div style="font-size:0.82rem;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:#0f766e;">Director</div>
+                    <div style="margin-top:10px;font-size:1.25rem;font-weight:800;color:#0f172a;">Go straight to the dashboard</div>
+                    <div style="margin-top:8px;font-size:0.93rem;line-height:1.5;color:#475569;">No password prompt. No attendance check. Enter the normal control hub directly.</div>
+                  </button>
+                  <button type="button" id="dashboardModeHeadFinanceBtn" style="text-align:left;padding:18px 18px 20px;border-radius:22px;border:1px solid rgba(245,158,11,0.22);background:linear-gradient(145deg,#fff7ed,#fffbeb);box-shadow:0 22px 40px rgba(245,158,11,0.16);cursor:pointer;">
+                    <div style="font-size:0.82rem;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:#b45309;">Head of Finance</div>
+                    <div style="margin-top:10px;font-size:1.25rem;font-weight:800;color:#7c2d12;">Begin with today's warm check-in</div>
+                    <div style="margin-top:8px;font-size:0.93rem;line-height:1.5;color:#9a3412;">Check in first, then continue to approvals, finance, and the normal admin dashboard with the same admin access.</div>
+                  </button>
+                </div>
+              </div>
+            `,
+            didOpen: (popup) => {
+              popup
+                .querySelector("#dashboardModeDirectorBtn")
+                ?.addEventListener("click", () => {
+                  selectedMode = "director";
+                  Swal.close();
+                });
+              popup
+                .querySelector("#dashboardModeHeadFinanceBtn")
+                ?.addEventListener("click", () => {
+                  selectedMode = "head_finance";
+                  Swal.close();
+                });
+            },
+            willClose: () => {
+              resolve(selectedMode);
+            },
+          });
+        });
+      }
+
+      async function resolveHeadFinanceWorkerForYear(year) {
+        let workers = [];
+        try {
+          const scopedSnap = await schoolRef(`years/${year}/workers`).once(
+            "value"
+          );
+          workers = dashboardWorkerRowsFromSnapshot(scopedSnap);
+        } catch (error) {
+          console.warn("Failed to load scoped workers for head finance", error);
+        }
+
+        if (!workers.length) {
+          try {
+            const legacySnap = await db.ref("workers").once("value");
+            workers = dashboardWorkerRowsFromSnapshot(legacySnap);
+          } catch (error) {
+            console.warn("Failed to load legacy workers for head finance", error);
+          }
+        }
+
+        const candidates = workers
+          .filter((worker) => isDashboardWorkerActive(worker))
+          .filter((worker) =>
+            dashboardNormalizeRole(
+              worker?.profile?.role || worker?.raw?.role || ""
+            ).includes("head_finance")
+          )
+          .sort((a, b) => {
+            const aName = dashboardWorkerNameUpper(a);
+            const bName = dashboardWorkerNameUpper(b);
+            const aPreferred = aName === HEAD_FINANCE_PREFERRED_NAME ? 0 : 1;
+            const bPreferred = bName === HEAD_FINANCE_PREFERRED_NAME ? 0 : 1;
+            if (aPreferred !== bPreferred) return aPreferred - bPreferred;
+            return aName.localeCompare(bName, "en");
+          });
+
+        if (!candidates.length) return null;
+
+        const worker = candidates[0];
+        return {
+          id: worker.id,
+          raw: worker.raw,
+          profile: {
+            ...worker.profile,
+            id: worker.id,
+            workerId: worker.id,
+            role:
+              worker.profile?.role ||
+              worker.raw?.role ||
+              "head_finance",
+            fullNameUpper:
+              worker.profile?.fullNameUpper || dashboardWorkerNameUpper(worker),
+          },
+        };
+      }
+
+      async function hasWorkerCheckedInToday(workerId, year) {
+        const { monthKey, dayKey } = getNairobiAttendanceKeys();
+        const results = await Promise.allSettled([
+          schoolRef(
+            `years/${year}/workerAttendance/${workerId}/${monthKey}/${dayKey}`
+          ).once("value"),
+          db.ref(`attendance/${workerId}/${monthKey}/${dayKey}`).once("value"),
+        ]);
+        return results.some((result) => {
+          if (result.status !== "fulfilled") return false;
+          return Number(result.value?.val()?.checkInTs || 0) > 0;
+        });
+      }
+
+      function clearHeadFinanceAttendanceSession() {
+        sessionStorage.removeItem("workerId");
+        sessionStorage.removeItem("workerProfile");
+        sessionStorage.removeItem("role");
+        sessionStorage.removeItem("fullNameUpper");
+        sessionStorage.removeItem("somap_workerName");
+      }
+
+      function enterDirectorMode() {
+        clearHeadFinanceAttendanceSession();
+        sessionStorage.setItem(DASHBOARD_MODE_KEY, "director");
+        sessionStorage.removeItem(POST_CHECKIN_TARGET_KEY);
+        return true;
+      }
+
+      async function enterHeadFinanceMode() {
+        const selectedYear = getSelectedYear();
+        const worker = await resolveHeadFinanceWorkerForYear(selectedYear);
+        if (!worker) {
+          clearHeadFinanceAttendanceSession();
+          sessionStorage.removeItem(DASHBOARD_MODE_KEY);
+          sessionStorage.removeItem(POST_CHECKIN_TARGET_KEY);
+          await Swal.fire({
+            icon: "error",
+            title: "Head of Finance profile not found",
+            text: `No active Head of Finance worker was found for ${selectedYear}.`,
+            confirmButtonColor: "#f59e0b",
+          });
+          return false;
+        }
+
+        const workerProfile = {
+          ...worker.profile,
+          id: worker.id,
+          workerId: worker.id,
+          role: "head_finance",
+          fullNameUpper:
+            worker.profile?.fullNameUpper ||
+            dashboardWorkerNameUpper(worker),
+        };
+
+        sessionStorage.setItem("workerId", worker.id);
+        sessionStorage.setItem("workerProfile", JSON.stringify(workerProfile));
+        sessionStorage.setItem("role", "head_finance");
+        sessionStorage.setItem("fullNameUpper", workerProfile.fullNameUpper);
+        sessionStorage.setItem("somap_workerName", workerProfile.fullNameUpper);
+        sessionStorage.setItem(POST_CHECKIN_TARGET_KEY, "../dashboard.html");
+        sessionStorage.setItem(DASHBOARD_MODE_KEY, "head_finance");
+
+        const checkedIn = await hasWorkerCheckedInToday(worker.id, selectedYear);
+        if (checkedIn) return true;
+
+        const result = await Swal.fire({
+          title: "Check in first, Mum 💛",
+          text: "Your finance desk is waiting for you today. Please check in first, then continue to approvals, finance, or your dashboard.",
+          icon: "info",
+          confirmButtonText: "Go to Check-In",
+          cancelButtonText: "Cancel",
+          showCancelButton: true,
+          allowOutsideClick: false,
+          confirmButtonColor: "#f59e0b",
+          cancelButtonColor: "#475569",
+          background: "#fffaf0",
+        });
+
+        if (!result.isConfirmed) {
+          clearHeadFinanceAttendanceSession();
+          sessionStorage.removeItem(DASHBOARD_MODE_KEY);
+          sessionStorage.removeItem(POST_CHECKIN_TARGET_KEY);
+          return false;
+        }
+
+        window.location.href =
+          "workershtml/workersattendance.html?from=dashboard&returnTo=" +
+          encodeURIComponent("../dashboard.html");
+        return false;
+      }
+
+      async function ensureSharedAdminModeBeforeDashboard(user) {
+        if (!shouldShowSharedAdminModeGate(user)) return true;
+        const currentMode = sessionStorage.getItem(DASHBOARD_MODE_KEY);
+        if (currentMode === "director") return enterDirectorMode();
+        if (currentMode === "head_finance") return enterHeadFinanceMode();
+        const selectedMode = await promptDashboardModeChoice();
+        if (selectedMode === "director") return enterDirectorMode();
+        if (selectedMode === "head_finance") return enterHeadFinanceMode();
+        return false;
+      }
+
       let currentRole = "admin";
       let currentClassScope = "";
       let yearListenerBound = false;
@@ -3514,6 +3803,9 @@
         });
       // Logout
       document.getElementById("logout").addEventListener("click", () => {
+        clearHeadFinanceAttendanceSession();
+        sessionStorage.removeItem(DASHBOARD_MODE_KEY);
+        sessionStorage.removeItem(POST_CHECKIN_TARGET_KEY);
         auth.signOut().then(() => location.reload());
       });
       // Charts (Fee Trends)
@@ -3579,13 +3871,10 @@
         });
       bindRemedialUi();
       // Initial
-      auth.onAuthStateChanged((user) => {
+      auth.onAuthStateChanged(async (user) => {
         if (user) {
           
-          const ADMIN_EMAILS = new Set([
-            "socratesschool2020@gmail.com",
-            "ssclass42023@gmail.com",
-          ]);
+          const ADMIN_EMAILS = SHARED_SOCRATES_ADMIN_EMAILS;
 
           if (user.email && ADMIN_EMAILS.has(user.email.toLowerCase())) {
             // Force admin role on every device/browser
@@ -3781,6 +4070,10 @@
             }, 100);
           } else {
             // Normal mode - regular user access
+            const sharedModeReady = await ensureSharedAdminModeBeforeDashboard(
+              user
+            );
+            if (!sharedModeReady) return;
             const sidebarEl = document.getElementById("sidebar");
             if (sidebarEl) {
               sidebarEl.classList.remove("hidden");

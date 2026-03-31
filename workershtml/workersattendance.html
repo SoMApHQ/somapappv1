@@ -695,7 +695,11 @@
       state.profile = Object.keys(nested).length ? nested : raw;
 
       if (schoolNameEl && state.schoolName) {
-        const roleLabel = state.profile.role || localStorage.getItem('role') || '';
+        const roleLabel =
+          state.profile.role ||
+          sessionStorage.getItem('role') ||
+          localStorage.getItem('role') ||
+          '';
         schoolNameEl.textContent = `${state.schoolName} • ${roleLabel}`.trim();
       }
       updateWorkerMetaLine();
@@ -735,14 +739,14 @@
     function getWorkerName() {
       // 1) Immediate from localStorage/sessionStorage if available
       const storedName =
-        localStorage.getItem('fullNameUpper') ||
         sessionStorage.getItem('fullNameUpper') ||
-        localStorage.getItem('somap_workerName') ||
-        sessionStorage.getItem('somap_workerName');
+        sessionStorage.getItem('somap_workerName') ||
+        localStorage.getItem('fullNameUpper') ||
+        localStorage.getItem('somap_workerName');
       const storedRole =
-        localStorage.getItem('role') ||
-        sessionStorage.getItem('role') ||
         (state.profile && state.profile.role) ||
+        sessionStorage.getItem('role') ||
+        localStorage.getItem('role') ||
         '';
       if (storedName) {
         return storedRole ? `${storedName} • ${storedRole}` : storedName;
@@ -773,9 +777,124 @@
     function getCurrentRoleKey() {
       return normalizeRoleKey(
         state.profile?.role ||
-        localStorage.getItem('role') ||
-        sessionStorage.getItem('role') || ''
+        sessionStorage.getItem('role') ||
+        localStorage.getItem('role') || ''
       );
+    }
+
+    function getPostCheckinReturnTarget() {
+      const params = new URLSearchParams(window.location.search || '');
+      const raw =
+        params.get('returnTo') ||
+        sessionStorage.getItem('somap_post_checkin_target') ||
+        '../dashboard.html';
+      const target = String(raw || '').trim();
+      if (!target || /^(https?:|javascript:|data:)/i.test(target)) {
+        return '../dashboard.html';
+      }
+      return target;
+    }
+
+    function showHeadFinanceExplanationLetterModal(prevCheck) {
+      return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'mini-modal-overlay';
+        overlay.innerHTML = `
+          <div class="mini-modal-card" role="dialog" aria-modal="true" style="width:min(760px,100%);padding:18px;border-radius:18px;background:linear-gradient(165deg,rgba(15,23,42,0.98),rgba(30,41,59,0.98));">
+            <div style="display:grid;gap:8px;">
+              <div style="display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;background:rgba(250,204,21,0.12);color:#fde68a;font-size:0.76rem;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;width:max-content;">Head of Finance</div>
+              <h3 style="margin:0;color:#fff;font-size:1.15rem;">Tafadhali tuandikie maelezo ya jana</h3>
+              <p style="margin:0;color:#cbd5e1;line-height:1.6;">Jana, tarehe ${prevCheck.prevDayLabel || 'iliyopita'}, kulibaki wazazi ${((prevCheck.uncalledStudents || []).length).toLocaleString('sw-TZ')} ambao hawakupigiwa simu. Tunaomba maelezo ya kina, ya heshima, na ya kujenga ili uweze kuendelea na check-in ya leo.</p>
+              <p style="margin:0;color:#fbbf24;font-weight:800;font-size:0.9rem;">Andika barua ya maelezo yasiyopungua maneno 500.</p>
+            </div>
+            <textarea id="hfLetterInput" placeholder="Andika maelezo ya jana kwa utulivu, kwa uwazi, na kwa namna ya kujenga..." style="min-height:260px;resize:vertical;border-radius:14px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.05);color:var(--ink);padding:14px;font:inherit;"></textarea>
+            <p id="hfLetterCount" style="margin:0;color:#94a3b8;font-size:0.82rem;">Maneno: 0 / 500</p>
+            <div class="mini-modal-actions">
+              <button type="button" class="mini-modal-btn" data-act="cancel">Ghairi</button>
+              <button type="button" class="mini-modal-btn primary" data-act="submit" disabled>Wasilisha Barua &amp; Endelea</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(overlay);
+        const input = overlay.querySelector('#hfLetterInput');
+        const countEl = overlay.querySelector('#hfLetterCount');
+        const submitBtn = overlay.querySelector('button[data-act="submit"]');
+        const refreshState = () => {
+          const words = countWords(input?.value || '');
+          countEl.textContent = `Maneno: ${words} / 500`;
+          countEl.style.color = words >= 500 ? '#34d399' : '#fbbf24';
+          submitBtn.disabled = words < 500;
+        };
+        input?.addEventListener('input', refreshState);
+        input?.focus();
+        refreshState();
+        overlay.addEventListener('click', (event) => {
+          const btn = event.target.closest('button[data-act]');
+          if (!btn) return;
+          const action = btn.getAttribute('data-act');
+          if (action === 'cancel') {
+            overlay.remove();
+            resolve({ submitted: false });
+            return;
+          }
+          const letter = String(input?.value || '').trim();
+          if (countWords(letter) < 500) {
+            toast('Andika barua ya maelezo yasiyopungua maneno 500.', 'warning');
+            input?.focus();
+            refreshState();
+            return;
+          }
+          overlay.remove();
+          resolve({ submitted: true, letter });
+        });
+      });
+    }
+
+    async function saveHeadFinanceExplanationLetter(year, letterText, prevCheck) {
+      const todayKey = todayYMD().replace(/-/g, '');
+      await schoolRef(`years/${year}/headFinanceExplanationLetters/${todayKey}`).set({
+        workerId: state.workerId,
+        letter: letterText,
+        uncalledCount: (prevCheck.uncalledStudents || []).length,
+        prevDayLabel: prevCheck.prevDayLabel || '',
+        submittedAt: Date.now(),
+      });
+    }
+
+    function maybeOfferPostCheckinRedirect(direction) {
+      if (direction !== 'in' || !isHeadFinance()) return Promise.resolve(false);
+      const params = new URLSearchParams(window.location.search || '');
+      if ((params.get('from') || '').toLowerCase() !== 'dashboard') return Promise.resolve(false);
+      const returnTo = getPostCheckinReturnTarget();
+      return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'mini-modal-overlay';
+        overlay.innerHTML = `
+          <div class="mini-modal-card" role="dialog" aria-modal="true" style="width:min(620px,100%);padding:18px;border-radius:18px;background:linear-gradient(150deg,rgba(15,23,42,0.98),rgba(30,41,59,0.98));">
+            <h3 style="margin:0;color:#fff;font-size:1.18rem;">You are checked in successfully</h3>
+            <p style="margin:0;color:#cbd5e1;line-height:1.65;">Would you like to continue to the Control Hub or remain here and begin today's parent calls?</p>
+            <div class="mini-modal-actions" style="justify-content:space-between;gap:10px;flex-wrap:wrap;">
+              <button type="button" class="mini-modal-btn" data-act="stay">Stay Here</button>
+              <button type="button" class="mini-modal-btn primary" data-act="proceed">Proceed to Dashboard</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', (event) => {
+          const btn = event.target.closest('button[data-act]');
+          if (!btn) return;
+          const action = btn.getAttribute('data-act');
+          overlay.remove();
+          if (action === 'proceed') {
+            sessionStorage.setItem('somap_dashboard_mode', 'head_finance');
+            sessionStorage.setItem('somap_post_checkin_target', returnTo);
+            window.location.href = returnTo;
+            resolve(true);
+            return;
+          }
+          resolve(false);
+        });
+      });
     }
 
     function roleAliasSet(roleKey) {
@@ -879,7 +998,11 @@
       setInterval(updateWorkerMetaLine, 1000);
     }
 
-    function openReasonModal({ title, message, placeholder }) {
+    function countWords(text) {
+      return String(text || '').trim().split(/\s+/).filter((word) => word.length > 0).length;
+    }
+
+    function openReasonModal({ title, message, placeholder, minWords = 0 }) {
       return new Promise((resolve) => {
         const overlay = document.createElement('div');
         overlay.className = 'mini-modal-overlay';
@@ -887,16 +1010,31 @@
           <div class="mini-modal-card" role="dialog" aria-modal="true">
             <h3>${title}</h3>
             <p>${message}</p>
+            ${minWords > 0 ? `<p style="margin:0;color:#fbbf24;font-size:0.84rem;font-weight:700;">Andika maelezo yasiyopungua maneno ${minWords}.</p>` : ''}
             <textarea id="reasonInput" placeholder="${placeholder || 'Andika sababu hapa...'}"></textarea>
+            ${minWords > 0 ? `<p id="reasonWordCount" style="margin:0;color:#94a3b8;font-size:0.82rem;">Maneno: 0 / ${minWords}</p>` : ''}
             <div class="mini-modal-actions">
               <button type="button" class="mini-modal-btn" data-act="cancel">Cancel</button>
-              <button type="button" class="mini-modal-btn primary" data-act="save">Save</button>
+              <button type="button" class="mini-modal-btn primary" data-act="save" ${minWords > 0 ? 'disabled' : ''}>Save</button>
             </div>
           </div>
         `;
         document.body.appendChild(overlay);
         const input = overlay.querySelector('#reasonInput');
+        const saveBtn = overlay.querySelector('button[data-act="save"]');
+        const wordCountEl = overlay.querySelector('#reasonWordCount');
+        const refreshWordState = () => {
+          if (minWords <= 0) return;
+          const words = countWords(input?.value || '');
+          if (wordCountEl) {
+            wordCountEl.textContent = `Maneno: ${words} / ${minWords}`;
+            wordCountEl.style.color = words >= minWords ? '#34d399' : '#fbbf24';
+          }
+          if (saveBtn) saveBtn.disabled = words < minWords;
+        };
+        input?.addEventListener('input', refreshWordState);
         input?.focus();
+        refreshWordState();
         overlay.addEventListener('click', (event) => {
           const btn = event.target.closest('button[data-act]');
           if (!btn) return;
@@ -910,6 +1048,12 @@
           if (!reason) {
             toast('Sababu inahitajika.', 'warning');
             input?.focus();
+            return;
+          }
+          if (minWords > 0 && countWords(reason) < minWords) {
+            toast(`Andika maelezo yasiyopungua maneno ${minWords}.`, 'warning');
+            input?.focus();
+            refreshWordState();
             return;
           }
           overlay.remove();
@@ -1535,11 +1679,7 @@
 
         // Teacher-specific readiness gate
         if (direction === 'in') {
-          const role = (
-            state.profile?.role ||
-            localStorage.getItem('role') ||
-            sessionStorage.getItem('role') || ''
-          ).toLowerCase();
+          const role = getCurrentRoleKey();
           if (role.includes('teacher')) {
             if (btn) btn.textContent = 'Inathibitisha mahitaji...';
             try {
@@ -1562,9 +1702,15 @@
             if (btn) btn.textContent = 'Inaangalia kazi za siku...';
             const prevCheck = await checkHeadFinancePreviousDayIncomplete(systemYear);
             if (prevCheck.blocked) {
-              toast(prevCheck.message, 'error');
-              await new Promise(r => setTimeout(r, 2500));
-              return;
+              const letterResult = await showHeadFinanceExplanationLetterModal(prevCheck);
+              if (!letterResult.submitted) {
+                if (btn) { btn.disabled = false; btn.textContent = 'Check-In Sasa'; }
+                toast('Check-in imeghairiwa. Barua ya maelezo inahitajika kwanza.', 'warning');
+                return;
+              }
+              await saveHeadFinanceExplanationLetter(systemYear, letterResult.letter, prevCheck).catch((e) =>
+                console.warn('Head finance explanation letter save failed', e)
+              );
             }
             const existingHFPlanSnap = await schoolRef(`years/${systemYear}/headFinanceCheckinPlan/${dayKey}`).once('value');
             if (!existingHFPlanSnap.val()) {
@@ -1662,8 +1808,9 @@
           if (lateMinutes > 0) {
             const input = await openReasonModal({
               title: 'Sababu ya kuchelewa check-in',
-              message: 'Umechelewa. Tafadhali andika sababu kabla ya kuhifadhi.',
-              placeholder: 'Kwa nini umechelewa leo?'
+              message: 'Umechelewa. Tafadhali andika sababu kabla ya kuhifadhi. Andika maelezo yasiyopungua maneno 200.',
+              placeholder: 'Kwa nini umechelewa leo?',
+              minWords: 200
             });
             if (input === null) {
               toast('Check-in imeghairiwa; hakuna kilichohifadhiwa.', 'info');
@@ -1736,6 +1883,7 @@
           toast('Attendance saved to legacy RTDB path for compatibility.', 'info', 2500);
         }
         await refreshAll();
+        await maybeOfferPostCheckinRedirect(direction);
       } catch (error) {
         console.error('Check action failed', error);
         toast(`Imeshindikana kuhifadhi ${direction === 'in' ? 'check-in' : 'check-out'}. Jaribu tena.`, 'error');
@@ -2028,21 +2176,11 @@
     // ==================== ACCOUNTANT CHECK-IN SYSTEM ====================
 
     function isAccountant() {
-      const role = (
-        state.profile?.role ||
-        localStorage.getItem('role') ||
-        sessionStorage.getItem('role') || ''
-      ).toLowerCase();
-      return role.includes('accountant');
+      return getCurrentRoleKey().includes('accountant');
     }
 
     function isHeadFinance() {
-      const role = (
-        state.profile?.role ||
-        localStorage.getItem('role') ||
-        sessionStorage.getItem('role') || ''
-      ).toLowerCase();
-      return role.includes('head_finance');
+      return getCurrentRoleKey().includes('head_finance');
     }
 
     function financeCallDateFromYMD(y, m, d, endOfDay = false) {
@@ -3276,7 +3414,9 @@
           if (uncalled.length > 0) {
             return {
               blocked: true,
-              message: `Haukumaliza kazi ya ${dY}-${dM}-${dD}: wazazi ${uncalled.length} hawakupigwa simu. Nenda dashibodi ukamilishe orodha kwanza, kisha urudi kufanya check-in.`,
+              uncalledStudents: uncalled,
+              prevDayLabel: `${dY}-${dM}-${dD}`,
+              message: `Haukumaliza kazi ya ${dY}-${dM}-${dD}: wazazi ${uncalled.length} hawakupigwa simu.`,
             };
           }
           break;
