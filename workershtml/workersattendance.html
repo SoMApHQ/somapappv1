@@ -283,6 +283,22 @@
     </div>
     <!-- ===== END ACCOUNTANT MODAL ===== -->
 
+    <!-- ===== ACCOUNTANT EXPLANATION LETTER MODAL ===== -->
+    <div id="acc-letter-overlay" style="display:none;position:fixed;inset:0;background:rgba(2,6,23,0.93);backdrop-filter:blur(12px);z-index:10100;flex-direction:column;overflow-y:auto;padding:20px 16px 40px;align-items:center;justify-content:center;">
+      <div style="max-width:600px;width:100%;background:rgba(15,23,42,0.97);border:1px solid rgba(255,255,255,0.12);border-radius:18px;padding:24px;box-shadow:0 14px 40px rgba(0,0,0,0.5);">
+        <h2 style="margin:0 0 6px;color:#fb7185;font-size:1.2rem;">Hukumaliza Kazi ya Jana</h2>
+        <p id="acc-letter-desc" style="margin:0 0 16px;color:#94a3b8;font-size:0.9rem;"></p>
+        <p style="color:#fbbf24;font-weight:700;margin:0 0 8px;font-size:0.93rem;">Andika barua ya maelezo (isiopungua maneno 150):</p>
+        <textarea id="acc-letter-text" placeholder="Andika maelezo ya kwa nini hukumaliza kupiga simu wazazi wote jana..." style="width:100%;min-height:160px;resize:vertical;border-radius:10px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.05);color:#e2e8f0;padding:12px;font:inherit;box-sizing:border-box;"></textarea>
+        <p id="acc-letter-count" style="font-size:0.82rem;color:#94a3b8;margin:6px 0 16px;"></p>
+        <div style="display:flex;gap:10px;justify-content:flex-end;">
+          <button id="acc-letter-cancel-btn" style="border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:10px 16px;font-weight:700;cursor:pointer;background:rgba(255,255,255,0.06);color:#e2e8f0;">Ghairi</button>
+          <button id="acc-letter-submit-btn" style="border:1px solid rgba(255,255,255,0.2);border-radius:10px;padding:10px 18px;font-weight:800;cursor:pointer;background:linear-gradient(135deg,#22d3ee,#6366f1);color:#0b1220;" disabled>Wasilisha Barua &amp; Endelea ✓</button>
+        </div>
+      </div>
+    </div>
+    <!-- ===== END ACCOUNTANT EXPLANATION LETTER MODAL ===== -->
+
     <!-- ===== HEAD FINANCE CHECK-IN MODAL ===== -->
     <div id="hf-checkin-overlay" style="display:none;">
       <div id="acc-checkin-modal">
@@ -1572,17 +1588,23 @@
           if (role.includes('accountant')) {
             if (btn) btn.textContent = 'Inaangalia kazi za siku...';
             const prevCheck = await checkAccountantPreviousDayIncomplete(systemYear);
+            let carryOverStudents = [];
             if (prevCheck.blocked) {
-              toast(prevCheck.message, 'error');
-              await new Promise(r => setTimeout(r, 2500));
-              window.location.href = '../mhasibu.html';
-              return;
+              // Show explanation letter modal instead of redirecting
+              const letterResult = await showAccountantExplanationLetterModal(prevCheck);
+              if (!letterResult.submitted) {
+                if (btn) { btn.disabled = false; btn.textContent = 'Check-In Sasa'; }
+                toast('Check-in imeghairiwa. Lazima uandike barua kwanza.', 'warning');
+                return;
+              }
+              await saveAccountantExplanationLetter(systemYear, letterResult.letter, prevCheck).catch(e => console.warn('Letter save failed', e));
+              carryOverStudents = prevCheck.uncalledStudents || [];
             }
             const existingPlanSnap = await schoolRef(`years/${systemYear}/accountantCheckinPlan/${dayKey}`).once('value');
             if (!existingPlanSnap.val()) {
               if (btn) btn.textContent = 'Inaandaa orodha...';
               const [callList, directorTasks] = await Promise.all([
-                buildAccountantCallList(systemYear, dayKey),
+                buildAccountantCallList(systemYear, dayKey, carryOverStudents),
                 loadDirectorTasksForToday(systemYear, dayKey),
               ]);
               if (btn) { btn.disabled = false; btn.textContent = 'Check-In Sasa'; }
@@ -2756,7 +2778,7 @@
       return debtors.slice(0, 60);
     }
 
-    async function buildAccountantCallList(year, todayKey) {
+    async function buildAccountantCallList(year, todayKey, carryOverStudents = []) {
       let allReports = {};
       try {
         const snap = await schoolRef(`years/${year}/accountantCallReports`).once('value');
@@ -2797,6 +2819,14 @@
         if (b.debtTillTs > 0) return 1;
         return b.balance - a.balance;
       });
+
+      // If there are carry-over students from yesterday, prepend them and exclude from today's pool
+      if (carryOverStudents && carryOverStudents.length > 0) {
+        const carryIds = new Set(carryOverStudents.map(s => String(s.studentId || '')).filter(Boolean));
+        const todayPool = debtors.filter(d => !carryIds.has(String(d.studentId || '')));
+        const todayNew = todayPool.slice(0, 60);
+        return [...carryOverStudents, ...todayNew];
+      }
 
       return debtors.slice(0, 60);
     }
@@ -3107,9 +3137,19 @@
         }
       } catch (e) { /* non-fatal */ }
 
-      const available = accountantStudentIds.size > 0
-        ? debtors.filter((debtor) => !accountantStudentIds.has(String(debtor.studentId || '')))
-        : debtors.slice(Math.min(60, debtors.length));
+      let available;
+      if (accountantStudentIds.size > 0) {
+        // Accountant has a plan — exclude their students
+        available = debtors.filter((debtor) => !accountantStudentIds.has(String(debtor.studentId || '')));
+        // If filtering removed all students (e.g. small roster), overlap is acceptable — give full list
+        if (available.length === 0 && debtors.length > 0) {
+          available = debtors.slice(0);
+        }
+      } else {
+        // Accountant hasn't checked in yet — give head finance starting from position 60
+        // If roster is small (≤60 students), overlap with accountant is acceptable
+        available = debtors.length > 60 ? debtors.slice(60) : debtors.slice(0);
+      }
 
       return available.slice(0, 60);
     }
@@ -3311,6 +3351,63 @@
       }
     }
 
+    function showAccountantExplanationLetterModal(prevCheck) {
+      return new Promise((resolve) => {
+        const overlay = document.getElementById('acc-letter-overlay');
+        const descEl = document.getElementById('acc-letter-desc');
+        const textEl = document.getElementById('acc-letter-text');
+        const countEl = document.getElementById('acc-letter-count');
+        const submitBtn = document.getElementById('acc-letter-submit-btn');
+        const cancelBtn = document.getElementById('acc-letter-cancel-btn');
+
+        const uncalledCount = (prevCheck.uncalledStudents || []).length;
+        descEl.textContent = `Siku ya ${prevCheck.prevDayLabel || 'jana'}: wazazi ${uncalledCount} hawakupigwa simu. Andika barua ya maelezo (isiopungua maneno 150) ili uweze kuendelea na check-in ya leo.`;
+        textEl.value = '';
+        countEl.textContent = 'Maneno: 0 / 150 yanayohitajika';
+        submitBtn.disabled = true;
+        overlay.style.display = 'flex';
+
+        function countWords(text) {
+          return text.trim().split(/\s+/).filter(w => w.length > 0).length;
+        }
+
+        textEl.oninput = () => {
+          const words = countWords(textEl.value);
+          countEl.textContent = `Maneno: ${words} / 150 yanayohitajika`;
+          countEl.style.color = words >= 150 ? '#34d399' : '#fbbf24';
+          submitBtn.disabled = words < 150;
+        };
+
+        submitBtn.onclick = () => {
+          const words = countWords(textEl.value);
+          if (words < 150) {
+            countEl.style.color = '#fb7185';
+            countEl.textContent = `Maneno: ${words} / 150 yanayohitajika — bado haijafika!`;
+            return;
+          }
+          overlay.style.display = 'none';
+          resolve({ submitted: true, letter: textEl.value.trim() });
+        };
+
+        cancelBtn.onclick = () => {
+          overlay.style.display = 'none';
+          resolve({ submitted: false });
+        };
+      });
+    }
+
+    async function saveAccountantExplanationLetter(year, letterText, prevCheck) {
+      const today = todayYMD();
+      const todayKey = today.replace(/-/g, '');
+      await schoolRef(`years/${year}/accountantExplanationLetters/${todayKey}`).set({
+        workerId: state.workerId,
+        letter: letterText,
+        uncalledCount: (prevCheck.uncalledStudents || []).length,
+        prevDayLabel: prevCheck.prevDayLabel || '',
+        submittedAt: Date.now(),
+      });
+    }
+
     async function checkAccountantPreviousDayIncomplete(year) {
       try {
         for (let delta = 1; delta <= 4; delta++) {
@@ -3329,7 +3426,9 @@
           if (uncalled.length > 0) {
             return {
               blocked: true,
-              message: `Haukumaliza kazi ya ${dY}-${dM}-${dD}: wazazi ${uncalled.length} hawakupigwa simu. Nenda mhasibu.html ukamilishe kwanza, kisha urudi kufanya check-in.`,
+              uncalledStudents: uncalled,
+              prevDayLabel: `${dY}-${dM}-${dD}`,
+              message: `Hukumaliza kazi ya ${dY}-${dM}-${dD}: wazazi ${uncalled.length} hawakupigwa simu.`,
             };
           }
           break; // Only check most recent school day that had a plan
