@@ -587,12 +587,13 @@ function buildFinanceStudents(
       if (!admission || L(admission) === 'n/a' || L(admission) === 'na') return false;
       if (!first || L(first) === 'n/a' || L(first) === 'na') return false;
       if (!last || L(last) === 'n/a' || L(last) === 'na') return false;
-      return Number.isFinite(getRegistrationYear(stu));
+      return true;
     };
     const belongsToSelectedYear = (stu, selectedYear) => {
       const regYear = getRegistrationYear(stu);
-      if (!regYear || !Number.isFinite(selectedYear)) return false;
-      return regYear >= SOMAP_DEFAULT_YEAR && regYear <= selectedYear;
+      if (!Number.isFinite(selectedYear)) return false;
+      if (!regYear) return true; // no timestamp — include legacy/migrated students
+      return regYear <= selectedYear;
     };
     const hasPaymentsForYear = (paymentsObj, yNum) => {
       if (!paymentsObj || typeof paymentsObj !== 'object') return false;
