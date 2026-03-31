@@ -1650,6 +1650,8 @@
       }
       const btn = direction === 'in' ? checkInBtn : checkOutBtn;
       const initialText = btn?.textContent || '';
+      let preparedLateMinutes = null;
+      let preparedCheckInReason = '';
       try {
         if (btn) {
           btn.disabled = true;
@@ -1712,22 +1714,41 @@
                 console.warn('Head finance explanation letter save failed', e)
               );
             }
-            const existingHFPlanSnap = await schoolRef(`years/${systemYear}/headFinanceCheckinPlan/${dayKey}`).once('value');
-            if (!existingHFPlanSnap.val()) {
-              if (btn) btn.textContent = 'Inaandaa orodha...';
-              const [hfCallList, directorTasks] = await Promise.all([
-                buildHeadFinanceCallList(systemYear, dayKey),
-                loadDirectorTasksForToday(systemYear, dayKey),
-              ]);
-              if (btn) { btn.disabled = false; btn.textContent = 'Check-In Sasa'; }
-              const result = await showHeadFinanceCheckinModal(hfCallList, directorTasks);
-              if (!result.confirmed) {
-                toast('Check-in imeghairiwa.', 'info');
+            preparedLateMinutes = computeLateMinutes(timestamp);
+            if (preparedLateMinutes > 0) {
+              if (btn) btn.textContent = 'Inaandika sababu ya kuchelewa...';
+              const input = await openReasonModal({
+                title: 'Sababu ya kuchelewa check-in',
+                message: 'Umechelewa. Tafadhali andika sababu kabla ya kuhifadhi. Andika maelezo yasiyopungua maneno 200.',
+                placeholder: 'Kwa nini umechelewa leo?',
+                minWords: 200
+              });
+              if (input === null) {
+                toast('Check-in imeghairiwa; hakuna kilichohifadhiwa.', 'info');
                 return;
               }
-              if (btn) { btn.disabled = true; btn.textContent = 'Inahifadhi...'; }
-              await saveHeadFinanceCheckinPlan(systemYear, dayKey, hfCallList, result);
+              preparedCheckInReason = input;
             }
+
+            if (btn) btn.textContent = 'Inaandaa orodha...';
+            const existingHFPlanSnap = await schoolRef(`years/${systemYear}/headFinanceCheckinPlan/${dayKey}`).once('value');
+            const existingHFPlan = existingHFPlanSnap.val() || {};
+            const [rebuiltCallList, directorTasks] = await Promise.all([
+              buildHeadFinanceCallList(systemYear, dayKey),
+              loadDirectorTasksForToday(systemYear, dayKey),
+            ]);
+            const hfCallList =
+              Array.isArray(existingHFPlan.callList) && existingHFPlan.callList.length
+                ? existingHFPlan.callList
+                : rebuiltCallList;
+            if (btn) { btn.disabled = false; btn.textContent = 'Check-In Sasa'; }
+            const result = await showHeadFinanceCheckinModal(hfCallList, directorTasks);
+            if (!result.confirmed) {
+              toast('Check-in imeghairiwa.', 'info');
+              return;
+            }
+            if (btn) { btn.disabled = true; btn.textContent = 'Inahifadhi...'; }
+            await saveHeadFinanceCheckinPlan(systemYear, dayKey, hfCallList, result);
           }
 
           // ── Accountant-specific check-in gate (inside same role block) ──
@@ -1803,9 +1824,12 @@
 
         const payload = {};
         if (direction === 'in') {
-          const lateMinutes = computeLateMinutes(timestamp);
-          let reason = '';
-          if (lateMinutes > 0) {
+          const lateMinutes =
+            preparedLateMinutes === null
+              ? computeLateMinutes(timestamp)
+              : preparedLateMinutes;
+          let reason = preparedCheckInReason || '';
+          if (lateMinutes > 0 && !reason) {
             const input = await openReasonModal({
               title: 'Sababu ya kuchelewa check-in',
               message: 'Umechelewa. Tafadhali andika sababu kabla ya kuhifadhi. Andika maelezo yasiyopungua maneno 200.',
