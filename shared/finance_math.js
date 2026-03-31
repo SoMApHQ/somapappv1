@@ -863,6 +863,10 @@ function buildFinanceStudents(
       datasetCache[y] = (async () => {
         const database = getDb();
         if (!database) throw new Error('SomapFinance: Firebase database not initialised.');
+        const isSocratesSchool =
+          String(global.SOMAP?.getSchool?.()?.id || global.currentSchoolId || '')
+            .trim()
+            .toLowerCase() === 'socrates-school';
 
         const [
           baseSnap,
@@ -889,29 +893,52 @@ function buildFinanceStudents(
           database.ref(pref(`finance/${y}/studentPlans`)).once('value'),
           database.ref(pref(`finance/${y}/plans`)).once('value'),
         ]);
-        let ledgerData = ledgerSnap.val() || {};
-        if (!Object.keys(ledgerData || {}).length) {
+        let baseStudents = baseSnap.val() || {};
+        let anchorEnrollments = anchorEnrollSnap.val() || {};
+        let yearEnrollments = enrollmentSnap.val() || {};
+        if (isSocratesSchool) {
           try {
-            const legacy = await database.ref(pref('financeLedgers')).once('value');
-            ledgerData = legacy.val() || {};
-          } catch (legacyErr) {
-            console.warn('SomapFinance: legacy financeLedgers read failed', legacyErr?.message || legacyErr);
+            const [legacyBaseSnap, legacyAnchorSnap, legacyYearSnap] = await Promise.all([
+              database.ref('students').once('value'),
+              database.ref(`enrollments/${SOMAP_DEFAULT_YEAR}`).once('value'),
+              database.ref(`enrollments/${y}`).once('value'),
+            ]);
+            baseStudents = { ...(legacyBaseSnap.val() || {}), ...(baseStudents || {}) };
+            anchorEnrollments = { ...(legacyAnchorSnap.val() || {}), ...(anchorEnrollments || {}) };
+            yearEnrollments = { ...(legacyYearSnap.val() || {}), ...(yearEnrollments || {}) };
+          } catch (legacyReadErr) {
+            console.warn('SomapFinance: legacy students/enrollments read failed', legacyReadErr?.message || legacyReadErr);
           }
         }
-        let studentFeesData = studentFeesSnap.val() || {};
-        if (!Object.keys(studentFeesData || {}).length) {
-          try {
-            const legacyStudentFeesSnap = await database.ref(pref(`finance/${y}/studentFees`)).once('value');
-            studentFeesData = legacyStudentFeesSnap.val() || {};
-          } catch (studentFeesErr) {
-            console.warn('SomapFinance: student fee override read failed', studentFeesErr?.message || studentFeesErr);
+        let ledgerData = ledgerSnap.val() || {};
+        try {
+          const legacyLedgerSnap = await database.ref(pref('financeLedgers')).once('value');
+          const legacyLedgerData = legacyLedgerSnap.val() || {};
+          if (isSocratesSchool) {
+            ledgerData = { ...(legacyLedgerData || {}), ...(ledgerData || {}) };
+          } else if (!Object.keys(ledgerData || {}).length) {
+            ledgerData = legacyLedgerData;
           }
+        } catch (legacyErr) {
+          console.warn('SomapFinance: legacy financeLedgers read failed', legacyErr?.message || legacyErr);
+        }
+        let studentFeesData = studentFeesSnap.val() || {};
+        try {
+          const legacyStudentFeesSnap = await database.ref(pref(`finance/${y}/studentFees`)).once('value');
+          const legacyStudentFeesData = legacyStudentFeesSnap.val() || {};
+          if (isSocratesSchool) {
+            studentFeesData = { ...(legacyStudentFeesData || {}), ...(studentFeesData || {}) };
+          } else if (!Object.keys(studentFeesData || {}).length) {
+            studentFeesData = legacyStudentFeesData;
+          }
+        } catch (studentFeesErr) {
+          console.warn('SomapFinance: student fee override read failed', studentFeesErr?.message || studentFeesErr);
         }
         const dataset = {
           year: y,
-          baseStudents: baseSnap.val() || {},
-          anchorEnrollments: anchorEnrollSnap.val() || {},
-          yearEnrollments: enrollmentSnap.val() || {},
+          baseStudents,
+          anchorEnrollments,
+          yearEnrollments,
           classFees: classFeesSnap.val() || {},
           overrides: overridesSnap.val() || {},
           plans: plansSnap.val() || {},
