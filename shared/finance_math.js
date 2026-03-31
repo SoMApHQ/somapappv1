@@ -863,6 +863,7 @@ function buildFinanceStudents(
       datasetCache[y] = (async () => {
         const database = getDb();
         if (!database) throw new Error('SomapFinance: Firebase database not initialised.');
+
         const [
           baseSnap,
           anchorEnrollSnap,
@@ -944,6 +945,7 @@ function buildFinanceStudents(
         );
         return dataset;
       })();
+      datasetCache[y].catch(() => { delete datasetCache[y]; });
     }
     return datasetCache[y];
   }
@@ -987,6 +989,7 @@ function buildFinanceStudents(
         });
         return { year: y, entries, totalDue, totalPaid, dataset };
       })();
+      summaryCache[y].catch(() => { delete summaryCache[y]; });
     }
     return summaryCache[y];
   }
