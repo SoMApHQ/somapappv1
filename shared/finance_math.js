@@ -398,6 +398,87 @@
     return { scheduleItems: schedule.items, prevDebtAfter: prevDebt, credit, totalPaid, debtTillNow };
   }
 
+  function normalizeDeadlineExtensionRows(source) {
+    if (!source || typeof source !== 'object') return [];
+    return Object.entries(source).map(([id, raw]) => {
+      const row = raw && typeof raw === 'object' ? raw : {};
+      const oldDeadlineTs = Number(row.oldDeadlineTs || row.sourceOverdueTs || 0);
+      const newDeadlineTs = Number(row.newDeadlineTs || row.extendedDeadlineTs || 0);
+      const approvedAt = Number(row.approvedAt || row.createdAt || row.updatedAt || 0);
+      const status = String(row.status || 'approved').trim().toLowerCase();
+      return { id, ...row, oldDeadlineTs, newDeadlineTs, approvedAt, status };
+    }).filter((row) => row.newDeadlineTs > 0);
+  }
+
+  function getStudentDeadlineExtensions(student) {
+    if (!student || typeof student !== 'object') return [];
+    if (Array.isArray(student._deadlineExtensions)) return student._deadlineExtensions;
+    return [];
+  }
+
+  function getNextInstallmentStartTs(scheduleItems, overdueThroughTs) {
+    if (!Array.isArray(scheduleItems) || !scheduleItems.length || !(overdueThroughTs > 0)) return 0;
+    const matchIndex = scheduleItems.findIndex((item) => Number(item?.toTS || 0) === Number(overdueThroughTs));
+    if (matchIndex < 0) {
+      const later = scheduleItems
+        .map((item) => Number(item?.fromTS || 0))
+        .filter((ts) => ts > Number(overdueThroughTs))
+        .sort((a, b) => a - b);
+      return later[0] || 0;
+    }
+    for (let idx = matchIndex + 1; idx < scheduleItems.length; idx++) {
+      const fromTs = Number(scheduleItems[idx]?.fromTS || 0);
+      if (fromTs > 0) return fromTs;
+    }
+    return 0;
+  }
+
+  function pickLatestDeadlineExtension(student, overdueThroughTs) {
+    const list = getStudentDeadlineExtensions(student);
+    if (!list.length || !(overdueThroughTs > 0)) return null;
+    const matches = list
+      .filter((row) => row.status === 'approved')
+      .filter((row) => {
+        if (Number(row.oldDeadlineTs || 0) > 0) {
+          return Number(row.oldDeadlineTs) === Number(overdueThroughTs);
+        }
+        return true;
+      })
+      .sort((a, b) => Number(b.approvedAt || b.createdAt || 0) - Number(a.approvedAt || a.createdAt || 0));
+    return matches[0] || null;
+  }
+
+  function decorateStudentsWithDeadlineExtensions(students, extensionBuckets) {
+    if (!students || typeof students !== 'object') return students || {};
+    const buckets = extensionBuckets && typeof extensionBuckets === 'object' ? extensionBuckets : {};
+    const byAdmission = {};
+    Object.entries(students).forEach(([sid, student]) => {
+      const adm = String(student?.admissionNumber || student?.admissionNo || '').trim();
+      if (adm) byAdmission[adm] = sid;
+    });
+    Object.entries(students).forEach(([sid, student]) => {
+      const adm = String(student?.admissionNumber || student?.admissionNo || '').trim();
+      const fromId = normalizeDeadlineExtensionRows(buckets[sid] || {});
+      const fromAdm = adm ? normalizeDeadlineExtensionRows(buckets[adm] || {}) : [];
+      student._deadlineExtensions = [...fromId, ...fromAdm]
+        .sort((a, b) => Number(a.createdAt || a.approvedAt || 0) - Number(b.createdAt || b.approvedAt || 0));
+    });
+    Object.keys(buckets).forEach((bucketKey) => {
+      if (students[bucketKey]) return;
+      const mapped = byAdmission[String(bucketKey).trim()];
+      if (!mapped) return;
+      const target = students[mapped];
+      if (!target) return;
+      const merged = [
+        ...(Array.isArray(target._deadlineExtensions) ? target._deadlineExtensions : []),
+        ...normalizeDeadlineExtensionRows(buckets[bucketKey] || {}),
+      ];
+      target._deadlineExtensions = merged
+        .sort((a, b) => Number(a.createdAt || a.approvedAt || 0) - Number(b.createdAt || b.approvedAt || 0));
+    });
+    return students;
+  }
+
   function computeStudentFinancials(student, targetYear){
     const feePerYear = Math.max(0, Number(student.feePerYear) || 0);
     const previousDebt = 0;
@@ -882,7 +963,8 @@ function buildFinanceStudents(
           ledgerSnap,
           carrySnap,
           studentPlansSnap,
-          financePlansSnap
+          financePlansSnap,
+          deadlineExtensionsSnap
         ] = await Promise.all([
           database.ref(pref('students')).once('value'),
           database.ref(pref(`enrollments/${SOMAP_DEFAULT_YEAR}`)).once('value'),
@@ -895,6 +977,7 @@ function buildFinanceStudents(
           database.ref(pref(`financeCarryForward/${y}`)).once('value'),
           database.ref(pref(`finance/${y}/studentPlans`)).once('value'),
           database.ref(pref(`finance/${y}/plans`)).once('value'),
+          database.ref(pref(`financeDeadlineExtensions/${y}`)).once('value'),
         ]);
         let baseStudents = baseSnap.val() || {};
         let anchorEnrollments = anchorEnrollSnap.val() || {};
@@ -960,7 +1043,7 @@ function buildFinanceStudents(
         });
         const mergedPlans = { ...(dataset.plans || {}), ...(financePlansRaw || {}) };
         const approvalsByStudent = await loadApprovedFinanceApprovals(y);
-        dataset.students = buildFinanceStudents(
+        const built = buildFinanceStudents(
           dataset.baseStudents,
           dataset.anchorEnrollments,
           dataset.yearEnrollments,
@@ -973,6 +1056,7 @@ function buildFinanceStudents(
           approvalsByStudent,
           y
         );
+        dataset.students = decorateStudentsWithDeadlineExtensions(built || {}, deadlineExtensionsSnap.val() || {});
         return dataset;
       })();
       datasetCache[y].catch(() => { delete datasetCache[y]; });
