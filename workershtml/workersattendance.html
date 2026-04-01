@@ -1887,8 +1887,19 @@
         if (direction === 'in') {
           const yesterdayCheck = await checkYesterdayCheckoutRequirement(timestamp);
           if (yesterdayCheck.blocked) {
-            toast(yesterdayCheck.message, 'error', 6500);
-            return;
+            if (btn) btn.textContent = 'Inaandika maelezo ya jana...';
+            const input = await openReasonModal({
+              title: 'Barua ya jana hukufanya check-out',
+              message: `${yesterdayCheck.message} Andika maelezo ya maneno yasiyopungua 200 kueleza kwa nini hukufanya check-out ya ${yesterdayCheck.dayLabel}. Baada ya hapo utaruhusiwa kufanya check-in ya leo, lakini siku ya jana itaendelea kuonekana haijafungwa.`,
+              placeholder: 'Andika maelezo ya kwa nini hukufanya check-out jana...',
+              minWords: 200
+            });
+            if (input === null) {
+              toast('Check-in imeghairiwa; maelezo ya jana yanahitajika kwanza.', 'warning', 6500);
+              return;
+            }
+            await saveMissedCheckoutExplanation(yesterdayCheck, input);
+            toast(`Maelezo ya kutofanya check-out ya ${yesterdayCheck.dayLabel} yamehifadhiwa. Unaendelea na check-in ya leo.`, 'info', 5500);
           }
           const role = getCurrentRoleKey();
           if (role.includes('teacher')) {
@@ -3726,14 +3737,29 @@
         if (await isHolidayDate(meta.year, meta.dayKey)) return { blocked: false, skipped: 'holiday' };
         const scopedDayPath = scopedPathForYear(meta.year, `workerAttendance/${state.workerId}/${meta.monthKey}/${meta.dayKey}`);
         const legacyDayPath = `attendance/${state.workerId}/${meta.monthKey}/${meta.dayKey}`;
-        const { snap } = await scopedOrSocratesLegacy(scopedDayPath, legacyDayPath);
+        const { snap, source } = await scopedOrSocratesLegacy(scopedDayPath, legacyDayPath);
         const record = snap.val() || {};
+        const savedExplanation =
+          String(record?.missedCheckoutExplanation?.text || record?.missedCheckoutExplanationText || '').trim();
         if (record.checkInTs && !record.checkOutTs) {
+          if (savedExplanation) {
+            return {
+              blocked: false,
+              unresolved: true,
+              alreadyExplained: true,
+              dayKey: meta.dayKey,
+              dayLabel: formatDayKey(meta.dayKey),
+            };
+          }
           return {
             blocked: true,
+            source,
+            scopedDayPath,
+            legacyDayPath,
+            record,
             dayKey: meta.dayKey,
             dayLabel: formatDayKey(meta.dayKey),
-            message: `Huwezi kufanya check-in leo kwa sababu hukufanya check-out ya ${formatDayKey(meta.dayKey)}. Wasiliana na Head Teacher kwanza.`,
+            message: `Huwezi kufanya check-in leo kwa sababu hukufanya check-out ya ${formatDayKey(meta.dayKey)}.`,
           };
         }
         return { blocked: false };
@@ -3741,6 +3767,29 @@
         console.warn('Yesterday checkout check skipped', error);
         return { blocked: false };
       }
+    }
+
+    async function saveMissedCheckoutExplanation(blockInfo, explanationText) {
+      if (!blockInfo?.dayKey) return;
+      const explanation = String(explanationText || '').trim();
+      if (!explanation) return;
+      const payload = {
+        missedCheckoutExplanation: {
+          text: explanation,
+          wordCount: countWords(explanation),
+          submittedAt: Date.now(),
+          clearedNextCheckin: true,
+        },
+        missedCheckoutExplanationText: explanation,
+        missedCheckoutExplanationWordCount: countWords(explanation),
+        missedCheckoutExplanationTs: Date.now(),
+      };
+      await writeAttendanceUpdate(
+        blockInfo.source || 'scoped',
+        blockInfo.scopedDayPath,
+        blockInfo.legacyDayPath,
+        payload
+      );
     }
 
     async function validateHeadFinanceCheckout(year, todayKey) {
