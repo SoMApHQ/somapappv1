@@ -81,6 +81,11 @@
     .mini-modal-actions { display:flex; justify-content:flex-end; gap:8px; }
     .mini-modal-btn { border:1px solid var(--border); border-radius:10px; padding:8px 12px; font-weight:700; cursor:pointer; background:rgba(255,255,255,0.08); color:var(--ink); }
     .mini-modal-btn.primary { background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#0b1220; border-color:rgba(255,255,255,0.2); }
+    .late-card-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+    .late-card { background:rgba(255,255,255,0.05); border:1px solid var(--border); border-radius:14px; padding:12px; display:grid; gap:8px; }
+    .late-card h4 { margin:0; color:#fff; font-size:0.95rem; }
+    .late-card .late-card-meta { color:#fbbf24; font-size:0.78rem; font-weight:700; }
+    .late-card textarea { min-height:130px; }
     @media (max-width: 640px) {
       .brand h1 { font-size:1.3rem; }
       .context__chip { width:100%; }
@@ -187,7 +192,7 @@
         </header>
         <div class="workers-card__content">
           <button id="checkInBtn" class="workers-btn">Check-In Sasa</button>
-          <p class="hint">Lazima kabla ya 07:30 (Africa/Nairobi). Baada ya hapo sababu ya kuchelewa inahitajika na entry husubiri idhini ya headteacher.</p>
+          <p class="hint">Lazima kabla ya 07:30 (Africa/Nairobi). Ukichelewa, barua ya maelezo ya maneno 200 ni lazima; viongozi wa shule hujibu pia kadi 4 za ziada. Entry husubiri idhini ya headteacher.</p>
         </div>
       </div>
 
@@ -198,7 +203,7 @@
         </header>
         <div class="workers-card__content">
           <button id="checkOutBtn" class="workers-btn secondary">Check-Out Sasa</button>
-          <p class="hint">Ukiondoka kabla au baada ya 16:00, sababu inahitajika na check-out husubiri idhini ya headteacher.</p>
+          <p class="hint">Ukiondoka kabla au baada ya 16:00, sababu inahitajika na check-out husubiri idhini ya headteacher. Huwezi kufanya check-out kama bado una kazi za leo ambazo hazijakamilika.</p>
         </div>
       </div>
     </section>
@@ -405,6 +410,9 @@
       todayKey: todayYMD().replace(/-/g, ''),
       workerId: '',
       profile: null,
+      teacherConfig: null,
+      teacherConfigYear: '',
+      teacherConfigLoaded: false,
       settings: {},
       rules: { ...DEFAULT_RULES },
       deviceId: ''
@@ -713,6 +721,25 @@
       state.settings = snap.val() || {};
       state.rules = { ...DEFAULT_RULES, ...(state.settings.attendanceRules || {}) };
       updateWifiStatus();
+    }
+
+    async function loadTeacherConfig(year = state.year || String(new Date().getFullYear())) {
+      const targetYear = String(year || '');
+      if (state.teacherConfigLoaded && state.teacherConfigYear === targetYear) {
+        return state.teacherConfig;
+      }
+      state.teacherConfigLoaded = true;
+      state.teacherConfigYear = targetYear;
+      state.teacherConfig = null;
+      if (!state.workerId || !targetYear) return null;
+      try {
+        const snap = await schoolRef(`years/${targetYear}/teachers_config/${state.workerId}`).once('value');
+        state.teacherConfig = snap.val() || null;
+      } catch (error) {
+        console.warn('Teacher config load failed', error);
+        state.teacherConfig = null;
+      }
+      return state.teacherConfig;
     }
 
     function computeLateMinutes(checkInTs) {
@@ -1058,6 +1085,182 @@
           }
           overlay.remove();
           resolve(reason);
+        });
+      });
+    }
+
+    function getStoredRoleLabel() {
+      return String(
+        state.profile?.role ||
+        sessionStorage.getItem('role') ||
+        localStorage.getItem('role') ||
+        ''
+      ).trim();
+    }
+
+    async function resolveAttendanceRoleContext(year = state.year || String(new Date().getFullYear())) {
+      const roleLabel = getStoredRoleLabel();
+      const roleKey = normalizeRoleKey(roleLabel);
+      let positionLabel = roleLabel || 'worker';
+      let isLeadershipLateRole = false;
+
+      if (roleKey === 'headteacher' || roleKey === 'head_teacher') {
+        return {
+          roleKey,
+          roleLabel,
+          positionLabel: 'Head Teacher',
+          isLeadershipLateRole: true,
+        };
+      }
+
+      if (roleKey === 'assistant_headteacher' || roleKey === 'assistant_head_teacher') {
+        return {
+          roleKey,
+          roleLabel,
+          positionLabel: 'Assistant Headteacher',
+          isLeadershipLateRole: true,
+        };
+      }
+
+      if (roleKey === 'academic' || roleKey === 'academic_teacher') {
+        return {
+          roleKey,
+          roleLabel,
+          positionLabel: 'Academic Teacher',
+          isLeadershipLateRole: true,
+        };
+      }
+
+      if (roleKey.includes('teacher')) {
+        const teacherConfig = await loadTeacherConfig(year);
+        const teacherType = String(teacherConfig?.teacherType || '').trim();
+        const teacherTypeKey = teacherType.toLowerCase();
+        if (teacherType) positionLabel = teacherType;
+        if (
+          teacherTypeKey === 'head teacher' ||
+          teacherTypeKey === 'assistant headteacher' ||
+          teacherTypeKey === 'assistant head teacher' ||
+          teacherTypeKey === 'academic teacher'
+        ) {
+          isLeadershipLateRole = true;
+        }
+      }
+
+      return {
+        roleKey,
+        roleLabel,
+        positionLabel,
+        isLeadershipLateRole,
+      };
+    }
+
+    function buildLeadershipLateQuestions(positionLabel, arrivalTime) {
+      const safePosition = String(positionLabel || 'leader').trim();
+      const safeTime = String(arrivalTime || '--').trim();
+      return [
+        {
+          key: 'exampleReflection',
+          minWords: 30,
+          title: 'Card 1',
+          prompt: `As a ${safePosition}, do you see arriving at ${safeTime} today as a good example to the school? Explain clearly with responsibility and honesty.`,
+        },
+        {
+          key: 'todayPromise',
+          minWords: 25,
+          title: 'Card 2',
+          prompt: `As a ${safePosition}, what apology promise do you give today, and what extra work will you do before leaving school to show seriousness?`,
+        },
+        {
+          key: 'repeatConsequence',
+          minWords: 30,
+          title: 'Card 3',
+          prompt: `If this lateness repeats three times this month, what action or consequence do you suggest should be used to motivate you to come earlier?`,
+        },
+        {
+          key: 'preventionPlan',
+          minWords: 30,
+          title: 'Card 4',
+          prompt: `As a ${safePosition}, what exact changes in your morning preparation, reporting time, and accountability will start today so this lateness does not happen again this week?`,
+        },
+      ];
+    }
+
+    function openLeadershipLateQuestionsModal(positionLabel, arrivalTime) {
+      const questions = buildLeadershipLateQuestions(positionLabel, arrivalTime);
+      return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'mini-modal-overlay';
+        overlay.innerHTML = `
+          <div class="mini-modal-card" role="dialog" aria-modal="true" style="width:min(980px,100%);max-height:90vh;overflow-y:auto;">
+            <h3>Kadi za Uongozi Baada ya Kuchelewa</h3>
+            <p>Umechelewa kuingia kazini saa ${arrivalTime}. Kwa sababu wewe ni <strong style="color:#fff;">${positionLabel}</strong>, jibu kadi zote 4 kabla ya kuendelea. Kila jibu lazima litimize kiwango chake cha maneno.</p>
+            <div class="late-card-grid">
+              ${questions.map((question, index) => `
+                <section class="late-card">
+                  <h4>${question.title}</h4>
+                  <div class="late-card-meta">Minimum ${question.minWords} words</div>
+                  <p>${question.prompt}</p>
+                  <textarea data-question-key="${question.key}" data-min-words="${question.minWords}" placeholder="Write your answer here..."></textarea>
+                  <div class="hint" data-word-state="${question.key}">Words: 0 / ${question.minWords}</div>
+                </section>
+              `).join('')}
+            </div>
+            <div class="mini-modal-actions">
+              <button type="button" class="mini-modal-btn primary" data-act="submit" disabled>Save Leadership Answers</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(overlay);
+        const submitBtn = overlay.querySelector('button[data-act="submit"]');
+        const inputs = Array.from(overlay.querySelectorAll('textarea[data-question-key]'));
+
+        const refreshState = () => {
+          let allValid = true;
+          inputs.forEach((input) => {
+            const minWords = Number(input.getAttribute('data-min-words') || 0);
+            const key = input.getAttribute('data-question-key');
+            const words = countWords(input.value || '');
+            const stateEl = overlay.querySelector(`[data-word-state="${key}"]`);
+            if (stateEl) {
+              stateEl.textContent = `Words: ${words} / ${minWords}`;
+              stateEl.style.color = words >= minWords ? '#34d399' : '#fbbf24';
+            }
+            if (words < minWords) allValid = false;
+          });
+          if (submitBtn) submitBtn.disabled = !allValid;
+        };
+
+        inputs.forEach((input, index) => {
+          input.addEventListener('input', refreshState);
+          if (index === 0) input.focus();
+        });
+        refreshState();
+
+        submitBtn?.addEventListener('click', () => {
+          const answers = {};
+          for (const question of questions) {
+            const input = overlay.querySelector(`textarea[data-question-key="${question.key}"]`);
+            const answer = String(input?.value || '').trim();
+            if (countWords(answer) < question.minWords) {
+              toast(`Answer ${question.title} must have at least ${question.minWords} words.`, 'warning');
+              input?.focus();
+              refreshState();
+              return;
+            }
+            answers[question.key] = {
+              title: question.title,
+              prompt: question.prompt,
+              minWords: question.minWords,
+              answer,
+              wordCount: countWords(answer),
+            };
+          }
+          overlay.remove();
+          resolve({
+            submitted: true,
+            questions,
+            answers,
+          });
         });
       });
     }
@@ -1668,6 +1871,7 @@
         state.monthKey = monthKey;
         if (yearSelect && yearSelect.value !== systemYear) yearSelect.value = systemYear;
         if (yearLabel) yearLabel.textContent = `Mwaka: ${state.year}`;
+        const roleContext = await resolveAttendanceRoleContext(systemYear);
 
         const scopedDayPath = scopedPathForYear(systemYear, `workerAttendance/${state.workerId}/${monthKey}/${dayKey}`);
         const legacyDayPath = `attendance/${state.workerId}/${monthKey}/${dayKey}`;
@@ -1681,6 +1885,11 @@
 
         // Teacher-specific readiness gate
         if (direction === 'in') {
+          const yesterdayCheck = await checkYesterdayCheckoutRequirement(timestamp);
+          if (yesterdayCheck.blocked) {
+            toast(yesterdayCheck.message, 'error', 6500);
+            return;
+          }
           const role = getCurrentRoleKey();
           if (role.includes('teacher')) {
             if (btn) btn.textContent = 'Inathibitisha mahitaji...';
@@ -1718,9 +1927,9 @@
             if (preparedLateMinutes > 0) {
               if (btn) btn.textContent = 'Inaandika sababu ya kuchelewa...';
               const input = await openReasonModal({
-                title: 'Sababu ya kuchelewa check-in',
-                message: 'Umechelewa. Tafadhali andika sababu kabla ya kuhifadhi. Andika maelezo yasiyopungua maneno 200.',
-                placeholder: 'Kwa nini umechelewa leo?',
+                title: 'Barua ya maelezo ya kuchelewa',
+                message: 'Umechelewa. Lazima uandike barua ya maelezo ya maneno yasiyopungua 200 kabla ya kuhifadhi check-in.',
+                placeholder: 'Andika barua ya maelezo ya kuchelewa hapa...',
                 minWords: 200
               });
               if (input === null) {
@@ -1792,6 +2001,15 @@
         }
 
         // ── Head Finance checkout gate ──
+        if (direction === 'out') {
+          if (btn) btn.textContent = 'Inathibitisha kazi za leo...';
+          const generalTaskValidation = await validateGeneralWorkerCheckout(systemYear, dayKey);
+          if (!generalTaskValidation.valid) {
+            toast(generalTaskValidation.message, 'error', 6000);
+            return;
+          }
+        }
+
         if (direction === 'out' && isHeadFinance()) {
           if (btn) btn.textContent = 'Inathibitisha kazi...';
           const validation = await validateHeadFinanceCheckout(systemYear, dayKey);
@@ -1831,9 +2049,11 @@
           let reason = preparedCheckInReason || '';
           if (lateMinutes > 0 && !reason) {
             const input = await openReasonModal({
-              title: 'Sababu ya kuchelewa check-in',
-              message: 'Umechelewa. Tafadhali andika sababu kabla ya kuhifadhi. Andika maelezo yasiyopungua maneno 200.',
-              placeholder: 'Kwa nini umechelewa leo?',
+              title: 'Barua ya maelezo ya kuchelewa',
+              message: roleContext.isLeadershipLateRole
+                ? `Umechelewa. Kwa sababu wewe ni ${roleContext.positionLabel}, lazima uandike barua ya maelezo ya maneno yasiyopungua 200. Baada ya kuhifadhi utafunguliwa kadi 4 za uongozi.`
+                : 'Umechelewa. Lazima uandike barua ya maelezo ya maneno yasiyopungua 200 kabla ya kuhifadhi check-in.',
+              placeholder: 'Andika barua ya maelezo ya kuchelewa hapa...',
               minWords: 200
             });
             if (input === null) {
@@ -1847,6 +2067,11 @@
           payload.checkInStatus = 'pending';
           payload.checkInReason = reason;
           payload.checkInReasonTs = Date.now();
+          payload.checkInReasonWordCount = countWords(reason);
+          if (lateMinutes > 0) {
+            payload.lateLetterMinWords = 200;
+            payload.lateLetterRoleLabel = roleContext.positionLabel || roleContext.roleLabel || 'worker';
+          }
         } else {
           const earlyMinutes = computeEarlyMinutes(timestamp);
           const overtimeMinutes = computeOvertimeMinutes(timestamp);
@@ -1874,29 +2099,34 @@
           payload.checkOutReasonTs = Date.now();
         }
 
-        let writeSource = source;
-        try {
-          if (source === 'legacy') {
-            await db.ref(legacyDayPath).update(payload);
-          } else {
-            await schoolRef(scopedDayPath).update(payload);
-          }
-        } catch (writeErr) {
-          if (source !== 'legacy' && isPermissionDenied(writeErr)) {
-            await db.ref(legacyDayPath).update(payload);
-            writeSource = 'legacy';
-          } else {
-            throw writeErr;
-          }
-        }
+        let writeSource = await writeAttendanceUpdate(source, scopedDayPath, legacyDayPath, payload);
         await updateSummaries(existing, payload, direction, dayKey).catch((summaryErr) => {
           console.warn('Summary update skipped', summaryErr);
         });
 
+        if (direction === 'in' && (payload.lateMinutes || 0) > 0 && roleContext.isLeadershipLateRole) {
+          const reflection = await openLeadershipLateQuestionsModal(
+            roleContext.positionLabel || roleContext.roleLabel || 'Leader',
+            formatTs(timestamp)
+          );
+          if (reflection?.submitted) {
+            writeSource = await writeAttendanceUpdate(writeSource, scopedDayPath, legacyDayPath, {
+              lateLeadershipReflection: {
+                submittedAt: Date.now(),
+                roleLabel: roleContext.positionLabel || roleContext.roleLabel || 'Leader',
+                arrivalTime: formatTs(timestamp),
+                answers: reflection.answers || {},
+              }
+            });
+          }
+        }
+
         if (direction === 'in') {
           toast(
             (payload.lateMinutes || 0) > 0
-              ? 'Check-in successful BUT YOU ARE LATE. Reason saved. Waiting for headteacher approval.'
+              ? roleContext.isLeadershipLateRole
+                ? 'Check-in successful BUT YOU ARE LATE. Your 200-word letter and leadership cards were saved. Waiting for headteacher approval.'
+                : 'Check-in successful BUT YOU ARE LATE. Your 200-word letter was saved. Waiting for headteacher approval.'
               : 'Check-in successful. Waiting for headteacher approval.',
             'success'
           );
@@ -3394,6 +3624,123 @@
         confirmedAt: Date.now(),
       };
       await schoolRef(`years/${year}/headFinanceCheckinPlan/${dayKey}`).set(plan);
+    }
+
+    async function writeAttendanceUpdate(writeSource, scopedDayPath, legacyDayPath, payload) {
+      if (writeSource === 'legacy') {
+        await db.ref(legacyDayPath).update(payload);
+        return 'legacy';
+      }
+      try {
+        await schoolRef(scopedDayPath).update(payload);
+        return 'scoped';
+      } catch (error) {
+        if (!isPermissionDenied(error)) throw error;
+        await db.ref(legacyDayPath).update(payload);
+        return 'legacy';
+      }
+    }
+
+    function isTaskCompleted(task) {
+      const status = String(task?.status || '').trim().toLowerCase();
+      return (
+        Number(task?.completedTs || 0) > 0 ||
+        task?.done === true ||
+        status === 'completed' ||
+        status === 'done'
+      );
+    }
+
+    function shouldTrackTask(task) {
+      if (!task || typeof task !== 'object') return false;
+      const status = String(task.status || '').trim().toLowerCase();
+      return !(
+        task.archived === true ||
+        task.deleted === true ||
+        status === 'cancelled' ||
+        status === 'canceled' ||
+        status === 'skipped'
+      );
+    }
+
+    async function validateGeneralWorkerCheckout(year, dayKey) {
+      try {
+        const snap = await schoolRef(`years/${year}/workerTasks/${state.workerId}/${dayKey}`).once('value');
+        const tasks = snap.val() || {};
+        const pending = Object.values(tasks).filter((task) => shouldTrackTask(task) && !isTaskCompleted(task));
+        if (!pending.length) return { valid: true };
+        return {
+          valid: false,
+          pendingCount: pending.length,
+          message: `Bado una kazi ${pending.length} za leo ambazo hazijakamilika. Maliza kwanza kwenye task dashboard kabla ya kufanya check-out.`,
+        };
+      } catch (error) {
+        console.warn('General checkout validation skipped', error);
+        return { valid: true };
+      }
+    }
+
+    function getDayMeta(date) {
+      const d = new Date(date.getTime());
+      const year = String(d.getFullYear());
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return {
+        year,
+        month,
+        day,
+        monthKey: `${year}${month}`,
+        dayKey: `${year}${month}${day}`,
+      };
+    }
+
+    async function isHolidayDate(year, dayKey) {
+      const paths = [
+        `years/${year}/holidays/${dayKey}`,
+        `years/${year}/holidayCalendar/${dayKey}`,
+        `years/${year}/calendar/holidays/${dayKey}`,
+        `years/${year}/schoolCalendar/holidays/${dayKey}`,
+        `years/${year}/workers_settings/holidays/${dayKey}`,
+        `years/${year}/settings/holidays/${dayKey}`,
+      ];
+      for (const path of paths) {
+        try {
+          const snap = await schoolRef(path).once('value');
+          if (!snap.exists()) continue;
+          const value = snap.val();
+          if (value === false) continue;
+          if (value && typeof value === 'object' && value.active === false) continue;
+          return true;
+        } catch (error) {
+          console.warn('Holiday lookup failed', path, error);
+        }
+      }
+      return false;
+    }
+
+    async function checkYesterdayCheckoutRequirement(referenceTs = localTs()) {
+      try {
+        const yesterday = new Date(referenceTs - 86400000);
+        const meta = getDayMeta(yesterday);
+        if (yesterday.getDay() === 0) return { blocked: false, skipped: 'sunday' };
+        if (await isHolidayDate(meta.year, meta.dayKey)) return { blocked: false, skipped: 'holiday' };
+        const scopedDayPath = scopedPathForYear(meta.year, `workerAttendance/${state.workerId}/${meta.monthKey}/${meta.dayKey}`);
+        const legacyDayPath = `attendance/${state.workerId}/${meta.monthKey}/${meta.dayKey}`;
+        const { snap } = await scopedOrSocratesLegacy(scopedDayPath, legacyDayPath);
+        const record = snap.val() || {};
+        if (record.checkInTs && !record.checkOutTs) {
+          return {
+            blocked: true,
+            dayKey: meta.dayKey,
+            dayLabel: formatDayKey(meta.dayKey),
+            message: `Huwezi kufanya check-in leo kwa sababu hukufanya check-out ya ${formatDayKey(meta.dayKey)}. Wasiliana na Head Teacher kwanza.`,
+          };
+        }
+        return { blocked: false };
+      } catch (error) {
+        console.warn('Yesterday checkout check skipped', error);
+        return { blocked: false };
+      }
     }
 
     async function validateHeadFinanceCheckout(year, todayKey) {
