@@ -31,6 +31,12 @@
   .badge-status.pending{background:#fef3c7;color:#b45309}
   .badge-status.shifted{background:#dcfce7;color:#15803d}
   .badge-status.review{background:#e0e7ff;color:#3730a3}
+  .calendar-banner{border-radius:18px;padding:14px 16px;border:1px solid #fecaca;background:#fff1f2}
+  .calendar-banner.hidden{display:none!important}
+  .calendar-banner.override{background:#fffbeb;border-color:#fcd34d}
+  .calendar-banner__title{margin:0 0 6px;font-size:1rem;font-weight:800;color:#9f1239}
+  .calendar-banner.override .calendar-banner__title{color:#92400e}
+  .calendar-banner__text{margin:0;color:#475569;line-height:1.45}
 </style>
 </head>
 <body class="bg-slate-50 min-h-screen">
@@ -110,6 +116,11 @@
         </div>
       </div>
     </div>
+  </section>
+
+  <section id="calendarBanner" class="calendar-banner hidden">
+    <h2 id="calendarBannerTitle" class="calendar-banner__title"></h2>
+    <p id="calendarBannerText" class="calendar-banner__text"></p>
   </section>
 
   <!-- Daily Register -->
@@ -195,6 +206,7 @@
 <script src="firebase.js"></script>
 <script src="shared/finance_math.js"></script>
 <script src="shared/shift_engine.js"></script>
+<script src="shared/school_calendar.js"></script>
 
 <script>
 (async function(){
@@ -220,6 +232,10 @@
   let shiftRefLegacy = null;
   let currentSchool = null;
   let isSocrates = false;
+  const SchoolCalendar = window.SomapSchoolCalendar || null;
+  const calendarBanner = document.getElementById('calendarBanner');
+  const calendarBannerTitle = document.getElementById('calendarBannerTitle');
+  const calendarBannerText = document.getElementById('calendarBannerText');
 
   function schoolRef(subPath) {
     return db.ref(SOMAP.P(subPath));
@@ -344,7 +360,30 @@
     return HOLIDAYS.includes(fixed) || MOVABLE.includes(iso);
   }
 
-  function monthWorkingDays(dateStr){
+  async function resolveStudentCalendarStatus(dateStr, className) {
+    if (!SchoolCalendar || !dateStr) return null;
+    try {
+      return await SchoolCalendar.resolveDateStatus({
+        year: getSelectedYear(),
+        date: dateStr,
+        schoolId: currentSchool?.id || SchoolCalendar.resolveSchoolId(),
+        audience: 'students',
+        className: className || '',
+      });
+    } catch (error) {
+      console.warn('Dashboard calendar resolve failed:', error?.message || error);
+      return null;
+    }
+  }
+
+  async function isStudentClassWorkingDay(dateStr, className) {
+    const status = await resolveStudentCalendarStatus(dateStr, className);
+    if (status) return !status.blockStudentAttendance && !!status.countAsSchoolDayStudents;
+    const dt = new Date(dateStr + 'T00:00:00');
+    return !(isWeekend(dt) || isHoliday(dt));
+  }
+
+  async function monthWorkingDays(dateStr){
     const d = new Date(dateStr + 'T00:00:00');
     const y = d.getFullYear();
     const m = d.getMonth();
@@ -352,7 +391,7 @@
     for (let day=1; day<=31; day++){
       const dt = new Date(y,m,day);
       if (dt.getMonth()!==m) break;
-      if (isWeekend(dt) || isHoliday(dt)) continue;
+      if (!(await isStudentClassWorkingDay(fmtDate(dt), ''))) continue;
       count++;
     }
     return count;
@@ -836,6 +875,7 @@
     const classNames = Array.from(classNamesSet).sort((a, b) => classOrderKey(a) - classOrderKey(b));
     const perClass = {};
     const schoolTotals = initialCounts();
+    const classCalendarStatus = {};
     classNames.forEach(cls => {
       perClass[cls] = initialCounts();
       perClass[cls].shifted = Number(shiftedByClass[normalizeClassName(cls)] || 0);
@@ -869,6 +909,11 @@
     });
     // Present/Absent
     for (const cls of classNames) {
+      classCalendarStatus[cls] = await resolveStudentCalendarStatus(targetDate, cls);
+      if (classCalendarStatus[cls]?.blockStudentAttendance) {
+        perClass[cls].holiday = classCalendarStatus[cls];
+        continue;
+      }
       try {
         const snap = await schoolRef(`attendance/${cls}/${monthKeyLocal}/${targetDate}`).get();
         const records = snap.exists() ? snap.val() : {};
@@ -915,10 +960,7 @@
         console.warn('Failed to load attendance for class', cls, e.message);
       }
 
-      perClass[cls].absent.total = Math.max(
-        0,
-        perClass[cls].registered.total - perClass[cls].present.total
-      );
+      perClass[cls].absent.total = Math.max(0, perClass[cls].registered.total - perClass[cls].present.total);
       perClass[cls].absent.boys = Math.max(
         0,
         perClass[cls].registered.boys - perClass[cls].present.boys
@@ -943,6 +985,7 @@
     let sumPct = 0;
     let classesWithData = 0;
     classNames.forEach(cls => {
+      if (classCalendarStatus[cls]?.blockStudentAttendance) return;
       const reg = perClass[cls].registered.total;
       const pres = perClass[cls].present.total;
       if (reg > 0) {
@@ -961,7 +1004,8 @@
       schoolTotals,
       schoolAvgPct,
       yellowAlertsCount,
-      absenteesByClass
+      absenteesByClass,
+      classCalendarStatus
     };
   }
 
@@ -970,7 +1014,7 @@
     currentDateStr = targetDate;
     monthKey = toMonthKey(targetDate);
     const stats = await computeDailyRegisterStats(targetDate);
-    const workdays = monthWorkingDays(targetDate);
+    const workdays = await monthWorkingDays(targetDate);
     const monthLabel = formatMonthLabel(targetDate);
 
     const monthLabelEl = el('monthLabel');
@@ -1017,8 +1061,33 @@
       : 'Active classes —';
     setBreakdown('schoolClassBreakdown', '', '', classLabel);
 
+    renderCalendarBanner(targetDate, stats.classCalendarStatus || {});
     buildRegisterTable(stats);
     renderAbsenteesPanel(stats);
+  }
+
+  function renderCalendarBanner(targetDate, classCalendarStatus) {
+    if (!calendarBanner || !calendarBannerTitle || !calendarBannerText) return;
+    const blockedEntries = Object.entries(classCalendarStatus || {}).filter(([, status]) => status?.blockStudentAttendance);
+    if (!blockedEntries.length) {
+      calendarBanner.className = 'calendar-banner hidden';
+      calendarBannerTitle.textContent = '';
+      calendarBannerText.textContent = '';
+      return;
+    }
+    const wholeSchool = blockedEntries.length > 0 && blockedEntries.every(([, status]) => {
+      if (status?.isPublicHoliday) return true;
+      return (status?.matchedEntries || []).some((entry) =>
+        entry.scope?.wholeSchool ||
+        (entry.scope?.studentsOnly && !(entry.scope?.classNames || []).length)
+      );
+    });
+    const first = blockedEntries[0][1];
+    calendarBanner.className = `calendar-banner${wholeSchool ? '' : ' override'}`;
+    calendarBannerTitle.textContent = wholeSchool ? 'HOLIDAY ACCORDING TO HEADTEACHER' : 'MIXED CLASS HOLIDAY NOTICE';
+    calendarBannerText.textContent = wholeSchool
+      ? first?.bannerText || `${targetDate} is marked as a student off-day.`
+      : `${targetDate} is not a normal student attendance day for these classes: ${blockedEntries.map(([cls]) => cls).join(', ')}. Affected classes are excluded from attendance calculations.`;
   }
 
   async function computeAnalytics(dateStr) {
@@ -1041,8 +1110,9 @@
     const days = [];
 
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-      if (isWeekend(d) || isHoliday(d)) continue;
-      days.push(fmtDate(new Date(d)));
+      const iso = fmtDate(new Date(d));
+      if (!(await isStudentClassWorkingDay(iso, cls))) continue;
+      days.push(iso);
     }
 
     const results = {};

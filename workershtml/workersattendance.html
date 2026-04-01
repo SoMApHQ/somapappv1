@@ -14,6 +14,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="../firebase.js"></script>
   <script src="../shared/academic-class-utils.js"></script>
+  <script src="../shared/school_calendar.js"></script>
   <script>
     // Required by finance_math.js for anchor enrollment year
     var SOMAP_DEFAULT_YEAR = new Date().getFullYear();
@@ -71,6 +72,12 @@
     .pill.warning { background:rgba(251,191,36,0.15); border-color:rgba(251,191,36,0.5); color:#fcd34d; }
     .pill.danger { background:rgba(251,113,133,0.15); border-color:rgba(251,113,133,0.5); color:#fecdd3; }
     .pill.info { background:rgba(99,102,241,0.18); border-color:rgba(99,102,241,0.45); color:#c7d2fe; }
+    .calendar-banner { margin-bottom:18px; padding:16px 18px; border-radius:18px; border:1px solid var(--border); background:rgba(15,23,42,0.82); box-shadow:var(--card-shadow); display:none; }
+    .calendar-banner.show { display:block; }
+    .calendar-banner.holiday { background:rgba(127,29,29,0.38); border-color:rgba(248,113,113,0.42); }
+    .calendar-banner.override { background:rgba(120,53,15,0.34); border-color:rgba(251,191,36,0.42); }
+    .calendar-banner__title { margin:0 0 6px; font-size:1rem; font-weight:800; color:#fff; }
+    .calendar-banner__text { margin:0; color:#e2e8f0; line-height:1.45; }
     .admin-actions { display:flex; gap:6px; flex-wrap:wrap; }
     .hint { font-size:0.9rem; color:var(--muted); }
     .mini-modal-overlay { position:fixed; inset:0; background:rgba(2,6,23,0.7); display:flex; align-items:center; justify-content:center; padding:16px; z-index:9999; }
@@ -182,6 +189,11 @@
         <div class="stat-label">Faini mwezi huu (TZS)</div>
         <div class="stat-value stat-accent" id="statFines">0</div>
       </div>
+    </section>
+
+    <section id="calendarStatusBanner" class="calendar-banner">
+      <h2 id="calendarBannerTitle" class="calendar-banner__title"></h2>
+      <p id="calendarBannerText" class="calendar-banner__text"></p>
     </section>
 
     <section class="workers-grid">
@@ -386,6 +398,10 @@
     const statLate = document.getElementById('statLate');
     const statEarly = document.getElementById('statEarly');
     const statFines = document.getElementById('statFines');
+    const calendarStatusBanner = document.getElementById('calendarStatusBanner');
+    const calendarBannerTitle = document.getElementById('calendarBannerTitle');
+    const calendarBannerText = document.getElementById('calendarBannerText');
+    const SchoolCalendar = window.SomapSchoolCalendar || null;
 
     const DEFAULT_RULES = {
       requireWifi: true,
@@ -415,7 +431,8 @@
       teacherConfigLoaded: false,
       settings: {},
       rules: { ...DEFAULT_RULES },
-      deviceId: ''
+      deviceId: '',
+      calendarStatus: null
     };
 
     const DEVICE_ID_KEY = 'somap_workers_device_id';
@@ -740,6 +757,63 @@
         state.teacherConfig = null;
       }
       return state.teacherConfig;
+    }
+
+    async function resolveWorkerCalendarStatus(dateStr = state.today, year = state.year || String(new Date().getFullYear())) {
+      if (!SchoolCalendar || !dateStr) return null;
+      try {
+        const roleContext = await resolveAttendanceRoleContext(year);
+        return await SchoolCalendar.resolveDateStatus({
+          year,
+          date: dateStr,
+          schoolId: state.schoolId,
+          audience: 'workers',
+          workerRole: roleContext?.positionLabel || roleContext?.roleLabel || state.profile?.role || '',
+          workerId: state.workerId,
+        });
+      } catch (error) {
+        console.warn('School calendar worker resolve failed', error);
+        return null;
+      }
+    }
+
+    function applyWorkerCalendarBanner(status) {
+      state.calendarStatus = status || null;
+      if (!calendarStatusBanner || !calendarBannerTitle || !calendarBannerText) return;
+      if (!status || (!status.blockWorkerAttendance && !status.isWorkingOverride && !status.isPublicHoliday && !status.isWeekend && !status.matchedEntries?.length)) {
+        calendarStatusBanner.className = 'calendar-banner';
+        calendarBannerTitle.textContent = '';
+        calendarBannerText.textContent = '';
+        if (checkInBtn) {
+          checkInBtn.disabled = false;
+          checkInBtn.textContent = 'Check-In Sasa';
+        }
+        if (checkOutBtn) {
+          checkOutBtn.disabled = false;
+          checkOutBtn.textContent = 'Check-Out Sasa';
+        }
+        return;
+      }
+
+      const isOffDay = !!status.blockWorkerAttendance;
+      calendarStatusBanner.className = `calendar-banner show ${isOffDay ? 'holiday' : 'override'}`;
+      calendarBannerTitle.textContent = isOffDay
+        ? status.isWeekend && !status.isPublicHoliday && !status.matchedEntries?.length
+          ? 'WEEKEND / OFF DAY'
+          : status.isPublicHoliday && !status.matchedEntries?.length
+            ? 'PUBLIC HOLIDAY'
+            : 'HOLIDAY ACCORDING TO HEADTEACHER'
+        : 'WORKING DAY OVERRIDE';
+      calendarBannerText.textContent = status.bannerText || status.bannerTitle || 'Attendance guidance loaded from the school calendar.';
+
+      if (checkInBtn) {
+        checkInBtn.disabled = isOffDay;
+        checkInBtn.textContent = isOffDay ? 'No Check-In Required Today' : 'Check-In Sasa';
+      }
+      if (checkOutBtn) {
+        checkOutBtn.disabled = isOffDay;
+        checkOutBtn.textContent = isOffDay ? 'No Check-Out Required Today' : 'Check-Out Sasa';
+      }
     }
 
     function computeLateMinutes(checkInTs) {
@@ -1872,6 +1946,13 @@
         if (yearSelect && yearSelect.value !== systemYear) yearSelect.value = systemYear;
         if (yearLabel) yearLabel.textContent = `Mwaka: ${state.year}`;
         const roleContext = await resolveAttendanceRoleContext(systemYear);
+        const todayCalendarStatus = await resolveWorkerCalendarStatus(ymd, systemYear);
+
+        if (todayCalendarStatus?.blockWorkerAttendance) {
+          applyWorkerCalendarBanner(todayCalendarStatus);
+          toast(`No ${direction === 'in' ? 'check-in' : 'check-out'} is required today. ${todayCalendarStatus.bannerTitle || 'The Head Teacher calendar marks today as an off-day for you.'}`, 'info', 6500);
+          return;
+        }
 
         const scopedDayPath = scopedPathForYear(systemYear, `workerAttendance/${state.workerId}/${monthKey}/${dayKey}`);
         const legacyDayPath = `attendance/${state.workerId}/${monthKey}/${dayKey}`;
@@ -2154,8 +2235,12 @@
         toast(`Imeshindikana kuhifadhi ${direction === 'in' ? 'check-in' : 'check-out'}. Jaribu tena.`, 'error');
       } finally {
         if (btn) {
-          btn.disabled = false;
-          btn.textContent = initialText || (direction === 'in' ? 'Check-In Sasa' : 'Check-Out Sasa');
+          if (state.calendarStatus?.blockWorkerAttendance) {
+            applyWorkerCalendarBanner(state.calendarStatus);
+          } else {
+            btn.disabled = false;
+            btn.textContent = initialText || (direction === 'in' ? 'Check-In Sasa' : 'Check-Out Sasa');
+          }
         }
       }
     }
@@ -2201,6 +2286,7 @@
 
     async function refreshAll() {
       updateWorkerMetaLine();
+      applyWorkerCalendarBanner(await resolveWorkerCalendarStatus(state.today, state.year || String(new Date().getFullYear())));
       await Promise.all([renderTable(), renderStats(), maybeShowAdminPanel()]);
     }
 
@@ -3706,6 +3792,13 @@
     }
 
     async function isHolidayDate(year, dayKey) {
+      const isoDate = /^\d{8}$/.test(String(dayKey || ''))
+        ? `${String(dayKey).slice(0, 4)}-${String(dayKey).slice(4, 6)}-${String(dayKey).slice(6, 8)}`
+        : '';
+      if (isoDate && SchoolCalendar) {
+        const resolved = await resolveWorkerCalendarStatus(isoDate, year);
+        if (resolved?.blockWorkerAttendance) return true;
+      }
       const paths = [
         `years/${year}/holidays/${dayKey}`,
         `years/${year}/holidayCalendar/${dayKey}`,

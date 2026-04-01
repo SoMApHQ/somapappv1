@@ -28,6 +28,7 @@
         canonClass,
       };
     </script>
+    <script src="../shared/school_calendar.js"></script>
     <style>
       * {
         font-family: Inter, system-ui, Arial;
@@ -135,6 +136,34 @@
       }
       .shift-note.success {
         color: #a16207;
+      }
+      .calendar-banner {
+        border-radius: 18px;
+        border: 1px solid #fecaca;
+        background: #fff1f2;
+        padding: 14px 16px;
+        display: none;
+      }
+      .calendar-banner.show {
+        display: block;
+      }
+      .calendar-banner.override {
+        background: #fffbeb;
+        border-color: #fcd34d;
+      }
+      .calendar-banner__title {
+        margin: 0 0 6px;
+        color: #9f1239;
+        font-size: 1rem;
+        font-weight: 800;
+      }
+      .calendar-banner.override .calendar-banner__title {
+        color: #92400e;
+      }
+      .calendar-banner__text {
+        margin: 0;
+        color: #475569;
+        line-height: 1.45;
       }
       #shiftModal {
         position: fixed;
@@ -332,6 +361,11 @@
             </button>
           </div>
         </div>
+      </section>
+
+      <section id="calendarBanner" class="calendar-banner">
+        <h2 id="calendarBannerTitle" class="calendar-banner__title"></h2>
+        <p id="calendarBannerText" class="calendar-banner__text"></p>
       </section>
 
       <!-- Attendance list -->
@@ -558,9 +592,14 @@
         let currentShiftStudent = null;
         let currentYear = "";
         let yearReloadPromise = null;
+        const SchoolCalendar = window.SomapSchoolCalendar || null;
+        const calendarState = { currentStatus: null, monthMap: {} };
 
         // ---------- HELPERS ----------
         const el = (id) => document.getElementById(id);
+        const calendarBanner = document.getElementById("calendarBanner");
+        const calendarBannerTitle = document.getElementById("calendarBannerTitle");
+        const calendarBannerText = document.getElementById("calendarBannerText");
         const shiftModal = document.getElementById("shiftModal");
         const shiftForm = document.getElementById("shiftForm");
         const shiftModalClose = document.getElementById("shiftModalClose");
@@ -594,6 +633,81 @@
             String(d.getDate()).padStart(2, "0");
           const iso = fmtDate(d);
           return HOLIDAYS.includes(fixed) || MOVABLE.includes(iso);
+        }
+        async function resolveStudentCalendarStatus(dateStr, classNameOverride) {
+          if (!SchoolCalendar || !dateStr) return null;
+          try {
+            return await SchoolCalendar.resolveDateStatus({
+              year: currentYear || window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear(),
+              date: dateStr,
+              schoolId: currentSchool?.id || SchoolCalendar.resolveSchoolId(),
+              audience: "students",
+              className: classNameOverride || currentClass,
+            });
+          } catch (error) {
+            console.warn("Student calendar resolve failed:", error?.message || error);
+            return null;
+          }
+        }
+        async function refreshCalendarState() {
+          calendarState.currentStatus = await resolveStudentCalendarStatus(
+            currentDateStr,
+            currentClass
+          );
+          calendarState.monthMap = {};
+          if (!currentDateStr || !currentClass || !SchoolCalendar) {
+            applyCalendarState();
+            return;
+          }
+          const dt = new Date(currentDateStr + "T00:00:00");
+          if (Number.isNaN(dt.getTime())) {
+            applyCalendarState();
+            return;
+          }
+          const year = dt.getFullYear();
+          const month = dt.getMonth();
+          const pending = [];
+          for (let day = 1; day <= 31; day += 1) {
+            const candidate = new Date(year, month, day);
+            if (candidate.getMonth() !== month) break;
+            const iso = fmtDate(candidate);
+            pending.push(
+              resolveStudentCalendarStatus(iso, currentClass).then((status) => {
+                calendarState.monthMap[iso] = status;
+              })
+            );
+          }
+          await Promise.all(pending);
+          applyCalendarState();
+        }
+        function applyCalendarState() {
+          const status = calendarState.currentStatus;
+          const isBlocked = !!status?.blockStudentAttendance;
+          const hasBanner = !!status && (isBlocked || status.isWorkingOverride || status.isPublicHoliday || status.matchedEntries?.length);
+          if (calendarBanner && calendarBannerTitle && calendarBannerText) {
+            calendarBanner.className = `calendar-banner${hasBanner ? " show" : ""}${!isBlocked && hasBanner ? " override" : ""}`;
+            calendarBannerTitle.textContent = hasBanner
+              ? isBlocked
+                ? status.isWeekend && !status.isPublicHoliday && !status.matchedEntries?.length
+                  ? "WEEKEND / OFF DAY"
+                  : status.isPublicHoliday && !status.matchedEntries?.length
+                    ? "PUBLIC HOLIDAY"
+                    : "HOLIDAY ACCORDING TO HEADTEACHER"
+                : "WORKING DAY / EVENT NOTICE"
+              : "";
+            calendarBannerText.textContent = hasBanner
+              ? status.bannerText || status.bannerTitle || "Calendar guidance loaded for this class."
+              : "";
+          }
+          ["applyQuick", "markAllPresent", "saveAll"].forEach((id) => {
+            const button = el(id);
+            if (button) button.disabled = isBlocked;
+          });
+          const table = el("attTable");
+          if (table) {
+            table.style.opacity = isBlocked ? "0.6" : "";
+            table.style.pointerEvents = isBlocked ? "none" : "";
+          }
         }
         function deriveDaily(am, pm) {
           if (!am && !pm) return "";
@@ -732,7 +846,12 @@
           for (let day = 1; day <= 31; day++) {
             const dt = new Date(y, m, day);
             if (dt.getMonth() !== m) break;
-            if (isWeekend(dt) || isHoliday(dt)) continue;
+            const iso = fmtDate(dt);
+            const status = calendarState.monthMap?.[iso] || null;
+            const isWorkingDay = status
+              ? !status.blockStudentAttendance && !!status.countAsSchoolDayStudents
+              : !(isWeekend(dt) || isHoliday(dt));
+            if (!isWorkingDay) continue;
             count++;
           }
           return count;
@@ -1042,6 +1161,10 @@
         }
         async function saveDayAttendance(cls, dateStr) {
           if (!db) return;
+          if (calendarState.currentStatus?.blockStudentAttendance) {
+            alert("Attendance is disabled for this class on the selected date because the Head Teacher calendar marks it as an off-day.");
+            return;
+          }
           const yymm = toMonthKey(dateStr);
           const path = `attendance/${cls}/${yymm}/${dateStr}`;
           try {
@@ -1172,6 +1295,7 @@
         }
 
         function onChipClick(e) {
+          if (calendarState.currentStatus?.blockStudentAttendance) return;
           const b = e.currentTarget;
           const stu = b.dataset.stu;
           const sess = b.dataset.sess;
@@ -1577,13 +1701,18 @@
           for (let day = 1; day <= 31; day++) {
             const candidate = new Date(year, month, day);
             if (candidate.getMonth() !== month) break;
-            days.push({
+              days.push({
               day,
               date: fmtDate(candidate),
               weekday: candidate.toLocaleDateString("en-GB", {
                 weekday: "short",
               }),
-              isWorkingDay: !isWeekend(candidate) && !isHoliday(candidate),
+              isWorkingDay: (() => {
+                const iso = fmtDate(candidate);
+                const status = calendarState.monthMap?.[iso] || null;
+                if (status) return !status.blockStudentAttendance && !!status.countAsSchoolDayStudents;
+                return !isWeekend(candidate) && !isHoliday(candidate);
+              })(),
             });
           }
           return days;
@@ -2727,6 +2856,7 @@
             loadDayAttendance(currentClass, currentDateStr),
             loadMonthAttendance(currentClass, monthKey),
           ]);
+          await refreshCalendarState();
           renderTable();
         }
 
@@ -2757,6 +2887,7 @@
               loadDayAttendance(currentClass, currentDateStr),
               loadMonthAttendance(currentClass, monthKey),
             ]);
+            await refreshCalendarState();
             renderTable();
           });
 
