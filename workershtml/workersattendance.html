@@ -1977,6 +1977,25 @@
 
         // Teacher-specific readiness gate
         if (direction === 'in') {
+          // ── Absent yesterday (no check-in at all) → 500-word letter required ──
+          const yesterdayAbsenceCheck = await checkYesterdayAbsenceRequirement(timestamp);
+          if (yesterdayAbsenceCheck.blocked) {
+            if (btn) btn.textContent = 'Inaandika barua ya kutokuhudhuria...';
+            const input = await openReasonModal({
+              title: 'Hukuja Kazini Jana — Barua ya Maneno 500 Inahitajika',
+              message: `${yesterdayAbsenceCheck.message} Eleza ulikuwa wapi na nani alikuruhusu kukosa kazi. Barua LAZIMA iwe maneno 500 au zaidi — si 499, bali 500 kamili na kuendelea.`,
+              placeholder: 'Andika maelezo ya kwa nini hukuja kazini jana, ulikuwa wapi, na nani alikuruhusu kukosa kazi...',
+              minWords: 500
+            });
+            if (input === null) {
+              if (btn) { btn.disabled = false; btn.textContent = 'Check-In Sasa'; }
+              toast('Check-in imeghairiwa; barua ya kutokuhudhuria inahitajika kwanza.', 'warning', 6500);
+              return;
+            }
+            await saveAbsenceExplanationLetter(yesterdayAbsenceCheck, input);
+            toast(`Barua ya kutokuhudhuria tarehe ${yesterdayAbsenceCheck.dayLabel} imehifadhiwa. Unaendelea na check-in ya leo.`, 'info', 5500);
+          }
+
           const yesterdayCheck = await checkYesterdayCheckoutRequirement(timestamp);
           if (yesterdayCheck.blocked) {
             if (btn) btn.textContent = 'Inaandika maelezo ya jana...';
@@ -2030,8 +2049,8 @@
             if (preparedLateMinutes > 0) {
               if (btn) btn.textContent = 'Inaandika sababu ya kuchelewa...';
               const input = await openReasonModal({
-                title: 'Barua ya maelezo ya kuchelewa',
-                message: 'Umechelewa. Lazima uandike barua ya maelezo ya maneno yasiyopungua 200 kabla ya kuhifadhi check-in.',
+                title: 'Barua ya Kuchelewa — Maneno 200 Kamili Inahitajika',
+                message: 'Umechelewa. Lazima uandike barua ya maelezo ya maneno 200 au zaidi — si 199 bali LAZIMA iwe maneno 200 kamili. Haiwezekani kufanya check-in bila kufikia maneno 200.',
                 placeholder: 'Andika barua ya maelezo ya kuchelewa hapa...',
                 minWords: 200
               });
@@ -2152,10 +2171,10 @@
           let reason = preparedCheckInReason || '';
           if (lateMinutes > 0 && !reason) {
             const input = await openReasonModal({
-              title: 'Barua ya maelezo ya kuchelewa',
+              title: 'Barua ya Kuchelewa — Maneno 200 Kamili Inahitajika',
               message: roleContext.isLeadershipLateRole
-                ? `Umechelewa. Kwa sababu wewe ni ${roleContext.positionLabel}, lazima uandike barua ya maelezo ya maneno yasiyopungua 200. Baada ya kuhifadhi utafunguliwa kadi 4 za uongozi.`
-                : 'Umechelewa. Lazima uandike barua ya maelezo ya maneno yasiyopungua 200 kabla ya kuhifadhi check-in.',
+                ? `Umechelewa. Kwa sababu wewe ni ${roleContext.positionLabel}, lazima uandike barua ya maelezo ya maneno 200 au zaidi — si 199 bali 200 kamili. Baada ya kuhifadhi utafunguliwa kadi 4 za uongozi.`
+                : 'Umechelewa. Lazima uandike barua ya maelezo ya maneno 200 au zaidi — si 199 bali LAZIMA iwe maneno 200 kamili. Haiwezekani kufanya check-in bila kufikia maneno 200.',
               placeholder: 'Andika barua ya maelezo ya kuchelewa hapa...',
               minWords: 200
             });
@@ -3871,6 +3890,64 @@
         console.warn('Yesterday checkout check skipped', error);
         return { blocked: false };
       }
+    }
+
+    async function checkYesterdayAbsenceRequirement(referenceTs = localTs()) {
+      try {
+        const yesterday = new Date(referenceTs - 86400000);
+        const meta = getDayMeta(yesterday);
+        // Skip Sunday
+        if (yesterday.getDay() === 0) return { blocked: false, skipped: 'sunday' };
+        // Skip holidays / off-days
+        if (await isHolidayDate(meta.year, meta.dayKey)) return { blocked: false, skipped: 'holiday' };
+        const isoDate = `${meta.year}-${meta.month}-${meta.day}`;
+        const yesterdayCalStatus = await resolveWorkerCalendarStatus(isoDate, meta.year);
+        if (yesterdayCalStatus?.blockWorkerAttendance) return { blocked: false, skipped: 'calendar_off' };
+        const scopedDayPath = scopedPathForYear(meta.year, `workerAttendance/${state.workerId}/${meta.monthKey}/${meta.dayKey}`);
+        const legacyDayPath = `attendance/${state.workerId}/${meta.monthKey}/${meta.dayKey}`;
+        const { snap, source } = await scopedOrSocratesLegacy(scopedDayPath, legacyDayPath);
+        const record = snap.val() || {};
+        // If they checked in yesterday, no issue
+        if (record.checkInTs) return { blocked: false };
+        // If they already submitted an absence explanation letter, allow through
+        const savedExplanation = String(record?.absenceExplanation?.text || '').trim();
+        if (savedExplanation) return { blocked: false, alreadyExplained: true };
+        return {
+          blocked: true,
+          source,
+          scopedDayPath,
+          legacyDayPath,
+          record,
+          dayKey: meta.dayKey,
+          dayLabel: formatDayKey(meta.dayKey),
+          message: `Hukuingia kazini siku ya ${formatDayKey(meta.dayKey)} (siku ya kazi). Lazima utoe barua ya maelezo ya maneno 500 au zaidi kabla ya kufanya check-in ya leo.`,
+        };
+      } catch (error) {
+        console.warn('Yesterday absence check skipped', error);
+        return { blocked: false };
+      }
+    }
+
+    async function saveAbsenceExplanationLetter(blockInfo, explanationText) {
+      if (!blockInfo?.dayKey) return;
+      const explanation = String(explanationText || '').trim();
+      if (!explanation) return;
+      const payload = {
+        absenceExplanation: {
+          text: explanation,
+          wordCount: countWords(explanation),
+          submittedAt: Date.now(),
+        },
+        absenceExplanationText: explanation,
+        absenceExplanationWordCount: countWords(explanation),
+        absenceExplanationTs: Date.now(),
+      };
+      await writeAttendanceUpdate(
+        blockInfo.source || 'scoped',
+        blockInfo.scopedDayPath,
+        blockInfo.legacyDayPath,
+        payload
+      );
     }
 
     async function saveMissedCheckoutExplanation(blockInfo, explanationText) {
