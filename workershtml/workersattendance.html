@@ -1748,24 +1748,35 @@
 
         // 4. Check lesson plans for each lesson today — ONLY when grid is from Firebase (not config fallback)
         if (result.todayLessons.length > 0 && !result.timetableFromConfig) {
-          const uniqueClasses = [...new Set(result.todayLessons.map(l => l.className))];
-          const plansByClass = {};
-          for (const cls of uniqueClasses) {
-            try {
-              const plansSnap = await schoolRef(`lessonPlans/${year}/${cls}/${todayDate}`).once('value');
-              plansByClass[cls] = Object.values(plansSnap.val() || {});
-            } catch (err) {
-              console.warn(`Plans load failed for ${cls} on ${todayDate}:`, err);
-              plansByClass[cls] = [];
+          // Load ALL plans for today across every stored class key. The class name in the timetable
+          // (e.g. "Pre-Unit") may differ from the class name used when saving a plan (e.g. "Pre Unit Class"),
+          // so we cannot do a direct Firebase path lookup by className — we must iterate all class keys
+          // and use classesEquivalent() for matching (same approach as scheme checking).
+          let allTodayPlans = [];
+          try {
+            const allClassesSnap = await schoolRef(`lessonPlans/${year}`).once('value');
+            const allClassesData = allClassesSnap.val() || {};
+            for (const [storedClass, dates] of Object.entries(allClassesData)) {
+              const dayPlans = (dates && dates[todayDate]) ? Object.values(dates[todayDate]) : [];
+              dayPlans.forEach(p => { if (p && typeof p === 'object') allTodayPlans.push({ ...p, _storedClass: storedClass }); });
             }
+          } catch (err) {
+            console.warn('Plans load failed for today:', err);
           }
 
           for (const lesson of result.todayLessons) {
-            const plans = plansByClass[lesson.className] || [];
-            const hasPlan = plans.some(p => {
+            const lessonClassAliases = collectClassAliases(lesson.className);
+            const hasPlan = allTodayPlans.some(p => {
               // Must belong to this teacher (teacherId stored on save)
               const planTeacherId = String(p.teacherId || '').trim();
               if (planTeacherId && planTeacherId !== state.workerId) return false;
+              // Match class using aliases so "Pre-Unit" == "Pre Unit Class" etc.
+              const storedClass = p._storedClass || p.className || p.class || '';
+              const planClass = p.className || p.class || storedClass;
+              const classMatch = lessonClassAliases.some(alias => classesEquivalent(alias, storedClass)) ||
+                                 lessonClassAliases.some(alias => classesEquivalent(alias, planClass));
+              if (!classMatch) return false;
+              // Match subject
               const pSubj = String(p.subject || p.subjectName || '').toLowerCase().trim();
               const lSubj = String(lesson.subject || '').toLowerCase().trim();
               return pSubj === lSubj || pSubj.includes(lSubj) || lSubj.includes(pSubj);
