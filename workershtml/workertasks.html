@@ -3284,6 +3284,17 @@
             toast('Please add at least one class with subjects', 'warning');
             return;
           }
+          // Validate: no duplicate class entries
+          const _classCountMap = {};
+          for (const m of validMappings) {
+            const _cls = toDisplayClass(m.class);
+            _classCountMap[_cls] = (_classCountMap[_cls] || 0) + 1;
+          }
+          const _dupClass = Object.entries(_classCountMap).find(([, count]) => count > 1);
+          if (_dupClass) {
+            toast(`${_dupClass[0]} is listed more than once. Please remove the duplicate class entry.`, 'warning');
+            return;
+          }
           // Validate streams: any stream that exists must have a name
           for (const m of validMappings) {
             const badStream = (m.streams || []).find((s) => s && !s.name);
@@ -3369,7 +3380,28 @@
 
       async function persistClassStreams(mappings) {
         const updates = {};
+        // Deduplicate mappings by class: merge streams from all entries for the same class.
+        // This prevents a duplicate class card from re-adding a stream that was removed in another card.
+        const dedupedMap = new Map();
         (mappings || []).forEach((mapping) => {
+          const classDisplay = toDisplayClass(mapping?.class || '');
+          if (!classDisplay) return;
+          const streams = (mapping.streams || []).filter((s) => s && s.name);
+          if (dedupedMap.has(classDisplay)) {
+            const existing = dedupedMap.get(classDisplay);
+            // Merge streams, keeping unique by streamKey
+            const seen = new Set((existing.streams || []).map((s) => normalizeStreamKey(s.name)));
+            const merged = [...(existing.streams || [])];
+            streams.forEach((s) => {
+              const sk = normalizeStreamKey(s.name);
+              if (!seen.has(sk)) { seen.add(sk); merged.push(s); }
+            });
+            dedupedMap.set(classDisplay, { ...existing, streams: merged });
+          } else {
+            dedupedMap.set(classDisplay, { ...mapping, class: classDisplay, streams });
+          }
+        });
+        dedupedMap.forEach((mapping) => {
           const classDisplay = toDisplayClass(mapping?.class || '');
           if (!classDisplay) return;
           const streams = (mapping.streams || []).filter((s) => s && s.name);
@@ -3378,9 +3410,17 @@
           // Firebase key-safe class key
           const classKey = classDisplay.replace(/[.#$\[\]/\s]/g, '_');
           if (!streams.length) {
+            // Delete the whole class entry
             updates[schoolPath(`years/${currentYear}/classStreams/${classKey}`)] = null;
+            // Also explicitly null each stream key within this class (belt-and-suspenders)
+            Object.keys(classEntry.streams || {}).forEach((sk) => {
+              updates[schoolPath(`years/${currentYear}/classStreams/${classKey}/streams/${sk}`)] = null;
+            });
             if (isSocratesSchool(school?.id)) {
               updates[`years/${currentYear}/classStreams/${classKey}`] = null;
+              Object.keys(classEntry.streams || {}).forEach((sk) => {
+                updates[`years/${currentYear}/classStreams/${classKey}/streams/${sk}`] = null;
+              });
             }
             delete sharedClassStreams[classDisplay];
             return;
