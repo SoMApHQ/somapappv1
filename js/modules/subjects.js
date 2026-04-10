@@ -147,6 +147,22 @@ export function addCustomSubject(className, subjectLabel, year) {
   return list;
 }
 
+/** Rename a custom subject in memory and localStorage for a given class and year. */
+export function renameCustomSubject(className, oldLabel, newLabel, year) {
+  const classKey = canonClass(className);
+  const oldSubject = canonSubject(oldLabel);
+  const newSubject = canonSubject(newLabel);
+  if (!classKey || !oldSubject || !newSubject) return [];
+  const y = normalizeYearKey(year);
+  const yearMap = CUSTOM_SUBJECTS_BY_YEAR[y] || {};
+  const list = yearMap[classKey] || [];
+  // Replace the old label with the new one; keep order, deduplicate
+  const updated = toUniqueLabels(list.map(s => (canonSubject(s) === oldSubject ? newSubject : s)));
+  CUSTOM_SUBJECTS_BY_YEAR[y] = { ...yearMap, [classKey]: updated };
+  safeWriteCustomStore(CUSTOM_SUBJECTS_BY_YEAR);
+  return updated;
+}
+
 /** Subjects for a class in the selected year. (Branch by year if syllabus changes.) */
 export function getSubjectsForClass(className, year) {
   const key = canonClass(className);

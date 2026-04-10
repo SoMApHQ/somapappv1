@@ -53,8 +53,8 @@
     }
   </script>
   <script type="module">
-    import { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass, setCustomSubjectsMap, addCustomSubject } from '../js/modules/subjects.js';
-    window.SomapSubjects = { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass, setCustomSubjectsMap, addCustomSubject };
+    import { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass, setCustomSubjectsMap, addCustomSubject, renameCustomSubject } from '../js/modules/subjects.js';
+    window.SomapSubjects = { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass, setCustomSubjectsMap, addCustomSubject, renameCustomSubject };
   </script>
 
   <style>
@@ -307,6 +307,9 @@
         <button id="btnCheckScoresheet" class="px-3 py-2 rounded-lg bg-violet-600 text-white text-sm">Check Scoresheet</button>
         <button id="btnAddSubject" class="px-3 py-2 rounded-lg bg-amber-600 text-white text-sm flex items-center gap-1" title="Add subject to this class">
           <i class="fas fa-plus-circle"></i> Add Subject
+        </button>
+        <button id="btnRenameSubject" class="px-3 py-2 rounded-lg bg-purple-600 text-white text-sm flex items-center gap-1" title="Rename a subject in this class">
+          <i class="fas fa-edit"></i> Rename Subject
         </button>
         <button id="btnFullScreen" class="px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm">Full Screen</button>
         <button id="btnSaveAll" class="px-3 py-2 rounded-lg bg-sky-600 text-white text-sm">Save Scores</button>
@@ -2177,6 +2180,224 @@
   <script src="../js/modules/grading.js"></script>
   <script>
     const { percent, gradeFromPercent: gradingGradeFromPercent, letterAndPercent } = window.Grading;
+  </script>
+
+  <!-- ===== RENAME SUBJECT MODAL ===== -->
+  <div id="renameSubjectModal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);backdrop-filter:blur(2px);" class="flex items-center justify-center">
+    <div style="background:#1e293b;border:1px solid #334155;border-radius:1rem;padding:1.5rem;width:min(94vw,420px);box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.2rem;">
+        <div>
+          <h2 style="color:#f1f5f9;font-size:1rem;font-weight:700;margin:0;"><i class="fas fa-edit" style="color:#a855f7;margin-right:6px;"></i>Rename Subject</h2>
+          <p id="renameSubjectClassLabel" style="color:#94a3b8;font-size:0.75rem;margin:2px 0 0;"></p>
+        </div>
+        <button id="btnCloseRenameModal" style="color:#94a3b8;background:none;border:none;font-size:1.3rem;cursor:pointer;line-height:1;">&times;</button>
+      </div>
+
+      <label style="display:block;color:#cbd5e1;font-size:0.8rem;margin-bottom:4px;">Subject to rename</label>
+      <select id="renameSubjectFrom" style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #475569;border-radius:8px;color:#f1f5f9;font-size:0.875rem;margin-bottom:1rem;">
+        <option value="">— select subject —</option>
+      </select>
+
+      <label style="display:block;color:#cbd5e1;font-size:0.8rem;margin-bottom:4px;">New name</label>
+      <input id="renameSubjectTo" type="text" placeholder="e.g. French" style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #475569;border-radius:8px;color:#f1f5f9;font-size:0.875rem;margin-bottom:1.2rem;box-sizing:border-box;">
+
+      <div id="renameSubjectStatus" style="font-size:0.78rem;color:#94a3b8;margin-bottom:0.8rem;min-height:18px;"></div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button id="btnCancelRename" style="padding:8px 18px;background:#334155;color:#cbd5e1;border:none;border-radius:8px;cursor:pointer;font-size:0.85rem;">Cancel</button>
+        <button id="btnConfirmRename" style="padding:8px 18px;background:#9333ea;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:0.85rem;font-weight:600;"><i class="fas fa-check"></i> Rename</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function(){
+    const modal        = document.getElementById('renameSubjectModal');
+    const selectFrom   = document.getElementById('renameSubjectFrom');
+    const inputTo      = document.getElementById('renameSubjectTo');
+    const statusEl     = document.getElementById('renameSubjectStatus');
+    const classLabel   = document.getElementById('renameSubjectClassLabel');
+    const btnOpen      = document.getElementById('btnRenameSubject');
+    const btnClose     = document.getElementById('btnCloseRenameModal');
+    const btnCancel    = document.getElementById('btnCancelRename');
+    const btnConfirm   = document.getElementById('btnConfirmRename');
+
+    function setStatus(msg, color){ statusEl.textContent = msg; statusEl.style.color = color || '#94a3b8'; }
+
+    function openModal(){
+      if (!state.className || !state.year){ alert('Select class and year first.'); return; }
+      // populate subject dropdown
+      selectFrom.innerHTML = '<option value="">— select subject —</option>';
+      (state.subjectList || []).forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.key;
+        opt.textContent = s.label;
+        selectFrom.appendChild(opt);
+      });
+      inputTo.value = '';
+      setStatus('');
+      classLabel.textContent = `${state.className} • ${state.year}`;
+      modal.style.display = 'flex';
+      inputTo.focus && inputTo.focus();
+    }
+    function closeModal(){ modal.style.display = 'none'; }
+
+    btnOpen   && btnOpen.addEventListener('click', openModal);
+    btnClose  && btnClose.addEventListener('click', closeModal);
+    btnCancel && btnCancel.addEventListener('click', closeModal);
+    modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+
+    // When "from" changes, pre-fill the "to" input with current name
+    selectFrom.addEventListener('change', () => {
+      const sel = selectFrom.options[selectFrom.selectedIndex];
+      if (sel && sel.value) inputTo.value = sel.textContent;
+      inputTo.select && inputTo.select();
+    });
+
+    btnConfirm && btnConfirm.addEventListener('click', async () => {
+      const oldKey   = selectFrom.value;
+      const oldLabel = selectFrom.options[selectFrom.selectedIndex]?.textContent || oldKey;
+      const newRaw   = String(inputTo.value || '').trim();
+      if (!oldKey)  { setStatus('Please select a subject to rename.', '#f87171'); return; }
+      if (!newRaw)  { setStatus('Please enter a new name.', '#f87171'); return; }
+
+      const api = SomapSub();
+      const canonical = api.canonSubject ? api.canonSubject(newRaw) : newRaw;
+      const newKey = makeSubjectKey(canonical);
+      if (!newKey)  { setStatus('Invalid new name.', '#f87171'); return; }
+      if (newKey === oldKey) { setStatus('New name is the same as the current name.', '#f87171'); return; }
+      const alreadyExists = (state.subjectList || []).some(s => s.key === newKey);
+      if (alreadyExists) { setStatus(`"${canonical}" already exists in ${state.className}.`, '#f87171'); return; }
+
+      setStatus('Renaming… please wait.', '#fbbf24');
+      btnConfirm.disabled = true;
+
+      try {
+        await renameSubjectEverywhere(state.year, state.className, oldKey, oldLabel, newKey, canonical);
+        // update in-memory subject list
+        if (api.renameCustomSubject) {
+          api.renameCustomSubject(state.className, oldLabel, canonical, state.year);
+        } else {
+          // fallback: reload
+          await loadCustomSubjectsForYear(state.year);
+        }
+        state.subjectList = getSubjectsForClassAndYear(state.className, state.year);
+        // re-key any in-memory scores
+        Object.values(state.scores || {}).forEach(stuScores => {
+          if (stuScores && stuScores[oldKey] !== undefined) {
+            stuScores[newKey] = { ...(stuScores[oldKey] || {}), label: canonical };
+            delete stuScores[oldKey];
+          }
+        });
+        buildTable();
+        recomputeAll();
+        if (typeof lblStatus !== 'undefined' && lblStatus) lblStatus.textContent = `Renamed "${oldLabel}" → "${canonical}"`;
+        setStatus(`Done! "${oldLabel}" has been renamed to "${canonical}" everywhere.`, '#4ade80');
+        setTimeout(closeModal, 1800);
+      } catch(err) {
+        setStatus('Error: ' + (err?.message || err), '#f87171');
+      } finally {
+        btnConfirm.disabled = false;
+      }
+    });
+
+    /* -------------------------------------------------------
+       Core rename function — updates Firebase in 3 places:
+       1. subjectCatalog  (subject metadata)
+       2. scores          (all stored marks)
+       3. teachers_config (teacher subject assignments)
+    ------------------------------------------------------- */
+    async function renameSubjectEverywhere(year, className, oldKey, oldLabel, newKey, newLabel) {
+      const db = getDB();
+      if (!db) throw new Error('Firebase not initialized');
+      const classKey = api_canonClass(className);
+      if (!classKey) throw new Error('Invalid class name');
+
+      const updates = {};  // multi-path atomic update
+
+      // ── 1. subjectCatalog ──────────────────────────────────
+      const catalogBase = `subjectCatalog/${year}/${classKey}`;
+      const newPayload = { label: newLabel, key: newKey, className: classKey, year: Number(year), updatedAt: firebase.database.ServerValue.TIMESTAMP };
+      updates[scopedPath(`${catalogBase}/${newKey}`)] = newPayload;
+      updates[scopedPath(`${catalogBase}/${oldKey}`)] = null;
+      if (isSocrates) {
+        updates[`${catalogBase}/${newKey}`] = newPayload;
+        updates[`${catalogBase}/${oldKey}`] = null;
+      }
+
+      // ── 2. scores — scan all exam types & months ───────────
+      const scoresBasePath = `scores/${year}/${classKey}`;
+      const scoresSnap = await (async () => {
+        try {
+          const found = await readFirstExisting([scoresBasePath]);
+          return found?.snap?.exists?.() ? found.snap : null;
+        } catch(_){ return null; }
+      })();
+      if (scoresSnap) {
+        const scoresRaw = scoresSnap.val() || {};
+        // structure: { examKey: { month: { admNum: { subjectKey: { score, max, label } } } } }
+        Object.entries(scoresRaw).forEach(([examK, monthsObj]) => {
+          if (!monthsObj || typeof monthsObj !== 'object') return;
+          Object.entries(monthsObj).forEach(([monthK, studentsObj]) => {
+            if (!studentsObj || typeof studentsObj !== 'object') return;
+            Object.entries(studentsObj).forEach(([adm, subjectsObj]) => {
+              if (!subjectsObj || typeof subjectsObj !== 'object') return;
+              if (subjectsObj[oldKey] === undefined) return;
+              const scoreData = { ...(subjectsObj[oldKey] || {}), label: newLabel };
+              const base = `${scoresBasePath}/${examK}/${monthK}/${adm}`;
+              updates[scopedPath(`${base}/${newKey}`)] = scoreData;
+              updates[scopedPath(`${base}/${oldKey}`)] = null;
+              if (isSocrates) {
+                updates[`${base}/${newKey}`] = scoreData;
+                updates[`${base}/${oldKey}`] = null;
+              }
+            });
+          });
+        });
+      }
+
+      // ── 3. teachers_config — update classSubjectMappings ───
+      const cfgPaths = [`years/${year}/teachers_config`, `teachers_config/${year}`];
+      for (const cfgPath of cfgPaths) {
+        try {
+          const found = await readFirstExisting([cfgPath]);
+          if (!found?.snap?.exists?.()) continue;
+          const cfgRaw = found.snap.val() || {};
+          Object.entries(cfgRaw).forEach(([teacherId, cfg]) => {
+            const mappings = Array.isArray(cfg?.classSubjectMappings) ? cfg.classSubjectMappings : [];
+            let changed = false;
+            const updatedMappings = mappings.map(mapping => {
+              const mappingClass = api_canonClass(mapping?.class || mapping?.className || mapping?.classLevel || mapping?.grade || '');
+              if (mappingClass !== classKey) return mapping;
+              const subs = Array.isArray(mapping.subjects) ? mapping.subjects : [];
+              if (!subs.includes(oldLabel) && !subs.includes(oldKey)) return mapping;
+              changed = true;
+              const updatedSubs = subs.map(s => (s === oldLabel || s === oldKey) ? newLabel : s);
+              // also handle stream subjects
+              const streams = Array.isArray(mapping.streams) ? mapping.streams.map(stream => {
+                const ss = Array.isArray(stream.subjects) ? stream.subjects : [];
+                if (!ss.includes(oldLabel) && !ss.includes(oldKey)) return stream;
+                return { ...stream, subjects: ss.map(s => (s === oldLabel || s === oldKey) ? newLabel : s) };
+              }) : mapping.streams;
+              return { ...mapping, subjects: updatedSubs, ...(streams ? { streams } : {}) };
+            });
+            if (changed) {
+              updates[scopedPath(`${cfgPath}/${teacherId}/classSubjectMappings`)] = updatedMappings;
+              if (isSocrates) updates[`${cfgPath}/${teacherId}/classSubjectMappings`] = updatedMappings;
+            }
+          });
+        } catch(_){}
+      }
+
+      // ── Apply all updates atomically ───────────────────────
+      await db.ref('/').update(updates);
+    }
+
+    function api_canonClass(className) {
+      const api = SomapSub();
+      return api.canonClass ? api.canonClass(className) : String(className || '').trim();
+    }
+  })();
   </script>
 </body>
 </html>
