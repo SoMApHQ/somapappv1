@@ -1237,6 +1237,19 @@
       if (m <= 0 || count === 0) return { pct: 0, total: 0, max: 0, attemptedCount: 0 };
       return { pct: (s * 100) / m, total: s, max: m, attemptedCount: count };
     }
+    // Display-normalised average: uses dispScore/dispMax so the result matches
+    // what is shown in the subject table rows. For monthly (non-window) exams
+    // this gives the same result as studentPercentFrom; for window exams it
+    // normalises every subject to its preferredDisplayMax so all subjects carry
+    // equal weight regardless of how many months contributed.
+    function displayPercentFrom(subjects){
+      const normed = toNormalizedRows(subjects);
+      const attempted = normed.filter(e => e.attempted);
+      const totalScore = attempted.reduce((sum, e) => sum + e.dispScore, 0);
+      const totalMax   = attempted.reduce((sum, e) => sum + e.dispMax,  0);
+      const pct = totalMax > 0 ? (totalScore * 100) / totalMax : 0;
+      return { pct, total: totalScore, max: totalMax, attemptedCount: attempted.length };
+    }
     // Unified grading
     function gradeFromPercent(p){
       const x = Math.max(0, Math.min(100, Number(p)||0));
@@ -4209,12 +4222,14 @@
         const att = pickMapValueByCandidates(attendance, attendanceLookup, candidateKeys) || { present:0, absent:0, days:0 };
         const scoreEntry = pickMapValueByCandidates(scores, scoreLookup, candidateKeys) || {};
         const subjectStats = buildSubjectStats(subjects, scoreEntry);
-        const overall = studentPercentFrom(subjectStats.subjects);
-        subjectStats.totalScore = overall.total;
-        subjectStats.totalMax = overall.max;
-        subjectStats.attemptedCount = overall.attemptedCount;
+        // Use display-normalised stats so that s.avg, s.grade, positions, summary
+        // PDF, CSV, and the report-card badge all agree with the subject table totals.
+        const displayStats = displayPercentFrom(subjectStats.subjects);
+        subjectStats.totalScore = displayStats.total;
+        subjectStats.totalMax = displayStats.max;
+        subjectStats.attemptedCount = displayStats.attemptedCount;
         const annualOverride = (state.examKey === 'annual') && annualOverallMap.hasOwnProperty(adm) ? Number(annualOverallMap[adm]) : null;
-        const avg = annualOverride !== null ? annualOverride : overall.pct;
+        const avg = annualOverride !== null ? annualOverride : displayStats.pct;
         const grade = gradeFromPercent(avg);
         const comment = autoComment(avg);
         students.push({
@@ -4228,7 +4243,7 @@
           nextDueLabel: fee.nextDueLabel || '-',
           feeSchedule: Array.isArray(fee.schedule) ? fee.schedule : [],
           presents: att.present, absents: att.absent, attendanceDays: att.days, attendancePercent: att.days ? (att.present/att.days)*100 : 0,
-          subjectStats, totalScore: overall.total, totalMax: overall.max, avg, grade, comment,
+          subjectStats, totalScore: displayStats.total, totalMax: displayStats.max, avg, grade, comment,
           attemptedCount: overall.attemptedCount,
           subjectPositions: {}, overallPosition: 0, annualPct: annualOverride !== null ? annualOverride : undefined, annualUsedParts: annualUsedPartsMap[adm] || [],
           monthLabel: MONTH_LABELS[state.month] || state.month, examLabel: state.examType
