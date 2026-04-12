@@ -2709,7 +2709,7 @@
         });
       }
 
-      function removeStreamFromCard(cardIndex, streamIndex, streamCardEl) {
+      async function removeStreamFromCard(cardIndex, streamIndex, streamCardEl) {
         const mapping = classSubjectMap[cardIndex];
         const targetStream = mapping?.streams?.[streamIndex];
         if (targetStream && !targetStream.canManage) {
@@ -2717,6 +2717,13 @@
           toast(`Only ${ownerName} or Academic can delete this stream.`, 'warning');
           return;
         }
+        const streamName = targetStream?.name || 'this stream';
+        const confirmed = window.confirm(
+          `Are you sure you want to permanently delete stream "${streamName}"?\n\nThis will remove it from all data including the timetable. This cannot be undone.`
+        );
+        if (!confirmed) return;
+
+        // Remove from local state and UI immediately
         if (mapping?.streams) mapping.streams[streamIndex] = null;
         streamCardEl.remove();
         const streamsList = document.getElementById(`streams-list-${cardIndex}`);
@@ -2725,6 +2732,80 @@
           streamsSection.style.display = 'none';
         }
         updateAddStreamControls(cardIndex);
+
+        // Immediately delete from Firebase RTDB so timetable and all pages stop recognising it
+        const className = mapping?.class;
+        if (!className || !targetStream?.name) return;
+        const classDisplay = toDisplayClass(className);
+        const classKey = classDisplay.replace(/[.#$\[\]/\s]/g, '_');
+        const sk = targetStream.streamKey || normalizeStreamKey(targetStream.name);
+        const classEntry = getSharedClassEntry(classDisplay) || { className: classDisplay, streams: {} };
+        const remainingStreamKeys = Object.keys(classEntry.streams || {}).filter((key) => key !== sk);
+
+        try {
+          const updates = {};
+          if (remainingStreamKeys.length === 0) {
+            // This was the last stream — delete the entire class entry
+            updates[schoolPath(`years/${currentYear}/classStreams/${classKey}`)] = null;
+            if (isSocratesSchool(school?.id)) {
+              updates[`years/${currentYear}/classStreams/${classKey}`] = null;
+            }
+            delete sharedClassStreams[classDisplay];
+          } else {
+            // Other streams still exist — delete only this specific stream key
+            updates[schoolPath(`years/${currentYear}/classStreams/${classKey}/streams/${sk}`)] = null;
+            if (isSocratesSchool(school?.id)) {
+              updates[`years/${currentYear}/classStreams/${classKey}/streams/${sk}`] = null;
+            }
+            if (sharedClassStreams[classDisplay]?.streams) {
+              delete sharedClassStreams[classDisplay].streams[sk];
+            }
+          }
+          if (Object.keys(updates).length) {
+            await db.ref().update(updates);
+          }
+          // Also persist the teacher's own config so the stream doesn't reappear on reload
+          await persistStreamDeletionToTeacherConfig();
+          toast(`Stream "${streamName}" permanently deleted from all data.`, 'success');
+        } catch (err) {
+          console.error('Failed to permanently delete stream from database', err);
+          toast(`Stream removed from view. Please save your profile to persist the deletion.`, 'warning');
+        }
+      }
+
+      async function persistStreamDeletionToTeacherConfig() {
+        if (!currentWorkerId || !teacherConfig) return;
+        const currentMappings = classSubjectMap.filter((m) => m && m.class);
+        if (!currentMappings.length) return;
+        const normalizedMappings = currentMappings.map((m) => ({
+          class: toDisplayClass(m.class),
+          subjects: uniqueSubjects(m.subjects || []),
+          streams: (m.streams || []).filter((s) => s && s.name).map((s) => ({
+            name: normalizeStreamName(s.name),
+            streamKey: s.streamKey || normalizeStreamKey(s.name),
+            subjects: uniqueSubjects(s.subjects || []),
+            studentIds: s.studentIds || [],
+            studentNames: s.studentNames || [],
+            addedBy: s.addedBy || currentWorkerId || '',
+            addedByName: s.addedByName || buildWorkerSnapshot().name || '',
+            ownerWorkerId: s.ownerWorkerId || '',
+            ownerName: s.ownerName || ''
+          }))
+        }));
+        const allClasses = [...new Set(normalizedMappings.map((m) => toDisplayClass(m.class)))];
+        const allSubjects = [...new Set(normalizedMappings.flatMap((m) => [
+          ...(m.subjects || []),
+          ...((m.streams || []).flatMap((stream) => stream.subjects || []))
+        ]))];
+        const updatedConfig = {
+          ...teacherConfig,
+          classSubjectMappings: normalizedMappings,
+          classes: allClasses,
+          subjects: allSubjects,
+          setupDate: localTs()
+        };
+        await schoolRef(`years/${currentYear}/teachers_config/${currentWorkerId}`).set(updatedConfig);
+        teacherConfig = updatedConfig;
       }
 
       function populateStreamSubjects(cardIndex, streamIndex, preselected = []) {
@@ -3410,17 +3491,11 @@
           // Firebase key-safe class key
           const classKey = classDisplay.replace(/[.#$\[\]/\s]/g, '_');
           if (!streams.length) {
-            // Delete the whole class entry
+            // Delete the whole class entry — do NOT also null individual stream keys in the
+            // same update() call, because overlapping parent+child paths cause Firebase to reject the write.
             updates[schoolPath(`years/${currentYear}/classStreams/${classKey}`)] = null;
-            // Also explicitly null each stream key within this class (belt-and-suspenders)
-            Object.keys(classEntry.streams || {}).forEach((sk) => {
-              updates[schoolPath(`years/${currentYear}/classStreams/${classKey}/streams/${sk}`)] = null;
-            });
             if (isSocratesSchool(school?.id)) {
               updates[`years/${currentYear}/classStreams/${classKey}`] = null;
-              Object.keys(classEntry.streams || {}).forEach((sk) => {
-                updates[`years/${currentYear}/classStreams/${classKey}/streams/${sk}`] = null;
-              });
             }
             delete sharedClassStreams[classDisplay];
             return;
