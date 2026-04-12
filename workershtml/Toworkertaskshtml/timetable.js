@@ -235,14 +235,14 @@
     els.addSlotButton?.addEventListener('click', () => {
       mutateSettings((settings) => {
         settings.slots.push({ id: `slot_${Date.now()}`, start: '08:00', end: '08:40', label: 'New Slot', isTeaching: true });
-      });
+      }, { rerender: 'settings' });
     });
     els.resetSlotsButton?.addEventListener('click', () => {
       mutateSettings((settings) => {
         settings.slots = deepClone(DEFAULT_SLOT_PRESETS[state.activeGroupId] || []);
         settings.activeDays = [...DAYS];
         settings.fridayAfternoon = { ...DEFAULT_FRIDAY_AFTERNOON };
-      });
+      }, { rerender: 'settings' });
     });
     els.saveDraftInvalidButton?.addEventListener('click', () => saveDraftInvalid(state.activeGroupId));
     els.downloadPdfButton?.addEventListener('click', () => downloadCurrentGroupPdf());
@@ -622,7 +622,9 @@
     });
     if (tabId === 'weeksnap') {
       renderWeekSnapTab().catch((e) => console.warn('Week snap render failed', e));
+      return;
     }
+    renderActiveTabPanels();
   }
 
   async function renderWeekSnapTab() {
@@ -702,14 +704,44 @@
     renderAccessState();
     renderAlerts();
     renderSummary(settings, displayTimetable, groupTeachers);
-    renderOverview(settings, displayTimetable, groupTeachers);
-    renderTeacherFilter();
-    renderTeacherTable();
-    renderSettings();
-    renderPreview();
-    renderPdfPanel();
-    renderAllGroupsPreview();
+    renderRequirementSourceBadge(summarizeRequirementSources(getRequirementAuditRows(groupId, settings, displayTimetable)));
+    renderActiveTabPanels(settings, displayTimetable, groupTeachers);
     renderHeaderStatus(displayTimetable);
+  }
+
+  function renderActiveTabPanels(
+    settings = getActiveSettings(),
+    displayTimetable = getDisplayTimetable(state.activeGroupId),
+    groupTeachers = getTeachersForGroup(state.activeGroupId)
+  ) {
+    if (state.activeTab === 'overview') {
+      renderOverview(settings, displayTimetable, groupTeachers);
+      return;
+    }
+    if (state.activeTab === 'teachers') {
+      renderTeacherFilter();
+      renderTeacherTable();
+      return;
+    }
+    if (state.activeTab === 'settings') {
+      renderSettings();
+      return;
+    }
+    if (state.activeTab === 'preview') {
+      renderPreview();
+      return;
+    }
+    if (state.activeTab === 'pdf') {
+      renderPdfPanel();
+      return;
+    }
+    if (state.activeTab === 'allgroups') {
+      renderAllGroupsPreview();
+      return;
+    }
+    if (state.activeTab === 'weeksnap') {
+      renderWeekSnapTab().catch((e) => console.warn('Week snap render failed', e));
+    }
   }
 
   function renderAccessState() {
@@ -967,7 +999,7 @@
       button.addEventListener('click', () => {
         mutateSettings((settingsDraft) => {
           settingsDraft.slots.splice(Number(button.dataset.removeSlot), 1);
-        });
+        }, { rerender: 'settings' });
       });
     });
   }
@@ -1027,7 +1059,7 @@
           start: fridayAfternoonStart,
           label: fridayAfternoonLabel
         };
-      });
+      }, { rerender: 'settings' });
       toast('Time slots rebuilt from the quick day builder.', 'success');
     } catch (error) {
       toast(error.message || 'Unable to build the timetable day layout.', 'warning');
@@ -1162,8 +1194,14 @@
         </tbody>
       </table>
     `;
-    els.subjectOptionsEditor.querySelectorAll('[data-subject-abbreviation]').forEach((input) => input.addEventListener('input', handleSubjectMetaInput));
-    els.subjectOptionsEditor.querySelectorAll('[data-subject-color]').forEach((input) => input.addEventListener('input', handleSubjectMetaInput));
+    els.subjectOptionsEditor.querySelectorAll('[data-subject-abbreviation]').forEach((input) => {
+      input.addEventListener('input', handleSubjectMetaInput);
+      input.addEventListener('change', handleSubjectMetaInput);
+    });
+    els.subjectOptionsEditor.querySelectorAll('[data-subject-color]').forEach((input) => {
+      input.addEventListener('input', handleSubjectMetaInput);
+      input.addEventListener('change', handleSubjectMetaInput);
+    });
   }
 
   function renderLockedCellsEditor() {
@@ -1206,7 +1244,7 @@
       button.addEventListener('click', () => {
         mutateSettings((settingsDraft) => {
           settingsDraft.lockedCells = (settingsDraft.lockedCells || []).filter((item) => item.id !== button.dataset.removeLock);
-        });
+        }, { rerender: 'settings' });
       });
     });
   }
@@ -1715,19 +1753,20 @@
         teacherId: type === 'teaching' ? teacherId : '',
         label: type === 'fixed' ? label : ''
       });
-    });
+    }, { rerender: 'settings' });
   }
 
   function handleSlotInput(event) {
     if (!state.viewer.canManage) return;
     const index = Number(event.target.dataset.slotIndex);
     const field = event.target.dataset.slotField;
+    const rerender = event.type === 'change' ? 'settings' : 'none';
     mutateSettings((settings) => {
       const slot = settings.slots[index];
       if (!slot) return;
       slot[field] = field === 'isTeaching' ? event.target.value === 'true' : event.target.value;
       if (field === 'label' && !slot.id) slot.id = slugify(slot.label || `slot_${index + 1}`);
-    });
+    }, { rerender, normalize: false });
   }
 
   function handlePeriodInput(event) {
@@ -1738,7 +1777,7 @@
     mutateSettings((settings) => {
       settings.periodRequirements[className] = settings.periodRequirements[className] || {};
       settings.periodRequirements[className][subject] = value;
-    });
+    }, { rerender: 'none', normalize: false });
   }
 
   function handleSubjectMetaInput(event) {
@@ -1747,25 +1786,35 @@
       const subject = event.target.dataset.subjectAbbreviation;
       mutateSettings((settings) => {
         settings.subjectAbbreviations[subject] = sanitizeAbbreviation(event.target.value);
-      });
+      }, { rerender: 'none', normalize: false });
       return;
     }
     if (event.target.dataset.subjectColor) {
       const subject = event.target.dataset.subjectColor;
       mutateSettings((settings) => {
         settings.subjectColors[subject] = toColorHex(event.target.value);
-      });
+      }, { rerender: 'none', normalize: false });
     }
   }
 
-  function mutateSettings(mutator) {
+  function mutateSettings(mutator, { rerender = 'all', normalize = true } = {}) {
     const groupId = state.activeGroupId;
-    const draft = deepClone(getSettingsForGroup(groupId));
+    const baseSettings = getSettingsForGroup(groupId);
+    const draft = normalize ? deepClone(baseSettings) : baseSettings;
     mutator(draft);
     draft.seededDefaults = false;
-    state.settingsByGroup[groupId] = normalizeSettings(draft, groupId, state.teachers, state.subjectCatalog);
+    state.settingsByGroup[groupId] = normalize
+      ? normalizeSettings(draft, groupId, state.teachers, state.subjectCatalog)
+      : draft;
     state.dirtySettings.add(groupId);
-    renderAll();
+    if (rerender === 'all') {
+      renderAll();
+      return;
+    }
+    renderAccessState();
+    if (rerender === 'settings') {
+      renderSettings();
+    }
   }
 
   function buildTimetable(groupId, settings, teachers) {
