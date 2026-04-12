@@ -246,8 +246,10 @@
     els.pdfAllButton?.addEventListener('click', () => downloadAllGroupsPdf());
     els.pdfPrintButton?.addEventListener('click', printCurrentPreview);
     els.weekSnapRefreshButton?.addEventListener('click', () => {
-      renderWeekSnapTab();
-      maybeEnsureWeekSnapshot().then(() => renderWeekSnapTab()).catch((e) => console.warn('Week snap refresh failed', e));
+      if (els.weekSnapStatusChip) { els.weekSnapStatusChip.textContent = 'Refreshing…'; }
+      maybeEnsureWeekSnapshot()
+        .then(() => renderWeekSnapTab())
+        .catch((e) => { console.warn('Week snap refresh failed', e); renderWeekSnapTab(); });
     });
   }
 
@@ -1428,9 +1430,12 @@
     }
   }
 
-  // Ensure the current-week snapshot exists for all groups already in generatedByGroup.
-  // Called on management page load so teachers can check in even when the timetable
-  // was generated in a previous week and hasn't changed.
+  // Ensure the current-week snapshot exists for ALL groups in GROUP_ORDER.
+  // Strategy per missing group:
+  //   1. In-memory state.generatedByGroup[gid]   → copy directly to snapshot
+  //   2. Not in memory → load from Firebase generated/{termKey}/{gid}  → copy if found
+  //   3. Still not found → generate the group (saves both generated + snapshot via persistGenerated)
+  // Called on management page load and via the "Refresh Snapshot" button.
   async function maybeEnsureWeekSnapshot() {
     if (!state.viewer?.canManage) return;
     try {
@@ -1439,14 +1444,40 @@
       const snapSnap = await state.db.ref(snapPath).once('value');
       const existingSnap = snapSnap.val() || {};
 
-      // Find groups that have a generated timetable but are missing from this week's snapshot
-      const missingGroups = GROUP_ORDER.filter(gid => state.generatedByGroup[gid] && !existingSnap[gid]);
+      // All groups that are absent from this week's snapshot
+      const missingGroups = GROUP_ORDER.filter(gid => !existingSnap[gid]);
       if (!missingGroups.length) return;
 
       for (const groupId of missingGroups) {
-        const generated = state.generatedByGroup[groupId];
-        if (!generated) continue;
         try {
+          // --- Step 1: try in-memory state ---
+          let generated = state.generatedByGroup[groupId] || null;
+
+          // --- Step 2: try loading from Firebase if not in memory ---
+          if (!generated) {
+            try {
+              const genSnap = await state.db.ref(
+                window.SOMAP.P(`years/${state.year}/timetable/generated/${state.activeTerm}/${groupId}`)
+              ).once('value');
+              if (genSnap.exists()) {
+                generated = genSnap.val();
+                // Sync back into memory so the rest of the page stays consistent
+                state.generatedByGroup[groupId] = generated;
+              }
+            } catch (loadErr) {
+              console.warn(`Could not load generated timetable for ${groupId} from Firebase:`, loadErr);
+            }
+          }
+
+          // --- Step 3: still nothing → generate it now ---
+          if (!generated) {
+            // generateGroup calls persistGenerated which writes the snapshot automatically
+            const payload = await generateGroup(groupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false, autoReason: 'week-snapshot-ensure' });
+            if (payload) generated = payload; // snapshot already written by persistGenerated
+            continue; // skip the manual snapshot write below; persistGenerated already did it
+          }
+
+          // --- Copy existing generated data into the weekly snapshot ---
           const { isSaved, ...persistablePayload } = generated;
           const snapshotPayload = {
             weekKey,
@@ -1463,9 +1494,11 @@
             classes: persistablePayload.classes || [],
             days: persistablePayload.days || []
           };
-          await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/weeklySnapshots/${state.activeTerm}/${weekKey}/generated/${groupId}`)).set(snapshotPayload);
+          await state.db.ref(window.SOMAP.P(
+            `years/${state.year}/timetable/weeklySnapshots/${state.activeTerm}/${weekKey}/generated/${groupId}`
+          )).set(snapshotPayload);
         } catch (e) {
-          console.warn(`Week snapshot copy for ${groupId} failed:`, e);
+          console.warn(`Week snapshot ensure for ${groupId} failed:`, e);
         }
       }
     } catch (err) {
