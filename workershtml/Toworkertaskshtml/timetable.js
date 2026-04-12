@@ -93,6 +93,7 @@
   };
   const CORE_SUBJECTS = new Set(['Math', 'English', 'Kiswahili', 'Science', 'Arithmetic', 'Writing Skills', 'Reading Skills', 'Communication', 'Kusoma']);
   const MORNING_PRIORITY_SUBJECTS = new Set(['Math', 'English', 'Science']);
+  const UPPER_PRIMARY_MORNING_SUBJECTS = new Set(['Math', 'English', 'Science', 'Kiswahili']);
   const DEFAULT_SLOT_PRESETS = {
     nursery_group: [
       { id: 'nursery_1', start: '08:00', end: '08:40', label: 'Teaching 1', isTeaching: true },
@@ -143,6 +144,7 @@
     teacherMap: {},
     subjectCatalog: {},
     classStreams: {},
+    schoolWorkerIds: [],
     schemeHoursByClass: {},
     settingsByGroup: {},
     generatedByGroup: {},
@@ -369,6 +371,7 @@
       await loadSchoolBranding();
       const source = await loadTeacherSources();
       state.teachers = source.teachers;
+      state.schoolWorkerIds = source.schoolWorkerIds || [];
       state.teacherMap = indexBy(source.teachers, 'workerId');
       state.subjectCatalog = source.subjectCatalog;
       state.schemeHoursByClass = await loadSchemeHoursMap();
@@ -379,13 +382,10 @@
       subscribeToSourceChanges();
       renderAll();
       if (withAutoGenerate) {
-        await maybeAutoRegenerateAll('source-refresh');
+        await maybeAutoRegenerateCurrent('source-refresh');
       } else {
         await maybeAutoRegenerateCurrent('render-only');
       }
-      // Ensure the current-week snapshot is populated for attendance checks.
-      // Runs silently after generation; non-critical if it fails.
-      await maybeEnsureWeekSnapshot();
     } finally {
       setBusyStatus('');
     }
@@ -463,6 +463,7 @@
     state.classStreams = normalizeClassStreams(classStreamsRaw);
     applyStreamsToGroups(state.classStreams);
     const teachers = [];
+    const schoolWorkerIds = Object.keys(workersRaw || {}).filter(Boolean);
 
     Object.entries(workersRaw).forEach(([workerId, workerValue]) => {
       const worker = workerValue || {};
@@ -491,19 +492,19 @@
       return String(left.workerId).localeCompare(String(right.workerId), 'en', { sensitivity: 'base' });
     });
 
-    return { teachers, subjectCatalog };
+    return { teachers, subjectCatalog, schoolWorkerIds };
   }
 
   async function loadSchemeHoursMap() {
     const map = {};
     try {
-      const [teacherSnap, templateSnap] = await Promise.all([
-        state.db.ref(`schemes/${state.schoolId}/teacher`).once('value'),
-        state.db.ref(`schemes/${state.schoolId}/templates/${state.year}`).once('value')
-      ]);
-      const teacherRaw = teacherSnap.val() || {};
-      Object.values(teacherRaw).forEach((byYear) => {
-        const yearNode = byYear?.[state.year] || {};
+      const teacherSchemeSnaps = await Promise.all(
+        (state.schoolWorkerIds || []).map((workerId) =>
+          state.db.ref(`schemes/${state.schoolId}/teacher/${workerId}/${state.year}`).once('value').catch(() => null)
+        )
+      );
+      teacherSchemeSnaps.forEach((snap) => {
+        const yearNode = snap?.val?.() || {};
         Object.values(yearNode).forEach((bySubject) => {
           Object.values(bySubject || {}).forEach((byTerm) => {
             const schemes = byTerm?.[state.activeTerm] || {};
@@ -511,6 +512,7 @@
           });
         });
       });
+      const templateSnap = await state.db.ref(`schemes/${state.schoolId}/templates/${state.year}`).once('value');
       const templateRaw = templateSnap.val() || {};
       Object.values(templateRaw).forEach((bySubject) => {
         Object.values(bySubject || {}).forEach((byTerm) => {
@@ -578,11 +580,13 @@
     const templateSchemeHandler = () => { if (!templateSchemeInitialFired) { templateSchemeInitialFired = true; return; } scheduleRefresh(); };
     templateSchemeRef.on('value', templateSchemeHandler);
     state.watchers.push(() => templateSchemeRef.off('value', templateSchemeHandler));
-    const teacherSchemeRef = state.db.ref(`schemes/${state.schoolId}/teacher`);
-    let teacherSchemeInitialFired = false;
-    const teacherSchemeHandler = () => { if (!teacherSchemeInitialFired) { teacherSchemeInitialFired = true; return; } scheduleRefresh(); };
-    teacherSchemeRef.on('value', teacherSchemeHandler);
-    state.watchers.push(() => teacherSchemeRef.off('value', teacherSchemeHandler));
+    (state.schoolWorkerIds || []).forEach((workerId) => {
+      const teacherSchemeRef = state.db.ref(`schemes/${state.schoolId}/teacher/${workerId}/${state.year}`);
+      let teacherSchemeInitialFired = false;
+      const teacherSchemeHandler = () => { if (!teacherSchemeInitialFired) { teacherSchemeInitialFired = true; return; } scheduleRefresh(); };
+      teacherSchemeRef.on('value', teacherSchemeHandler);
+      state.watchers.push(() => teacherSchemeRef.off('value', teacherSchemeHandler));
+    });
   }
 
   function scheduleRefresh() {
@@ -1540,10 +1544,16 @@
     const settings = normalizeSettings(getActiveSettings(), state.activeGroupId, state.teachers, state.subjectCatalog);
     settings.seededDefaults = false;
     state.settingsByGroup[state.activeGroupId] = settings;
-    await persistSettings(state.activeGroupId, settings, false);
-    state.dirtySettings.delete(state.activeGroupId);
-    renderAll();
-    toast('Timetable settings saved.', 'success');
+    try {
+      await generateGroup(state.activeGroupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false, autoReason: 'settings-save' });
+      toast('Timetable settings saved and the current group was regenerated.', 'success');
+    } catch (error) {
+      await persistSettings(state.activeGroupId, settings, false);
+      state.dirtySettings.delete(state.activeGroupId);
+      renderAll();
+      console.warn('Settings saved without regeneration', error);
+      toast('Timetable settings saved, but regeneration failed. Use Regenerate Group.', 'warning');
+    }
   }
 
   async function saveDraftInvalid(groupId) {
@@ -1920,8 +1930,12 @@
       if (!candidateTeachers.some((teacher) => teacher.workerId === teacherId)) {
         fixedIssues.push({ category: 'locked', title: 'Locked teaching cell uses an invalid teacher assignment', body: `${cell.className} / ${cell.day} / ${getSlotLabel(cell.slotId, slots)} / ${subject || 'Unknown subject'}` });
       }
-      if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot, settings, slots)) {
-        fixedIssues.push({ category: 'locked', title: 'Locked morning-core subject is placed after lunch', body: `${cell.className} / ${subject} is locked on ${cell.day} at ${getSlotLabel(cell.slotId, slots)}.` });
+      const slotRuleError = getSlotRuleViolation(cell.className, subject, slot, settings, slots);
+      if (slotRuleError) {
+        fixedIssues.push({ category: 'locked', title: slotRuleError.title, body: `${cell.className} / ${subject} is locked on ${cell.day} at ${getSlotLabel(cell.slotId, slots)}.` });
+      }
+      if (wouldCreateConsecutiveSubjectPlacement({ slots, grid }, cell.className, subject, cell.day, cell.slotId)) {
+        fixedIssues.push({ category: 'locked', title: 'Locked subject repeats in consecutive periods', body: `${cell.className} / ${subject} is locked in back-to-back periods on ${cell.day}.` });
       }
       const subjectMeta = subjectLegend.find((item) => item.subject === subject) || {
         subject,
@@ -2082,9 +2096,10 @@
       (searchState.days || DAYS).forEach((day) => {
         searchState.slots.forEach((slot) => {
           if (!slot.isTeaching) return;
-          if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot, searchState.settings, searchState.slots)) return;
+          if (getSlotRuleViolation(className, subject, slot, searchState.settings, searchState.slots)) return;
           if (searchState.grid[className][day][slot.id]?.type) return;
           if (searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id]) return;
+          if (wouldCreateConsecutiveSubjectPlacement(searchState, className, subject, day, slot.id)) return;
           const slotIndex = slotIndexMap[slot.id];
           const sameDayCount = searchState.classSubjectDayCount[className][day][subject] || 0;
           if (sameDayCount >= distribution.dailyMax) return;
@@ -2291,8 +2306,12 @@
             if (isFridayAfternoonClosure(day, slot, settings)) {
               lockedViolations.push({ title: 'Friday afternoon block was used for teaching', body: `${className} / ${day} / ${getSlotLabel(slot.id, slots)}` });
             }
-            if (isMorningPrioritySubject(cell.subject) && !slotEndsBeforeLunch(slot, settings, slots)) {
-              invalidPlacements.push({ title: 'Morning-core subject placed after lunch', body: `${className} / ${cell.subject} is scheduled on ${day} at ${getSlotLabel(slot.id, slots)}.` });
+            const slotRuleError = getSlotRuleViolation(className, cell.subject, slot, settings, slots);
+            if (slotRuleError) {
+              invalidPlacements.push({ title: slotRuleError.title, body: `${className} / ${cell.subject} is scheduled on ${day} at ${getSlotLabel(slot.id, slots)}.` });
+            }
+            if (wouldCreateConsecutiveSubjectPlacement({ slots, grid }, className, cell.subject, day, slot.id)) {
+              invalidPlacements.push({ title: 'Subject repeats in consecutive periods', body: `${className} / ${cell.subject} appears in back-to-back periods on ${day}.` });
             }
             if (!cell.teacherId) {
               invalidPlacements.push({ title: 'Teaching cell is missing a teacher', body: `${className} / ${day} / ${getSlotLabel(slot.id, slots)} / ${cell.subject || 'Unknown subject'}` });
@@ -2952,10 +2971,11 @@
     (searchState.days || getScheduleDays(settings)).forEach((day) => {
       (searchState.slots || []).forEach((slot) => {
         if (!slot.isTeaching) return;
-        if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot, settings, searchState.slots)) return;
+        if (getSlotRuleViolation(className, subject, slot, settings, searchState.slots)) return;
         const existing = searchState.grid?.[className]?.[day]?.[slot.id] || null;
         const sameDayCount = searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0;
         if (sameDayCount >= distribution.dailyMax) return;
+        if (wouldCreateConsecutiveSubjectPlacement(searchState, className, subject, day, slot.id)) return;
         if (existing?.type) {
           if (existing.type === 'fixed' || existing.locked || (settings.lockedCells || []).some((cell) => cell.className === className && cell.day === day && cell.slotId === slot.id)) {
             lockedOrFixedBlocks += 1;
@@ -3743,13 +3763,45 @@
         slot.isTeaching &&
         !searchState.grid[className][day][slot.id]?.type &&
         !searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id] &&
-        (!isMorningPrioritySubject(subject) || slotEndsBeforeLunch(slot, searchState.settings, searchState.slots))
+        !getSlotRuleViolation(className, subject, slot, searchState.settings, searchState.slots) &&
+        !wouldCreateConsecutiveSubjectPlacement(searchState, className, subject, day, slot.id)
       )
     );
   }
 
   function isMorningPrioritySubject(subject) {
     return MORNING_PRIORITY_SUBJECTS.has(normalizeSubjectName(subject));
+  }
+
+  function isUpperPrimaryClass(className) {
+    return /^Class\s*[3-7]\b/i.test(resolveBaseClass(normalizeClassName(className)));
+  }
+
+  function isRestrictedUpperPrimaryMorningSlot(slot) {
+    return parseTimeToMinutes(slot?.start) < 12 * 60;
+  }
+
+  function getSlotRuleViolation(className, subject, slot, settings, slots) {
+    const normalizedSubject = normalizeSubjectName(subject);
+    if (isMorningPrioritySubject(normalizedSubject) && !slotEndsBeforeLunch(slot, settings, slots)) {
+      return { code: 'core_after_lunch', title: 'Morning-core subject placed after lunch' };
+    }
+    if (isUpperPrimaryClass(className) && isRestrictedUpperPrimaryMorningSlot(slot) && !UPPER_PRIMARY_MORNING_SUBJECTS.has(normalizedSubject)) {
+      return { code: 'upper_humanity_in_morning', title: 'Upper-primary afternoon subject placed in the morning' };
+    }
+    return null;
+  }
+
+  function wouldCreateConsecutiveSubjectPlacement(context, className, subject, day, slotId) {
+    const normalizedSubject = normalizeSubjectName(subject);
+    const orderedTeachingSlots = (context.slots || []).filter((slot) => slot.isTeaching);
+    const targetIndex = orderedTeachingSlots.findIndex((slot) => slot.id === slotId);
+    if (targetIndex < 0) return false;
+    const previousSlot = orderedTeachingSlots[targetIndex - 1];
+    const nextSlot = orderedTeachingSlots[targetIndex + 1];
+    const previousCell = previousSlot ? context.grid?.[className]?.[day]?.[previousSlot.id] : null;
+    const nextCell = nextSlot ? context.grid?.[className]?.[day]?.[nextSlot.id] : null;
+    return [previousCell, nextCell].some((cell) => cell?.type === 'teaching' && normalizeSubjectName(cell.subject) === normalizedSubject);
   }
 
   function slotEndsBeforeLunch(slot, settings, slots) {
