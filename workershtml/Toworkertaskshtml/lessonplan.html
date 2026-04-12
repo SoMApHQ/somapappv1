@@ -849,6 +849,34 @@
     }
     applySchoolFromUrl();
 
+    // Read lesson-plan query params set by the attendance blocking modal.
+    // Stores timetable slot metadata into sessionStorage so the save handler can pick it up,
+    // and returns pre-fill values to auto-populate the form after teacher data loads.
+    function applyLessonPlanUrlParams() {
+      const params = new URLSearchParams(window.location.search || '');
+      const classParam = params.get('class');
+      const subjectParam = params.get('subject');
+      const dateParam = params.get('date');
+      const groupId = params.get('groupId') || '';
+      const slotId = params.get('slotId') || '';
+      const slotLabel = params.get('slotLabel') || '';
+      const start = params.get('start') || '';
+      const end = params.get('end') || '';
+
+      // Store slot metadata in sessionStorage so the save handler can embed it in every new plan
+      if (slotId || groupId) {
+        try {
+          sessionStorage.setItem('somap_lp_tt_meta', JSON.stringify({ groupId, slotId, slotLabel, start, end }));
+        } catch (_) {}
+      } else {
+        // Clear stale metadata when opening the page without slot params
+        try { sessionStorage.removeItem('somap_lp_tt_meta'); } catch (_) {}
+      }
+
+      return { classParam, subjectParam, dateParam, slotId, slotLabel, start, end, groupId };
+    }
+    const _lpUrlPrefill = applyLessonPlanUrlParams();
+
     const db = window.db || firebase.database();
     const school = (typeof SOMAP !== 'undefined' && SOMAP.getSchool) ? SOMAP.getSchool() : null;
     const schoolId = (school && school.id) || window.currentSchoolId || localStorage.getItem('somap.currentSchoolId') || localStorage.getItem('currentSchoolId') || localStorage.getItem('schoolId') || 'socrates-school';
@@ -2956,12 +2984,95 @@
         // Populate filters and form selects
         populateSelects();
 
+        // Auto-open the form pre-filled when arriving from the attendance blocking modal
+        maybeAutoOpenFromUrlParams();
+
         // Load lesson plans
         loadLessonPlans();
       } catch (error) {
         console.error('Error loading config:', error);
         toast('Error loading teacher configuration', 'error');
       }
+    }
+
+    // If the page was opened from the attendance blocking modal with pre-fill params,
+    // automatically open the "New Lesson Plan" form with those values pre-selected.
+    function maybeAutoOpenFromUrlParams() {
+      const { classParam, subjectParam, dateParam, slotLabel, start, end } = _lpUrlPrefill;
+      if (!classParam && !subjectParam && !dateParam) return; // Nothing to pre-fill
+
+      // Simulate clicking "Create New Lesson Plan" — reset + open form
+      editingPlanId = null;
+      preferredSchemeEntryId = null;
+      selectedSchemeEntry = null;
+      activeSchemeBundle = null;
+      document.querySelectorAll('#lessonForm input, #lessonForm textarea, #lessonForm select').forEach(el => {
+        if (el.id === 'totalStudents' || el.id === 'studentsPresent') {
+          el.value = '';
+        } else if (el.type === 'number') el.value = '';
+        else if (el.type === 'date') el.value = '';
+        else if (el.tagName === 'TEXTAREA') el.value = '';
+        else if (el.tagName === 'SELECT') el.selectedIndex = 0;
+        else el.value = '';
+      });
+      document.getElementById('lpPresentBoys').value = '0';
+      document.getElementById('lpPresentGirls').value = '0';
+      document.getElementById('lpAbsentBoys').value = '0';
+      document.getElementById('lpAbsentGirls').value = '0';
+      if (planCoverageStatus) planCoverageStatus.value = 'started';
+      if (typeof clearLessonPlanJournalDraft === 'function') clearLessonPlanJournalDraft();
+      if (typeof resetHomeworkPlanState === 'function') resetHomeworkPlanState();
+      if (typeof resetDelayWorkflow === 'function') resetDelayWorkflow();
+      if (typeof clearSchemeGuidance === 'function') clearSchemeGuidance();
+
+      // Set date
+      if (dateParam && planDate) {
+        planDate.value = dateParam;
+        if (planDayOfWeek) {
+          try {
+            const d = new Date(dateParam + 'T00:00:00');
+            planDayOfWeek.value = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d.getDay()] || '';
+          } catch (_) {}
+        }
+        if (typeof maybeSyncWeekFromDate === 'function') maybeSyncWeekFromDate();
+      }
+
+      // Set class (find option by value or text match)
+      if (classParam && planClass) {
+        for (const opt of planClass.options) {
+          if (opt.value === classParam || opt.value.toLowerCase() === classParam.toLowerCase()) {
+            planClass.value = opt.value;
+            break;
+          }
+        }
+      }
+
+      // Set subject
+      if (subjectParam && planSubject) {
+        for (const opt of planSubject.options) {
+          if (opt.value === subjectParam || opt.value.toLowerCase() === subjectParam.toLowerCase()) {
+            planSubject.value = opt.value;
+            break;
+          }
+        }
+      }
+
+      // Show slot/time hint in the form header area if available
+      if ((slotLabel || start || end) && lessonForm) {
+        const timeHint = [slotLabel, start && end ? `${start}–${end}` : (start || end)].filter(Boolean).join(' · ');
+        let hintEl = lessonForm.querySelector('#lpSlotHint');
+        if (!hintEl) {
+          hintEl = document.createElement('p');
+          hintEl.id = 'lpSlotHint';
+          hintEl.style.cssText = 'margin:0 0 12px;padding:8px 12px;background:rgba(34,211,238,0.1);border:1px solid rgba(34,211,238,0.35);border-radius:8px;color:rgba(255,255,255,0.85);font-size:0.87rem;';
+          lessonForm.insertBefore(hintEl, lessonForm.firstChild);
+        }
+        hintEl.textContent = `📅 Pre-filled from timetable slot: ${timeHint}`;
+      }
+
+      lessonForm.classList.remove('hidden');
+      lessonForm.scrollIntoView({ behavior: 'smooth' });
+      if (typeof recomputeForSelection === 'function') recomputeForSelection();
     }
 
     // Populate select dropdowns
@@ -3415,6 +3526,13 @@ ${plan.reflection || 'N/A'}
       const currentTeacherName = getCurrentTeacherDisplayName();
       const currentSchoolName = getCurrentSchoolName();
       const currentSchoolLogoUrl = getEffectiveSchoolLogoUrl(existingPlan);
+      // Timetable slot metadata — filled when opened from the attendance blocking modal
+      const _ttMeta = (() => {
+        try {
+          return JSON.parse(sessionStorage.getItem('somap_lp_tt_meta') || 'null') || {};
+        } catch (_) { return {}; }
+      })();
+
       const planData = {
         id: editingPlanId || '',
         schoolId,
@@ -3431,6 +3549,13 @@ ${plan.reflection || 'N/A'}
         term: document.getElementById('planTerm').value,
         week: document.getElementById('planWeek').value,
         date: dateVal,
+        dayName: (() => { try { const d = new Date(dateVal + 'T00:00:00'); return ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d.getDay()] || ''; } catch(_) { return ''; } })(),
+        // Timetable slot metadata (for exact matching in attendance check)
+        timetableGroupId: _ttMeta.groupId || '',
+        timetableSlotId: _ttMeta.slotId || '',
+        timetableSlotLabel: _ttMeta.slotLabel || '',
+        startTime: _ttMeta.start || '',
+        endTime: _ttMeta.end || '',
         totals: {
           totalStudents: parseInt(document.getElementById('totalStudents').value),
           present: parseInt(document.getElementById('studentsPresent').value),

@@ -195,7 +195,7 @@
       'saveSettingsButton', 'addSlotButton', 'resetSlotsButton', 'slotEditor', 'periodRequirementsEditor',
       'subjectOptionsEditor', 'lockedCellsEditor', 'previewStatusChip', 'previewGenerateButton', 'saveDraftInvalidButton',
       'previewShell', 'pdfMetaPanel', 'printNotesPanel', 'pdfCurrentButton', 'pdfAllButton', 'pdfPrintButton',
-      'allGroupsShell'
+      'allGroupsShell', 'weekSnapStatusChip', 'weekSnapRefreshButton', 'weekSnapShell'
     ].forEach((id) => {
       els[toCamel(id)] = document.getElementById(id);
     });
@@ -245,6 +245,10 @@
     els.pdfCurrentButton?.addEventListener('click', () => downloadCurrentGroupPdf());
     els.pdfAllButton?.addEventListener('click', () => downloadAllGroupsPdf());
     els.pdfPrintButton?.addEventListener('click', printCurrentPreview);
+    els.weekSnapRefreshButton?.addEventListener('click', () => {
+      renderWeekSnapTab();
+      maybeEnsureWeekSnapshot().then(() => renderWeekSnapTab()).catch((e) => console.warn('Week snap refresh failed', e));
+    });
   }
 
   function initBackLink() {
@@ -373,6 +377,9 @@
       } else {
         await maybeAutoRegenerateCurrent('render-only');
       }
+      // Ensure the current-week snapshot is populated for attendance checks.
+      // Runs silently after generation; non-critical if it fails.
+      await maybeEnsureWeekSnapshot();
     } finally {
       setBusyStatus('');
     }
@@ -602,6 +609,74 @@
     document.querySelectorAll('.tt-panel').forEach((panel) => {
       panel.classList.toggle('is-active', panel.id === `tab-${tabId}`);
     });
+    if (tabId === 'weeksnap') {
+      renderWeekSnapTab().catch((e) => console.warn('Week snap render failed', e));
+    }
+  }
+
+  async function renderWeekSnapTab() {
+    const weekKey = getMondayYMD(new Date());
+    const termKey = state.activeTerm;
+    if (els.weekSnapStatusChip) {
+      els.weekSnapStatusChip.textContent = 'Loading…';
+      els.weekSnapStatusChip.className = 'tt-inline-status';
+    }
+    if (els.weekSnapShell) {
+      els.weekSnapShell.innerHTML = '<div class="tt-preview-empty">Loading week snapshot…</div>';
+    }
+    try {
+      const snapSnap = await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/weeklySnapshots/${termKey}/${weekKey}/generated`)).once('value');
+      const snapData = snapSnap.val() || {};
+      const groupIds = Object.keys(snapData);
+
+      if (!groupIds.length) {
+        if (els.weekSnapStatusChip) {
+          els.weekSnapStatusChip.textContent = 'Missing — click Refresh';
+          els.weekSnapStatusChip.className = 'tt-inline-status tt-pill--danger';
+        }
+        if (els.weekSnapShell) {
+          els.weekSnapShell.innerHTML = `<div class="tt-preview-empty">No snapshot found for week starting <strong>${weekKey}</strong>. Click <strong>Refresh Snapshot</strong> to generate one.</div>`;
+        }
+        return;
+      }
+
+      const allValid = groupIds.every(gid => snapData[gid]?.validationSummary?.isValid);
+      if (els.weekSnapStatusChip) {
+        els.weekSnapStatusChip.textContent = allValid ? 'All Groups Valid' : 'Some Groups Have Issues';
+        els.weekSnapStatusChip.className = `tt-inline-status ${allValid ? 'tt-pill--success' : 'tt-pill--warning'}`;
+      }
+
+      let html = `<p style="color:var(--tt-muted,#64748b);font-size:0.88rem;margin:0 0 12px;">Week of <strong>${weekKey}</strong> &nbsp;·&nbsp; Term: <strong>${termKey}</strong> &nbsp;·&nbsp; ${groupIds.length} group(s) saved.</p>`;
+      for (const gid of groupIds) {
+        const g = snapData[gid];
+        const isValid = g?.validationSummary?.isValid;
+        const genAt = g?.generatedAt ? new Date(g.generatedAt).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi', dateStyle: 'short', timeStyle: 'short' }) : '—';
+        const teacherCount = Array.isArray(g?.teacherLegend) ? g.teacherLegend.length : '—';
+        const classCount = Array.isArray(g?.classes) ? g.classes.length : '—';
+        html += `
+          <div style="border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:12px 14px;margin-bottom:10px;background:rgba(255,255,255,0.04);">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+              <strong style="color:white;">${escapeHtml(g?.groupTitle || gid)}</strong>
+              <span class="tt-pill ${isValid ? 'tt-pill--success' : 'tt-pill--warning'}">${isValid ? '✓ Valid' : '⚠ Has Issues'}</span>
+            </div>
+            <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:0.85rem;color:var(--tt-muted,#64748b);">
+              <span>Generated: ${genAt}</span>
+              <span>Teachers: ${teacherCount}</span>
+              <span>Classes: ${classCount}</span>
+              <span>Group ID: ${escapeHtml(gid)}</span>
+            </div>
+          </div>`;
+      }
+      if (els.weekSnapShell) els.weekSnapShell.innerHTML = html;
+    } catch (err) {
+      if (els.weekSnapStatusChip) {
+        els.weekSnapStatusChip.textContent = 'Error loading';
+        els.weekSnapStatusChip.className = 'tt-inline-status tt-pill--danger';
+      }
+      if (els.weekSnapShell) {
+        els.weekSnapShell.innerHTML = `<div class="tt-preview-empty">Failed to load snapshot: ${escapeHtml(String(err?.message || err))}</div>`;
+      }
+    }
   }
 
   function renderAll() {
@@ -1316,9 +1391,86 @@
     await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/settings/${state.activeTerm}/${groupId}`)).set(payload);
   }
 
+  // Return the ISO-Monday (YYYY-MM-DD) of the week containing `date`.
+  function getMondayYMD(date) {
+    const d = new Date(date);
+    const day = d.getDay(); // 0=Sun, 1=Mon … 6=Sat
+    const diff = (day === 0) ? -6 : 1 - day;
+    d.setDate(d.getDate() + diff);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  }
+
   async function persistGenerated(groupId, payload) {
     const { isSaved, ...persistablePayload } = payload || {};
+    // Write to primary generated path
     await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/generated/${state.activeTerm}/${groupId}`)).set(persistablePayload);
+    // Also write current-week snapshot so attendance can read it without staleness concerns
+    try {
+      const weekKey = getMondayYMD(new Date());
+      const snapshotPayload = {
+        weekKey,
+        generatedAt: persistablePayload.generatedAt || Date.now(),
+        sourceConfigHash: persistablePayload.sourceConfigHash || '',
+        status: persistablePayload.status || 'draft-invalid',
+        validationSummary: persistablePayload.validationSummary || {},
+        groupId,
+        termKey: state.activeTerm,
+        grid: persistablePayload.grid || {},
+        slots: persistablePayload.slots || [],
+        teacherLegend: persistablePayload.teacherLegend || [],
+        subjectLegend: persistablePayload.subjectLegend || [],
+        classes: persistablePayload.classes || [],
+        days: persistablePayload.days || []
+      };
+      await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/weeklySnapshots/${state.activeTerm}/${weekKey}/generated/${groupId}`)).set(snapshotPayload);
+    } catch (snapErr) {
+      console.warn('Weekly snapshot write failed (non-critical):', snapErr);
+    }
+  }
+
+  // Ensure the current-week snapshot exists for all groups already in generatedByGroup.
+  // Called on management page load so teachers can check in even when the timetable
+  // was generated in a previous week and hasn't changed.
+  async function maybeEnsureWeekSnapshot() {
+    if (!state.viewer?.canManage) return;
+    try {
+      const weekKey = getMondayYMD(new Date());
+      const snapPath = window.SOMAP.P(`years/${state.year}/timetable/weeklySnapshots/${state.activeTerm}/${weekKey}/generated`);
+      const snapSnap = await state.db.ref(snapPath).once('value');
+      const existingSnap = snapSnap.val() || {};
+
+      // Find groups that have a generated timetable but are missing from this week's snapshot
+      const missingGroups = GROUP_ORDER.filter(gid => state.generatedByGroup[gid] && !existingSnap[gid]);
+      if (!missingGroups.length) return;
+
+      for (const groupId of missingGroups) {
+        const generated = state.generatedByGroup[groupId];
+        if (!generated) continue;
+        try {
+          const { isSaved, ...persistablePayload } = generated;
+          const snapshotPayload = {
+            weekKey,
+            generatedAt: persistablePayload.generatedAt || Date.now(),
+            sourceConfigHash: persistablePayload.sourceConfigHash || '',
+            status: persistablePayload.status || 'draft-invalid',
+            validationSummary: persistablePayload.validationSummary || {},
+            groupId,
+            termKey: state.activeTerm,
+            grid: persistablePayload.grid || {},
+            slots: persistablePayload.slots || [],
+            teacherLegend: persistablePayload.teacherLegend || [],
+            subjectLegend: persistablePayload.subjectLegend || [],
+            classes: persistablePayload.classes || [],
+            days: persistablePayload.days || []
+          };
+          await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/weeklySnapshots/${state.activeTerm}/${weekKey}/generated/${groupId}`)).set(snapshotPayload);
+        } catch (e) {
+          console.warn(`Week snapshot copy for ${groupId} failed:`, e);
+        }
+      }
+    } catch (err) {
+      console.warn('maybeEnsureWeekSnapshot failed (non-critical):', err);
+    }
   }
 
   function addLockedPlacement() {

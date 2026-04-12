@@ -1528,16 +1528,22 @@
       return entries;
     }
 
+    // Return the ISO-Monday (YYYY-MM-DD) of the week containing `date`.
+    function getMondayYMD(date) {
+      const d = new Date(date);
+      const day = d.getDay(); // 0=Sun, 1=Mon … 6=Sat
+      const diff = (day === 0) ? -6 : 1 - day;
+      d.setDate(d.getDate() + diff);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    }
+
     function dedupeLessons(lessons) {
       const seen = new Set();
       return (lessons || []).filter((lesson) => {
         const key = [
           normalizeClassKey(lesson.className),
           String(lesson.subject || '').trim().toLowerCase(),
-          String(lesson.start || '').trim(),
-          String(lesson.end || '').trim(),
-          String(lesson.slotLabel || '').trim(),
-          lesson.fromConfig ? 'config' : 'grid'
+          String(lesson.slotId || lesson.start || '').trim()
         ].join('|');
         if (seen.has(key)) return false;
         seen.add(key);
@@ -1549,11 +1555,13 @@
       const result = {
         ready: true,
         noTimetableSetup: false,
+        noTimetableForWeek: false,
         missingSchemes: [],
         todayLessons: [],
         missingPlans: [],
         isWeekend: false,
-        dayName: ''
+        dayName: '',
+        timetableSource: ''
       };
 
       const now = new Date();
@@ -1566,7 +1574,7 @@
       const year = state.year || String(nairobiNow.getFullYear());
       const todayDate = todayYMD(now); // YYYY-MM-DD
 
-      // 1. Load teacher config (class-subject mappings)
+      // 1. Load teacher config (still needed for scheme checking)
       let teacherConfig = null;
       try {
         const configSnap = await schoolRef(`years/${year}/teachers_config/${state.workerId}`).once('value');
@@ -1582,7 +1590,7 @@
         return result;
       }
 
-      // 2. Check schemes exist for each class/subject
+      // 2. Check schemes exist for each class/subject (unchanged)
       let schemesData = {};
       try {
         const schemesSnap = await db.ref(`schemes/${state.schoolId}/teacher/${state.workerId}/${year}`).once('value');
@@ -1591,25 +1599,10 @@
         console.warn('Schemes load failed:', err);
       }
 
-      for (const mapping of classSubjectMappings) {
-        const cls = mapping.class || '';
-        const subjects = mapping.subjects || [];
-        const clsKey = toSchemeKey(cls);
-        const clsSchemes = schemesData[clsKey] || {};
-        for (const subj of subjects) {
-          const subjKey = toSchemeKey(subj);
-          const subjSchemes = clsSchemes[subjKey];
-          const hasScheme = subjSchemes && Object.keys(subjSchemes).length > 0;
-          if (!hasScheme) {
-            result.missingSchemes.push(`${cls} – ${subj}`);
-          }
-        }
-      }
-
-      if (classSubjectMappings.length) {
+      {
         const schemeEntries = flattenTeacherSchemes(schemesData);
-        const normalizedMissingSchemes = [];
         const normalizedMissingKeys = new Set();
+        const normalizedMissingSchemes = [];
 
         for (const mapping of classSubjectMappings) {
           const cls = mapping.class || mapping.className || '';
@@ -1634,152 +1627,126 @@
             }
           }
         }
-
         result.missingSchemes = normalizedMissingSchemes;
       }
 
       // 3. Timetable + lesson plan checks (weekdays only)
       if (!result.isWeekend) {
         const termKey = getTermFromMonth(nairobiNow.getMonth());
-        const timetableLessons = [];
+        const weekKey = getMondayYMD(nairobiNow); // YYYY-MM-DD of this week's Monday
+        const weekMondayTs = new Date(weekKey + 'T00:00:00').getTime();
+        const myWorkerIdNorm = String(state.workerId || '').trim().toLowerCase();
 
-        // Build a set of all class/stream names this teacher is assigned to,
-        // so we can detect whether the timetable in Firebase actually covers them.
-        const teacherClasses = new Set();
-        const teacherClassKeys = new Set();
-        for (const mapping of classSubjectMappings) {
-          const streams = (mapping.streams || []).filter(s => s && s.name);
-          if (streams.length > 0) {
-            streams.forEach((s) => {
-              teacherClasses.add(s.name);
-              teacherClassKeys.add(normalizeClassKey(s.name));
-            });
-          } else {
-            const cls = mapping.class || mapping.className || '';
-            if (cls) {
-              teacherClasses.add(cls);
-              teacherClassKeys.add(normalizeClassKey(cls));
-            }
-          }
-        }
-        const teacherClassAliases = Array.from(new Set(Array.from(teacherClasses).flatMap((className) => collectClassAliases(className))));
+        // A. Source resolution: try weekly snapshot first, then generated (only if not stale)
+        let ttGroupsData = null; // { [groupId]: generatedGroupData }
 
-        // timetableCoverageFound = true means Firebase has a saved timetable grid that
-        // includes at least one of this teacher's classes.  When true we trust the grid
-        // result — zero lessons means the teacher is genuinely free today (OPEN slots).
-        // The fallback to classSubjectMappings is only valid when the timetable hasn't
-        // been generated/saved yet.
-        let timetableCoverageFound = false;
-
+        // A1. Weekly snapshot (preferred source)
         try {
-          const ttSnap = await schoolRef(`years/${year}/timetable/generated/${termKey}`).once('value');
-          const ttData = ttSnap.val() || {};
-          const myWorkerIdNorm = String(state.workerId || '').trim().toLowerCase();
-          for (const [, groupData] of Object.entries(ttData)) {
-            const grid = groupData.grid || {};
-            const slots = Array.isArray(groupData.slots) ? groupData.slots : [];
-            const legend = Array.isArray(groupData.teacherLegend) ? groupData.teacherLegend : [];
+          const snapSnap = await schoolRef(`years/${year}/timetable/weeklySnapshots/${termKey}/${weekKey}/generated`).once('value');
+          const snapData = snapSnap.val();
+          if (snapData && typeof snapData === 'object' && Object.keys(snapData).length > 0) {
+            ttGroupsData = snapData;
+            result.timetableSource = 'weeklySnapshot';
+          }
+        } catch (_) { /* fall through */ }
 
-            // Find this teacher's entry in the saved legend — gives us their number for robust matching
-            const legendEntry = legend.find(t => String(t.workerId || '').trim().toLowerCase() === myWorkerIdNorm);
-            const myNumber = legendEntry ? String(legendEntry.number) : null;
-            if (legendEntry) timetableCoverageFound = true;
-
-            for (const [className, days] of Object.entries(grid)) {
-              const classKey = normalizeClassKey(className);
-              if (!timetableCoverageFound && (teacherClasses.has(className) || teacherClassKeys.has(classKey))) {
-                timetableCoverageFound = true;
-              }
-              if (!timetableCoverageFound && teacherClassAliases.some((alias) => classesEquivalent(alias, className))) {
-                timetableCoverageFound = true;
-              }
-              const daySlots = (days && days[result.dayName]) || {};
-              for (const [slotId, cell] of Object.entries(daySlots)) {
-                if (!cell || cell.type === 'fixed' || !cell.subject) continue;
-                // Match by teacherId (primary) OR by teacherNumber via legend (fallback for ID format mismatches)
-                const byId = String(cell.teacherId || '').trim().toLowerCase() === myWorkerIdNorm;
-                const byNumber = myNumber !== null && String(cell.teacherNumber || '') === myNumber;
-                if (byId || byNumber) {
-                  const slotInfo = slots.find(s => s.id === slotId) || {};
-                  timetableLessons.push({
-                    className,
-                    subject: cell.subject,
-                    start: slotInfo.start || '',
-                    end: slotInfo.end || '',
-                    slotLabel: slotInfo.label || slotId
-                  });
-                }
+        // A2. Fallback: generated/{termKey} — only use if generated THIS week (not stale)
+        if (!ttGroupsData) {
+          try {
+            const genSnap = await schoolRef(`years/${year}/timetable/generated/${termKey}`).once('value');
+            const genData = genSnap.val();
+            if (genData && typeof genData === 'object') {
+              const fresh = Object.fromEntries(
+                Object.entries(genData).filter(([, gd]) => Number(gd?.generatedAt || 0) >= weekMondayTs)
+              );
+              if (Object.keys(fresh).length > 0) {
+                ttGroupsData = fresh;
+                result.timetableSource = 'generated';
               }
             }
-          }
-        } catch (err) {
-          console.warn('Timetable load failed:', err);
+          } catch (_) { /* fall through */ }
         }
 
-        // Fallback: only when the timetable has NOT been saved to Firebase for this teacher's
-        // classes yet.  If the timetable IS there but shows zero lessons, that means the
-        // teacher is genuinely free today — we must NOT invent phantom lessons from config.
-        if (timetableLessons.length === 0 && !timetableCoverageFound && classSubjectMappings.length > 0) {
-          for (const mapping of classSubjectMappings) {
-            const streams = (mapping.streams || []).filter(s => s && s.name);
-            const subjects = mapping.subjects || [];
-            if (streams.length > 0) {
-              for (const stream of streams) {
-                const streamSubjects = (stream.subjects && stream.subjects.length) ? stream.subjects : subjects;
-                for (const subj of streamSubjects) {
-                  if (stream.name && subj) timetableLessons.push({ className: stream.name, subject: subj, start: '', end: '', slotLabel: '', fromConfig: true });
-                }
-              }
-            } else {
-              const cls = mapping.class || mapping.className || '';
-              for (const subj of subjects) {
-                if (cls && subj) timetableLessons.push({ className: cls, subject: subj, start: '', end: '', slotLabel: '', fromConfig: true });
+        // A3. No valid timetable source for this week — BLOCK check-in
+        if (!ttGroupsData) {
+          result.noTimetableForWeek = true;
+          result.ready = false;
+          return result;
+        }
+
+        // B. Find all of this teacher's lessons for today from the saved timetable grid.
+        //    Discover group IDs dynamically — no hardcoded group names.
+        const timetableLessons = [];
+        for (const [groupId, groupData] of Object.entries(ttGroupsData)) {
+          if (!groupData || typeof groupData !== 'object') continue;
+          const grid = groupData.grid || {};
+          const slots = Array.isArray(groupData.slots) ? groupData.slots : [];
+          const legend = Array.isArray(groupData.teacherLegend) ? groupData.teacherLegend : [];
+
+          const legendEntry = legend.find(t => String(t.workerId || '').trim().toLowerCase() === myWorkerIdNorm);
+          const myNumber = legendEntry ? String(legendEntry.number) : null;
+
+          for (const [className, days] of Object.entries(grid)) {
+            const daySlots = (days && days[result.dayName]) || {};
+            for (const [slotId, cell] of Object.entries(daySlots)) {
+              if (!cell || cell.type === 'fixed' || !cell.subject) continue;
+              const byId = String(cell.teacherId || '').trim().toLowerCase() === myWorkerIdNorm;
+              const byNumber = myNumber !== null && String(cell.teacherNumber || '') === myNumber;
+              if (byId || byNumber) {
+                const slotInfo = slots.find(s => s.id === slotId) || {};
+                timetableLessons.push({
+                  className,
+                  subject: cell.subject,
+                  slotId,
+                  start: slotInfo.start || '',
+                  end: slotInfo.end || '',
+                  slotLabel: slotInfo.label || slotId,
+                  groupId
+                });
               }
             }
           }
         }
 
         result.todayLessons = dedupeLessons(timetableLessons);
-        // True when all lessons came from the config fallback (timetable not yet saved to Firebase).
-        // Config-based lessons list ALL subjects for the teacher — they are NOT day-specific, so
-        // we cannot use them to accurately verify today's lesson plans.  We only check plans when
-        // the timetable grid was actually read from Firebase.
-        result.timetableFromConfig = result.todayLessons.length > 0 && result.todayLessons.every(l => l.fromConfig);
 
-        // 4. Check lesson plans for each lesson today — ONLY when grid is from Firebase (not config fallback)
-        if (result.todayLessons.length > 0 && !result.timetableFromConfig) {
-          // Load ALL plans for today across every stored class key. The class name in the timetable
-          // (e.g. "Pre-Unit") may differ from the class name used when saving a plan (e.g. "Pre Unit Class"),
-          // so we cannot do a direct Firebase path lookup by className — we must iterate all class keys
-          // and use classesEquivalent() for matching (same approach as scheme checking).
+        // C. Check lesson plans for each lesson today
+        if (result.todayLessons.length > 0) {
           let allTodayPlans = [];
-          try {
-            const allClassesSnap = await schoolRef(`lessonPlans/${year}`).once('value');
-            const allClassesData = allClassesSnap.val() || {};
-            for (const [storedClass, dates] of Object.entries(allClassesData)) {
-              const dayPlans = (dates && dates[todayDate]) ? Object.values(dates[todayDate]) : [];
-              dayPlans.forEach(p => { if (p && typeof p === 'object') allTodayPlans.push({ ...p, _storedClass: storedClass }); });
-            }
-          } catch (err) {
-            console.warn('Plans load failed for today:', err);
+          // Verification errors must BLOCK check-in — no permissive catch here.
+          const allClassesSnap = await schoolRef(`lessonPlans/${year}`).once('value');
+          const allClassesData = allClassesSnap.val() || {};
+          for (const [storedClass, dates] of Object.entries(allClassesData)) {
+            const dayPlans = (dates && dates[todayDate]) ? Object.values(dates[todayDate]) : [];
+            dayPlans.forEach(p => { if (p && typeof p === 'object') allTodayPlans.push({ ...p, _storedClass: storedClass }); });
           }
 
           for (const lesson of result.todayLessons) {
             const lessonClassAliases = collectClassAliases(lesson.className);
             const hasPlan = allTodayPlans.some(p => {
-              // Must belong to this teacher (teacherId stored on save)
+              // Must belong to this teacher
               const planTeacherId = String(p.teacherId || '').trim();
               if (planTeacherId && planTeacherId !== state.workerId) return false;
-              // Match class using aliases so "Pre-Unit" == "Pre Unit Class" etc.
+
+              // Class match (aliases aware)
               const storedClass = p._storedClass || p.className || p.class || '';
-              const planClass = p.className || p.class || storedClass;
-              const classMatch = lessonClassAliases.some(alias => classesEquivalent(alias, storedClass)) ||
-                                 lessonClassAliases.some(alias => classesEquivalent(alias, planClass));
+              const planCls = p.className || p.class || storedClass;
+              const classMatch = lessonClassAliases.some(a => classesEquivalent(a, storedClass)) ||
+                                 lessonClassAliases.some(a => classesEquivalent(a, planCls));
               if (!classMatch) return false;
-              // Match subject
+
+              // Subject match
               const pSubj = String(p.subject || p.subjectName || '').toLowerCase().trim();
               const lSubj = String(lesson.subject || '').toLowerCase().trim();
-              return pSubj === lSubj || pSubj.includes(lSubj) || lSubj.includes(pSubj);
+              if (!(pSubj === lSubj || pSubj.includes(lSubj) || lSubj.includes(pSubj))) return false;
+
+              // Slot match: exact for new plans that carry timetableSlotId; legacy fallback otherwise
+              const planSlotId = String(p.timetableSlotId || '').trim();
+              if (planSlotId && lesson.slotId) {
+                return planSlotId === lesson.slotId;
+              }
+              // Legacy plan (no timetableSlotId): class+subject match is sufficient
+              return true;
             });
             if (!hasPlan) {
               result.missingPlans.push(lesson);
@@ -1842,12 +1809,12 @@
 
       // Timetable / lesson plan section (weekdays only)
       if (!result.isWeekend) {
-        if (result.timetableFromConfig) {
-          // Timetable not yet saved to Firebase — config subjects are not day-specific, do not block
+        if (result.noTimetableForWeek) {
+          // No valid timetable saved for this week — hard block
           sections += `
-            <div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.35);border-radius:10px;padding:12px;margin-top:10px;">
-              <strong style="color:#c7d2fe;">🗓️ Jedwali la Masaa – Bado Halijahifadhiwa</strong>
-              <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Jedwali la masaa bado halijapakiwa kwenye mfumo. Mipango ya masomo ya leo <strong>${todaySwName} ${todayDateLabel}</strong> haiwezi kuthibitishwa hadi jedwali litakapohifadhiwa na Academic Teacher. Unaweza kuendelea kufanya check-in.</p>
+            <div style="background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.45);border-radius:10px;padding:12px;margin-top:10px;">
+              <strong style="color:#fbbf24;">🗓️ Jedwali la Wiki Hii Halijatayarishwa</strong>
+              <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Jedwali la masaa la wiki hii bado halijahifadhiwa kwenye mfumo. Huwezi kufanya check-in mpaka jedwali liwe tayari. Tafadhali wasiliana na Academic Teacher au Head Teacher watengeneze jedwali la wiki hii.</p>
             </div>`;
         } else if (result.todayLessons.length === 0) {
           sections += `
@@ -1856,18 +1823,23 @@
               <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Hukupatikana kwenye jedwali la masaa leo. Kama ni kosa, wasiliana na Academic / Head Teacher waboreshe jedwali.</p>
             </div>`;
         } else if (result.missingPlans.length > 0) {
-          const fromConfig = result.todayLessons.every(l => l.fromConfig);
-          const scheduleNote = fromConfig
-            ? `Jedwali bado halijapakiwa kikamilifu — masomo yaliyoonyeshwa yanatokana na madarasa uliyopewa.`
-            : `Kulingana na jedwali la masaa lililohifadhiwa.`;
-
           // Build per-lesson cards: missing ones get a full action card, present ones get a compact row
           const lessonCards = result.todayLessons.map(l => {
-            const isMissing = result.missingPlans.some(m => m.className === l.className && m.subject === l.subject);
+            const isMissing = result.missingPlans.some(m =>
+              m.className === l.className && m.subject === l.subject && (m.slotId || '') === (l.slotId || '')
+            );
             const timeStr = l.start ? `${l.start} – ${l.end}` : '';
-            const slotStr = l.slotLabel && !l.fromConfig ? ` &nbsp;·&nbsp; <em>${l.slotLabel}</em>` : '';
+            const slotStr = l.slotLabel ? ` &nbsp;·&nbsp; <em>${l.slotLabel}</em>` : '';
             if (isMissing) {
-              const lessonQp = `${qp}&class=${encodeURIComponent(l.className)}&subject=${encodeURIComponent(l.subject)}&date=${encodeURIComponent(todayDateLabel)}`;
+              const lessonQp = `${qp}`
+                + `&class=${encodeURIComponent(l.className)}`
+                + `&subject=${encodeURIComponent(l.subject)}`
+                + `&date=${encodeURIComponent(todayDateLabel)}`
+                + `&slotId=${encodeURIComponent(l.slotId || '')}`
+                + `&slotLabel=${encodeURIComponent(l.slotLabel || '')}`
+                + `&start=${encodeURIComponent(l.start || '')}`
+                + `&end=${encodeURIComponent(l.end || '')}`
+                + `&groupId=${encodeURIComponent(l.groupId || '')}`;
               return `
                 <div style="background:rgba(251,113,133,0.12);border:1px solid rgba(251,113,133,0.5);border-radius:10px;padding:12px 14px;margin-bottom:8px;">
                   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">
@@ -1896,7 +1868,7 @@
               <strong style="color:#fb7185;font-size:0.97rem;">📝 Mipango ya Masomo Inayokosekana – ${todaySwName}, ${todayDateLabel}</strong>
               <p style="margin:6px 0 10px;color:var(--muted);font-size:0.88rem;">
                 Una somo ${result.todayLessons.length > 1 ? `${result.todayLessons.length} ` : ''}leo kulingana na jedwali. Andaa mpango wa somo kwa kila somo lililokosekana kabla ya kufanya check-in.
-                <span style="display:block;margin-top:2px;font-size:0.82rem;opacity:0.7;">${scheduleNote}</span>
+                <span style="display:block;margin-top:2px;font-size:0.82rem;opacity:0.7;">Kulingana na jedwali la masaa lililohifadhiwa (${result.timetableSource || 'saved'}).</span>
               </p>
               ${lessonCards}
             </div>`;
@@ -2025,7 +1997,10 @@
               toast('🎉 Hongera! Schemes na mipango ya masomo yako yote iko tayari. Unafanya check-in...', 'success');
               await new Promise(r => setTimeout(r, 1600));
             } catch (readinessErr) {
-              console.warn('Teacher readiness check failed — allowing check-in:', readinessErr);
+              // Verification failure must BLOCK check-in, not allow it
+              toast(`Tatizo la uthibitishaji wa mwalimu: ${readinessErr?.message || 'Hitilafu isiyojulikana'}. Check-in imezuiwa.`, 'error', 7000);
+              if (btn) { btn.disabled = false; btn.textContent = initialText || 'Check-In Sasa'; }
+              return;
             }
             if (btn) btn.textContent = 'Inahifadhi...';
           }
