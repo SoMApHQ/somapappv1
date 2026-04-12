@@ -1431,11 +1431,14 @@
   }
 
   // Ensure the current-week snapshot exists for ALL groups in GROUP_ORDER.
-  // Strategy per missing group:
-  //   1. In-memory state.generatedByGroup[gid]   → copy directly to snapshot
-  //   2. Not in memory → load from Firebase generated/{termKey}/{gid}  → copy if found
-  //   3. Still not found → generate the group (saves both generated + snapshot via persistGenerated)
-  // Called on management page load and via the "Refresh Snapshot" button.
+  // Strategy per group missing from the snapshot:
+  //   1. Use in-memory state.generatedByGroup[gid] if present → call persistGenerated()
+  //      (this is the exact same save path that writes both primary + snapshot)
+  //   2. Not in memory → load the saved record directly from Firebase → call persistGenerated()
+  //   3. Still nothing in Firebase → generate the group fresh via generateGroup()
+  //      (which calls persistGenerated() internally, so the snapshot is written automatically)
+  // Draft groups (has-issues) are saved just like valid groups — validation status never blocks saving.
+  // Called on management page load and when the user clicks "Refresh Snapshot".
   async function maybeEnsureWeekSnapshot() {
     if (!state.viewer?.canManage) return;
     try {
@@ -1444,59 +1447,40 @@
       const snapSnap = await state.db.ref(snapPath).once('value');
       const existingSnap = snapSnap.val() || {};
 
-      // All groups that are absent from this week's snapshot
+      // Every group in GROUP_ORDER that is absent from this week's snapshot
       const missingGroups = GROUP_ORDER.filter(gid => !existingSnap[gid]);
       if (!missingGroups.length) return;
 
       for (const groupId of missingGroups) {
         try {
-          // --- Step 1: try in-memory state ---
+          // Step 1 — prefer what is already in memory
           let generated = state.generatedByGroup[groupId] || null;
 
-          // --- Step 2: try loading from Firebase if not in memory ---
+          // Step 2 — fall back to loading the saved record from Firebase
           if (!generated) {
-            try {
-              const genSnap = await state.db.ref(
-                window.SOMAP.P(`years/${state.year}/timetable/generated/${state.activeTerm}/${groupId}`)
-              ).once('value');
-              if (genSnap.exists()) {
-                generated = genSnap.val();
-                // Sync back into memory so the rest of the page stays consistent
-                state.generatedByGroup[groupId] = generated;
-              }
-            } catch (loadErr) {
-              console.warn(`Could not load generated timetable for ${groupId} from Firebase:`, loadErr);
+            const genSnap = await state.db.ref(
+              window.SOMAP.P(`years/${state.year}/timetable/generated/${state.activeTerm}/${groupId}`)
+            ).once('value');
+            if (genSnap.exists()) {
+              generated = genSnap.val();
+              state.generatedByGroup[groupId] = generated; // keep memory in sync
             }
           }
 
-          // --- Step 3: still nothing → generate it now ---
-          if (!generated) {
-            // generateGroup calls persistGenerated which writes the snapshot automatically
-            const payload = await generateGroup(groupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false, autoReason: 'week-snapshot-ensure' });
-            if (payload) generated = payload; // snapshot already written by persistGenerated
-            continue; // skip the manual snapshot write below; persistGenerated already did it
+          if (generated) {
+            // Re-run persistGenerated so it writes BOTH the primary path and the weekly snapshot.
+            // This is the same function path used during a normal save — always reliable.
+            await persistGenerated(groupId, generated);
+          } else {
+            // Step 3 — group was never generated; create it now.
+            // generateGroup() calls persistGenerated() internally, so the snapshot is written.
+            await generateGroup(groupId, {
+              saveMode: 'draftIfInvalid',
+              silent: true,
+              openPreview: false,
+              autoReason: 'week-snapshot-ensure'
+            });
           }
-
-          // --- Copy existing generated data into the weekly snapshot ---
-          const { isSaved, ...persistablePayload } = generated;
-          const snapshotPayload = {
-            weekKey,
-            generatedAt: persistablePayload.generatedAt || Date.now(),
-            sourceConfigHash: persistablePayload.sourceConfigHash || '',
-            status: persistablePayload.status || 'draft-invalid',
-            validationSummary: persistablePayload.validationSummary || {},
-            groupId,
-            termKey: state.activeTerm,
-            grid: persistablePayload.grid || {},
-            slots: persistablePayload.slots || [],
-            teacherLegend: persistablePayload.teacherLegend || [],
-            subjectLegend: persistablePayload.subjectLegend || [],
-            classes: persistablePayload.classes || [],
-            days: persistablePayload.days || []
-          };
-          await state.db.ref(window.SOMAP.P(
-            `years/${state.year}/timetable/weeklySnapshots/${state.activeTerm}/${weekKey}/generated/${groupId}`
-          )).set(snapshotPayload);
         } catch (e) {
           console.warn(`Week snapshot ensure for ${groupId} failed:`, e);
         }
