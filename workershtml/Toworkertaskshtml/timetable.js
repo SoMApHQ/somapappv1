@@ -4,6 +4,7 @@
   const TZ = 'Africa/Nairobi';
   const FALLBACK_LOGO = '../../images/somap-logo.png.jpg';
   const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+  const DAY_OPTIONS = [...DAYS, 'Saturday'];
   const TERM_OPTIONS = [
     { value: 'term1', label: 'Term 1' },
     { value: 'term2', label: 'Term 2' },
@@ -129,6 +130,7 @@
     lower_primary_group: { default: 3, special: { 'Writing Skills': 4, 'Reading Skills': 4, Arithmetic: 5, Listening: 2, Kusoma: 3, 'Developing Sports & Arts': 2, 'Health Care': 2 } },
     upper_primary_group: { default: 2, special: { Math: 5, English: 5, Kiswahili: 4, Science: 4, Geography: 2, History: 2, French: 2, Arts: 2, 'Social Studies': 3, 'Civics & Morals': 2 } }
   };
+  const DEFAULT_FRIDAY_AFTERNOON = { start: '12:30', label: 'Games / Talents' };
 
   const state = {
     db: null,
@@ -192,7 +194,7 @@
       'summarySubjects', 'summarySubjectsFoot', 'summaryPeriods', 'summaryPeriodsFoot', 'summaryCollisions',
       'summaryCollisionsFoot', 'summaryValidation', 'summaryValidationFoot', 'overviewStatusChip', 'overviewHighlights',
       'validationSummaryPanel', 'validationDetails', 'requirementAuditTableBody', 'classLoadAuditTableBody', 'teacherClassFilter', 'teacherTableBody', 'settingsStatusChip',
-      'saveSettingsButton', 'addSlotButton', 'resetSlotsButton', 'slotEditor', 'periodRequirementsEditor',
+      'saveSettingsButton', 'addSlotButton', 'resetSlotsButton', 'scheduleTemplateBuilder', 'slotEditor', 'periodRequirementsEditor',
       'subjectOptionsEditor', 'lockedCellsEditor', 'previewStatusChip', 'previewGenerateButton', 'saveDraftInvalidButton',
       'previewShell', 'pdfMetaPanel', 'printNotesPanel', 'pdfCurrentButton', 'pdfAllButton', 'pdfPrintButton',
       'allGroupsShell', 'weekSnapStatusChip', 'weekSnapRefreshButton', 'weekSnapShell'
@@ -236,6 +238,8 @@
     els.resetSlotsButton?.addEventListener('click', () => {
       mutateSettings((settings) => {
         settings.slots = deepClone(DEFAULT_SLOT_PRESETS[state.activeGroupId] || []);
+        settings.activeDays = [...DAYS];
+        settings.fridayAfternoon = { ...DEFAULT_FRIDAY_AFTERNOON };
       });
     });
     els.saveDraftInvalidButton?.addEventListener('click', () => saveDraftInvalid(state.activeGroupId));
@@ -493,29 +497,25 @@
   async function loadSchemeHoursMap() {
     const map = {};
     try {
-      const snap = await state.db.ref(`schemes/${state.schoolId}/templates/${state.year}`).once('value');
-      const raw = snap.val() || {};
-      Object.values(raw).forEach((bySubject) => {
+      const [teacherSnap, templateSnap] = await Promise.all([
+        state.db.ref(`schemes/${state.schoolId}/teacher`).once('value'),
+        state.db.ref(`schemes/${state.schoolId}/templates/${state.year}`).once('value')
+      ]);
+      const teacherRaw = teacherSnap.val() || {};
+      Object.values(teacherRaw).forEach((byYear) => {
+        const yearNode = byYear?.[state.year] || {};
+        Object.values(yearNode).forEach((bySubject) => {
+          Object.values(bySubject || {}).forEach((byTerm) => {
+            const schemes = byTerm?.[state.activeTerm] || {};
+            Object.values(schemes || {}).forEach((scheme) => mergeSchemeHours(map, scheme, 'teacher'));
+          });
+        });
+      });
+      const templateRaw = templateSnap.val() || {};
+      Object.values(templateRaw).forEach((bySubject) => {
         Object.values(bySubject || {}).forEach((byTerm) => {
           const templates = byTerm?.[state.activeTerm] || {};
-          Object.values(templates || {}).forEach((template) => {
-            const className = normalizeClassName(template?.className || template?.classKey || '');
-            const subjectName = normalizeSubjectName(template?.subjectName || template?.subjectKey || '');
-            const hours = Number(template?.hoursPerWeek || 0);
-            const createdAt = Number(template?.meta?.createdAt || 0);
-            if (!className || !subjectName || hours <= 0) return;
-            map[className] = map[className] || {};
-            const existing = map[className][subjectName];
-            if (!existing || createdAt >= existing.createdAt) {
-              map[className][subjectName] = {
-                hours,
-                createdAt,
-                termKey: state.activeTerm,
-                templateId: template?.templateId || '',
-                source: 'scheme'
-              };
-            }
-          });
+          Object.values(templates || {}).forEach((template) => mergeSchemeHours(map, template, 'template'));
         });
       });
     } catch (error) {
@@ -573,11 +573,16 @@
     const catalogHandler = () => { if (!catalogInitialFired) { catalogInitialFired = true; return; } scheduleRefresh(); };
     catalogRef.on('value', catalogHandler);
     state.watchers.push(() => catalogRef.off('value', catalogHandler));
-    const schemeRef = state.db.ref(`schemes/${state.schoolId}/templates/${state.year}`);
-    let schemeInitialFired = false;
-    const schemeHandler = () => { if (!schemeInitialFired) { schemeInitialFired = true; return; } scheduleRefresh(); };
-    schemeRef.on('value', schemeHandler);
-    state.watchers.push(() => schemeRef.off('value', schemeHandler));
+    const templateSchemeRef = state.db.ref(`schemes/${state.schoolId}/templates/${state.year}`);
+    let templateSchemeInitialFired = false;
+    const templateSchemeHandler = () => { if (!templateSchemeInitialFired) { templateSchemeInitialFired = true; return; } scheduleRefresh(); };
+    templateSchemeRef.on('value', templateSchemeHandler);
+    state.watchers.push(() => templateSchemeRef.off('value', templateSchemeHandler));
+    const teacherSchemeRef = state.db.ref(`schemes/${state.schoolId}/teacher`);
+    let teacherSchemeInitialFired = false;
+    const teacherSchemeHandler = () => { if (!teacherSchemeInitialFired) { teacherSchemeInitialFired = true; return; } scheduleRefresh(); };
+    teacherSchemeRef.on('value', teacherSchemeHandler);
+    state.watchers.push(() => teacherSchemeRef.off('value', teacherSchemeHandler));
   }
 
   function scheduleRefresh() {
@@ -881,10 +886,49 @@
   }
 
   function renderSettings() {
+    renderScheduleTemplateBuilder();
     renderSlotEditor();
     renderRequirementsEditor();
     renderSubjectOptionsEditor();
     renderLockedCellsEditor();
+  }
+
+  function renderScheduleTemplateBuilder() {
+    const settings = getActiveSettings();
+    if (!els.scheduleTemplateBuilder) return;
+    const config = deriveScheduleBuilderConfig(settings);
+    els.scheduleTemplateBuilder.innerHTML = `
+      <section class="tt-schedule-builder">
+        <div class="tt-settings-block__head" style="margin-bottom:0;">
+          <div>
+            <h4 style="margin:0;">Quick Day Builder</h4>
+            <p class="tt-schedule-builder__note">Set one lesson length, day start/end, break, lunch, and Friday afternoon once. The slot table below updates automatically for this group.</p>
+          </div>
+        </div>
+        <div class="tt-schedule-builder__grid">
+          <div class="tt-field"><label>Lesson Minutes</label><input id="builderLessonMinutes" class="tt-input" type="number" min="20" max="120" step="5" value="${escapeAttr(String(config.lessonDurationMinutes))}" ${inputDisabled()}></div>
+          <div class="tt-field"><label>Lesson 1 Starts</label><input id="builderDayStart" class="tt-input" type="time" value="${escapeAttr(config.dayStartTime)}" ${inputDisabled()}></div>
+          <div class="tt-field"><label>Day Ends</label><input id="builderDayEnd" class="tt-input" type="time" value="${escapeAttr(config.dayEndTime)}" ${inputDisabled()}></div>
+          <div class="tt-field"><label>Break Starts</label><input id="builderBreakStart" class="tt-input" type="time" value="${escapeAttr(config.breakStartTime)}" ${inputDisabled()}></div>
+          <div class="tt-field"><label>Break Minutes</label><input id="builderBreakMinutes" class="tt-input" type="number" min="0" max="120" step="5" value="${escapeAttr(String(config.breakDurationMinutes))}" ${inputDisabled()}></div>
+          <div class="tt-field"><label>Break Label</label><input id="builderBreakLabel" class="tt-input" value="${escapeAttr(config.breakLabel)}" ${inputDisabled()}></div>
+          <div class="tt-field"><label>Lunch Starts</label><input id="builderLunchStart" class="tt-input" type="time" value="${escapeAttr(config.lunchStartTime)}" ${inputDisabled()}></div>
+          <div class="tt-field"><label>Lunch Minutes</label><input id="builderLunchMinutes" class="tt-input" type="number" min="0" max="180" step="5" value="${escapeAttr(String(config.lunchDurationMinutes))}" ${inputDisabled()}></div>
+          <div class="tt-field"><label>Lunch Label</label><input id="builderLunchLabel" class="tt-input" value="${escapeAttr(config.lunchLabel)}" ${inputDisabled()}></div>
+          <div class="tt-field"><label>Friday Afternoon Starts</label><input id="builderFridayStart" class="tt-input" type="time" value="${escapeAttr(config.fridayAfternoonStart)}" ${inputDisabled()}></div>
+          <div class="tt-field"><label>Friday Afternoon Label</label><input id="builderFridayLabel" class="tt-input" value="${escapeAttr(config.fridayAfternoonLabel)}" ${inputDisabled()}></div>
+          <div class="tt-field">
+            <label>Saturday Teaching</label>
+            <label class="tt-checkbox-row"><input id="builderIncludeSaturday" type="checkbox" ${config.includeSaturday ? 'checked' : ''} ${inputDisabled()}><span>Include Saturday in this group</span></label>
+          </div>
+        </div>
+        <div class="tt-schedule-builder__actions">
+          <p class="tt-schedule-builder__note">If the day length leaves unused minutes, a fixed buffer block is added automatically so times remain exact.</p>
+          <button type="button" class="tt-btn tt-btn--secondary" id="applyScheduleBuilderButton" ${state.viewer.canManage ? '' : 'disabled'}>Apply Builder To Slots</button>
+        </div>
+      </section>
+    `;
+    document.getElementById('applyScheduleBuilderButton')?.addEventListener('click', applyScheduleBuilder);
   }
 
   function renderSlotEditor() {
@@ -922,6 +966,145 @@
         });
       });
     });
+  }
+
+  function deriveScheduleBuilderConfig(settings) {
+    const slots = normalizeSlots(settings?.slots || []);
+    const teachingSlots = slots.filter((slot) => slot.isTeaching);
+    const fixedSlots = slots.filter((slot) => !slot.isTeaching);
+    const namedFixedSlots = fixedSlots.filter((slot) => !/^buffer\b/i.test(String(slot.label || '')));
+    const breakSlot = namedFixedSlots.find((slot) => !/lunch/i.test(slot.label || '')) || namedFixedSlots[0] || null;
+    const lunchSlot = namedFixedSlots.find((slot) => /lunch/i.test(slot.label || '')) || namedFixedSlots[1] || null;
+    return {
+      lessonDurationMinutes: Math.max(20, getSlotDurationMinutes(teachingSlots[0]) || 40),
+      dayStartTime: teachingSlots[0]?.start || slots[0]?.start || '08:00',
+      dayEndTime: slots[slots.length - 1]?.end || teachingSlots[teachingSlots.length - 1]?.end || '15:00',
+      breakStartTime: breakSlot?.start || '10:00',
+      breakDurationMinutes: Math.max(0, getSlotDurationMinutes(breakSlot) || 30),
+      breakLabel: breakSlot?.label || 'Breakfast / Break',
+      lunchStartTime: lunchSlot?.start || '12:30',
+      lunchDurationMinutes: Math.max(0, getSlotDurationMinutes(lunchSlot) || 40),
+      lunchLabel: lunchSlot?.label || 'Lunch',
+      fridayAfternoonStart: normalizeFridayAfternoon(settings?.fridayAfternoon || {}).start,
+      fridayAfternoonLabel: normalizeFridayAfternoon(settings?.fridayAfternoon || {}).label,
+      includeSaturday: getScheduleDays(settings).includes('Saturday')
+    };
+  }
+
+  function applyScheduleBuilder() {
+    if (!state.viewer.canManage) return;
+    const lessonDurationMinutes = Math.max(20, Number(document.getElementById('builderLessonMinutes')?.value || 0));
+    const dayStartTime = document.getElementById('builderDayStart')?.value || '';
+    const dayEndTime = document.getElementById('builderDayEnd')?.value || '';
+    const breakStartTime = document.getElementById('builderBreakStart')?.value || '';
+    const breakDurationMinutes = Math.max(0, Number(document.getElementById('builderBreakMinutes')?.value || 0));
+    const breakLabel = String(document.getElementById('builderBreakLabel')?.value || 'Breakfast / Break').trim() || 'Breakfast / Break';
+    const lunchStartTime = document.getElementById('builderLunchStart')?.value || '';
+    const lunchDurationMinutes = Math.max(0, Number(document.getElementById('builderLunchMinutes')?.value || 0));
+    const lunchLabel = String(document.getElementById('builderLunchLabel')?.value || 'Lunch').trim() || 'Lunch';
+    const fridayAfternoonStart = document.getElementById('builderFridayStart')?.value || DEFAULT_FRIDAY_AFTERNOON.start;
+    const fridayAfternoonLabel = String(document.getElementById('builderFridayLabel')?.value || DEFAULT_FRIDAY_AFTERNOON.label).trim() || DEFAULT_FRIDAY_AFTERNOON.label;
+    const includeSaturday = Boolean(document.getElementById('builderIncludeSaturday')?.checked);
+    try {
+      const slots = buildSlotsFromTemplate({
+        groupId: state.activeGroupId,
+        lessonDurationMinutes,
+        dayStartTime,
+        dayEndTime,
+        interruptions: [
+          { start: breakStartTime, durationMinutes: breakDurationMinutes, label: breakLabel },
+          { start: lunchStartTime, durationMinutes: lunchDurationMinutes, label: lunchLabel }
+        ]
+      });
+      mutateSettings((settings) => {
+        settings.slots = slots;
+        settings.activeDays = includeSaturday ? [...DAYS, 'Saturday'] : [...DAYS];
+        settings.fridayAfternoon = {
+          start: fridayAfternoonStart,
+          label: fridayAfternoonLabel
+        };
+      });
+      toast('Time slots rebuilt from the quick day builder.', 'success');
+    } catch (error) {
+      toast(error.message || 'Unable to build the timetable day layout.', 'warning');
+    }
+  }
+
+  function buildSlotsFromTemplate({ groupId, lessonDurationMinutes, dayStartTime, dayEndTime, interruptions }) {
+    const startMinutes = parseTimeToMinutes(dayStartTime);
+    const endMinutes = parseTimeToMinutes(dayEndTime);
+    if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes) || endMinutes <= startMinutes) {
+      throw new Error('Choose a valid day start and end time.');
+    }
+    if (!Number.isFinite(lessonDurationMinutes) || lessonDurationMinutes < 20) {
+      throw new Error('Lesson minutes must be 20 or more.');
+    }
+    const fixedBlocks = (interruptions || [])
+      .filter((item) => item && item.start)
+      .map((item, index) => {
+        const blockStart = parseTimeToMinutes(item.start);
+        const duration = Math.max(0, Number(item.durationMinutes || 0));
+        const blockEnd = blockStart + duration;
+        if (!Number.isFinite(blockStart) || duration <= 0) return null;
+        return {
+          id: `${slugify(groupId)}_fixed_${index + 1}`,
+          start: blockStart,
+          end: blockEnd,
+          label: String(item.label || `Fixed Block ${index + 1}`).trim() || `Fixed Block ${index + 1}`
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => left.start - right.start);
+    fixedBlocks.forEach((block, index) => {
+      if (block.start <= startMinutes || block.end >= endMinutes) {
+        throw new Error(`${block.label} must stay inside the school day.`);
+      }
+      if (index > 0 && fixedBlocks[index - 1].end > block.start) {
+        throw new Error('Break and lunch times cannot overlap.');
+      }
+    });
+
+    const slots = [];
+    let cursor = startMinutes;
+    let teachingCount = 1;
+    let fixedCount = 1;
+    const addSlot = (slotStart, slotEnd, label, isTeaching) => {
+      if (slotEnd <= slotStart) return;
+      slots.push({
+        id: `${slugify(groupId)}_${isTeaching ? 'teaching' : 'fixed'}_${slots.length + 1}`,
+        start: formatMinutesAsTime(slotStart),
+        end: formatMinutesAsTime(slotEnd),
+        label,
+        isTeaching
+      });
+    };
+
+    fixedBlocks.forEach((block) => {
+      while (cursor + lessonDurationMinutes <= block.start) {
+        addSlot(cursor, cursor + lessonDurationMinutes, `Teaching ${teachingCount}`, true);
+        cursor += lessonDurationMinutes;
+        teachingCount += 1;
+      }
+      if (cursor < block.start) {
+        addSlot(cursor, block.start, `Buffer ${fixedCount}`, false);
+        fixedCount += 1;
+      }
+      addSlot(block.start, block.end, block.label, false);
+      cursor = block.end;
+    });
+
+    while (cursor + lessonDurationMinutes <= endMinutes) {
+      addSlot(cursor, cursor + lessonDurationMinutes, `Teaching ${teachingCount}`, true);
+      cursor += lessonDurationMinutes;
+      teachingCount += 1;
+    }
+    if (cursor < endMinutes) {
+      addSlot(cursor, endMinutes, `Buffer ${fixedCount}`, false);
+    }
+    if (!slots.some((slot) => slot.isTeaching)) {
+      throw new Error('This layout leaves no teaching lesson in the day.');
+    }
+    return normalizeSlots(slots);
   }
 
   function renderRequirementsEditor() {
@@ -984,11 +1167,12 @@
     if (!els.lockedCellsEditor) return;
     const teachers = getTeachersForGroup(state.activeGroupId);
     const subjects = getSubjectsForGroup(state.activeGroupId, settings);
+    const days = getScheduleDays(settings);
     const slotOptions = (settings.slots || []).map((slot) => `<option value="${escapeAttr(slot.id)}">${escapeHtml(`${slot.start}-${slot.end} | ${slot.label}`)}</option>`).join('');
     els.lockedCellsEditor.innerHTML = `
       <div class="tt-locked-form">
         <div class="tt-field"><label>Class</label><select id="lockClassSelect" class="tt-select" ${inputDisabled()}>${GROUPS[state.activeGroupId].classes.map((className) => `<option value="${escapeAttr(className)}">${escapeHtml(className)}</option>`).join('')}</select></div>
-        <div class="tt-field"><label>Day</label><select id="lockDaySelect" class="tt-select" ${inputDisabled()}>${DAYS.map((day) => `<option value="${escapeAttr(day)}">${escapeHtml(day)}</option>`).join('')}</select></div>
+        <div class="tt-field"><label>Day</label><select id="lockDaySelect" class="tt-select" ${inputDisabled()}>${days.map((day) => `<option value="${escapeAttr(day)}">${escapeHtml(day)}</option>`).join('')}</select></div>
         <div class="tt-field"><label>Slot</label><select id="lockSlotSelect" class="tt-select" ${inputDisabled()}>${slotOptions}</select></div>
         <div class="tt-field"><label>Placement Type</label><select id="lockTypeSelect" class="tt-select" ${inputDisabled()}><option value="teaching">Teaching</option><option value="fixed">Fixed Block</option></select></div>
         <div class="tt-field"><label>Subject</label><select id="lockSubjectSelect" class="tt-select" ${inputDisabled()}>${subjects.map((subject) => `<option value="${escapeAttr(subject)}">${escapeHtml(subject)}</option>`).join('')}</select></div>
@@ -1142,10 +1326,11 @@
 
   function renderCombinedPreviewTable(preview) {
     const slots = preview.slots || [];
+    const days = preview.days || getScheduleDays(getSettingsForGroup(preview.groupId || state.activeGroupId));
     const rows = [];
-    DAYS.forEach((day) => {
+    days.forEach((day) => {
       preview.classes.forEach((className, classIndex) => {
-        const cells = slots.map((slot) => `<td>${renderGridCell(preview.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day))}</td>`).join('');
+        const cells = slots.map((slot) => `<td>${renderGridCell(preview.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day, preview))}</td>`).join('');
         rows.push(`
           <tr>
             ${classIndex === 0 ? `<td class="tt-class-cell" rowspan="${preview.classes.length}">${escapeHtml(day)}</td>` : ''}
@@ -1176,7 +1361,7 @@
   function renderDayTable(preview, day) {
     const slots = preview.slots || [];
     const rows = preview.classes.map((className) => {
-      const rowCells = slots.map((slot) => `<td>${renderGridCell(preview.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day))}</td>`).join('');
+      const rowCells = slots.map((slot) => `<td>${renderGridCell(preview.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day, preview))}</td>`).join('');
       return `<tr><td class="tt-class-cell">${escapeHtml(className)}</td>${rowCells}</tr>`;
     }).join('');
     return `
@@ -1492,8 +1677,9 @@
 
   function addLockedPlacement() {
     if (!state.viewer.canManage) return;
+    const days = getScheduleDays(getActiveSettings());
     const className = document.getElementById('lockClassSelect')?.value || GROUPS[state.activeGroupId].classes[0];
-    const day = document.getElementById('lockDaySelect')?.value || DAYS[0];
+    const day = document.getElementById('lockDaySelect')?.value || days[0] || DAYS[0];
     const slotId = document.getElementById('lockSlotSelect')?.value || '';
     const type = document.getElementById('lockTypeSelect')?.value || 'teaching';
     const subject = document.getElementById('lockSubjectSelect')?.value || '';
@@ -1574,12 +1760,13 @@
 
   function buildTimetable(groupId, settings, teachers) {
     const group = GROUPS[groupId];
+    const days = getScheduleDays(settings);
     const slots = normalizeSlots(settings.slots || []);
     const teacherLegend = buildTeacherLegend(groupId, settings, teachers);
     const subjectLegend = buildSubjectLegend(groupId, settings);
     const teacherNumberMap = Object.fromEntries(teacherLegend.map((teacher) => [teacher.workerId, teacher.number]));
     const candidateMap = buildCandidateTeacherMap(groupId, teachers, settings);
-    const initialGrid = createBaseGrid(group.classes, slots);
+    const initialGrid = createBaseGrid(group.classes, slots, settings);
     const classOccupancy = {};
     const teacherOccupancy = {};
     const classSubjectDayCount = {};
@@ -1592,7 +1779,7 @@
     group.classes.forEach((className) => {
       classOccupancy[className] = {};
       classSubjectDayCount[className] = {};
-      DAYS.forEach((day) => {
+      days.forEach((day) => {
         classOccupancy[className][day] = {};
         classSubjectDayCount[className][day] = {};
       });
@@ -1601,7 +1788,7 @@
       teacherOccupancy[teacher.workerId] = {};
       teacherDayLoad[teacher.workerId] = {};
       teacherEdgeLoad[teacher.workerId] = { first: 0, last: 0 };
-      DAYS.forEach((day) => {
+      days.forEach((day) => {
         teacherOccupancy[teacher.workerId][day] = {};
         teacherDayLoad[teacher.workerId][day] = 0;
       });
@@ -1633,7 +1820,7 @@
 
     GROUPS[groupId].classes.forEach((className) => {
       const required = Object.values(demand[className] || {}).reduce((sum, count) => sum + Math.max(0, Number(count) || 0), 0);
-      const openTeachingSlots = DAYS.reduce((sum, day) => sum + slots.filter((slot) => slot.isTeaching && !initialGrid[className][day][slot.id]?.type).length, 0);
+      const openTeachingSlots = days.reduce((sum, day) => sum + slots.filter((slot) => slot.isTeaching && !initialGrid[className][day][slot.id]?.type).length, 0);
       if (required > openTeachingSlots) {
         fixedIssues.push({
           category: 'capacity',
@@ -1659,6 +1846,7 @@
       classSubjectDayCount,
       teacherDayLoad,
       teacherEdgeLoad,
+      days,
       nodesVisited: 0,
       limit: Math.max(90000, computeDemandScore(demand) * 2200),
       bestGrid: null,
@@ -1717,7 +1905,7 @@
         fixedIssues.push({ category: 'locked', title: 'Locked placement points to an unknown slot', body: `${cell.className} / ${cell.day} / ${cell.slotId}` });
         return;
       }
-      if (getAutoFixedCell(slot, cell.day) && cell.type !== 'fixed') {
+      if (getAutoFixedCell(slot, cell.day, settings) && cell.type !== 'fixed') {
         fixedIssues.push({ category: 'locked', title: 'Locked teaching cell is inside a fixed timetable block', body: `${cell.className} / ${cell.day} / ${getSlotLabel(cell.slotId, slots)}` });
         return;
       }
@@ -1732,7 +1920,7 @@
       if (!candidateTeachers.some((teacher) => teacher.workerId === teacherId)) {
         fixedIssues.push({ category: 'locked', title: 'Locked teaching cell uses an invalid teacher assignment', body: `${cell.className} / ${cell.day} / ${getSlotLabel(cell.slotId, slots)} / ${subject || 'Unknown subject'}` });
       }
-      if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot)) {
+      if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot, settings, slots)) {
         fixedIssues.push({ category: 'locked', title: 'Locked morning-core subject is placed after lunch', body: `${cell.className} / ${subject} is locked on ${cell.day} at ${getSlotLabel(cell.slotId, slots)}.` });
       }
       const subjectMeta = subjectLegend.find((item) => item.subject === subject) || {
@@ -1810,8 +1998,9 @@
     const schedulable = entries.filter((entry) => entry.placements.length > 0);
     if (!schedulable.length) return null;
     schedulable.sort((left, right) => {
-      const leftTargetDistinctDays = Math.min(left.remaining, DAYS.length);
-      const rightTargetDistinctDays = Math.min(right.remaining, DAYS.length);
+      const dayCount = searchState.days?.length || DAYS.length;
+      const leftTargetDistinctDays = Math.min(left.remaining, dayCount);
+      const rightTargetDistinctDays = Math.min(right.remaining, dayCount);
       const leftDaySlack = left.uniqueDays - leftTargetDistinctDays;
       const rightDaySlack = right.uniqueDays - rightTargetDistinctDays;
       if (leftDaySlack !== rightDaySlack) return leftDaySlack - rightDaySlack;
@@ -1890,10 +2079,10 @@
     const distribution = getSubjectDistributionConfig(searchState, className, subject);
     const needsAdditionalCoverage = distribution.coveredDaySet.size < distribution.targetDistinctDays;
     (searchState.candidateMap[className]?.[subject] || []).forEach((teacher) => {
-      DAYS.forEach((day) => {
+      (searchState.days || DAYS).forEach((day) => {
         searchState.slots.forEach((slot) => {
           if (!slot.isTeaching) return;
-          if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot)) return;
+          if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot, searchState.settings, searchState.slots)) return;
           if (searchState.grid[className][day][slot.id]?.type) return;
           if (searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id]) return;
           const slotIndex = slotIndexMap[slot.id];
@@ -2001,11 +2190,12 @@
     const teacherDayLoad = {};
     const teacherEdgeLoad = {};
     const slotIndexMap = Object.fromEntries((slots || []).map((slot, index) => [slot.id, index]));
+    const days = getScheduleDays(settings);
 
     GROUPS[groupId].classes.forEach((className) => {
       classOccupancy[className] = {};
       classSubjectDayCount[className] = {};
-      DAYS.forEach((day) => {
+      days.forEach((day) => {
         classOccupancy[className][day] = {};
         classSubjectDayCount[className][day] = {};
       });
@@ -2015,14 +2205,14 @@
       teacherOccupancy[teacher.workerId] = {};
       teacherDayLoad[teacher.workerId] = {};
       teacherEdgeLoad[teacher.workerId] = { first: 0, last: 0 };
-      DAYS.forEach((day) => {
+      days.forEach((day) => {
         teacherOccupancy[teacher.workerId][day] = {};
         teacherDayLoad[teacher.workerId][day] = 0;
       });
     });
 
     GROUPS[groupId].classes.forEach((className) => {
-      DAYS.forEach((day) => {
+      days.forEach((day) => {
         (slots || []).forEach((slot) => {
           const cell = grid?.[className]?.[day]?.[slot.id];
           if (!cell?.type) return;
@@ -2062,6 +2252,7 @@
       classSubjectDayCount,
       teacherDayLoad,
       teacherEdgeLoad,
+      days,
       nodesVisited: 0,
       limit: 0,
       bestGrid: null,
@@ -2071,6 +2262,7 @@
   }
 
   function validateTimetable({ settings, slots, classes, grid, groupId, teachers, teacherLegend, subjectLegend, candidateMap, lockedCells, fixedIssues, classLoadAudit }) {
+    const days = getScheduleDays(settings);
     const collisions = [];
     const missingTeachers = [];
     const unscheduled = [];
@@ -2087,7 +2279,7 @@
 
     classes.forEach((className) => {
       actualCounts[className] = {};
-      DAYS.forEach((day) => {
+      days.forEach((day) => {
         (slots || []).forEach((slot) => {
           const cell = grid?.[className]?.[day]?.[slot.id] || null;
           if (!cell) return;
@@ -2096,10 +2288,10 @@
             if (!slot.isTeaching) {
               lockedViolations.push({ title: 'Teaching cell placed in a fixed block', body: `${className} / ${day} / ${getSlotLabel(slot.id, slots)}` });
             }
-            if (isFridayAfternoonClosure(day, slot)) {
+            if (isFridayAfternoonClosure(day, slot, settings)) {
               lockedViolations.push({ title: 'Friday afternoon block was used for teaching', body: `${className} / ${day} / ${getSlotLabel(slot.id, slots)}` });
             }
-            if (isMorningPrioritySubject(cell.subject) && !slotEndsBeforeLunch(slot)) {
+            if (isMorningPrioritySubject(cell.subject) && !slotEndsBeforeLunch(slot, settings, slots)) {
               invalidPlacements.push({ title: 'Morning-core subject placed after lunch', body: `${className} / ${cell.subject} is scheduled on ${day} at ${getSlotLabel(slot.id, slots)}.` });
             }
             if (!cell.teacherId) {
@@ -2231,9 +2423,10 @@
       validation: engineResult.validation,
       teacherLegend: engineResult.teacherLegend,
       subjectLegend: engineResult.subjectLegend,
+      fridayAfternoon: normalizeFridayAfternoon(settings.fridayAfternoon || {}),
       slots: engineResult.slots,
       classes: engineResult.classes,
-      days: DAYS,
+      days: getScheduleDays(settings),
       grid: engineResult.grid,
       collisions: engineResult.validation.collisions,
       missingTeachers: engineResult.validation.missingTeachers,
@@ -2295,15 +2488,16 @@
     const logoData = await loadImageDataUrl(state.schoolLogoUrl || FALLBACK_LOGO, FALLBACK_LOGO);
     groupIds.forEach((groupId, index) => {
       const timetable = timetables[index];
+      const days = timetable.days || getScheduleDays(getSettingsForGroup(groupId));
       if (index > 0) doc.addPage();
       const tableStartY = drawPdfHeader(doc, logoData, groupId, timetable);
       const head = [['Day', 'Class', ...timetable.slots.map((slot) => `${slot.start}-${slot.end}`)]];
       const body = [];
-      DAYS.forEach((day) => {
+      days.forEach((day) => {
         timetable.classes.forEach((className, classIndex) => {
           const row = [classIndex === 0 ? day : '', className];
           timetable.slots.forEach((slot) => {
-            const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day);
+            const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day, timetable);
             row.push(cell.type === 'teaching' ? cell.code : (cell.type === 'fixed' ? (cell.label || 'Fixed') : 'OPEN'));
           });
           body.push(row);
@@ -2328,10 +2522,10 @@
           }
           if (data.section !== 'body' || data.column.index < 2) return;
           const dayBlockIndex = Math.floor(data.row.index / timetable.classes.length);
-          const day = DAYS[dayBlockIndex];
+          const day = days[dayBlockIndex];
           const className = timetable.classes[data.row.index % timetable.classes.length];
           const slot = timetable.slots[data.column.index - 2];
-          const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day);
+          const cell = timetable.grid?.[className]?.[day]?.[slot.id] || createEmptyCell(slot, day, timetable);
           if (cell.type === 'teaching') {
             data.cell.styles.fillColor = hexToRgbArray(cell.color || '#dbeafe');
             data.cell.styles.fontStyle = 'bold';
@@ -2682,10 +2876,10 @@
       .filter((cell) => cell.className === className && cell.type === 'fixed')
       .map((cell) => `${cell.day}|${cell.slotId}`));
     let count = 0;
-    DAYS.forEach((day) => {
+    getScheduleDays(settings).forEach((day) => {
       (slots || []).forEach((slot) => {
         if (!slot?.isTeaching) return;
-        if (getAutoFixedCell(slot, day)) return;
+        if (getAutoFixedCell(slot, day, settings)) return;
         if (lockedFixed.has(`${day}|${slot.id}`)) return;
         count += 1;
       });
@@ -2755,10 +2949,10 @@
     const distribution = getSubjectDistributionConfig(searchState, className, subject);
     let openClassSlotsIgnoringTeacher = 0;
     let lockedOrFixedBlocks = 0;
-    DAYS.forEach((day) => {
+    (searchState.days || getScheduleDays(settings)).forEach((day) => {
       (searchState.slots || []).forEach((slot) => {
         if (!slot.isTeaching) return;
-        if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot)) return;
+        if (isMorningPrioritySubject(subject) && !slotEndsBeforeLunch(slot, settings, searchState.slots)) return;
         const existing = searchState.grid?.[className]?.[day]?.[slot.id] || null;
         const sameDayCount = searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0;
         if (sameDayCount >= distribution.dailyMax) return;
@@ -2845,6 +3039,49 @@
     return Array.from(subjects).filter(Boolean).sort((left, right) => left.localeCompare(right));
   }
 
+  function mergeSchemeHours(map, record, sourceType) {
+    const className = normalizeClassName(record?.className || record?.baseClassName || record?.classKey || record?.baseClassKey || '');
+    const subjectName = normalizeSubjectName(record?.subjectName || record?.subjectKey || '');
+    const hours = Number(record?.hoursPerWeek || 0);
+    const updatedAt = Number(record?.meta?.updatedAt || record?.meta?.createdAt || record?.updatedAt || 0);
+    if (!className || !subjectName || hours <= 0) return;
+    map[className] = map[className] || {};
+    const existing = map[className][subjectName];
+    const candidate = {
+      hours,
+      updatedAt,
+      createdAt: Number(record?.meta?.createdAt || record?.createdAt || updatedAt || 0),
+      termKey: normalizeTermKey(record?.termKey || state.activeTerm),
+      templateId: record?.templateId || record?.fromTemplateId || '',
+      schemeId: record?.schemeId || record?.templateId || '',
+      source: sourceType === 'teacher' ? 'teacher_scheme' : 'template_scheme'
+    };
+    if (!existing) {
+      map[className][subjectName] = candidate;
+      return;
+    }
+    if (existing.source === 'teacher_scheme' && candidate.source !== 'teacher_scheme') return;
+    if (candidate.source === 'teacher_scheme' && existing.source !== 'teacher_scheme') {
+      map[className][subjectName] = candidate;
+      return;
+    }
+    if ((candidate.updatedAt || candidate.createdAt || 0) >= (existing.updatedAt || existing.createdAt || 0)) {
+      map[className][subjectName] = candidate;
+    }
+  }
+
+  function getSchemeRequirementMeta(className, subject) {
+    const normalizedClass = normalizeClassName(className);
+    const normalizedSubject = normalizeSubjectName(subject);
+    const exact = state.schemeHoursByClass?.[normalizedClass]?.[normalizedSubject] || null;
+    if (exact) return exact;
+    const baseClass = resolveBaseClass(normalizedClass);
+    if (baseClass && baseClass !== normalizedClass) {
+      return state.schemeHoursByClass?.[baseClass]?.[normalizedSubject] || null;
+    }
+    return null;
+  }
+
   function normalizeSettings(raw, groupId, teachers, subjectCatalog) {
     const defaults = buildDefaultSettings(groupId, teachers, subjectCatalog);
     const input = raw && typeof raw === 'object' ? deepClone(raw) : {};
@@ -2857,23 +3094,30 @@
     })));
     const periodRequirements = {};
     const requirementSources = {};
+    const activeDays = normalizeActiveDays(input.activeDays || defaults.activeDays || []);
+    const fridayAfternoon = normalizeFridayAfternoon(input.fridayAfternoon || defaults.fridayAfternoon || {});
     GROUPS[groupId].classes.forEach((className) => {
       periodRequirements[className] = {};
       requirementSources[className] = {};
       getSubjectsForClass(groupId, className, { periodRequirements: input.periodRequirements || defaults.periodRequirements || {} }).forEach((subject) => {
-        const schemeMeta = state.schemeHoursByClass?.[className]?.[subject] || null;
+        const schemeMeta = getSchemeRequirementMeta(className, subject);
         const schemeHours = Number(schemeMeta?.hours || 0);
         const shouldPreferSeeded = !raw || Boolean(input.seededDefaults);
         const fallbackValue = shouldPreferSeeded && schemeHours > 0
           ? schemeHours
           : Number(defaults.periodRequirements?.[className]?.[subject] ?? 0);
-        // Scheme hours (from Academic Materials) take precedence when a scheme exists for this class/subject
+        // Teacher-edited scheme hours take precedence, then academic templates, then saved/default fallback values.
         const value = schemeHours > 0
           ? schemeHours
           : Number(input.periodRequirements?.[className]?.[subject] ?? fallbackValue);
         periodRequirements[className][subject] = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
         requirementSources[className][subject] = schemeHours > 0
-          ? { source: 'scheme', label: 'Scheme of Work', termKey: schemeMeta?.termKey || state.activeTerm, templateId: schemeMeta?.templateId || '' }
+          ? {
+              source: 'scheme',
+              label: schemeMeta?.source === 'teacher_scheme' ? 'Teacher Scheme of Work' : 'Academic Scheme of Work',
+              termKey: schemeMeta?.termKey || state.activeTerm,
+              templateId: schemeMeta?.templateId || schemeMeta?.schemeId || ''
+            }
           : { source: 'default', label: 'Default fallback', termKey: state.activeTerm, templateId: '' };
       });
     });
@@ -2886,6 +3130,8 @@
     return {
       groupId,
       classes: GROUPS[groupId].classes,
+      activeDays,
+      fridayAfternoon,
       slots,
       fixedBlocks: slots.filter((slot) => !slot.isTeaching).map((slot) => ({ slotId: slot.id, label: slot.label })),
       periodRequirements,
@@ -2927,17 +3173,34 @@
       periodRequirements[className] = {};
       requirementSources[className] = {};
       Array.from(subjects).forEach((subject) => {
-        const schemeMeta = state.schemeHoursByClass?.[className]?.[subject] || null;
+        const schemeMeta = getSchemeRequirementMeta(className, subject);
         const schemeHours = Number(schemeMeta?.hours || 0);
         periodRequirements[className][subject] = schemeHours > 0 ? schemeHours : (preset.special?.[subject] ?? preset.default ?? 2);
         requirementSources[className][subject] = schemeHours > 0
-          ? { source: 'scheme', label: 'Scheme of Work', termKey: schemeMeta?.termKey || state.activeTerm, templateId: schemeMeta?.templateId || '' }
+          ? {
+              source: 'scheme',
+              label: schemeMeta?.source === 'teacher_scheme' ? 'Teacher Scheme of Work' : 'Academic Scheme of Work',
+              termKey: schemeMeta?.termKey || state.activeTerm,
+              templateId: schemeMeta?.templateId || schemeMeta?.schemeId || ''
+            }
           : { source: 'default', label: 'Default fallback', termKey: state.activeTerm, templateId: '' };
         subjectAbbreviations[subject] = DEFAULT_ABBREVIATIONS[subject] || makeSubjectAbbreviation(subject);
         subjectColors[subject] = DEFAULT_SUBJECT_COLORS[subject] || '#dbeafe';
       });
     });
-    return { groupId, classes: GROUPS[groupId].classes, slots, periodRequirements, requirementSources, subjectAbbreviations, subjectColors, lockedCells: [], seededDefaults: true };
+    return {
+      groupId,
+      classes: GROUPS[groupId].classes,
+      activeDays: [...DAYS],
+      fridayAfternoon: { ...DEFAULT_FRIDAY_AFTERNOON },
+      slots,
+      periodRequirements,
+      requirementSources,
+      subjectAbbreviations,
+      subjectColors,
+      lockedCells: [],
+      seededDefaults: true
+    };
   }
 
   function normalizeGeneratedPayload(raw, groupId) {
@@ -2948,6 +3211,8 @@
       termKey: normalizeTermKey(raw.termKey || state.activeTerm),
       termLabel: raw.termLabel || termLabel(raw.termKey || state.activeTerm),
       isSaved: true,
+      days: normalizeActiveDays(raw.days || getSettingsForGroup(groupId).activeDays || []),
+      fridayAfternoon: normalizeFridayAfternoon(raw.fridayAfternoon || getSettingsForGroup(groupId).fridayAfternoon || {}),
       slots: normalizeSlots(raw.slots || getSettingsForGroup(groupId).slots || []),
       validation: {
         ...buildEmptyValidation(),
@@ -3065,7 +3330,7 @@
       .map((cell) => ({
         id: cell.id || `lock_${Math.random().toString(16).slice(2, 8)}`,
         className: normalizeClassName(cell.className || cell.class),
-        day: DAYS.includes(cell.day) ? cell.day : DAYS[0],
+        day: DAY_OPTIONS.includes(cell.day) ? cell.day : DAYS[0],
         slotId: String(cell.slotId || ''),
         type: cell.type === 'fixed' ? 'fixed' : 'teaching',
         subject: normalizeSubjectName(cell.subject || ''),
@@ -3085,14 +3350,15 @@
     }));
   }
 
-  function createBaseGrid(classes, slots) {
+  function createBaseGrid(classes, slots, settings) {
     const grid = {};
+    const days = getScheduleDays(settings);
     classes.forEach((className) => {
       grid[className] = {};
-      DAYS.forEach((day) => {
+      days.forEach((day) => {
         grid[className][day] = {};
         slots.forEach((slot) => {
-          const fixedCell = getAutoFixedCell(slot, day);
+          const fixedCell = getAutoFixedCell(slot, day, settings);
           if (fixedCell) {
             grid[className][day][slot.id] = { ...fixedCell, slotId: slot.id };
           }
@@ -3202,6 +3468,8 @@
       groupId,
       sourceConfigHash: state.sourceConfigHash,
       classes: [...(GROUPS[groupId]?.classes || [])],
+      activeDays: normalizeActiveDays(normalizedSettings.activeDays || []),
+      fridayAfternoon: normalizeFridayAfternoon(normalizedSettings.fridayAfternoon || {}),
       slots: (normalizedSettings.slots || []).map((slot) => ({
         id: String(slot.id || ''),
         start: String(slot.start || ''),
@@ -3397,6 +3665,22 @@
     return String(Math.max(2024, Math.round(year)));
   }
 
+  function normalizeActiveDays(days) {
+    const ordered = DAY_OPTIONS.filter((day) => Array.isArray(days) && days.includes(day));
+    return ordered.length ? ordered : [...DAYS];
+  }
+
+  function normalizeFridayAfternoon(value) {
+    return {
+      start: isValidTime(value?.start) ? String(value.start) : DEFAULT_FRIDAY_AFTERNOON.start,
+      label: String(value?.label || DEFAULT_FRIDAY_AFTERNOON.label).trim() || DEFAULT_FRIDAY_AFTERNOON.label
+    };
+  }
+
+  function getScheduleDays(settings) {
+    return normalizeActiveDays(settings?.activeDays || settings?.days || []);
+  }
+
   function compactTitleCase(value) {
     return String(value || '').trim().replace(/\s+/g, ' ').split(' ').filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()).join(' ');
   }
@@ -3415,21 +3699,30 @@
     return slot ? `${slot.start}-${slot.end} | ${slot.label}` : slotId;
   }
 
+  function getSlotDurationMinutes(slot) {
+    if (!slot) return 0;
+    const start = parseTimeToMinutes(slot.start);
+    const end = parseTimeToMinutes(slot.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 0;
+    return end - start;
+  }
+
   function getSubjectDistributionConfig(searchState, className, subject) {
+    const days = searchState.days || DAYS;
     const required = Math.max(0, Number(searchState.settings?.periodRequirements?.[className]?.[subject] || 0));
-    const coveredDaySet = new Set(DAYS.filter((day) => (searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0) > 0));
+    const coveredDaySet = new Set(days.filter((day) => (searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0) > 0));
     const availableDaySet = new Set(coveredDaySet);
-    DAYS.forEach((day) => {
+    days.forEach((day) => {
       if (hasSchedulablePlacementOnDay(searchState, className, subject, day)) availableDaySet.add(day);
     });
-    const targetDistinctDays = Math.max(1, Math.min(required || 1, availableDaySet.size || 1, DAYS.length));
+    const targetDistinctDays = Math.max(1, Math.min(required || 1, availableDaySet.size || 1, days.length || 1));
     const dailyMax = Math.max(1, Math.ceil((required || 1) / targetDistinctDays));
     return { required, coveredDaySet, availableDaySet, targetDistinctDays, dailyMax };
   }
 
   function countUnusedSchedulableDays(searchState, className, subject) {
     let count = 0;
-    DAYS.forEach((day) => {
+    (searchState.days || DAYS).forEach((day) => {
       if ((searchState.classSubjectDayCount?.[className]?.[day]?.[subject] || 0) > 0) return;
       if (hasSchedulablePlacementOnDay(searchState, className, subject, day)) count += 1;
     });
@@ -3438,7 +3731,7 @@
 
   function countSchedulableDays(searchState, className, subject) {
     let count = 0;
-    DAYS.forEach((day) => {
+    (searchState.days || DAYS).forEach((day) => {
       if (hasSchedulablePlacementOnDay(searchState, className, subject, day)) count += 1;
     });
     return count;
@@ -3450,7 +3743,7 @@
         slot.isTeaching &&
         !searchState.grid[className][day][slot.id]?.type &&
         !searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id] &&
-        (!isMorningPrioritySubject(subject) || slotEndsBeforeLunch(slot))
+        (!isMorningPrioritySubject(subject) || slotEndsBeforeLunch(slot, searchState.settings, searchState.slots))
       )
     );
   }
@@ -3459,12 +3752,14 @@
     return MORNING_PRIORITY_SUBJECTS.has(normalizeSubjectName(subject));
   }
 
-  function slotEndsBeforeLunch(slot) {
-    return parseTimeToMinutes(slot?.end) <= 12 * 60 + 30;
+  function slotEndsBeforeLunch(slot, settings, slots) {
+    const lunchStart = getLunchStartMinutes(settings, slots);
+    return parseTimeToMinutes(slot?.end) <= lunchStart;
   }
 
-  function isFridayAfternoonClosure(day, slot) {
-    return day === 'Friday' && parseTimeToMinutes(slot?.start) >= 12 * 60 + 30;
+  function isFridayAfternoonClosure(day, slot, settings) {
+    const friday = normalizeFridayAfternoon(settings?.fridayAfternoon || settings || {});
+    return day === 'Friday' && parseTimeToMinutes(slot?.start) >= parseTimeToMinutes(friday.start);
   }
 
   function parseTimeToMinutes(value) {
@@ -3473,15 +3768,35 @@
     return Number(match[1]) * 60 + Number(match[2]);
   }
 
-  function getAutoFixedCell(slot, day) {
+  function isValidTime(value) {
+    return Number.isFinite(parseTimeToMinutes(value));
+  }
+
+  function formatMinutesAsTime(value) {
+    const total = Math.max(0, Number(value) || 0);
+    const hours = Math.floor(total / 60);
+    const minutes = total % 60;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  }
+
+  function getLunchStartMinutes(settings, slots) {
+    const lunchSlot = (slots || []).find((slot) => !slot.isTeaching && /lunch/i.test(String(slot.label || '')));
+    const lunchStart = lunchSlot ? parseTimeToMinutes(lunchSlot.start) : Number.POSITIVE_INFINITY;
+    return Number.isFinite(lunchStart) ? lunchStart : parseTimeToMinutes(DEFAULT_FRIDAY_AFTERNOON.start);
+  }
+
+  function getAutoFixedCell(slot, day, settings) {
     if (!slot) return null;
     if (!slot.isTeaching) return { type: 'fixed', label: slot.label, note: `${slot.start}-${slot.end}` };
-    if (isFridayAfternoonClosure(day, slot)) return { type: 'fixed', label: 'Games / Talents', note: 'Friday afternoon' };
+    if (isFridayAfternoonClosure(day, slot, settings)) {
+      const friday = normalizeFridayAfternoon(settings?.fridayAfternoon || settings || {});
+      return { type: 'fixed', label: friday.label, note: 'Friday afternoon' };
+    }
     return null;
   }
 
-  function createEmptyCell(slot, day) {
-    return getAutoFixedCell(slot, day) || { type: 'empty', label: 'Open' };
+  function createEmptyCell(slot, day, settings) {
+    return getAutoFixedCell(slot, day, settings) || { type: 'empty', label: 'Open' };
   }
 
   function stableStringify(value) {
