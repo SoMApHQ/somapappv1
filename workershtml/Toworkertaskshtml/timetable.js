@@ -1039,7 +1039,7 @@
     };
   }
 
-  function applyScheduleBuilder() {
+  async function applyScheduleBuilder() {
     if (!state.viewer.canManage) return;
     const lessonDurationMinutes = Math.max(20, Number(document.getElementById('builderLessonMinutes')?.value || 0));
     const dayStartTime = document.getElementById('builderDayStart')?.value || '';
@@ -1072,7 +1072,8 @@
           label: fridayAfternoonLabel
         };
       }, { rerender: 'settings' });
-      toast('Time slots rebuilt from the quick day builder.', 'success');
+      toast('Time slots rebuilt from the quick day builder. Saving settings...', 'success');
+      await saveCurrentSettings();
     } catch (error) {
       toast(error.message || 'Unable to build the timetable day layout.', 'warning');
     }
@@ -1496,7 +1497,7 @@
       return `<div class="tt-cell tt-cell--fixed"><div class="tt-cell__code">${escapeHtml(cell.label || 'Fixed')}</div><div class="tt-cell__text">${escapeHtml(cell.note || '')}</div></div>`;
     }
     if (cell.type === 'teaching') {
-      return `<div class="tt-cell tt-cell--teaching" style="background:${escapeAttr(toColorHex(cell.color || '#dbeafe'))};"><div class="tt-cell__code">${escapeHtml(cell.code || `${cell.abbreviation}-${cell.teacherNumber}`)}</div><div class="tt-cell__text">${escapeHtml(cell.subject || '')}</div></div>`;
+      return `<div class="tt-cell tt-cell--teaching" style="background:${escapeAttr(toColorHex(cell.color || '#dbeafe'))};"><div class="tt-cell__code">${escapeHtml(cell.code || formatLessonCode(cell.abbreviation, cell.teacherNumber))}</div><div class="tt-cell__text">${escapeHtml(cell.subject || '')}</div></div>`;
     }
     return '<div class="tt-cell tt-cell--empty"><div class="tt-cell__code">OPEN</div><div class="tt-cell__text">No required period</div></div>';
   }
@@ -2179,7 +2180,7 @@
         teacherNumber: teacherLegendNumber,
         abbreviation: subjectMeta.abbreviation,
         color: subjectMeta.color,
-        code: `${subjectMeta.abbreviation}-${teacherLegendNumber}`
+        code: formatLessonCode(subjectMeta.abbreviation, teacherLegendNumber)
       };
       classOccupancy[cell.className][cell.day][cell.slotId] = true;
       teacherOccupancy[teacherId] = teacherOccupancy[teacherId] || {};
@@ -2389,7 +2390,7 @@
       teacherNumber: placement.teacherNumber,
       abbreviation: placement.abbreviation,
       color: placement.color,
-      code: `${placement.abbreviation}-${placement.teacherNumber}`
+      code: formatLessonCode(placement.abbreviation, placement.teacherNumber)
     };
     searchState.teacherOccupancy[placement.teacherId][placement.day][placement.slotId] = className;
     searchState.classSubjectDayCount[className][placement.day][subject] = (searchState.classSubjectDayCount[className][placement.day][subject] || 0) + 1;
@@ -4077,6 +4078,12 @@
 
   function makeSubjectAbbreviation(subject) {
     return sanitizeAbbreviation(DEFAULT_ABBREVIATIONS[subject] || subject.split(/\s+/).map((part) => part.slice(0, 2)).join('').slice(0, 5));
+  }
+
+  function formatLessonCode(abbreviation, teacherNumber) {
+    const code = sanitizeAbbreviation(abbreviation || 'SUBJ');
+    const teacherTag = String(teacherNumber || '?').trim() || '?';
+    return `${code}-T${teacherTag}`;
   }
 
   function getSlotLabel(slotId, slots) {
