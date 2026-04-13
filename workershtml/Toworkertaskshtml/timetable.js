@@ -1885,6 +1885,7 @@
       grid: source.grid || {},
       sourceTeacherCount: Number(source.sourceTeacherCount || getTeachersForGroup(groupId).length || 0),
       sourceConfigHash: String(source.sourceConfigHash || state.sourceConfigHash || ''),
+      structuralConfigHash: String(source.structuralConfigHash || buildStructuralConfigHash(groupId, getSettingsForGroup(groupId))),
       generationConfigHash: String(source.generationConfigHash || buildGenerationConfigHash(groupId, getSettingsForGroup(groupId))),
       status: source.status || (validationSummary.isValid ? 'valid' : 'draft-invalid')
     });
@@ -2856,6 +2857,7 @@
       classLoadAudit: engineResult.validation.classLoadAudit,
       sourceTeacherCount: teachers.length,
       sourceConfigHash: state.sourceConfigHash,
+      structuralConfigHash: buildStructuralConfigHash(groupId, settings),
       generationConfigHash: buildGenerationConfigHash(groupId, settings),
       status: validationSummary.isValid ? 'valid' : 'draft-invalid',
       isSaved: Boolean(isSaved)
@@ -3754,6 +3756,7 @@
         ...blankValidationSummary(),
         ...(raw.validationSummary || raw.validation?.summary || {})
       },
+      structuralConfigHash: String(raw.structuralConfigHash || ''),
       generationConfigHash: String(raw.generationConfigHash || '')
     };
   }
@@ -4024,6 +4027,24 @@
     }));
   }
 
+  function buildStructuralConfigHash(groupId, settings = getSettingsForGroup(groupId)) {
+    const normalizedSettings = normalizeSettings(settings, groupId, state.teachers, state.subjectCatalog);
+    return hashString(stableStringify({
+      groupId,
+      classes: getStableGroupClasses(groupId),
+      activeDays: normalizeActiveDays(normalizedSettings.activeDays || []),
+      fridayAfternoon: normalizeFridayAfternoon(normalizedSettings.fridayAfternoon || {}),
+      slots: (normalizedSettings.slots || []).map((slot) => ({
+        id: String(slot.id || ''),
+        start: String(slot.start || ''),
+        end: String(slot.end || ''),
+        label: String(slot.label || ''),
+        isTeaching: slot.isTeaching !== false
+      })),
+      lockedCells: canonicalizeLockedCells(normalizedSettings.lockedCells || [])
+    }));
+  }
+
   function isTimetableStale(groupId, timetable, settings = getSettingsForGroup(groupId)) {
     if (!timetable) {
       console.debug('[TT] isTimetableStale:', groupId, '→ stale (no saved record)');
@@ -4034,8 +4055,14 @@
       return true;
     }
     const expectedGenerationHash = buildGenerationConfigHash(groupId, settings);
+    const expectedStructuralHash = buildStructuralConfigHash(groupId, settings);
+    const hasUsableGrid = Boolean(timetable.grid && Object.keys(timetable.grid || {}).length);
     if (timetable.generationConfigHash) {
       const stale = String(timetable.generationConfigHash) !== String(expectedGenerationHash);
+      if (stale && groupId === 'upper_primary_group' && hasUsableGrid && String(timetable.structuralConfigHash || '') === String(expectedStructuralHash)) {
+        console.debug('[TT] isTimetableStale:', groupId, '-> fresh (structural hash matched for upper primary)');
+        return false;
+      }
       if (stale) console.debug('[TT] isTimetableStale:', groupId, '→ stale (generationConfigHash mismatch)');
       return stale;
     }
