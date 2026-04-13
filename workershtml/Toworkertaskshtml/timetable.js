@@ -157,6 +157,9 @@
     watchers: [],
     refreshTimer: null,
     autoGenerating: false,
+    isSavingSettings: false,
+    pendingGenerationTimer: null,
+    pdfLibsPromise: null,
     dirtySettings: new Set(),
     schoolLogoUrl: FALLBACK_LOGO
   };
@@ -228,8 +231,8 @@
     });
     els.teacherClassFilter?.addEventListener('change', renderTeacherTable);
     els.refreshButton?.addEventListener('click', () => reloadAll({ reason: 'manual-refresh', withAutoGenerate: true }));
-    els.regenerateButton?.addEventListener('click', () => generateGroup(state.activeGroupId, { saveMode: 'draftIfInvalid', silent: false, openPreview: true }));
-    els.previewGenerateButton?.addEventListener('click', () => generateGroup(state.activeGroupId, { saveMode: 'draftIfInvalid', silent: false, openPreview: true }));
+    els.regenerateButton?.addEventListener('click', () => runManagedGeneration(state.activeGroupId, { saveMode: 'draftIfInvalid', silent: false, openPreview: true, autoReason: 'manual-regenerate' }));
+    els.previewGenerateButton?.addEventListener('click', () => runManagedGeneration(state.activeGroupId, { saveMode: 'draftIfInvalid', silent: false, openPreview: true, autoReason: 'preview-regenerate' }));
     els.generateAllButton?.addEventListener('click', () => generateAllGroups({ saveMode: 'draftIfInvalid', silent: false }));
     els.saveSettingsButton?.addEventListener('click', saveCurrentSettings);
     els.addSlotButton?.addEventListener('click', () => {
@@ -381,11 +384,7 @@
       populateGroupSelector();
       subscribeToSourceChanges();
       renderAll();
-      if (withAutoGenerate) {
-        await maybeAutoRegenerateCurrent('source-refresh');
-      } else {
-        await maybeAutoRegenerateCurrent('render-only');
-      }
+      scheduleAutoRegeneration(withAutoGenerate ? 'source-refresh' : 'render-only');
     } finally {
       setBusyStatus('');
     }
@@ -600,6 +599,8 @@
 
   function detachWatchers() {
     clearTimeout(state.refreshTimer);
+    clearTimeout(state.pendingGenerationTimer);
+    state.pendingGenerationTimer = null;
     state.watchers.forEach((off) => {
       try { off(); } catch (error) { console.warn('Failed to detach watcher', error); }
     });
@@ -749,7 +750,7 @@
       els.accessBadge.textContent = state.viewer.canManage ? `Management access: ${state.viewer.role}` : `View only: ${state.viewer.role}`;
       els.accessBadge.className = `tt-pill ${state.viewer.canManage ? 'tt-pill--success' : 'tt-pill--neutral'}`;
     }
-    const disabled = !state.viewer.canManage;
+    const disabled = !state.viewer.canManage || state.autoGenerating || state.isSavingSettings;
     [
       els.regenerateButton,
       els.generateAllButton,
@@ -762,7 +763,15 @@
       if (button) button.disabled = disabled;
     });
     if (els.settingsStatusChip) {
-      els.settingsStatusChip.textContent = disabled ? 'Read only settings' : (state.dirtySettings.has(state.activeGroupId) ? 'Unsaved changes' : 'Editable settings');
+      if (!state.viewer.canManage) {
+        els.settingsStatusChip.textContent = 'Read only settings';
+      } else if (state.isSavingSettings) {
+        els.settingsStatusChip.textContent = 'Saving settings...';
+      } else if (state.autoGenerating) {
+        els.settingsStatusChip.textContent = 'Regenerating preview...';
+      } else {
+        els.settingsStatusChip.textContent = state.dirtySettings.has(state.activeGroupId) ? 'Unsaved changes' : 'Editable settings';
+      }
     }
   }
 
@@ -1456,17 +1465,25 @@
     const current = displayTimetable;
     const summary = current?.validationSummary || blankValidationSummary();
     if (els.generatedStatusBadge) {
-      const stale = isTimetableStale(state.activeGroupId, saved);
       let label = 'No generated timetable';
       let className = 'tt-pill tt-pill--warning';
-      if (current?.isSaved && current?.isValid && !stale) {
-        label = 'Saved valid timetable';
-        className = 'tt-pill tt-pill--success';
-      } else if (stale) {
-        label = 'Needs regeneration';
-      } else if (current) {
-        label = current.isSaved ? 'Saved timetable loaded' : 'Live preview loaded';
-        className = summary.isValid ? 'tt-pill tt-pill--success' : 'tt-pill tt-pill--warning';
+      if (state.isSavingSettings) {
+        label = 'Saving settings...';
+        className = 'tt-pill tt-pill--neutral';
+      } else if (state.autoGenerating) {
+        label = 'Regenerating preview...';
+        className = 'tt-pill tt-pill--neutral';
+      } else {
+        const stale = isTimetableStale(state.activeGroupId, saved);
+        if (current?.isSaved && current?.isValid && !stale) {
+          label = 'Saved valid timetable';
+          className = 'tt-pill tt-pill--success';
+        } else if (stale) {
+          label = 'Needs regeneration';
+        } else if (current) {
+          label = current.isSaved ? 'Saved timetable loaded' : 'Live preview loaded';
+          className = summary.isValid ? 'tt-pill tt-pill--success' : 'tt-pill tt-pill--warning';
+        }
       }
       els.generatedStatusBadge.textContent = label;
       els.generatedStatusBadge.className = className;
@@ -1479,6 +1496,51 @@
     setText(els.lastDownloadedValue, state.lastDownloadedAt || 'No export yet');
   }
 
+  function scheduleAutoRegeneration(reason) {
+    clearTimeout(state.pendingGenerationTimer);
+    const groupId = state.activeGroupId;
+    const generated = state.generatedByGroup[groupId];
+    if (!isTimetableStale(groupId, generated)) return;
+    state.pendingGenerationTimer = window.setTimeout(() => {
+      state.pendingGenerationTimer = null;
+      runManagedGeneration(groupId, {
+        saveMode: state.viewer.canManage ? 'draftIfInvalid' : 'none',
+        silent: true,
+        openPreview: false,
+        autoReason: reason,
+        failureToast: state.viewer.canManage ? 'Automatic regeneration failed. Use Regenerate Group.' : ''
+      }).catch((error) => {
+        console.warn('Deferred timetable regeneration failed', error);
+      });
+    }, 60);
+  }
+
+  async function runManagedGeneration(groupId, {
+    saveMode = 'draftIfInvalid',
+    silent = false,
+    openPreview = false,
+    autoReason = 'manual',
+    failureToast = ''
+  } = {}) {
+    if (state.autoGenerating) return getDisplayTimetable(groupId);
+    state.autoGenerating = true;
+    renderAll();
+    try {
+      await yieldToBrowser();
+      return await generateGroup(groupId, { saveMode, silent, openPreview, autoReason });
+    } catch (error) {
+      if (failureToast) toast(failureToast, 'warning');
+      throw error;
+    } finally {
+      state.autoGenerating = false;
+      renderAll();
+    }
+  }
+
+  function yieldToBrowser() {
+    return new Promise((resolve) => window.setTimeout(resolve, 0));
+  }
+
   async function maybeAutoRegenerateAll(reason) {
     if (state.autoGenerating) return;
     const staleGroups = GROUP_ORDER.filter((groupId) => {
@@ -1488,18 +1550,22 @@
     if (!staleGroups.length) return;
     if (state.viewer.canManage) {
       state.autoGenerating = true;
+      renderAll();
       try {
         for (const groupId of staleGroups) {
           try {
+            await yieldToBrowser();
             await generateGroup(groupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false, autoReason: reason });
           } catch (error) {
             console.warn(`Auto-save for ${groupId} failed; keeping live preview only.`, error);
+            await yieldToBrowser();
             await generateGroup(groupId, { saveMode: 'none', silent: true, openPreview: false, autoReason: reason });
           }
         }
         renderAll();
       } finally {
         state.autoGenerating = false;
+        renderAll();
       }
       return;
     }
@@ -1509,8 +1575,7 @@
   async function maybeAutoRegenerateCurrent(reason) {
     const generated = state.generatedByGroup[state.activeGroupId];
     if (isTimetableStale(state.activeGroupId, generated)) {
-      await generateGroup(state.activeGroupId, { saveMode: 'none', silent: true, openPreview: false, autoReason: reason });
-      renderAll();
+      await runManagedGeneration(state.activeGroupId, { saveMode: 'none', silent: true, openPreview: false, autoReason: reason });
     }
   }
 
@@ -1519,14 +1584,22 @@
       toast('Generation is limited to management roles.', 'warning');
       return;
     }
-    let validCount = 0;
-    for (const groupId of GROUP_ORDER) {
-      const result = await generateGroup(groupId, { saveMode, silent: true, openPreview: false, autoReason: 'generate-all' });
-      if (result?.validationSummary?.isValid) validCount += 1;
-    }
+    state.autoGenerating = true;
     renderAll();
-    setActiveTab('preview');
-    if (!silent) toast(`Generated ${GROUP_ORDER.length} groups. ${validCount} valid timetable(s) saved.`, 'success');
+    try {
+      let validCount = 0;
+      for (const groupId of GROUP_ORDER) {
+        await yieldToBrowser();
+        const result = await generateGroup(groupId, { saveMode, silent: true, openPreview: false, autoReason: 'generate-all' });
+        if (result?.validationSummary?.isValid) validCount += 1;
+      }
+      renderAll();
+      setActiveTab('preview');
+      if (!silent) toast(`Generated ${GROUP_ORDER.length} groups. ${validCount} valid timetable(s) saved.`, 'success');
+    } finally {
+      state.autoGenerating = false;
+      renderAll();
+    }
   }
 
   async function generateGroup(groupId, { saveMode = 'validOnly', silent = false, openPreview = true } = {}) {
@@ -1579,18 +1652,25 @@
       toast('Settings are read-only for your role.', 'warning');
       return;
     }
-    const settings = normalizeSettings(getActiveSettings(), state.activeGroupId, state.teachers, state.subjectCatalog);
+    if (state.isSavingSettings) return;
+    const groupId = state.activeGroupId;
+    const settings = normalizeSettings(getActiveSettings(), groupId, state.teachers, state.subjectCatalog);
     settings.seededDefaults = false;
-    state.settingsByGroup[state.activeGroupId] = settings;
+    state.settingsByGroup[groupId] = settings;
+    state.isSavingSettings = true;
+    state.dirtySettings.delete(groupId);
+    renderAll();
     try {
-      await generateGroup(state.activeGroupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false, autoReason: 'settings-save' });
-      toast('Timetable settings saved and the current group was regenerated.', 'success');
+      await persistSettings(groupId, settings, true);
+      toast('Timetable settings saved.', 'success');
+      scheduleAutoRegeneration('settings-save');
     } catch (error) {
-      await persistSettings(state.activeGroupId, settings, false);
-      state.dirtySettings.delete(state.activeGroupId);
+      state.dirtySettings.add(groupId);
+      console.warn('Settings save failed', error);
+      toast('Unable to save timetable settings.', 'error');
+    } finally {
+      state.isSavingSettings = false;
       renderAll();
-      console.warn('Settings saved without regeneration', error);
-      toast('Timetable settings saved, but regeneration failed. Use Regenerate Group.', 'warning');
     }
   }
 
@@ -1834,6 +1914,7 @@
     const demand = cloneRequirementMap(settings.periodRequirements || {});
     const fixedIssues = [];
     const classLoadAudit = buildClassLoadAudit(groupId, settings, slots);
+    const fastDraftMode = shouldUseFastDraftMode(settings, classLoadAudit, candidateMap);
 
     group.classes.forEach((className) => {
       classOccupancy[className] = {};
@@ -1908,13 +1989,15 @@
       days,
       nodesVisited: 0,
       limit: Math.max(90000, computeDemandScore(demand) * 2200),
+      startTime: performance.now(),
+      timeLimit: 3000,
       bestGrid: null,
       bestDemandScore: Infinity,
       fixedIssues
     };
 
     seedDistinctDayCoverage(searchState);
-    const solved = searchSchedule(searchState);
+    const solved = fastDraftMode ? fillGreedyDemand(searchState) : searchSchedule(searchState);
     const seededBestGrid = deepClone(solved ? searchState.grid : (searchState.bestGrid || searchState.grid));
     const finalGrid = repairRemainingDemand({
       groupId,
@@ -1923,7 +2006,8 @@
       teachers,
       teacherLegend,
       subjectLegend,
-      initialGrid: seededBestGrid
+      initialGrid: seededBestGrid,
+      fastDraftMode
     });
     const validation = validateTimetable({
       settings,
@@ -2028,6 +2112,8 @@
     }
     if (demandScore === 0) return true;
     if (searchState.nodesVisited > searchState.limit) return false;
+    if (searchState.nodesVisited % 500 === 0 && searchState.startTime !== undefined &&
+        performance.now() - searchState.startTime > (searchState.timeLimit || 3000)) return false;
     searchState.nodesVisited += 1;
 
     const nextChoice = chooseMostConstrainedDemand(searchState);
@@ -2038,6 +2124,20 @@
       undo();
     }
     return false;
+  }
+
+  function fillGreedyDemand(searchState) {
+    let progress = true;
+    let safety = Math.max(1200, computeDemandScore(searchState.demand) * 8);
+    while (progress && safety > 0) {
+      progress = false;
+      safety -= 1;
+      const nextChoice = chooseMostConstrainedDemand(searchState);
+      if (!nextChoice || !nextChoice.placements.length) break;
+      placeLesson(searchState, nextChoice.className, nextChoice.subject, nextChoice.placements[0]);
+      progress = true;
+    }
+    return computeDemandScore(searchState.demand) === 0;
   }
 
   function chooseMostConstrainedDemand(searchState) {
@@ -2207,7 +2307,7 @@
     };
   }
 
-  function repairRemainingDemand({ groupId, settings, slots, teachers, teacherLegend, subjectLegend, initialGrid }) {
+  function repairRemainingDemand({ groupId, settings, slots, teachers, teacherLegend, subjectLegend, initialGrid, fastDraftMode = false }) {
     let repairState = rebuildSchedulingStateFromGrid({
       groupId,
       settings,
@@ -2217,30 +2317,25 @@
       subjectLegend,
       grid: initialGrid
     });
-    repairState.limit = Math.max(25000, computeDemandScore(repairState.demand) * 1400);
-    repairState.bestGrid = deepClone(repairState.grid);
-    repairState.bestDemandScore = computeDemandScore(repairState.demand);
     seedDistinctDayCoverage(repairState);
-    const repaired = searchSchedule(repairState);
-    if (!repaired && repairState.bestGrid) {
-      repairState = rebuildSchedulingStateFromGrid({
-        groupId,
-        settings,
-        slots,
-        teachers,
-        teacherLegend,
-        subjectLegend,
-        grid: deepClone(repairState.bestGrid)
-      });
+    if (!fastDraftMode) {
+      repairState.limit = Math.max(25000, computeDemandScore(repairState.demand) * 1400);
+      repairState.bestGrid = deepClone(repairState.grid);
+      repairState.bestDemandScore = computeDemandScore(repairState.demand);
+      const repaired = searchSchedule(repairState);
+      if (!repaired && repairState.bestGrid) {
+        repairState = rebuildSchedulingStateFromGrid({
+          groupId,
+          settings,
+          slots,
+          teachers,
+          teacherLegend,
+          subjectLegend,
+          grid: deepClone(repairState.bestGrid)
+        });
+      }
     }
-    let progress = true;
-    while (progress) {
-      progress = false;
-      const nextChoice = chooseMostConstrainedDemand(repairState);
-      if (!nextChoice || !nextChoice.placements.length) break;
-      placeLesson(repairState, nextChoice.className, nextChoice.subject, nextChoice.placements[0]);
-      progress = true;
-    }
+    fillGreedyDemand(repairState);
     return repairState.grid;
   }
 
@@ -2538,7 +2633,7 @@
     let timetable = getDisplayTimetable(groupId);
     if (timetable && !isTimetableStale(groupId, timetable)) return timetable;
     if (state.viewer.canManage) {
-      timetable = await generateGroup(groupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false });
+      timetable = await runManagedGeneration(groupId, { saveMode: 'draftIfInvalid', silent: true, openPreview: false, autoReason: 'export-refresh' });
       return timetable;
     }
     if (timetable) return timetable;
@@ -2547,6 +2642,11 @@
   }
 
   async function exportTimetablesToPdf(groupIds, timetables) {
+    const hasPdfLibs = await ensurePdfLibs();
+    if (!hasPdfLibs) {
+      toast('Unable to load PDF tools on this page.', 'error');
+      return;
+    }
     const jsPdfLib = window.jspdf?.jsPDF;
     if (!jsPdfLib) {
       toast('jsPDF is missing on this page.', 'error');
@@ -2610,6 +2710,53 @@
     });
     doc.save(`${slugify(state.school?.name || state.schoolId || 'school')}_general_timetable_${state.year}_${normalizeTermKey(state.activeTerm)}.pdf`);
     noteExportAction('PDF downloaded');
+  }
+
+  async function ensurePdfLibs() {
+    if (window.jspdf?.jsPDF && typeof window.jspdf.jsPDF === 'function') return true;
+    if (!state.pdfLibsPromise) {
+      state.pdfLibsPromise = (async () => {
+        await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+        await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.0/jspdf.plugin.autotable.min.js');
+      })().catch((error) => {
+        state.pdfLibsPromise = null;
+        throw error;
+      });
+    }
+    try {
+      await state.pdfLibsPromise;
+      return Boolean(window.jspdf?.jsPDF);
+    } catch (error) {
+      console.warn('Unable to load PDF libraries', error);
+      return false;
+    }
+  }
+
+  function loadScriptOnce(src) {
+    return new Promise((resolve, reject) => {
+      const existing = Array.from(document.scripts || []).find((script) => script.src === src);
+      if (existing) {
+        if (existing.dataset.loaded === 'true') {
+          resolve();
+          return;
+        }
+        existing.addEventListener('load', () => {
+          existing.dataset.loaded = 'true';
+          resolve();
+        }, { once: true });
+        existing.addEventListener('error', () => reject(new Error(`Failed to load ${src}`)), { once: true });
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = src;
+      script.async = true;
+      script.onload = () => {
+        script.dataset.loaded = 'true';
+        resolve();
+      };
+      script.onerror = () => reject(new Error(`Failed to load ${src}`));
+      document.head.appendChild(script);
+    });
   }
 
   function drawPdfHeader(doc, logoData, groupId, timetable) {
@@ -2779,6 +2926,21 @@
       });
     });
     return map;
+  }
+
+  function shouldUseFastDraftMode(settings, classLoadAudit, candidateMap) {
+    if ((classLoadAudit || []).some((row) => row.isOverloaded)) return true;
+    const totalRequired = sumPeriodRequirements(settings.periodRequirements || {});
+    let missingTeacherRequirements = 0;
+    Object.entries(settings.periodRequirements || {}).forEach(([className, bucket]) => {
+      Object.entries(bucket || {}).forEach(([subject, count]) => {
+        if (Number(count) <= 0) return;
+        if (!(candidateMap?.[className]?.[normalizeSubjectName(subject)] || []).length) {
+          missingTeacherRequirements += 1;
+        }
+      });
+    });
+    return missingTeacherRequirements > 0 || totalRequired >= 180;
   }
 
   function buildStaffingWarnings(groupId, settings) {
