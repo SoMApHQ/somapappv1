@@ -1801,7 +1801,7 @@
 
   async function persistSettings(groupId, settings, forceNormalize) {
     const normalized = forceNormalize ? normalizeSettings(settings, groupId, state.teachers, state.subjectCatalog) : settings;
-    const payload = {
+    const payload = sanitizeForFirebase({
       ...normalized,
       groupId,
       termKey: state.activeTerm,
@@ -1810,7 +1810,7 @@
       fixedBlocks: (normalized.slots || []).filter((slot) => !slot.isTeaching).map((slot) => ({ slotId: slot.id, label: slot.label, start: slot.start, end: slot.end })),
       updatedAt: Date.now(),
       updatedBy: buildActor()
-    };
+    });
     await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/settings/${state.activeTerm}/${groupId}`)).set(payload);
   }
 
@@ -1824,7 +1824,7 @@
   }
 
   async function persistGenerated(groupId, payload) {
-    const { isSaved, ...persistablePayload } = payload || {};
+    const persistablePayload = buildPersistableGeneratedPayload(groupId, payload);
     console.debug('[TT] persistGenerated: writing primary record for', groupId, 'status:', persistablePayload.status || 'n/a');
     // Write to primary generated path
     await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/generated/${state.activeTerm}/${groupId}`)).set(persistablePayload);
@@ -1851,6 +1851,43 @@
     } catch (snapErr) {
       console.warn('Weekly snapshot write failed (non-critical):', snapErr);
     }
+  }
+
+  function buildPersistableGeneratedPayload(groupId, payload) {
+    const source = payload && typeof payload === 'object' ? payload : {};
+    const validationSummary = {
+      ...blankValidationSummary(),
+      ...(source.validationSummary || source.validation?.summary || {})
+    };
+    const validation = {
+      ...buildEmptyValidation(),
+      ...(source.validation || {})
+    };
+    return sanitizeForFirebase({
+      groupId,
+      year: state.year,
+      termKey: normalizeTermKey(source.termKey || state.activeTerm),
+      termLabel: source.termLabel || termLabel(source.termKey || state.activeTerm),
+      schoolId: source.schoolId || state.schoolId,
+      schoolName: source.schoolName || state.school?.name || state.schoolId,
+      groupTitle: source.groupTitle || GROUPS[groupId]?.title || '',
+      generatedAt: Number(source.generatedAt || Date.now()),
+      generatedBy: source.generatedBy || buildActor(),
+      isValid: Boolean(validationSummary.isValid),
+      validationSummary,
+      validation,
+      teacherLegend: Array.isArray(source.teacherLegend) ? source.teacherLegend : [],
+      subjectLegend: Array.isArray(source.subjectLegend) ? source.subjectLegend : [],
+      fridayAfternoon: normalizeFridayAfternoon(source.fridayAfternoon || {}),
+      slots: normalizeSlots(source.slots || getSettingsForGroup(groupId).slots || []),
+      classes: Array.isArray(source.classes) && source.classes.length ? source.classes : [...(GROUPS[groupId]?.classes || [])],
+      days: normalizeActiveDays(source.days || getSettingsForGroup(groupId).activeDays || []),
+      grid: source.grid || {},
+      sourceTeacherCount: Number(source.sourceTeacherCount || getTeachersForGroup(groupId).length || 0),
+      sourceConfigHash: String(source.sourceConfigHash || state.sourceConfigHash || ''),
+      generationConfigHash: String(source.generationConfigHash || buildGenerationConfigHash(groupId, getSettingsForGroup(groupId))),
+      status: source.status || (validationSummary.isValid ? 'valid' : 'draft-invalid')
+    });
   }
 
   // Ensure the current-week snapshot exists for ALL groups in GROUP_ORDER.
@@ -3793,7 +3830,7 @@
       const expanded = [];
       base.forEach((className) => {
         expanded.push(className);  // base class always kept
-        const streams = classStreams[className];
+        const streams = sortStreamEntries(classStreams[className] || []);
         if (streams && streams.length >= 1) {
           // Insert each stream row immediately after its base class
           streams.forEach((s) => expanded.push(s.name));
@@ -3968,7 +4005,7 @@
     return hashString(stableStringify({
       groupId,
       sourceConfigHash: state.sourceConfigHash,
-      classes: [...(GROUPS[groupId]?.classes || [])],
+      classes: getStableGroupClasses(groupId),
       activeDays: normalizeActiveDays(normalizedSettings.activeDays || []),
       fridayAfternoon: normalizeFridayAfternoon(normalizedSettings.fridayAfternoon || {}),
       slots: (normalizedSettings.slots || []).map((slot) => ({
@@ -4029,15 +4066,34 @@
   function canonicalizeClassStreams(classStreams) {
     const result = {};
     Object.keys(classStreams || {}).sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' })).forEach((className) => {
-      result[className] = (classStreams[className] || [])
+      result[className] = sortStreamEntries(classStreams[className] || [])
         .map((stream) => ({
           name: String(stream.name || '').trim(),
           streamKey: String(stream.streamKey || '').trim(),
           subjects: sortStrings((stream.subjects || []).map(normalizeSubjectName).filter(Boolean))
-        }))
-        .sort((left, right) => `${left.name}|${left.streamKey}`.localeCompare(`${right.name}|${right.streamKey}`, 'en', { sensitivity: 'base' }));
+        }));
     });
     return result;
+  }
+
+  function sortStreamEntries(streams) {
+    return (streams || [])
+      .map((stream) => ({
+        ...stream,
+        name: String(stream?.name || '').trim(),
+        streamKey: String(stream?.streamKey || '').trim()
+      }))
+      .filter((stream) => stream.name)
+      .sort((left, right) => `${left.name}|${left.streamKey}`.localeCompare(`${right.name}|${right.streamKey}`, 'en', { sensitivity: 'base' }));
+  }
+
+  function getStableGroupClasses(groupId) {
+    const stable = [];
+    (BASE_GROUP_CLASSES[groupId] || []).forEach((className) => {
+      stable.push(className);
+      sortStreamEntries(state.classStreams?.[className] || []).forEach((stream) => stable.push(stream.name));
+    });
+    return stable;
   }
 
   function canonicalizeSubjectCatalog(catalog) {
@@ -4393,6 +4449,27 @@
 
   function deepClone(value) {
     return JSON.parse(JSON.stringify(value || {}));
+  }
+
+  function sanitizeForFirebase(value) {
+    if (value === null) return null;
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => sanitizeForFirebase(item))
+        .filter((item) => item !== undefined);
+    }
+    if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+    if (typeof value === 'string' || typeof value === 'boolean') return value;
+    if (typeof value === 'undefined' || typeof value === 'function') return undefined;
+    if (value && typeof value === 'object') {
+      const result = {};
+      Object.keys(value).forEach((key) => {
+        const safeValue = sanitizeForFirebase(value[key]);
+        if (safeValue !== undefined) result[key] = safeValue;
+      });
+      return result;
+    }
+    return value;
   }
 
   function indexBy(list, key) {
