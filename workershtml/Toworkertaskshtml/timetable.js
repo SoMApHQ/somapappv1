@@ -2438,7 +2438,62 @@
       }
     }
     fillGreedyDemand(repairState);
+    // Last-resort pass: if morning-priority subjects (e.g. Math, English) still have
+    // unmet demand because every before-lunch slot is occupied or the teacher is busy,
+    // place them in after-lunch slots rather than leaving periods unscheduled.
+    fillLastResortMorningSubjects(repairState);
     return repairState.grid;
+  }
+
+  function fillLastResortMorningSubjects(repairState) {
+    if (computeDemandScore(repairState.demand) === 0) return;
+    let progress = true;
+    let safety = Math.max(200, computeDemandScore(repairState.demand) * 4);
+    while (progress && safety > 0) {
+      progress = false;
+      safety -= 1;
+      for (const [className, bucket] of Object.entries(repairState.demand)) {
+        for (const [subject, remaining] of Object.entries(bucket || {})) {
+          if (remaining <= 0) continue;
+          // Only help subjects that are morning-priority AND have no regular placement available
+          if (!isMorningPrioritySubject(subject, className, repairState.settings)) continue;
+          if (collectPlacements(repairState, className, subject).length > 0) continue;
+          // Gather after-lunch placements (relaxing the morning-priority rule)
+          const relaxed = [];
+          const distribution = getSubjectDistributionConfig(repairState, className, subject);
+          const subjectMeta = repairState.subjectLegend.find((item) => item.subject === subject)
+            || { abbreviation: makeSubjectAbbreviation(subject), color: DEFAULT_SUBJECT_COLORS[subject] || '#dbeafe' };
+          (repairState.candidateMap[className]?.[subject] || []).forEach((teacher) => {
+            (repairState.days || DAYS).forEach((day) => {
+              repairState.slots.forEach((slot) => {
+                if (!slot.isTeaching) return;
+                if (slotEndsBeforeLunch(slot, repairState.settings, repairState.slots)) return;
+                if (repairState.grid[className][day][slot.id]?.type) return;
+                if (repairState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id]) return;
+                if (wouldCreateConsecutiveSubjectPlacement(repairState, className, subject, day, slot.id)) return;
+                const sameDayCount = repairState.classSubjectDayCount[className][day][subject] || 0;
+                if (sameDayCount >= distribution.dailyMax) return;
+                const teacherLoad = repairState.teacherDayLoad[teacher.workerId]?.[day] || 0;
+                relaxed.push({
+                  className, subject, day, slotId: slot.id,
+                  teacherId: teacher.workerId,
+                  teacherNumber: repairState.teacherNumberMap[teacher.workerId] || '?',
+                  abbreviation: subjectMeta.abbreviation,
+                  color: subjectMeta.color,
+                  score: sameDayCount * 20 + teacherLoad * 4
+                });
+              });
+            });
+          });
+          if (!relaxed.length) continue;
+          relaxed.sort((a, b) => a.score - b.score || `${a.day}:${a.slotId}`.localeCompare(`${b.day}:${b.slotId}`));
+          placeLesson(repairState, className, subject, relaxed[0]);
+          progress = true;
+          break;
+        }
+        if (progress) break;
+      }
+    }
   }
 
   function rebuildSchedulingStateFromGrid({ groupId, settings, slots, teachers, teacherLegend, subjectLegend, grid }) {

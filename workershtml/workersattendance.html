@@ -1650,22 +1650,22 @@
           }
         } catch (_) { /* fall through */ }
 
-        // A2. Fallback: generated/{termKey} — only use if generated THIS week (not stale)
-        if (!ttGroupsData) {
-          try {
-            const genSnap = await schoolRef(`years/${year}/timetable/generated/${termKey}`).once('value');
-            const genData = genSnap.val();
-            if (genData && typeof genData === 'object') {
-              const fresh = Object.fromEntries(
-                Object.entries(genData).filter(([, gd]) => Number(gd?.generatedAt || 0) >= weekMondayTs)
-              );
-              if (Object.keys(fresh).length > 0) {
-                ttGroupsData = fresh;
-                result.timetableSource = 'generated';
-              }
-            }
-          } catch (_) { /* fall through */ }
-        }
+        // A2. Supplement: load generated/{termKey} and fill in any group missing from the snapshot.
+        // Runs even when A1 found some data — ensures a partial snapshot never silently drops a group.
+        try {
+          const genSnap = await schoolRef(`years/${year}/timetable/generated/${termKey}`).once('value');
+          const genData = genSnap.val();
+          if (genData && typeof genData === 'object') {
+            Object.entries(genData).forEach(([gid, gd]) => {
+              if (!gd || typeof gd !== 'object') return;
+              if (Number(gd.generatedAt || 0) < weekMondayTs) return; // stale — skip
+              if (ttGroupsData && ttGroupsData[gid]) return; // already present in snapshot
+              ttGroupsData = ttGroupsData || {};
+              ttGroupsData[gid] = gd;
+              if (result.timetableSource !== 'weeklySnapshot') result.timetableSource = 'generated';
+            });
+          }
+        } catch (_) { /* fall through */ }
 
         // A3. No valid timetable source for this week — BLOCK check-in
         if (!ttGroupsData) {
