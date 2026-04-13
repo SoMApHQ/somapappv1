@@ -1195,11 +1195,11 @@
     const groupMorningSubjects = settings.morningPrioritySubjects || [];
     els.subjectOptionsEditor.innerHTML = `
       <div class="tt-report-item" style="margin-bottom:16px;">
-        <strong>Morning Lesson Priorities</strong>
-        <div style="margin-top:6px;">Morning means any teaching slot that ends before lunch. The first teaching lesson of the day strongly prefers these subjects, and the scheduler keeps them before lunch whenever possible.</div>
+        <strong>Before Lunch Only Subjects</strong>
+        <div style="margin-top:6px;">Morning means any teaching slot that ends before lunch. Checked subjects can be scheduled only before lunch and will never be placed after lunch. Other subjects are still allowed in both morning and afternoon. The first teaching lesson of the day also prefers these checked subjects.</div>
       </div>
       <div class="tt-report-item" style="margin-bottom:16px;">
-        <strong>Group Default Morning Subjects</strong>
+        <strong>Group Default Before-Lunch Subjects</strong>
         <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;">
           ${subjects.map((subject) => `
             <label class="tt-checkbox-row" style="gap:8px;">
@@ -1210,7 +1210,7 @@
         </div>
       </div>
       <table class="tt-subject-options-table" style="margin-bottom:16px;">
-        <thead><tr><th>Class</th><th>Use Group Default</th><th>Class Morning Subjects</th></tr></thead>
+        <thead><tr><th>Class</th><th>Use Group Default</th><th>Class Before-Lunch Subjects</th></tr></thead>
         <tbody>
           ${GROUPS[state.activeGroupId].classes.map((className) => {
             const hasOverride = hasMorningPriorityOverride(settings, className);
