@@ -92,8 +92,11 @@
     'Developing Sports & Arts': '#ffedd5'
   };
   const CORE_SUBJECTS = new Set(['Math', 'English', 'Kiswahili', 'Science', 'Arithmetic', 'Writing Skills', 'Reading Skills', 'Communication', 'Kusoma']);
-  const MORNING_PRIORITY_SUBJECTS = new Set(['Math', 'English', 'Science']);
-  const UPPER_PRIMARY_MORNING_SUBJECTS = new Set(['Math', 'English', 'Science', 'Kiswahili']);
+  const DEFAULT_GROUP_MORNING_PRIORITY_SUBJECTS = {
+    nursery_group: ['Arithmetic', 'Communication'],
+    lower_primary_group: ['Arithmetic', 'Writing Skills', 'Reading Skills', 'Kusoma'],
+    upper_primary_group: ['Math', 'English']
+  };
   const DEFAULT_SLOT_PRESETS = {
     nursery_group: [
       { id: 'nursery_1', start: '08:00', end: '08:40', label: 'Teaching 1', isTeaching: true },
@@ -1189,7 +1192,53 @@
     const settings = getActiveSettings();
     if (!els.subjectOptionsEditor) return;
     const subjects = getSubjectsForGroup(state.activeGroupId, settings);
+    const groupMorningSubjects = settings.morningPrioritySubjects || [];
     els.subjectOptionsEditor.innerHTML = `
+      <div class="tt-report-item" style="margin-bottom:16px;">
+        <strong>Morning Lesson Priorities</strong>
+        <div style="margin-top:6px;">Morning means any teaching slot that ends before lunch. The first teaching lesson of the day strongly prefers these subjects, and the scheduler keeps them before lunch whenever possible.</div>
+      </div>
+      <div class="tt-report-item" style="margin-bottom:16px;">
+        <strong>Group Default Morning Subjects</strong>
+        <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;">
+          ${subjects.map((subject) => `
+            <label class="tt-checkbox-row" style="gap:8px;">
+              <input type="checkbox" data-morning-group-subject="${escapeAttr(subject)}" ${groupMorningSubjects.includes(subject) ? 'checked' : ''} ${inputDisabled()}>
+              <span>${escapeHtml(subject)}</span>
+            </label>
+          `).join('')}
+        </div>
+      </div>
+      <table class="tt-subject-options-table" style="margin-bottom:16px;">
+        <thead><tr><th>Class</th><th>Use Group Default</th><th>Class Morning Subjects</th></tr></thead>
+        <tbody>
+          ${GROUPS[state.activeGroupId].classes.map((className) => {
+            const hasOverride = hasMorningPriorityOverride(settings, className);
+            const classMorningSubjects = getMorningPrioritySubjectsForClass(settings, className);
+            return `
+              <tr>
+                <td>${escapeHtml(className)}</td>
+                <td>
+                  <label class="tt-checkbox-row" style="gap:8px;">
+                    <input type="checkbox" data-morning-class-inherit="${escapeAttr(className)}" ${hasOverride ? '' : 'checked'} ${inputDisabled()}>
+                    <span>Use group default</span>
+                  </label>
+                </td>
+                <td>
+                  <div style="display:flex;flex-wrap:wrap;gap:12px;">
+                    ${subjects.map((subject) => `
+                      <label class="tt-checkbox-row" style="gap:8px;opacity:${hasOverride ? '1' : '0.65'};">
+                        <input type="checkbox" data-morning-class="${escapeAttr(className)}" data-morning-subject="${escapeAttr(subject)}" ${classMorningSubjects.includes(subject) ? 'checked' : ''} ${hasOverride ? '' : 'disabled'} ${inputDisabled()}>
+                        <span>${escapeHtml(subject)}</span>
+                      </label>
+                    `).join('')}
+                  </div>
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
       <table class="tt-subject-options-table">
         <thead><tr><th>Subject</th><th>Abbreviation</th><th>Color</th></tr></thead>
         <tbody>
@@ -1210,6 +1259,15 @@
     els.subjectOptionsEditor.querySelectorAll('[data-subject-color]').forEach((input) => {
       input.addEventListener('input', handleSubjectMetaInput);
       input.addEventListener('change', handleSubjectMetaInput);
+    });
+    els.subjectOptionsEditor.querySelectorAll('[data-morning-group-subject]').forEach((input) => {
+      input.addEventListener('change', handleMorningPriorityInput);
+    });
+    els.subjectOptionsEditor.querySelectorAll('[data-morning-class-inherit]').forEach((input) => {
+      input.addEventListener('change', handleMorningPriorityInput);
+    });
+    els.subjectOptionsEditor.querySelectorAll('[data-morning-class]').forEach((input) => {
+      input.addEventListener('change', handleMorningPriorityInput);
     });
   }
 
@@ -1877,6 +1935,43 @@
     }
   }
 
+  function handleMorningPriorityInput(event) {
+    if (!state.viewer.canManage) return;
+    const subject = normalizeSubjectName(event.target.dataset.morningSubject || event.target.dataset.morningGroupSubject || '');
+    const className = normalizeClassName(event.target.dataset.morningClass || event.target.dataset.morningClassInherit || '');
+    mutateSettings((settings) => {
+      settings.morningPrioritySubjects = normalizeSubjectSelectionList(
+        Array.from(document.querySelectorAll('[data-morning-group-subject]:checked')).map((input) => input.dataset.morningGroupSubject || ''),
+        getSubjectsForGroup(state.activeGroupId, settings)
+      );
+      settings.morningPriorityByClass = settings.morningPriorityByClass || {};
+      if (event.target.dataset.morningClassInherit) {
+        if (event.target.checked) {
+          delete settings.morningPriorityByClass[className];
+        } else {
+          settings.morningPriorityByClass[className] = normalizeSubjectSelectionList(
+            settings.morningPrioritySubjects,
+            getSubjectsForClass(state.activeGroupId, className, settings)
+          );
+        }
+      } else if (event.target.dataset.morningClass) {
+        const selected = Array.from(document.querySelectorAll(`[data-morning-class="${cssEscape(className)}"]:checked`))
+          .map((input) => input.dataset.morningSubject || '');
+        settings.morningPriorityByClass[className] = normalizeSubjectSelectionList(
+          selected,
+          getSubjectsForClass(state.activeGroupId, className, settings)
+        );
+      } else if (subject) {
+        Object.keys(settings.morningPriorityByClass || {}).forEach((entryClass) => {
+          settings.morningPriorityByClass[entryClass] = normalizeSubjectSelectionList(
+            settings.morningPriorityByClass[entryClass],
+            getSubjectsForClass(state.activeGroupId, entryClass, settings)
+          );
+        });
+      }
+    }, { rerender: 'settings' });
+  }
+
   function mutateSettings(mutator, { rerender = 'all', normalize = true } = {}) {
     const groupId = state.activeGroupId;
     const baseSettings = getSettingsForGroup(groupId);
@@ -2236,11 +2331,11 @@
 
   function collectPlacements(searchState, className, subject) {
     const placements = [];
-    const slotIndexMap = Object.fromEntries(searchState.slots.map((slot, index) => [slot.id, index]));
     const remainingForSubject = Number(searchState.demand?.[className]?.[subject] || 0);
     const unusedSchedulableDays = countUnusedSchedulableDays(searchState, className, subject);
     const distribution = getSubjectDistributionConfig(searchState, className, subject);
     const needsAdditionalCoverage = distribution.coveredDaySet.size < distribution.targetDistinctDays;
+    const remainingMorningPriorityDemand = getRemainingMorningPriorityDemand(searchState, className);
     (searchState.candidateMap[className]?.[subject] || []).forEach((teacher) => {
       (searchState.days || DAYS).forEach((day) => {
         searchState.slots.forEach((slot) => {
@@ -2249,17 +2344,23 @@
           if (searchState.grid[className][day][slot.id]?.type) return;
           if (searchState.teacherOccupancy[teacher.workerId]?.[day]?.[slot.id]) return;
           if (wouldCreateConsecutiveSubjectPlacement(searchState, className, subject, day, slot.id)) return;
-          const slotIndex = slotIndexMap[slot.id];
+          const slotIndex = getOrderedTeachingSlotIndex(slot.id, searchState.slots);
           const sameDayCount = searchState.classSubjectDayCount[className][day][subject] || 0;
           if (sameDayCount >= distribution.dailyMax) return;
           if (sameDayCount > 0 && remainingForSubject <= unusedSchedulableDays) return;
           const teacherLoad = searchState.teacherDayLoad[teacher.workerId]?.[day] || 0;
           const edgePenalty = slotIndex === 0
             ? (searchState.teacherEdgeLoad[teacher.workerId]?.first || 0)
-            : (slotIndex === searchState.slots.length - 1 ? (searchState.teacherEdgeLoad[teacher.workerId]?.last || 0) : 0);
+            : (slotIndex === getOrderedTeachingSlots(searchState.slots).length - 1 ? (searchState.teacherEdgeLoad[teacher.workerId]?.last || 0) : 0);
           const earlyBias = CORE_SUBJECTS.has(subject) ? slotIndex * 2 : slotIndex;
           const uncoveredDayBonus = needsAdditionalCoverage && sameDayCount === 0 ? -30 : (sameDayCount > 0 ? 28 : -6);
           const dayCoveragePressure = needsAdditionalCoverage && sameDayCount > 0 ? 26 : 0;
+          const isMorningSlot = slotEndsBeforeLunch(slot, searchState.settings, searchState.slots);
+          const isPriorityMorningSubject = isMorningPrioritySubject(subject, className, searchState.settings);
+          const firstLessonPenalty = slotIndex === 0 && !isPriorityMorningSubject && remainingMorningPriorityDemand > 0 ? 95 : 0;
+          const firstLessonBonus = slotIndex === 0 && isPriorityMorningSubject ? -70 : 0;
+          const morningSlotBonus = isMorningSlot ? -18 : 0;
+          const afternoonGapPenalty = isMorningSlot ? 0 : countEarlierOpenMorningSlots(searchState, className, day, slot.id) * 24;
           const subjectMeta = searchState.subjectLegend.find((item) => item.subject === subject) || { abbreviation: makeSubjectAbbreviation(subject), color: '#dbeafe' };
           placements.push({
             className,
@@ -2270,7 +2371,7 @@
             slotId: slot.id,
             abbreviation: subjectMeta.abbreviation,
             color: subjectMeta.color,
-            score: sameDayCount * 20 + teacherLoad * 4 + edgePenalty * 3 + earlyBias + uncoveredDayBonus + dayCoveragePressure
+            score: sameDayCount * 20 + teacherLoad * 4 + edgePenalty * 3 + earlyBias + uncoveredDayBonus + dayCoveragePressure + firstLessonPenalty + afternoonGapPenalty + morningSlotBonus + firstLessonBonus
           });
         });
       });
@@ -3270,6 +3371,22 @@
     return Array.from(subjects).filter(Boolean).sort((left, right) => left.localeCompare(right));
   }
 
+  function getDefaultMorningPrioritySubjects(groupId, subjects) {
+    return normalizeSubjectSelectionList(DEFAULT_GROUP_MORNING_PRIORITY_SUBJECTS[groupId] || [], subjects);
+  }
+
+  function hasMorningPriorityOverride(settings, className) {
+    return Array.isArray(settings?.morningPriorityByClass?.[className]) && settings.morningPriorityByClass[className].length > 0;
+  }
+
+  function getMorningPrioritySubjectsForClass(settings, className, groupId = settings?.groupId || state.activeGroupId) {
+    const classSubjects = getSubjectsForClass(groupId, className, settings);
+    if (hasMorningPriorityOverride(settings, className)) {
+      return normalizeSubjectSelectionList(settings.morningPriorityByClass[className], classSubjects);
+    }
+    return normalizeSubjectSelectionList(settings?.morningPrioritySubjects || [], classSubjects);
+  }
+
   function mergeSchemeHours(map, record, sourceType) {
     const className = normalizeClassName(record?.className || record?.baseClassName || record?.classKey || record?.baseClassKey || '');
     const subjectName = normalizeSubjectName(record?.subjectName || record?.subjectKey || '');
@@ -3354,9 +3471,25 @@
     });
     const subjectAbbreviations = {};
     const subjectColors = {};
+    const subjectsInGroup = getSubjectsForGroup(groupId, { periodRequirements });
     getSubjectsForGroup(groupId, { periodRequirements }).forEach((subject) => {
       subjectAbbreviations[subject] = sanitizeAbbreviation(input.subjectAbbreviations?.[subject] || defaults.subjectAbbreviations?.[subject] || makeSubjectAbbreviation(subject));
       subjectColors[subject] = toColorHex(input.subjectColors?.[subject] || defaults.subjectColors?.[subject] || DEFAULT_SUBJECT_COLORS[subject] || '#dbeafe');
+    });
+    const morningPrioritySubjects = normalizeSubjectSelectionList(
+      input.morningPrioritySubjects ?? defaults.morningPrioritySubjects ?? [],
+      subjectsInGroup
+    );
+    const morningPriorityByClass = {};
+    GROUPS[groupId].classes.forEach((className) => {
+      const classSubjects = getSubjectsForClass(groupId, className, { periodRequirements });
+      const normalized = normalizeSubjectSelectionList(
+        input.morningPriorityByClass?.[className] ?? defaults.morningPriorityByClass?.[className] ?? [],
+        classSubjects
+      );
+      if (normalized.length) {
+        morningPriorityByClass[className] = normalized;
+      }
     });
     return {
       groupId,
@@ -3369,6 +3502,8 @@
       requirementSources,
       subjectAbbreviations,
       subjectColors,
+      morningPrioritySubjects,
+      morningPriorityByClass,
       lockedCells: normalizeLockedCells(input.lockedCells || []),
       seededDefaults: input.seededDefaults !== undefined ? Boolean(input.seededDefaults) : !raw,
       updatedAt: input.updatedAt || null,
@@ -3390,6 +3525,7 @@
     const requirementSources = {};
     const subjectAbbreviations = {};
     const subjectColors = {};
+    const morningPriorityByClass = {};
     GROUPS[groupId].classes.forEach((className) => {
       const baseClass = resolveBaseClass(className);
       const subjects = new Set(SUBJECT_DEFAULTS[baseClass] || SUBJECT_DEFAULTS[className] || []);
@@ -3429,6 +3565,8 @@
       requirementSources,
       subjectAbbreviations,
       subjectColors,
+      morningPrioritySubjects: getDefaultMorningPrioritySubjects(groupId, getSubjectsForGroup(groupId, { periodRequirements })),
+      morningPriorityByClass,
       lockedCells: [],
       seededDefaults: true
     };
@@ -3571,6 +3709,12 @@
       .filter((cell) => cell.className && cell.day && cell.slotId);
   }
 
+  function normalizeSubjectSelectionList(list, allowedSubjects) {
+    const allowed = new Set((allowedSubjects || []).map(normalizeSubjectName).filter(Boolean));
+    return Array.from(new Set((list || []).map(normalizeSubjectName).filter((subject) => subject && (!allowed.size || allowed.has(subject)))))
+      .sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' }));
+  }
+
   function normalizeSlots(slots) {
     return (slots || []).map((slot, index) => ({
       id: String(slot.id || `${slugify(slot.label || `slot_${index + 1}`)}_${index + 1}`),
@@ -3711,7 +3855,9 @@
       periodRequirements: canonicalizePeriodRequirements(normalizedSettings.periodRequirements || {}),
       lockedCells: canonicalizeLockedCells(normalizedSettings.lockedCells || []),
       subjectAbbreviations: canonicalizeSimpleMap(normalizedSettings.subjectAbbreviations || {}),
-      subjectColors: canonicalizeSimpleMap(normalizedSettings.subjectColors || {})
+      subjectColors: canonicalizeSimpleMap(normalizedSettings.subjectColors || {}),
+      morningPrioritySubjects: sortStrings(normalizedSettings.morningPrioritySubjects || []),
+      morningPriorityByClass: canonicalizeListMap(normalizedSettings.morningPriorityByClass || {})
     }));
   }
 
@@ -3800,6 +3946,14 @@
     const result = {};
     Object.keys(map || {}).sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' })).forEach((key) => {
       result[key] = String(map[key] || '');
+    });
+    return result;
+  }
+
+  function canonicalizeListMap(map) {
+    const result = {};
+    Object.keys(map || {}).sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' })).forEach((key) => {
+      result[key] = sortStrings(map[key] || []);
     });
     return result;
   }
@@ -3980,25 +4134,41 @@
     );
   }
 
-  function isMorningPrioritySubject(subject) {
-    return MORNING_PRIORITY_SUBJECTS.has(normalizeSubjectName(subject));
+  function isMorningPrioritySubject(subject, className, settings) {
+    return getMorningPrioritySubjectsForClass(settings, className, settings?.groupId || state.activeGroupId)
+      .includes(normalizeSubjectName(subject));
   }
 
-  function isUpperPrimaryClass(className) {
-    return /^Class\s*[3-7]\b/i.test(resolveBaseClass(normalizeClassName(className)));
+  function getOrderedTeachingSlots(slots) {
+    return (slots || []).filter((slot) => slot.isTeaching);
   }
 
-  function isRestrictedUpperPrimaryMorningSlot(slot) {
-    return parseTimeToMinutes(slot?.start) < 12 * 60;
+  function getOrderedTeachingSlotIndex(slotId, slots) {
+    return getOrderedTeachingSlots(slots).findIndex((slot) => slot.id === slotId);
+  }
+
+  function getRemainingMorningPriorityDemand(searchState, className) {
+    return getMorningPrioritySubjectsForClass(searchState.settings, className, searchState.groupId)
+      .reduce((sum, subject) => sum + Math.max(0, Number(searchState.demand?.[className]?.[subject] || 0)), 0);
+  }
+
+  function countEarlierOpenMorningSlots(searchState, className, day, slotId) {
+    const targetIndex = getOrderedTeachingSlotIndex(slotId, searchState.slots);
+    if (targetIndex <= 0) return 0;
+    let count = 0;
+    getOrderedTeachingSlots(searchState.slots).forEach((slot, index) => {
+      if (index >= targetIndex) return;
+      if (!slotEndsBeforeLunch(slot, searchState.settings, searchState.slots)) return;
+      if (searchState.grid?.[className]?.[day]?.[slot.id]?.type) return;
+      count += 1;
+    });
+    return count;
   }
 
   function getSlotRuleViolation(className, subject, slot, settings, slots) {
     const normalizedSubject = normalizeSubjectName(subject);
-    if (isMorningPrioritySubject(normalizedSubject) && !slotEndsBeforeLunch(slot, settings, slots)) {
-      return { code: 'core_after_lunch', title: 'Morning-core subject placed after lunch' };
-    }
-    if (isUpperPrimaryClass(className) && isRestrictedUpperPrimaryMorningSlot(slot) && !UPPER_PRIMARY_MORNING_SUBJECTS.has(normalizedSubject)) {
-      return { code: 'upper_humanity_in_morning', title: 'Upper-primary afternoon subject placed in the morning' };
+    if (isMorningPrioritySubject(normalizedSubject, className, settings) && !slotEndsBeforeLunch(slot, settings, slots)) {
+      return { code: 'morning_priority_after_lunch', title: 'Morning-priority subject placed after lunch' };
     }
     return null;
   }
@@ -4110,6 +4280,10 @@
 
   function escapeAttr(value) {
     return escapeHtml(value);
+  }
+
+  function cssEscape(value) {
+    return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
 
   function setText(element, value) {
