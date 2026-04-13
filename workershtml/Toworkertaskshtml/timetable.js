@@ -644,6 +644,21 @@
     try {
       const snapSnap = await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/weeklySnapshots/${termKey}/${weekKey}/generated`)).once('value');
       const snapData = snapSnap.val() || {};
+
+      // Supplement with any group missing from the snapshot by reading the primary generated path.
+      // This ensures all groups appear even when the snapshot write silently failed.
+      try {
+        const weekMondayTs = new Date(weekKey + 'T00:00:00').getTime();
+        const genSnap = await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/generated/${termKey}`)).once('value');
+        const genData = genSnap.val() || {};
+        Object.entries(genData).forEach(([gid, gd]) => {
+          if (!gd || typeof gd !== 'object') return;
+          if (Number(gd.generatedAt || 0) < weekMondayTs) return; // stale
+          if (snapData[gid]) return; // already in snapshot
+          snapData[gid] = gd;
+        });
+      } catch (_) { /* fall through — snapshot display degrades gracefully */ }
+
       const groupIds = Object.keys(snapData);
 
       if (!groupIds.length) {
@@ -2257,6 +2272,11 @@
     const schedulable = entries.filter((entry) => entry.placements.length > 0);
     if (!schedulable.length) return null;
     schedulable.sort((left, right) => {
+      // Morning-priority subjects (Math, English) get absolute first priority so they
+      // claim before-lunch slots before non-morning subjects crowd them out.
+      const leftMorning = isMorningPrioritySubject(left.subject, left.className, searchState.settings) ? 0 : 1;
+      const rightMorning = isMorningPrioritySubject(right.subject, right.className, searchState.settings) ? 0 : 1;
+      if (leftMorning !== rightMorning) return leftMorning - rightMorning;
       const dayCount = searchState.days?.length || DAYS.length;
       const leftTargetDistinctDays = Math.min(left.remaining, dayCount);
       const rightTargetDistinctDays = Math.min(right.remaining, dayCount);
@@ -2319,6 +2339,11 @@
       });
     });
     targets.sort((left, right) => {
+      // Morning-priority subjects (Math, English) must claim morning slots before
+      // non-morning subjects crowd them out. Process morning-priority first.
+      const leftMorning = isMorningPrioritySubject(left.subject, left.className, searchState.settings) ? 0 : 1;
+      const rightMorning = isMorningPrioritySubject(right.subject, right.className, searchState.settings) ? 0 : 1;
+      if (leftMorning !== rightMorning) return leftMorning - rightMorning;
       const leftSlack = left.schedulableDays - left.targetDays;
       const rightSlack = right.schedulableDays - right.targetDays;
       if (leftSlack !== rightSlack) return leftSlack - rightSlack;
