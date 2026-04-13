@@ -387,7 +387,22 @@
       populateGroupSelector();
       subscribeToSourceChanges();
       renderAll();
-      scheduleAutoRegeneration(withAutoGenerate ? 'source-refresh' : 'render-only');
+      if (withAutoGenerate) {
+        // For managers: regenerate ALL stale groups (each saved with draftIfInvalid so they persist as Saved).
+        // For non-managers: maybeAutoRegenerateAll falls through to maybeAutoRegenerateCurrent (display only).
+        console.debug('[TT] reloadAll: scheduling full auto-regeneration, canManage:', state.viewer.canManage, 'reason:', reason);
+        setTimeout(() => {
+          maybeAutoRegenerateAll(reason).catch((e) => console.warn('[TT] Auto-regeneration failed:', e));
+        }, 60);
+        // Ensure the weekly snapshot has all groups (lightweight gap-fill — does not regenerate non-stale saves).
+        if (state.viewer.canManage) {
+          setTimeout(() => {
+            maybeEnsureWeekSnapshot().catch((e) => console.warn('[TT] Week snapshot ensure on load failed:', e));
+          }, 250);
+        }
+      } else {
+        scheduleAutoRegeneration('render-only');
+      }
     } finally {
       setBusyStatus('');
     }
@@ -545,7 +560,9 @@
         const legacySettingsSnap = await state.db.ref(window.SOMAP.P(`years/${year}/timetable/settings/${groupId}`)).once('value').catch(() => null);
         settingsEntries[groupId] = legacySettingsSnap?.exists?.() ? legacySettingsSnap.val() : null;
       }
-      generatedEntries[groupId] = generatedSnap.exists() ? generatedSnap.val() : null;
+      const genRecord = generatedSnap.exists() ? generatedSnap.val() : null;
+      generatedEntries[groupId] = genRecord;
+      console.debug('[TT] loadTimetableRecords:', groupId, genRecord ? `loaded (status: ${genRecord.status || 'n/a'}, generatedAt: ${genRecord.generatedAt || 'n/a'})` : 'no saved record');
     }));
     state.settingsByGroup = settingsEntries;
     state.generatedByGroup = generatedEntries;
@@ -1649,11 +1666,15 @@
   async function maybeAutoRegenerateCurrent(reason) {
     const generated = state.generatedByGroup[state.activeGroupId];
     if (isTimetableStale(state.activeGroupId, generated)) {
-      await runManagedGeneration(state.activeGroupId, { saveMode: 'none', silent: true, openPreview: false, autoReason: reason });
+      // Managers save immediately with draftIfInvalid so warning-only groups persist as Saved.
+      // Non-managers generate for display only (saveMode: 'none').
+      const saveMode = state.viewer.canManage ? 'draftIfInvalid' : 'none';
+      console.debug('[TT] maybeAutoRegenerateCurrent:', state.activeGroupId, 'saveMode:', saveMode, 'reason:', reason);
+      await runManagedGeneration(state.activeGroupId, { saveMode, silent: true, openPreview: false, autoReason: reason });
     }
   }
 
-  async function generateAllGroups({ saveMode = 'validOnly', silent = false } = {}) {
+  async function generateAllGroups({ saveMode = 'draftIfInvalid', silent = false } = {}) {
     if (!state.viewer.canManage) {
       toast('Generation is limited to management roles.', 'warning');
       return;
@@ -1688,18 +1709,31 @@
     const engineResult = buildTimetable(groupId, settings, teachers);
     const payload = buildGeneratedPayload(groupId, settings, teachers, engineResult, false);
     state.previewByGroup[groupId] = payload;
-    if (saveMode === 'validOnly' && payload.validationSummary.isValid) {
+    // Fatal save block: no grid produced or group has no classes — cannot persist a usable timetable.
+    const hasGrid = payload.grid && Object.keys(payload.grid).length > 0;
+    const fatalBlock = !hasGrid || !GROUPS[groupId]?.classes?.length;
+    if (fatalBlock && saveMode !== 'none') {
+      console.warn('[TT] generateGroup: fatal block — no usable grid for', groupId, '— skipping save');
+    } else if (saveMode === 'validOnly' && payload.validationSummary.isValid) {
+      console.debug('[TT] generateGroup: persisting valid timetable for', groupId);
       await persistSettings(groupId, settings, true);
       await persistGenerated(groupId, payload);
       state.generatedByGroup[groupId] = { ...payload, isSaved: true };
       state.previewByGroup[groupId] = { ...payload, isSaved: true };
       state.dirtySettings.delete(groupId);
-    } else if (saveMode === 'draftIfInvalid') {
+      console.debug('[TT] generateGroup: Status=Saved for', groupId);
+    } else if (saveMode === 'draftIfInvalid' && !fatalBlock) {
+      // Save even when isValid is false — warnings and mismatches are not fatal.
+      const saveStatus = payload.validationSummary.isValid ? 'valid' : 'draft-invalid';
+      console.debug('[TT] generateGroup: persisting (draftIfInvalid) for', groupId, 'status:', saveStatus, 'isValid:', payload.validationSummary.isValid);
       await persistSettings(groupId, settings, true);
-      await persistGenerated(groupId, { ...payload, status: payload.validationSummary.isValid ? 'valid' : 'draft-invalid' });
+      await persistGenerated(groupId, { ...payload, status: saveStatus });
       state.generatedByGroup[groupId] = { ...payload, isSaved: true };
       state.previewByGroup[groupId] = { ...payload, isSaved: true };
       state.dirtySettings.delete(groupId);
+      console.debug('[TT] generateGroup: Status=Saved for', groupId, '(with issues:', !payload.validationSummary.isValid, ')');
+    } else if (saveMode !== 'none') {
+      console.debug('[TT] generateGroup: skip save for', groupId, 'saveMode:', saveMode, 'isValid:', payload.validationSummary.isValid, 'fatalBlock:', fatalBlock);
     }
     if (openPreview) {
       state.activeGroupId = groupId;
@@ -1791,6 +1825,7 @@
 
   async function persistGenerated(groupId, payload) {
     const { isSaved, ...persistablePayload } = payload || {};
+    console.debug('[TT] persistGenerated: writing primary record for', groupId, 'status:', persistablePayload.status || 'n/a');
     // Write to primary generated path
     await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/generated/${state.activeTerm}/${groupId}`)).set(persistablePayload);
     // Also write current-week snapshot so attendance can read it without staleness concerns
@@ -1811,6 +1846,7 @@
         classes: persistablePayload.classes || [],
         days: persistablePayload.days || []
       };
+      console.debug('[TT] persistGenerated: writing weekly snapshot for', groupId, 'weekKey:', weekKey);
       await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/weeklySnapshots/${state.activeTerm}/${weekKey}/generated/${groupId}`)).set(snapshotPayload);
     } catch (snapErr) {
       console.warn('Weekly snapshot write failed (non-critical):', snapErr);
@@ -3046,9 +3082,18 @@
 
   function getDisplayTimetable(groupId) {
     const preview = state.previewByGroup[groupId];
-    if (preview) return preview;
     const generated = state.generatedByGroup[groupId];
-    return generated ? { ...generated, isSaved: true } : null;
+    // A committed preview (isSaved: true) is the authoritative live record — prefer it.
+    if (preview?.isSaved) return preview;
+    // A saved Firebase record beats an uncommitted preview (saveMode:'none' generation).
+    // This prevents auto-preview-only regeneration from downgrading a Saved timetable to Draft.
+    if (generated) {
+      console.debug('[TT] getDisplayTimetable:', groupId, '→ loaded saved record (isSaved: true)');
+      return { ...generated, isSaved: true };
+    }
+    // No saved record: fall back to unsaved preview (shows as Draft, encourages user to save).
+    if (preview) console.debug('[TT] getDisplayTimetable:', groupId, '→ unsaved preview (Draft)');
+    return preview || null;
   }
 
   function getSettingsForGroup(groupId) {
@@ -3943,13 +3988,24 @@
   }
 
   function isTimetableStale(groupId, timetable, settings = getSettingsForGroup(groupId)) {
-    if (!timetable) return true;
-    if (normalizeTermKey(timetable.termKey || state.activeTerm) !== state.activeTerm) return true;
+    if (!timetable) {
+      console.debug('[TT] isTimetableStale:', groupId, '→ stale (no saved record)');
+      return true;
+    }
+    if (normalizeTermKey(timetable.termKey || state.activeTerm) !== state.activeTerm) {
+      console.debug('[TT] isTimetableStale:', groupId, '→ stale (term mismatch)');
+      return true;
+    }
     const expectedGenerationHash = buildGenerationConfigHash(groupId, settings);
     if (timetable.generationConfigHash) {
-      return String(timetable.generationConfigHash) !== String(expectedGenerationHash);
+      const stale = String(timetable.generationConfigHash) !== String(expectedGenerationHash);
+      if (stale) console.debug('[TT] isTimetableStale:', groupId, '→ stale (generationConfigHash mismatch)');
+      return stale;
     }
-    return String(timetable.sourceConfigHash || '') !== String(state.sourceConfigHash || '');
+    // Legacy record without generationConfigHash — fall back to sourceConfigHash comparison.
+    const stale = String(timetable.sourceConfigHash || '') !== String(state.sourceConfigHash || '');
+    if (stale) console.debug('[TT] isTimetableStale:', groupId, '→ stale (sourceConfigHash mismatch, legacy record)');
+    return stale;
   }
 
   function canonicalizeTeacherMappings(mappings) {
