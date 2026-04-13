@@ -1801,8 +1801,9 @@
 
   async function persistSettings(groupId, settings, forceNormalize) {
     const normalized = forceNormalize ? normalizeSettings(settings, groupId, state.teachers, state.subjectCatalog) : settings;
+    const settingsPath = window.SOMAP.P(`years/${state.year}/timetable/settings/${state.activeTerm}/${groupId}`);
     const payload = sanitizeForFirebase({
-      ...normalized,
+      ...serializeTimetableSettings(normalized),
       groupId,
       termKey: state.activeTerm,
       termLabel: termLabel(state.activeTerm),
@@ -1811,7 +1812,16 @@
       updatedAt: Date.now(),
       updatedBy: buildActor()
     });
-    await state.db.ref(window.SOMAP.P(`years/${state.year}/timetable/settings/${state.activeTerm}/${groupId}`)).set(payload);
+    try {
+      await state.db.ref(settingsPath).set(payload);
+    } catch (error) {
+      console.error('[TT] persistSettings failed', {
+        groupId,
+        path: settingsPath,
+        illegalSubjectKeys: collectIllegalTimetableSubjectKeys(normalized)
+      }, error);
+      throw error;
+    }
   }
 
   // Return the ISO-Monday (YYYY-MM-DD) of the week containing `date`.
@@ -3597,7 +3607,7 @@
 
   function normalizeSettings(raw, groupId, teachers, subjectCatalog) {
     const defaults = buildDefaultSettings(groupId, teachers, subjectCatalog);
-    const input = raw && typeof raw === 'object' ? deepClone(raw) : {};
+    const input = raw && typeof raw === 'object' ? deepClone(deserializeTimetableSettings(raw)) : {};
     const slots = normalizeSlots((input.slots || defaults.slots || []).map((slot, index) => ({
       id: slot.id || `${groupId}_slot_${index + 1}`,
       start: slot.start || '08:00',
@@ -4476,6 +4486,94 @@
 
   function deepClone(value) {
     return JSON.parse(JSON.stringify(value || {}));
+  }
+
+  const FIREBASE_KEY_PREFIX = '__ttkey__';
+
+  function hasIllegalFirebaseKey(key) {
+    return /[.#$/\[\]]/.test(String(key || ''));
+  }
+
+  function encodeFirebaseKey(key) {
+    const raw = String(key || '');
+    if (!raw) return '';
+    if (!hasIllegalFirebaseKey(raw) && !raw.startsWith(FIREBASE_KEY_PREFIX)) return raw;
+    return `${FIREBASE_KEY_PREFIX}${encodeURIComponent(raw).replace(/\./g, '%2E')}`;
+  }
+
+  function decodeFirebaseKey(key) {
+    const raw = String(key || '');
+    if (!raw.startsWith(FIREBASE_KEY_PREFIX)) return raw;
+    try {
+      return decodeURIComponent(raw.slice(FIREBASE_KEY_PREFIX.length));
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  function encodeSubjectKeyedMap(map) {
+    const result = {};
+    Object.entries(map || {}).forEach(([key, value]) => {
+      result[encodeFirebaseKey(key)] = value;
+    });
+    return result;
+  }
+
+  function decodeSubjectKeyedMap(map) {
+    const result = {};
+    Object.entries(map || {}).forEach(([key, value]) => {
+      result[decodeFirebaseKey(key)] = value;
+    });
+    return result;
+  }
+
+  function encodeNestedSubjectKeyedMap(map) {
+    const result = {};
+    Object.entries(map || {}).forEach(([className, bucket]) => {
+      result[className] = encodeSubjectKeyedMap(bucket || {});
+    });
+    return result;
+  }
+
+  function decodeNestedSubjectKeyedMap(map) {
+    const result = {};
+    Object.entries(map || {}).forEach(([className, bucket]) => {
+      result[className] = decodeSubjectKeyedMap(bucket || {});
+    });
+    return result;
+  }
+
+  function serializeTimetableSettings(settings) {
+    return {
+      ...(settings || {}),
+      periodRequirements: encodeNestedSubjectKeyedMap(settings?.periodRequirements || {}),
+      requirementSources: encodeNestedSubjectKeyedMap(settings?.requirementSources || {}),
+      subjectAbbreviations: encodeSubjectKeyedMap(settings?.subjectAbbreviations || {}),
+      subjectColors: encodeSubjectKeyedMap(settings?.subjectColors || {})
+    };
+  }
+
+  function deserializeTimetableSettings(settings) {
+    return {
+      ...(settings || {}),
+      periodRequirements: decodeNestedSubjectKeyedMap(settings?.periodRequirements || {}),
+      requirementSources: decodeNestedSubjectKeyedMap(settings?.requirementSources || {}),
+      subjectAbbreviations: decodeSubjectKeyedMap(settings?.subjectAbbreviations || {}),
+      subjectColors: decodeSubjectKeyedMap(settings?.subjectColors || {})
+    };
+  }
+
+  function collectIllegalTimetableSubjectKeys(settings) {
+    const keys = new Set();
+    Object.keys(settings?.subjectAbbreviations || {}).forEach((key) => { if (hasIllegalFirebaseKey(key)) keys.add(key); });
+    Object.keys(settings?.subjectColors || {}).forEach((key) => { if (hasIllegalFirebaseKey(key)) keys.add(key); });
+    Object.values(settings?.periodRequirements || {}).forEach((bucket) => {
+      Object.keys(bucket || {}).forEach((key) => { if (hasIllegalFirebaseKey(key)) keys.add(key); });
+    });
+    Object.values(settings?.requirementSources || {}).forEach((bucket) => {
+      Object.keys(bucket || {}).forEach((key) => { if (hasIllegalFirebaseKey(key)) keys.add(key); });
+    });
+    return Array.from(keys).sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' }));
   }
 
   function sanitizeForFirebase(value) {
