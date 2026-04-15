@@ -557,6 +557,8 @@
     });
   }
 
+  let _initCtx = null; // cache initialized context so button re-clicks skip re-setup
+
   async function loadAndRender(isEvent = false) {
     try {
       if (!window.firebase || !firebase.database) {
@@ -565,6 +567,16 @@
       }
       if (!window.SOMAP || !SOMAP.getSchool) {
         if (isEvent) showToast('SOMAP haijapakiwa.', 'error');
+        return;
+      }
+
+      // If already initialized, just re-render and scroll
+      if (_initCtx) {
+        await _initCtx.render();
+        if (isEvent) {
+          const anchor = document.getElementById(containerId);
+          if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
         return;
       }
 
@@ -581,10 +593,23 @@
       let lastAttendanceSource = 'scoped';
       let latestKeys = { monthKey: '', todayKey: '' };
 
-      const profileSnap = await scopedOrLegacy(db, `years/${currentYear}/workers/${workerId}/profile`, `workers/${workerId}/profile`, legacyFriendly);
-      const profile = profileSnap.snap.val() || {};
+      // Show skeleton immediately so the UI responds at once
+      if (isEvent) {
+        injectStyles();
+        document.body.classList.add('headteacher-approvals-page');
+        const { els: skeletonEls } = ensureContainer();
+        if (skeletonEls.list) {
+          skeletonEls.list.innerHTML = '<p class="empty" style="opacity:0.6;">Inapakia mahudhurio...</p>';
+        }
+      }
+
+      // Batch 1: profile + teacherCfg in parallel (was sequential — saves ~1 round-trip)
       const cachedRole = (localStorage.getItem('somap_role') || '').toLowerCase();
-      const teacherCfgSnap = await scopedOrLegacy(db, `years/${currentYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`, legacyFriendly);
+      const [profileSnap, teacherCfgSnap] = await Promise.all([
+        scopedOrLegacy(db, `years/${currentYear}/workers/${workerId}/profile`, `workers/${workerId}/profile`, legacyFriendly),
+        scopedOrLegacy(db, `years/${currentYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`, legacyFriendly)
+      ]);
+      const profile = profileSnap.snap.val() || {};
       const teacherCfg = teacherCfgSnap.snap.val() || {};
       const teacherType = (teacherCfg.teacherType || '').toLowerCase();
       const profileRole = (profile.role || '').toLowerCase();
@@ -606,10 +631,6 @@
       });
 
       let rulesRef = db.ref(SOMAP.P(`years/${currentYear}/workers_settings/attendanceRules`));
-      const initialRules = await setupRules(els.rules, rulesRef, async (payload) => {
-        await lockManager.applyRules(payload);
-      });
-      await lockManager.applyRules(initialRules);
 
       const render = async () => {
         const now = new Date();
@@ -858,19 +879,31 @@
         });
       }
 
-      await render();
+      // Run rules setup AND first render in parallel — saves one full round-trip
+      const [initialRules] = await Promise.all([
+        setupRules(els.rules, rulesRef, async (payload) => {
+          await lockManager.applyRules(payload);
+        }),
+        render()
+      ]);
+      await lockManager.applyRules(initialRules);
       attachRealtime();
+
+      // Cache context so button re-clicks skip re-setup entirely
+      _initCtx = { render };
 
       if (yearCtx && yearCtx.onYearChanged) {
         yearCtx.onYearChanged(async (yr) => {
           try {
             currentYear = String(yr);
             rulesRef = db.ref(SOMAP.P(`years/${currentYear}/workers_settings/attendanceRules`));
-            const newRules = await setupRules(els.rules, rulesRef, async (payload) => {
-              await lockManager.applyRules(payload);
-            });
+            const [newRules] = await Promise.all([
+              setupRules(els.rules, rulesRef, async (payload) => {
+                await lockManager.applyRules(payload);
+              }),
+              render()
+            ]);
             await lockManager.applyRules(newRules);
-            await render();
             attachRealtime();
           } catch (err) {
             console.error('Failed to refresh rules for new year', err);
@@ -884,7 +917,7 @@
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(() => loadAndRender(false), 600);
+    loadAndRender(false); // removed 600ms artificial delay
   });
 
   window.addEventListener('headteacher-approvals-open', () => {
