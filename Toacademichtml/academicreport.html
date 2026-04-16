@@ -19,6 +19,7 @@
   <script src="../Todashboardhtml/yearContext.js"></script>
   <script src="../js/modules/class_teachers.js"></script>
   <script src="../js/finance_core.js"></script>
+  <script src="../shared/school_calendar.js"></script>
   <script type="module">
     import { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass, setCustomSubjectsMap } from '../js/modules/subjects.js';
     window.SomapSubjects = { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass, setCustomSubjectsMap };
@@ -473,6 +474,7 @@
       isSocrates: false,
       classTeacherAssignments: {},
       teacherByClassSubject: new Map(),
+      workerIdByTeacherName: new Map(),
       analysis: null
     };
 
@@ -677,6 +679,113 @@
       const ax = (a.match(/\d+/) || [''])[0];
       const bx = (b.match(/\d+/) || [''])[0];
       return ax && bx && ax === bx;
+    }
+
+    function normalizeTeacherLookup(value) {
+      return String(value || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+    }
+
+    function teacherLookupVariants(value) {
+      const normalized = normalizeTeacherLookup(value);
+      if (!normalized) return [];
+      const compact = normalized.replace(/\s+/g, '');
+      const tokens = normalized.split(' ').filter(Boolean);
+      const variants = new Set([normalized, compact]);
+      if (tokens.length >= 2) variants.add(tokens.slice(0, 2).join(' '));
+      if (tokens.length >= 3) variants.add(tokens.slice(0, 3).join(' '));
+      return Array.from(variants).filter(Boolean);
+    }
+
+    function teacherNamesMatch(a, b) {
+      const left = normalizeTeacherLookup(a);
+      const right = normalizeTeacherLookup(b);
+      if (!left || !right) return false;
+      if (left === right) return true;
+      if (left.replace(/\s+/g, '') === right.replace(/\s+/g, '')) return true;
+      const leftTokens = left.split(' ').filter(Boolean);
+      const rightTokens = right.split(' ').filter(Boolean);
+      if (!leftTokens.length || !rightTokens.length) return false;
+      const smaller = leftTokens.length <= rightTokens.length ? leftTokens : rightTokens;
+      const larger = leftTokens.length > rightTokens.length ? leftTokens : rightTokens;
+      return smaller.every((token) => larger.includes(token));
+    }
+
+    function registerTeacherWorkerAlias(name, workerId) {
+      const id = String(workerId || '').trim();
+      if (!id) return;
+      teacherLookupVariants(name).forEach((variant) => {
+        if (!state.workerIdByTeacherName.has(variant)) state.workerIdByTeacherName.set(variant, id);
+      });
+    }
+
+    function resolveTeacherWorkerId(name) {
+      const variants = teacherLookupVariants(name);
+      for (const variant of variants) {
+        if (state.workerIdByTeacherName.has(variant)) return state.workerIdByTeacherName.get(variant);
+      }
+      return '';
+    }
+
+    function ensureTeacherSubjectEffort(entry, subject) {
+      const canonical = canonicalSubjectName(subject);
+      if (!canonical) return null;
+      entry.subjectBreakdown = entry.subjectBreakdown || {};
+      if (!entry.subjectBreakdown[canonical]) {
+        entry.subjectBreakdown[canonical] = {
+          subject: canonical,
+          hoursPerWeek: 0,
+          expectedLessonPlans: null,
+          expectedLessonNotes: null,
+          lessonPlanCount: 0,
+          lessonNoteCount: 0
+        };
+      }
+      return entry.subjectBreakdown[canonical];
+    }
+
+    async function countInstructionalDaysInRange(year, className, fromDate, toDate) {
+      let teachingDays = 0;
+      let weekdayFallback = 0;
+      try {
+        const start = new Date(fromDate + 'T00:00:00');
+        const end = new Date(toDate + 'T00:00:00');
+        if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) {
+          return { teachingDays: 0, weekdayCount: 0, teachingWeeks: 0 };
+        }
+        const calendarApi = window.SomapSchoolCalendar && typeof window.SomapSchoolCalendar.resolveDateStatus === 'function'
+          ? window.SomapSchoolCalendar
+          : null;
+        for (let cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+          const isoDate = [
+            cursor.getFullYear(),
+            String(cursor.getMonth() + 1).padStart(2, '0'),
+            String(cursor.getDate()).padStart(2, '0')
+          ].join('-');
+          const weekday = cursor.getDay() >= 1 && cursor.getDay() <= 5;
+          if (weekday) weekdayFallback += 1;
+          if (calendarApi) {
+            try {
+              const status = await calendarApi.resolveDateStatus({
+                audience: 'students',
+                schoolId: state.currentSchoolId || undefined,
+                year,
+                className,
+                date: isoDate
+              });
+              if (status && status.countAsSchoolDayStudents && !status.blockStudentAttendance) {
+                teachingDays += 1;
+              }
+              continue;
+            } catch (_) {}
+          }
+          if (weekday) teachingDays += 1;
+        }
+      } catch (_) {}
+      return {
+        teachingDays,
+        weekdayCount: weekdayFallback,
+        teachingWeeks: teachingDays > 0 ? (teachingDays / 5) : 0
+      };
     }
 
     function normalizeAdm(value) {
@@ -1471,13 +1580,18 @@
         Object.entries(workers || {}).forEach(([workerId, raw]) => {
           const profile = raw && (raw.profile || raw) || {};
           const fullName = firstText(profile.fullNameUpper, profile.fullName, [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ').trim());
-          if (fullName) workerNameById.set(workerId, fullName);
+          if (fullName) {
+            workerNameById.set(workerId, fullName);
+            registerTeacherWorkerAlias(fullName, workerId);
+          }
         });
         const configSnap = await scopedOrSocratesLegacy('years/' + year + '/teachers_config', 'years/' + year + '/teachers_config');
         const configs = configSnap && configSnap.exists && configSnap.exists() ? (configSnap.val() || {}) : {};
         Object.entries(configs || {}).forEach(([workerId, cfg]) => {
           const teacherName = workerNameById.get(workerId) || firstText(cfg && cfg.name, cfg && cfg.teacherName, 'Teacher');
-          if (teacherName && workerId) state.workerIdByTeacherName.set(teacherName.toUpperCase(), workerId);
+          registerTeacherWorkerAlias(teacherName, workerId);
+          registerTeacherWorkerAlias(cfg && cfg.name, workerId);
+          registerTeacherWorkerAlias(cfg && cfg.teacherName, workerId);
           const mappings = Array.isArray(cfg && cfg.classSubjectMappings) ? cfg.classSubjectMappings : [];
           mappings.forEach((mapping) => {
             const classCanon = normalizeDisplayClass(firstText(mapping && mapping.class, mapping && mapping.className, mapping && mapping.classLevel, mapping && mapping.grade));
@@ -1637,6 +1751,212 @@
               }
             } catch (_) {}
           }
+        }
+      } catch (_) {}
+      return effort;
+    }
+
+    async function fetchTeacherEffortDataDetailed(year, className, fromDate, toDate) {
+      const effort = {};
+      try {
+        const db = getDB();
+        if (!db) return effort;
+        const monthKeys = getMonthKeysBetween(fromDate, toDate);
+        const classKey = normalizeDisplayClass(className).toUpperCase() + '::';
+        const teachingWindow = await countInstructionalDaysInRange(year, className, fromDate, toDate);
+        const teacherList = [];
+
+        state.teacherByClassSubject.forEach((teacherName, key) => {
+          if (!key.startsWith(classKey)) return;
+          let entry = teacherList.find((teacher) => teacher.name === teacherName);
+          if (!entry) {
+            entry = { name: teacherName, workerId: resolveTeacherWorkerId(teacherName), subjects: [] };
+            teacherList.push(entry);
+            effort[teacherName] = {
+              presentDays: 0,
+              totalDays: 0,
+              lateDays: 0,
+              lateLetters: 0,
+              checkoutLetters: 0,
+              explanationLetters: 0,
+              lessonPlanCount: 0,
+              lessonNoteCount: 0,
+              lessonPlanDates: [],
+              lessonNoteDates: [],
+              periodsPerWeek: 0,
+              expectedLessonPlans: null,
+              expectedLessonNotes: null,
+              subjects: [],
+              subjectBreakdown: {},
+              teachingDays: teachingWindow.teachingDays || 0,
+              teachingWeeks: teachingWindow.teachingWeeks || 0
+            };
+          }
+          const subject = key.slice(classKey.length);
+          if (subject && !entry.subjects.includes(subject)) {
+            entry.subjects.push(subject);
+            effort[entry.name].subjects.push(subject);
+            ensureTeacherSubjectEffort(effort[entry.name], subject);
+          }
+        });
+        if (!teacherList.length) return effort;
+
+        function resolveTeacherEntry(recordTeacherId, recordTeacherName, subjectName) {
+          const subjectCanon = canonicalSubjectName(subjectName);
+          if (recordTeacherId) {
+            const byId = teacherList.find((teacher) => String(teacher.workerId || '') === String(recordTeacherId || ''));
+            if (byId) return byId;
+          }
+          if (recordTeacherName) {
+            const byName = teacherList.find((teacher) => teacherNamesMatch(teacher.name, recordTeacherName));
+            if (byName) return byName;
+          }
+          if (subjectCanon) {
+            const bySubject = teacherList.filter((teacher) => (teacher.subjects || []).includes(subjectCanon));
+            if (bySubject.length === 1) return bySubject[0];
+          }
+          return null;
+        }
+
+        function resolveSubjectBucket(entry, subjectName) {
+          const subjectCanon = canonicalSubjectName(subjectName);
+          if (subjectCanon && (entry.subjects || []).includes(subjectCanon)) {
+            return ensureTeacherSubjectEffort(entry, subjectCanon);
+          }
+          if (!subjectCanon && Array.isArray(entry.subjects) && entry.subjects.length === 1) {
+            return ensureTeacherSubjectEffort(entry, entry.subjects[0]);
+          }
+          if (subjectCanon) return ensureTeacherSubjectEffort(entry, subjectCanon);
+          return null;
+        }
+
+        for (const teacher of teacherList) {
+          if (!teacher.workerId) continue;
+          try {
+            const schoolId = state.currentSchoolId || 'socrates-school';
+            const schemeSnap = await db.ref('schemes/' + schoolId + '/teacher/' + teacher.workerId + '/' + year).get();
+            const schemesByClass = schemeSnap && schemeSnap.exists && schemeSnap.exists() ? (schemeSnap.val() || {}) : {};
+            Object.entries(schemesByClass || {}).forEach(([, schemesBySubject]) => {
+              Object.entries(schemesBySubject || {}).forEach(([, schemesByTerm]) => {
+                Object.values(schemesByTerm || {}).forEach((scheme) => {
+                  if (!scheme || typeof scheme !== 'object') return;
+                  if (!classMatches(className, firstText(scheme.className, scheme.class, scheme.baseClassName))) return;
+                  const subjectCanon = canonicalSubjectName(firstText(scheme.subjectName, scheme.subject));
+                  if (!subjectCanon || !(teacher.subjects || []).includes(subjectCanon)) return;
+                  const hours = Number(firstText(scheme.hoursPerWeek, scheme.parsedTemplate && scheme.parsedTemplate.hoursPerWeek) || 0);
+                  if (!(hours > 0)) return;
+                  const bucket = ensureTeacherSubjectEffort(effort[teacher.name], subjectCanon);
+                  if (bucket) bucket.hoursPerWeek = Math.max(Number(bucket.hoursPerWeek || 0), hours);
+                });
+              });
+            });
+          } catch (_) {}
+        }
+
+        for (const teacher of teacherList) {
+          const buckets = Object.values(effort[teacher.name].subjectBreakdown || {});
+          effort[teacher.name].periodsPerWeek = buckets.reduce((sum, bucket) => sum + Number(bucket.hoursPerWeek || 0), 0);
+          buckets.forEach((bucket) => {
+            const hours = Number(bucket.hoursPerWeek || 0);
+            if (hours > 0 && (teachingWindow.teachingDays || 0) > 0) {
+              const expected = Math.max(0, Math.round(hours * teachingWindow.teachingWeeks));
+              bucket.expectedLessonPlans = expected;
+              bucket.expectedLessonNotes = expected;
+            } else {
+              bucket.expectedLessonPlans = null;
+              bucket.expectedLessonNotes = null;
+            }
+          });
+          effort[teacher.name].expectedLessonPlans = buckets.some((bucket) => bucket.expectedLessonPlans !== null)
+            ? buckets.reduce((sum, bucket) => sum + Number(bucket.expectedLessonPlans || 0), 0)
+            : null;
+          effort[teacher.name].expectedLessonNotes = buckets.some((bucket) => bucket.expectedLessonNotes !== null)
+            ? buckets.reduce((sum, bucket) => sum + Number(bucket.expectedLessonNotes || 0), 0)
+            : null;
+        }
+
+        try {
+          const plansSnap = await scopedOrSocratesLegacy('lessonPlans/' + year, 'lessonPlans/' + year);
+          if (plansSnap && plansSnap.exists && plansSnap.exists()) {
+            const allPlansData = plansSnap.val() || {};
+            Object.entries(allPlansData).forEach(([planClass, dateMap]) => {
+              if (!classMatches(className, planClass)) return;
+              if (!dateMap || typeof dateMap !== 'object') return;
+              Object.entries(dateMap).forEach(([date, planMap]) => {
+                if (!date || date < fromDate || date > toDate) return;
+                if (!planMap || typeof planMap !== 'object') return;
+                Object.values(planMap).forEach((plan) => {
+                  if (!plan || typeof plan !== 'object') return;
+                  const match = resolveTeacherEntry(
+                    firstText(plan.teacherId, plan.teacher && plan.teacher.uid, plan.ownerId),
+                    firstText(plan.teacherName, plan.teacher && plan.teacher.name, plan.recordedBy),
+                    plan.subject
+                  );
+                  if (!match) return;
+                  effort[match.name].lessonPlanCount += 1;
+                  effort[match.name].lessonPlanDates.push(date);
+                  const bucket = resolveSubjectBucket(effort[match.name], plan.subject);
+                  if (bucket) bucket.lessonPlanCount += 1;
+                });
+              });
+            });
+          }
+        } catch (_) {}
+
+        try {
+          const notesSnap = await scopedOrSocratesLegacy('lessonNotes/' + year, 'lessonNotes/' + year);
+          if (notesSnap && notesSnap.exists && notesSnap.exists()) {
+            const allNotesData = notesSnap.val() || {};
+            Object.entries(allNotesData).forEach(([storedWorkerId, noteMap]) => {
+              if (!noteMap || typeof noteMap !== 'object') return;
+              Object.values(noteMap).forEach((note) => {
+                if (!note || typeof note !== 'object') return;
+                const lessonDate = firstText(note.lessonDateContext, note.date, note.lessonDate);
+                if (!lessonDate || lessonDate < fromDate || lessonDate > toDate) return;
+                if (!classMatches(className, firstText(note.class, note.className))) return;
+                const match = resolveTeacherEntry(
+                  firstText(note.teacherId, storedWorkerId),
+                  firstText(note.teacherName, note.recordedBy),
+                  note.subject
+                );
+                if (!match) return;
+                effort[match.name].lessonNoteCount += 1;
+                effort[match.name].lessonNoteDates.push(lessonDate);
+                const bucket = resolveSubjectBucket(effort[match.name], note.subject);
+                if (bucket) bucket.lessonNoteCount += 1;
+              });
+            });
+          }
+        } catch (_) {}
+
+        for (const teacher of teacherList) {
+          if (!teacher.workerId) continue;
+          for (const mk of monthKeys) {
+            try {
+              const daySnap = await scopedOrSocratesLegacy(
+                'years/' + year + '/workerAttendance/' + teacher.workerId + '/' + mk,
+                'attendance/' + teacher.workerId + '/' + mk
+              );
+              if (!(daySnap && daySnap.exists && daySnap.exists())) continue;
+              const days = daySnap.val() || {};
+              Object.entries(days).forEach(([dayKey, day]) => {
+                if (!day || typeof day !== 'object') return;
+                const dk = String(dayKey);
+                const isoDate = dk.length === 8 ? dk.slice(0, 4) + '-' + dk.slice(4, 6) + '-' + dk.slice(6, 8) : '';
+                if (!isoDate || isoDate < fromDate || isoDate > toDate) return;
+                effort[teacher.name].totalDays += 1;
+                if (day.checkInTs) {
+                  effort[teacher.name].presentDays += 1;
+                  if (Number(day.lateMinutes || 0) > 0) {
+                    effort[teacher.name].lateDays += 1;
+                    if (day.checkInReason) effort[teacher.name].lateLetters += 1;
+                  }
+                }
+                if (day.checkOutReason) effort[teacher.name].checkoutLetters += 1;
+              });
+            } catch (_) {}
+          }
+          effort[teacher.name].explanationLetters = Number(effort[teacher.name].lateLetters || 0) + Number(effort[teacher.name].checkoutLetters || 0);
         }
       } catch (_) {}
       return effort;
@@ -2112,7 +2432,7 @@
         const subjectStats = buildSubjectStats(studentAnalytics, subjectList, filters.className);
         const teacherInsights = buildTeacherInsights(subjectStats);
         const movement = buildMovementSummary(studentAnalytics, filters.className, filters.year, shiftReports);
-        const teacherEffort = await fetchTeacherEffortData(filters.year, filters.className, filters.fromDate, filters.toDate);
+        const teacherEffort = await fetchTeacherEffortDataDetailed(filters.year, filters.className, filters.fromDate, filters.toDate);
         state.analysis = analyzeClass(filters, studentAnalytics, timeline, subjectStats, teacherInsights, movement, shiftReports, examRecords, teacherEffort);
         renderAll(state.analysis);
         setStatus('Academic report loaded for ' + filters.className + ' (' + filters.year + ').', true);
@@ -2902,20 +3222,24 @@
         styles: { fontSize: 8.0, cellPadding: 1.9 },
         headStyles: { fillColor: [37, 99, 235] }
       });
-      // Teacher professional effort table (attendance + lesson plans)
+      // Teacher professional effort table (attendance + preparation records)
       const effortData = analysis.teacherEffort || {};
       const effortRows = Object.entries(effortData).map(([name, data]) => {
         const attPct = Number(data.totalDays || 0) > 0 ? Math.round((data.presentDays / data.totalDays) * 100) : null;
         const attStr = attPct !== null ? String(data.presentDays) + '/' + String(data.totalDays) + ' (' + attPct + '%)' : 'No check-in data';
-        const lateStr = Number(data.lateDays || 0) > 0 ? String(data.lateDays) + ' late (' + String(data.lateLetters || 0) + ' letter(s))' : '0 late';
-        const exp = data.expectedLessonPlans;
-        const plansStr = exp !== null ? String(data.lessonPlanCount || 0) + '/' + String(exp) + ' expected' : String(data.lessonPlanCount || 0) + ' plan(s)';
-        const planPct = exp !== null && exp > 0 ? Math.round((data.lessonPlanCount / exp) * 100) : null;
+        const lateStr = String(data.lateDays || 0) + ' late / ' + String(data.explanationLetters || 0) + ' letter(s)';
+        const planExp = data.expectedLessonPlans;
+        const noteExp = data.expectedLessonNotes;
+        const plansStr = 'P ' + String(data.lessonPlanCount || 0) + '/' + (planExp !== null ? String(planExp) : '-') + ' | N ' + String(data.lessonNoteCount || 0) + '/' + (noteExp !== null ? String(noteExp) : '-');
+        const planPct = planExp !== null && planExp > 0 ? Math.round((Number(data.lessonPlanCount || 0) / planExp) * 100) : null;
+        const notePct = noteExp !== null && noteExp > 0 ? Math.round((Number(data.lessonNoteCount || 0) / noteExp) * 100) : null;
+        const prepPctCandidates = [planPct, notePct].filter((value) => value !== null);
+        const prepPct = prepPctCandidates.length ? Math.min.apply(null, prepPctCandidates) : null;
         let flag;
         if (attPct !== null && attPct < 80) flag = 'Low attendance (' + attPct + '%)';
-        else if (planPct !== null && planPct < 60) flag = 'Low plan coverage (' + planPct + '%)';
-        else if (attPct === null && Number(data.lessonPlanCount || 0) === 0) flag = 'No records found';
-        else if (Number(data.lessonPlanCount || 0) === 0 && exp === null) flag = 'No lesson plans';
+        else if (prepPct !== null && prepPct < 60) flag = 'Low prep coverage (' + prepPct + '%)';
+        else if (attPct === null && Number(data.lessonPlanCount || 0) === 0 && Number(data.lessonNoteCount || 0) === 0) flag = 'No records found';
+        else if (planExp === null && noteExp === null) flag = 'Scheme hours not found';
         else flag = 'OK';
         return [name, attStr, lateStr, plansStr, flag];
       });
@@ -2923,23 +3247,23 @@
         const effortStartY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 8 : y + 130;
         doc.setFontSize(10);
         doc.setTextColor(15, 23, 42);
-        doc.text('Teacher Professional Effort — Attendance and Lesson Plan Compliance', margin, effortStartY);
+        doc.text('Teacher Professional Effort - Attendance and Preparation Compliance', margin, effortStartY);
         doc.setFontSize(8);
         doc.setTextColor(71, 85, 105);
-        doc.text('Attendance from worker check-in records (Jan-today). Lesson plans counted for this class. Expected plans = timetable periods/week x weeks in window.', margin, effortStartY + 5);
+        doc.text('Attendance uses worker check-in records inside the selected report window. Lesson plans and lesson notes are counted only for this class in the same date range. Expected preparation is derived from scheme hours per week, then adjusted by the active school calendar so weekends, Tanzania public holidays, and headteacher-declared student breaks do not inflate the expected totals.', margin, effortStartY + 5, { maxWidth: pageWidth - 2 * margin });
         doc.autoTable({
-          startY: effortStartY + 8,
-          head: [['Teacher', 'Check-ins (present/recorded)', 'Late / Letters', 'Lesson Plans (done/expected)', 'Assessment']],
+          startY: effortStartY + 12,
+          head: [['Teacher', 'Check-ins (present/recorded)', 'Late / Letters', 'Plans / Notes (done/expected)', 'Assessment']],
           body: effortRows,
           margin: { left: margin, right: margin },
           theme: 'grid',
           styles: { fontSize: 7.8, cellPadding: 1.8 },
           headStyles: { fillColor: [15, 23, 42] },
-          columnStyles: { 0: { cellWidth: 44 }, 1: { cellWidth: 38 }, 2: { cellWidth: 28 }, 3: { cellWidth: 38 } },
+          columnStyles: { 0: { cellWidth: 42 }, 1: { cellWidth: 34 }, 2: { cellWidth: 28 }, 3: { cellWidth: 50 } },
           didParseCell: function (data) {
             if (data.section === 'body' && data.column.index === 4) {
               const raw = String(data.cell.raw || '');
-              if (raw.includes('Low') || raw.includes('No records') || raw.includes('No lesson')) {
+              if (raw.includes('Low') || raw.includes('No records') || raw.includes('Scheme')) {
                 data.cell.styles.textColor = [185, 28, 28];
                 data.cell.styles.fontStyle = 'bold';
               } else if (raw === 'OK') {
@@ -2960,7 +3284,7 @@
           if (attPct !== null) {
             detail += 'Checked in ' + data.presentDays + ' of ' + data.totalDays + ' recorded days (' + attPct + '%). ';
             if (Number(data.lateDays || 0) > 0) {
-              detail += '' + data.lateDays + ' late arrival(s) — ' + (data.lateLetters || 0) + ' explanation letter(s) submitted. ';
+              detail += '' + data.lateDays + ' late arrival(s) and ' + (data.explanationLetters || 0) + ' explanation letter(s) were recorded. ';
             } else {
               detail += 'No late arrivals recorded. ';
             }
@@ -2968,14 +3292,14 @@
             detail += 'No check-in records found in this date window. ';
           }
           if (exp !== null) {
-            detail += 'Prepared ' + (data.lessonPlanCount || 0) + ' lesson plan(s) against an expected ' + exp + ' (' + (data.periodsPerWeek || 0) + ' periods/week x weeks in window). ';
+            detail += 'Prepared ' + (data.lessonPlanCount || 0) + ' lesson plan(s) and ' + (data.lessonNoteCount || 0) + ' lesson note(s) against an expected ' + exp + ' preparation cycle(s) from scheme hours per week and the filtered teaching window. ';
             if (planPct !== null && planPct < 60) {
-              detail += 'Coverage is ' + planPct + '% — teacher should review lesson planning habits; this gap directly affects classroom preparation and student performance.';
+              detail += 'Plan coverage is ' + planPct + '% and this low preparation trend should be reviewed because weak planning usually affects classroom preparation, continuity, and learner performance.';
             } else if (planPct !== null) {
-              detail += 'Coverage is ' + planPct + '% — adequate for this window.';
+              detail += 'Plan coverage is ' + planPct + '% and the subject-by-subject notes below give the fuller preparation picture for this window.';
             }
           } else {
-            detail += 'Lesson plan count: ' + (data.lessonPlanCount || 0) + '. Timetable data not found to compute expected plans.';
+            detail += 'Lesson plan count: ' + (data.lessonPlanCount || 0) + '. Lesson note count: ' + (data.lessonNoteCount || 0) + '. Scheme hours per week were not found, so expected preparation totals could not be computed yet.';
           }
           if (detailY + 14 > pageHeight - 18) { doc.addPage(); detailY = pdfPageHeader(doc, assets, 'Teacher Effect — Detail (cont.)', '', [15, 23, 42]); }
           doc.setFontSize(7.8);
@@ -2984,11 +3308,66 @@
           doc.text(lines, margin, detailY);
           detailY += lines.length * 4.2 + 3;
         });
+        const subjectDetailTitleY = detailY + 2;
+        if (subjectDetailTitleY + 12 > pageHeight - 18) { doc.addPage(); detailY = pdfPageHeader(doc, assets, 'Teacher Effect - Detail (cont.)', '', [15, 23, 42]); }
+        doc.setFontSize(9);
+        doc.setTextColor(15, 23, 42);
+        doc.text('Subject-by-subject preparation review', margin, detailY + 2);
+        detailY += 8;
+        Object.entries(effortData).forEach(([name, data]) => {
+          const attPct = Number(data.totalDays || 0) > 0 ? Math.round((data.presentDays / data.totalDays) * 100) : null;
+          const buckets = Object.values(data.subjectBreakdown || {});
+          const detailBuckets = buckets.length ? buckets : [{
+            subject: (data.subjects || []).join(', ') || 'subject not mapped',
+            hoursPerWeek: data.periodsPerWeek || 0,
+            expectedLessonPlans: data.expectedLessonPlans,
+            expectedLessonNotes: data.expectedLessonNotes,
+            lessonPlanCount: data.lessonPlanCount || 0,
+            lessonNoteCount: data.lessonNoteCount || 0
+          }];
+          detailBuckets.forEach((bucket) => {
+            const planExp = bucket.expectedLessonPlans;
+            const noteExp = bucket.expectedLessonNotes;
+            const planPct = planExp !== null && planExp > 0 ? Math.round((Number(bucket.lessonPlanCount || 0) / planExp) * 100) : null;
+            const notePct = noteExp !== null && noteExp > 0 ? Math.round((Number(bucket.lessonNoteCount || 0) / noteExp) * 100) : null;
+            const prepPctCandidates = [planPct, notePct].filter((value) => value !== null);
+            const prepPct = prepPctCandidates.length ? Math.min.apply(null, prepPctCandidates) : null;
+            let detail = name + ' (' + bucket.subject + '): ';
+            if (attPct !== null) {
+              detail += 'Within the selected reporting window, this teacher checked in on ' + data.presentDays + ' of ' + data.totalDays + ' recorded worker-attendance days, giving an attendance rate of ' + attPct + '%. ';
+            } else {
+              detail += 'No worker check-in records were found for this teacher inside the selected reporting window, so the attendance side of this review remains incomplete until matching attendance entries are available. ';
+            }
+            detail += 'The attendance file also shows ' + Number(data.lateDays || 0) + ' late arrival(s) and ' + Number(data.explanationLetters || 0) + ' explanation letter(s), counting written reasons captured during late check-in or reason-based check-out workflows. ';
+            if (planExp !== null || noteExp !== null) {
+              detail += 'For ' + bucket.subject + ', the active scheme of work shows ' + Number(bucket.hoursPerWeek || 0) + ' teaching period(s) per week. After removing weekends and student non-teaching days from the school calendar, this report window carries approximately ' + (data.teachingWeeks || 0).toFixed(1) + ' teaching week-equivalents. ';
+              detail += 'That produces an expected preparation load of ' + String(planExp !== null ? planExp : 0) + ' lesson plan(s) and ' + String(noteExp !== null ? noteExp : 0) + ' lesson note(s). ';
+              detail += 'The teacher completed ' + Number(bucket.lessonPlanCount || 0) + ' lesson plan(s) and ' + Number(bucket.lessonNoteCount || 0) + ' lesson note(s) for this subject';
+              if (prepPct !== null) {
+                detail += ', which places the weakest preparation coverage at about ' + prepPct + '%. ';
+                detail += prepPct < 60
+                  ? 'This is below the expected preparation standard and should be discussed in the academic meeting because weak planning and weak lesson-note documentation usually reduce classroom readiness, continuity, and follow-up quality.'
+                  : 'This level of preparation is acceptable for the current window and suggests the teacher is maintaining the expected planning and documentation rhythm for classroom delivery.';
+              } else {
+                detail += '. ';
+              }
+            } else {
+              detail += 'Lesson plans and lesson notes have still been counted, but no usable scheme hours per week were found for this subject, so the report cannot yet calculate the expected preparation volume with confidence. ';
+              detail += 'That should be corrected by ensuring the teacher has a saved scheme of work for this class and subject in the selected academic year.';
+            }
+            if (detailY + 18 > pageHeight - 18) { doc.addPage(); detailY = pdfPageHeader(doc, assets, 'Teacher Effect - Detail (cont.)', '', [15, 23, 42]); }
+            doc.setFontSize(7.8);
+            doc.setTextColor(15, 23, 42);
+            const subjectLines = doc.splitTextToSize(detail, pageWidth - 2 * margin);
+            doc.text(subjectLines, margin, detailY);
+            detailY += subjectLines.length * 4.2 + 3;
+          });
+        });
       } else {
         const noteY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : y + 130;
         doc.setFontSize(8.5);
         doc.setTextColor(120, 130, 150);
-        doc.text('Teacher attendance and lesson plan data will appear here once teacher check-in records and lesson plan records are linked to this class.', margin, noteY, { maxWidth: pageWidth - 2 * margin });
+        doc.text('Teacher attendance, lesson plans, and lesson notes will appear here once teacher check-in records, schemes of work, and preparation records are linked to this class for the selected reporting window.', margin, noteY, { maxWidth: pageWidth - 2 * margin });
       }
 
       doc.addPage();
