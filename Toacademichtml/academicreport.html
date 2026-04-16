@@ -1513,53 +1513,124 @@
       try {
         const monthKeys = getMonthKeysBetween(fromDate, toDate);
         const classKey = normalizeDisplayClass(className).toUpperCase() + '::';
-        // Collect unique teachers mapped to this class
+        // Collect unique teachers + their subjects for this class
         const teacherList = [];
         state.teacherByClassSubject.forEach((teacherName, key) => {
-          if (key.startsWith(classKey) && !teacherList.find((t) => t.name === teacherName)) {
+          if (!key.startsWith(classKey)) return;
+          let entry = teacherList.find((t) => t.name === teacherName);
+          if (!entry) {
             const workerId = state.workerIdByTeacherName && state.workerIdByTeacherName.get(teacherName.toUpperCase());
-            teacherList.push({ name: teacherName, workerId });
-            effort[teacherName] = { presentDays: 0, totalDays: 0, lateDays: 0, lessonPlanCount: 0 };
+            entry = { name: teacherName, workerId, subjects: [] };
+            teacherList.push(entry);
+            effort[teacherName] = { presentDays: 0, totalDays: 0, lateDays: 0, lateLetters: 0, lessonPlanCount: 0, lessonPlanDates: [], periodsPerWeek: 0, expectedLessonPlans: null, subjects: [] };
+          }
+          const subj = key.slice(classKey.length);
+          if (subj && !entry.subjects.includes(subj)) {
+            entry.subjects.push(subj);
+            effort[entry.name].subjects.push(subj);
           }
         });
         if (!teacherList.length) return effort;
 
-        // Load lesson plans for the year (one read) and filter by class + date range
+        // Count weekdays (Mon–Fri) in date range for expected lesson plan calculation
+        let weekdayCount = 0;
         try {
-          const { snap: plansSnap } = await scopedOrSocratesLegacy('lessonPlans/' + year, 'lessonPlans/' + year);
+          const rangeStart = new Date(fromDate + 'T00:00:00');
+          const rangeEnd = new Date(toDate + 'T00:00:00');
+          for (let d = new Date(rangeStart); d <= rangeEnd; d.setDate(d.getDate() + 1)) {
+            const dow = d.getDay();
+            if (dow >= 1 && dow <= 5) weekdayCount++;
+          }
+        } catch (_) {}
+
+        // Load timetable period requirements to compute expected lesson plans
+        try {
+          const ttGroupMap = {
+            nursery_group: ['Baby Class', 'Middle Class', 'Pre Unit Class', 'Baby', 'Middle', 'Pre Unit'],
+            lower_primary_group: ['Class 1', 'Class 2'],
+            upper_primary_group: ['Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7']
+          };
+          const normalClass = normalizeDisplayClass(className);
+          let groupId = null;
+          for (const [gId, cls] of Object.entries(ttGroupMap)) {
+            if (cls.some((c) => normalizeDisplayClass(c) === normalClass)) { groupId = gId; break; }
+          }
+          if (groupId) {
+            for (const term of ['term1', 'term2', 'term3']) {
+              const ttSnap = await scopedOrSocratesLegacy('years/' + year + '/timetable/settings/' + term + '/' + groupId, 'years/' + year + '/timetable/settings/' + term + '/' + groupId);
+              if (ttSnap && ttSnap.exists && ttSnap.exists()) {
+                const ttData = ttSnap.val() || {};
+                const periodReqs = ttData.periodRequirements || {};
+                const classReqs = periodReqs[normalClass] || periodReqs[className] || {};
+                for (const teacher of teacherList) {
+                  let ppw = 0;
+                  for (const subj of teacher.subjects) {
+                    ppw += Number(classReqs[subj] || 0);
+                  }
+                  if (ppw > 0 && effort[teacher.name].periodsPerWeek === 0) effort[teacher.name].periodsPerWeek = ppw;
+                }
+                break;
+              }
+            }
+          }
+        } catch (_) {}
+
+        // Set expected lesson plans based on periods/week × weeks in range
+        for (const teacher of teacherList) {
+          const ppw = effort[teacher.name].periodsPerWeek;
+          effort[teacher.name].expectedLessonPlans = ppw > 0 && weekdayCount > 0 ? Math.round(ppw * weekdayCount / 5) : null;
+        }
+
+        // Load lesson plans — stored as lessonPlans/{year}/{className}/{date}/{planId}
+        try {
+          const plansSnap = await scopedOrSocratesLegacy('lessonPlans/' + year, 'lessonPlans/' + year);
           if (plansSnap && plansSnap.exists && plansSnap.exists()) {
-            const allPlans = plansSnap.val() || {};
-            Object.values(allPlans).forEach((plan) => {
-              if (!plan || typeof plan !== 'object') return;
-              const pd = String(plan.date || plan.lessonDate || '');
-              if (!pd || pd < fromDate || pd > toDate) return;
-              const pc = String(plan.className || plan.class || '').trim();
-              if (!classMatches(className, pc)) return;
-              const tn = String(plan.teacherName || plan.recordedBy || '').trim().toUpperCase();
-              const match = teacherList.find((t) => t.name.toUpperCase() === tn || tn.startsWith(t.name.toUpperCase().split(' ')[0]));
-              if (match) effort[match.name].lessonPlanCount += 1;
+            const allPlansData = plansSnap.val() || {};
+            // Nested: { planClassName: { date: { planId: plan } } }
+            Object.entries(allPlansData).forEach(([planClass, dateMap]) => {
+              if (!classMatches(className, planClass)) return;
+              if (!dateMap || typeof dateMap !== 'object') return;
+              Object.entries(dateMap).forEach(([date, planMap]) => {
+                if (!date || date < fromDate || date > toDate) return;
+                if (!planMap || typeof planMap !== 'object') return;
+                Object.values(planMap).forEach((plan) => {
+                  if (!plan || typeof plan !== 'object') return;
+                  const tn = String(plan.teacherName || plan.teacher && plan.teacher.name || plan.recordedBy || '').trim().toUpperCase();
+                  const match = teacherList.find((t) => t.name.toUpperCase() === tn || (tn && tn.startsWith(t.name.toUpperCase().split(' ')[0])));
+                  if (match) {
+                    effort[match.name].lessonPlanCount += 1;
+                    effort[match.name].lessonPlanDates.push(date);
+                  }
+                });
+              });
             });
           }
         } catch (_) {}
 
-        // Load attendance for each teacher across each month in range
+        // Load attendance per teacher — path: workerAttendance/{workerId}/{monthKey}/{dayKey}
+        // dayKey format: YYYYMMDD; record fields: checkInTs (present), lateMinutes, checkInReason (letter)
         for (const teacher of teacherList) {
           if (!teacher.workerId) continue;
           for (const mk of monthKeys) {
             try {
-              const { snap: daySnap } = await scopedOrSocratesLegacy(
+              const daySnap = await scopedOrSocratesLegacy(
                 'workerAttendance/' + teacher.workerId + '/' + mk,
                 'attendance/' + teacher.workerId + '/' + mk
               );
               if (daySnap && daySnap.exists && daySnap.exists()) {
                 const days = daySnap.val() || {};
-                Object.values(days).forEach((day) => {
+                Object.entries(days).forEach(([dayKey, day]) => {
                   if (!day || typeof day !== 'object') return;
+                  // Convert YYYYMMDD to ISO date for range check
+                  const dk = String(dayKey);
+                  const isoDate = dk.length === 8 ? dk.slice(0, 4) + '-' + dk.slice(4, 6) + '-' + dk.slice(6, 8) : '';
+                  if (!isoDate || isoDate < fromDate || isoDate > toDate) return;
                   effort[teacher.name].totalDays += 1;
-                  if (day.checkIn || day.in || day.checkedIn) {
+                  if (day.checkInTs) {
                     effort[teacher.name].presentDays += 1;
-                    if (Number(day.late || day.lateMinutes || day.lateDuration || 0) > 0) {
+                    if (Number(day.lateMinutes || 0) > 0) {
                       effort[teacher.name].lateDays += 1;
+                      if (day.checkInReason) effort[teacher.name].lateLetters += 1;
                     }
                   }
                 });
@@ -2835,10 +2906,17 @@
       const effortData = analysis.teacherEffort || {};
       const effortRows = Object.entries(effortData).map(([name, data]) => {
         const attPct = Number(data.totalDays || 0) > 0 ? Math.round((data.presentDays / data.totalDays) * 100) : null;
-        const attStr = attPct !== null ? String(data.presentDays) + '/' + String(data.totalDays) + ' (' + attPct + '%)' : 'No data';
-        const lateStr = String(data.lateDays || 0) + ' late check-in(s)';
-        const plansStr = String(data.lessonPlanCount || 0) + ' plan(s)';
-        const flag = (attPct !== null && attPct < 80) ? 'Low attendance' : (Number(data.lessonPlanCount || 0) === 0 ? 'No lesson plans found' : 'OK');
+        const attStr = attPct !== null ? String(data.presentDays) + '/' + String(data.totalDays) + ' (' + attPct + '%)' : 'No check-in data';
+        const lateStr = Number(data.lateDays || 0) > 0 ? String(data.lateDays) + ' late (' + String(data.lateLetters || 0) + ' letter(s))' : '0 late';
+        const exp = data.expectedLessonPlans;
+        const plansStr = exp !== null ? String(data.lessonPlanCount || 0) + '/' + String(exp) + ' expected' : String(data.lessonPlanCount || 0) + ' plan(s)';
+        const planPct = exp !== null && exp > 0 ? Math.round((data.lessonPlanCount / exp) * 100) : null;
+        let flag;
+        if (attPct !== null && attPct < 80) flag = 'Low attendance (' + attPct + '%)';
+        else if (planPct !== null && planPct < 60) flag = 'Low plan coverage (' + planPct + '%)';
+        else if (attPct === null && Number(data.lessonPlanCount || 0) === 0) flag = 'No records found';
+        else if (Number(data.lessonPlanCount || 0) === 0 && exp === null) flag = 'No lesson plans';
+        else flag = 'OK';
         return [name, attStr, lateStr, plansStr, flag];
       });
       if (effortRows.length > 0) {
@@ -2848,25 +2926,63 @@
         doc.text('Teacher Professional Effort — Attendance and Lesson Plan Compliance', margin, effortStartY);
         doc.setFontSize(8);
         doc.setTextColor(71, 85, 105);
-        doc.text('Attendance counted from worker check-in records. Lesson plans counted for this class within the selected date window.', margin, effortStartY + 5);
+        doc.text('Attendance from worker check-in records (Jan-today). Lesson plans counted for this class. Expected plans = timetable periods/week x weeks in window.', margin, effortStartY + 5);
         doc.autoTable({
           startY: effortStartY + 8,
-          head: [['Teacher', 'Days Present / Working', 'Late Check-ins', 'Lesson Plans (this class)', 'Assessment']],
+          head: [['Teacher', 'Check-ins (present/recorded)', 'Late / Letters', 'Lesson Plans (done/expected)', 'Assessment']],
           body: effortRows,
           margin: { left: margin, right: margin },
           theme: 'grid',
-          styles: { fontSize: 8.0, cellPadding: 1.9 },
+          styles: { fontSize: 7.8, cellPadding: 1.8 },
           headStyles: { fillColor: [15, 23, 42] },
+          columnStyles: { 0: { cellWidth: 44 }, 1: { cellWidth: 38 }, 2: { cellWidth: 28 }, 3: { cellWidth: 38 } },
           didParseCell: function (data) {
             if (data.section === 'body' && data.column.index === 4) {
-              if (String(data.cell.raw || '').includes('Low attendance') || String(data.cell.raw || '').includes('No lesson plans')) {
+              const raw = String(data.cell.raw || '');
+              if (raw.includes('Low') || raw.includes('No records') || raw.includes('No lesson')) {
                 data.cell.styles.textColor = [185, 28, 28];
                 data.cell.styles.fontStyle = 'bold';
-              } else if (String(data.cell.raw || '') === 'OK') {
+              } else if (raw === 'OK') {
                 data.cell.styles.textColor = [22, 101, 52];
+                data.cell.styles.fontStyle = 'bold';
               }
             }
           }
+        });
+        // Per-teacher detail paragraphs
+        let detailY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 6 : effortStartY + 60;
+        Object.entries(effortData).forEach(([name, data]) => {
+          const attPct = Number(data.totalDays || 0) > 0 ? Math.round((data.presentDays / data.totalDays) * 100) : null;
+          const exp = data.expectedLessonPlans;
+          const planPct = exp !== null && exp > 0 ? Math.round(((data.lessonPlanCount || 0) / exp) * 100) : null;
+          const subjects = (data.subjects || []).join(', ') || 'subject not mapped';
+          let detail = name + ' (' + subjects + '): ';
+          if (attPct !== null) {
+            detail += 'Checked in ' + data.presentDays + ' of ' + data.totalDays + ' recorded days (' + attPct + '%). ';
+            if (Number(data.lateDays || 0) > 0) {
+              detail += '' + data.lateDays + ' late arrival(s) — ' + (data.lateLetters || 0) + ' explanation letter(s) submitted. ';
+            } else {
+              detail += 'No late arrivals recorded. ';
+            }
+          } else {
+            detail += 'No check-in records found in this date window. ';
+          }
+          if (exp !== null) {
+            detail += 'Prepared ' + (data.lessonPlanCount || 0) + ' lesson plan(s) against an expected ' + exp + ' (' + (data.periodsPerWeek || 0) + ' periods/week x weeks in window). ';
+            if (planPct !== null && planPct < 60) {
+              detail += 'Coverage is ' + planPct + '% — teacher should review lesson planning habits; this gap directly affects classroom preparation and student performance.';
+            } else if (planPct !== null) {
+              detail += 'Coverage is ' + planPct + '% — adequate for this window.';
+            }
+          } else {
+            detail += 'Lesson plan count: ' + (data.lessonPlanCount || 0) + '. Timetable data not found to compute expected plans.';
+          }
+          if (detailY + 14 > pageHeight - 18) { doc.addPage(); detailY = pdfPageHeader(doc, assets, 'Teacher Effect — Detail (cont.)', '', [15, 23, 42]); }
+          doc.setFontSize(7.8);
+          doc.setTextColor(15, 23, 42);
+          const lines = doc.splitTextToSize(detail, pageWidth - 2 * margin);
+          doc.text(lines, margin, detailY);
+          detailY += lines.length * 4.2 + 3;
         });
       } else {
         const noteY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : y + 130;
