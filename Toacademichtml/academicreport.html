@@ -788,6 +788,33 @@
       };
     }
 
+    // Count expected worker working days: Mon–Fri minus Tanzania public holidays and
+    // headteacher-declared closures. All teachers share the same denominator for this range.
+    async function countExpectedWorkerDays(year, fromDate, toDate) {
+      let workingDays = 0;
+      try {
+        const start = new Date(fromDate + 'T00:00:00');
+        const end   = new Date(toDate   + 'T00:00:00');
+        if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return 0;
+        const calApi = window.SomapSchoolCalendar && typeof window.SomapSchoolCalendar.resolveDateStatus === 'function'
+          ? window.SomapSchoolCalendar : null;
+        for (let cur = new Date(start); cur <= end; cur.setDate(cur.getDate() + 1)) {
+          const dow = cur.getDay();
+          if (dow < 1 || dow > 5) continue; // skip weekends
+          const iso = [cur.getFullYear(), String(cur.getMonth() + 1).padStart(2, '0'), String(cur.getDate()).padStart(2, '0')].join('-');
+          if (calApi) {
+            try {
+              const st = await calApi.resolveDateStatus({ audience: 'workers', schoolId: state.currentSchoolId || undefined, year, date: iso });
+              if (st && !st.blockWorkerAttendance) workingDays += 1;
+              continue;
+            } catch (_) {}
+          }
+          workingDays += 1; // fallback: all weekdays count
+        }
+      } catch (_) {}
+      return workingDays;
+    }
+
     function normalizeAdm(value) {
       return String(value || '').trim();
     }
@@ -1764,6 +1791,7 @@
         const monthKeys = getMonthKeysBetween(fromDate, toDate);
         const classKey = normalizeDisplayClass(className).toUpperCase() + '::';
         const teachingWindow = await countInstructionalDaysInRange(year, className, fromDate, toDate);
+        const expectedWorkerDays = await countExpectedWorkerDays(year, fromDate, toDate);
         const teacherList = [];
 
         state.teacherByClassSubject.forEach((teacherName, key) => {
@@ -1944,8 +1972,11 @@
                 const dk = String(dayKey);
                 const isoDate = dk.length === 8 ? dk.slice(0, 4) + '-' + dk.slice(4, 6) + '-' + dk.slice(6, 8) : '';
                 if (!isoDate || isoDate < fromDate || isoDate > toDate) return;
-                effort[teacher.name].totalDays += 1;
-                if (day.checkInTs) {
+                // Only count headteacher-approved check-ins. Legacy records without checkInStatus
+                // are treated as approved unless explicitly rejected.
+                const inStatus = String(day.checkInStatus || '').toLowerCase();
+                const isApproved = inStatus === 'approved' || (inStatus === '' && day.approved !== false && day.checkInTs);
+                if (isApproved) {
                   effort[teacher.name].presentDays += 1;
                   if (Number(day.lateMinutes || 0) > 0) {
                     effort[teacher.name].lateDays += 1;
@@ -1957,6 +1988,11 @@
             } catch (_) {}
           }
           effort[teacher.name].explanationLetters = Number(effort[teacher.name].lateLetters || 0) + Number(effort[teacher.name].checkoutLetters || 0);
+        }
+        // Set the same expected working days for every teacher — the denominator comes from
+        // the calendar (Mon–Fri minus holidays), not from individual DB record counts.
+        for (const teacher of teacherList) {
+          effort[teacher.name].totalDays = expectedWorkerDays;
         }
       } catch (_) {}
       return effort;
@@ -3225,143 +3261,189 @@
       // Teacher professional effort table (attendance + preparation records)
       const effortData = analysis.teacherEffort || {};
       const effortRows = Object.entries(effortData).map(([name, data]) => {
-        const attPct = Number(data.totalDays || 0) > 0 ? Math.round((data.presentDays / data.totalDays) * 100) : null;
-        const attStr = attPct !== null ? String(data.presentDays) + '/' + String(data.totalDays) + ' (' + attPct + '%)' : 'No check-in data';
-        const lateStr = String(data.lateDays || 0) + ' late / ' + String(data.explanationLetters || 0) + ' letter(s)';
-        const planExp = data.expectedLessonPlans;
-        const noteExp = data.expectedLessonNotes;
-        const plansStr = 'P ' + String(data.lessonPlanCount || 0) + '/' + (planExp !== null ? String(planExp) : '-') + ' | N ' + String(data.lessonNoteCount || 0) + '/' + (noteExp !== null ? String(noteExp) : '-');
-        const planPct = planExp !== null && planExp > 0 ? Math.round((Number(data.lessonPlanCount || 0) / planExp) * 100) : null;
-        const notePct = noteExp !== null && noteExp > 0 ? Math.round((Number(data.lessonNoteCount || 0) / noteExp) * 100) : null;
-        const prepPctCandidates = [planPct, notePct].filter((value) => value !== null);
-        const prepPct = prepPctCandidates.length ? Math.min.apply(null, prepPctCandidates) : null;
+        const totalExp = Number(data.totalDays || 0);
+        const present  = Number(data.presentDays || 0);
+        const attPct   = totalExp > 0 ? Math.round((present / totalExp) * 100) : null;
+        // Attendance cell: two lines
+        const attStr   = attPct !== null
+          ? String(present) + ' present\n' + String(totalExp) + ' expected (' + attPct + '%)'
+          : 'No check-in data';
+        // Late days cell
+        const lateStr  = String(data.lateDays || 0) + ' days';
+        // Letters cell — flag if excessive
+        const letters  = Number(data.explanationLetters || 0);
+        const letterStr = String(letters) + (letters > 5 ? '\n(⚠ high)' : '');
+        // Plans / Notes cells
+        const planExp  = data.expectedLessonPlans;
+        const noteExp  = data.expectedLessonNotes;
+        const planDone = Number(data.lessonPlanCount || 0);
+        const noteDone = Number(data.lessonNoteCount || 0);
+        const plansStr = String(planDone) + ' / ' + (planExp !== null ? String(planExp) : '?');
+        const notesStr = String(noteDone) + ' / ' + (noteExp !== null ? String(noteExp) : '?');
+        // Assessment flag
+        const planPct  = planExp !== null && planExp > 0 ? Math.round((planDone / planExp) * 100) : null;
+        const notePct  = noteExp !== null && noteExp > 0 ? Math.round((noteDone / noteExp) * 100) : null;
+        const prepPct  = [planPct, notePct].filter((v) => v !== null);
+        const minPrep  = prepPct.length ? Math.min.apply(null, prepPct) : null;
         let flag;
-        if (attPct !== null && attPct < 80) flag = 'Low attendance (' + attPct + '%)';
-        else if (prepPct !== null && prepPct < 60) flag = 'Low prep coverage (' + prepPct + '%)';
-        else if (attPct === null && Number(data.lessonPlanCount || 0) === 0 && Number(data.lessonNoteCount || 0) === 0) flag = 'No records found';
-        else if (planExp === null && noteExp === null) flag = 'Scheme hours not found';
+        if (attPct !== null && attPct < 80)        flag = 'Low attendance (' + attPct + '%)';
+        else if (letters > 5)                       flag = 'Frequent letters (' + letters + ')';
+        else if (minPrep !== null && minPrep < 60)  flag = 'Low prep (' + minPrep + '%)';
+        else if (attPct === null && planDone === 0 && noteDone === 0) flag = 'No records found';
+        else if (planExp === null && noteExp === null) flag = 'No scheme of work';
         else flag = 'OK';
-        return [name, attStr, lateStr, plansStr, flag];
+        return [name, attStr, lateStr, letterStr, plansStr, notesStr, flag];
       });
       if (effortRows.length > 0) {
         const effortStartY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 8 : y + 130;
         doc.setFontSize(10);
         doc.setTextColor(15, 23, 42);
-        doc.text('Teacher Professional Effort - Attendance and Preparation Compliance', margin, effortStartY);
+        doc.text('Teacher Professional Effort — Attendance and Preparation', margin, effortStartY);
         doc.setFontSize(8);
         doc.setTextColor(71, 85, 105);
-        doc.text('Attendance uses worker check-in records inside the selected report window. Lesson plans and lesson notes are counted only for this class in the same date range. Expected preparation is derived from scheme hours per week, then adjusted by the active school calendar so weekends, Tanzania public holidays, and headteacher-declared student breaks do not inflate the expected totals.', margin, effortStartY + 5, { maxWidth: pageWidth - 2 * margin });
+        doc.text('Present days = headteacher-approved check-ins only. Expected days = Mon–Fri in the selected window, minus Tanzania public holidays and headteacher-declared closures (same denominator for every teacher). Plans and notes are counted only for this class in this date range.', margin, effortStartY + 5, { maxWidth: pageWidth - 2 * margin });
         doc.autoTable({
           startY: effortStartY + 12,
-          head: [['Teacher', 'Check-ins (present/recorded)', 'Late / Letters', 'Plans / Notes (done/expected)', 'Assessment']],
+          head: [['Teacher', 'Attendance\n(present / expected)', 'Late\nDays', 'Letters', 'Plans\n(done / exp)', 'Notes\n(done / exp)', 'Assessment']],
           body: effortRows,
           margin: { left: margin, right: margin },
           theme: 'grid',
-          styles: { fontSize: 7.8, cellPadding: 1.8 },
+          styles: { fontSize: 7.5, cellPadding: 1.8 },
           headStyles: { fillColor: [15, 23, 42] },
-          columnStyles: { 0: { cellWidth: 42 }, 1: { cellWidth: 34 }, 2: { cellWidth: 28 }, 3: { cellWidth: 50 } },
+          columnStyles: {
+            0: { cellWidth: 38 },
+            1: { cellWidth: 32, halign: 'center' },
+            2: { cellWidth: 14, halign: 'center' },
+            3: { cellWidth: 18, halign: 'center' },
+            4: { cellWidth: 24, halign: 'center' },
+            5: { cellWidth: 24, halign: 'center' }
+          },
           didParseCell: function (data) {
-            if (data.section === 'body' && data.column.index === 4) {
-              const raw = String(data.cell.raw || '');
-              if (raw.includes('Low') || raw.includes('No records') || raw.includes('Scheme')) {
-                data.cell.styles.textColor = [185, 28, 28];
-                data.cell.styles.fontStyle = 'bold';
-              } else if (raw === 'OK') {
-                data.cell.styles.textColor = [22, 101, 52];
-                data.cell.styles.fontStyle = 'bold';
+            if (data.section === 'body') {
+              if (data.column.index === 3) {
+                // Letters column — amber if 3–5, red if > 5
+                const count = parseInt(String(data.cell.raw || '').split('\n')[0], 10) || 0;
+                if (count > 5) { data.cell.styles.fillColor = [254, 226, 226]; data.cell.styles.textColor = [185, 28, 28]; data.cell.styles.fontStyle = 'bold'; }
+                else if (count >= 3) { data.cell.styles.fillColor = [255, 247, 237]; data.cell.styles.textColor = [180, 83, 9]; }
+              }
+              if (data.column.index === 1) {
+                // Attendance column — red if < 80%
+                const raw = String(data.cell.raw || '');
+                const m = raw.match(/\((\d+)%\)/);
+                if (m && Number(m[1]) < 80) { data.cell.styles.fillColor = [254, 226, 226]; data.cell.styles.textColor = [185, 28, 28]; }
+                else if (m && Number(m[1]) >= 95) { data.cell.styles.fillColor = [220, 252, 231]; data.cell.styles.textColor = [22, 101, 52]; }
+              }
+              if (data.column.index === 6) {
+                const raw = String(data.cell.raw || '');
+                if (raw.includes('Low') || raw.includes('No records') || raw.includes('No scheme') || raw.includes('Frequent')) {
+                  data.cell.styles.textColor = [185, 28, 28]; data.cell.styles.fontStyle = 'bold';
+                } else if (raw === 'OK') {
+                  data.cell.styles.textColor = [22, 101, 52]; data.cell.styles.fontStyle = 'bold';
+                }
               }
             }
           }
         });
-        // Per-teacher detail paragraphs
+        // ── Per-teacher detail section ────────────────────────────────────────
+        // One compact paragraph per teacher (attendance overview + punctuality note),
+        // followed by a concise subject-by-subject preparation line.
+        // Duplicate subject entries (SCIENCE vs Science → same canonical) are merged.
         let detailY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 6 : effortStartY + 60;
-        Object.entries(effortData).forEach(([name, data]) => {
-          const attPct = Number(data.totalDays || 0) > 0 ? Math.round((data.presentDays / data.totalDays) * 100) : null;
-          const exp = data.expectedLessonPlans;
-          const planPct = exp !== null && exp > 0 ? Math.round(((data.lessonPlanCount || 0) / exp) * 100) : null;
-          const subjects = (data.subjects || []).join(', ') || 'subject not mapped';
-          let detail = name + ' (' + subjects + '): ';
-          if (attPct !== null) {
-            detail += 'Checked in ' + data.presentDays + ' of ' + data.totalDays + ' recorded days (' + attPct + '%). ';
-            if (Number(data.lateDays || 0) > 0) {
-              detail += '' + data.lateDays + ' late arrival(s) and ' + (data.explanationLetters || 0) + ' explanation letter(s) were recorded. ';
-            } else {
-              detail += 'No late arrivals recorded. ';
-            }
-          } else {
-            detail += 'No check-in records found in this date window. ';
-          }
-          if (exp !== null) {
-            detail += 'Prepared ' + (data.lessonPlanCount || 0) + ' lesson plan(s) and ' + (data.lessonNoteCount || 0) + ' lesson note(s) against an expected ' + exp + ' preparation cycle(s) from scheme hours per week and the filtered teaching window. ';
-            if (planPct !== null && planPct < 60) {
-              detail += 'Plan coverage is ' + planPct + '% and this low preparation trend should be reviewed because weak planning usually affects classroom preparation, continuity, and learner performance.';
-            } else if (planPct !== null) {
-              detail += 'Plan coverage is ' + planPct + '% and the subject-by-subject notes below give the fuller preparation picture for this window.';
-            }
-          } else {
-            detail += 'Lesson plan count: ' + (data.lessonPlanCount || 0) + '. Lesson note count: ' + (data.lessonNoteCount || 0) + '. Scheme hours per week were not found, so expected preparation totals could not be computed yet.';
-          }
-          if (detailY + 14 > pageHeight - 18) { doc.addPage(); detailY = pdfPageHeader(doc, assets, 'Teacher Effect — Detail (cont.)', '', [15, 23, 42]); }
-          doc.setFontSize(7.8);
-          doc.setTextColor(15, 23, 42);
-          const lines = doc.splitTextToSize(detail, pageWidth - 2 * margin);
-          doc.text(lines, margin, detailY);
-          detailY += lines.length * 4.2 + 3;
-        });
-        const subjectDetailTitleY = detailY + 2;
-        if (subjectDetailTitleY + 12 > pageHeight - 18) { doc.addPage(); detailY = pdfPageHeader(doc, assets, 'Teacher Effect - Detail (cont.)', '', [15, 23, 42]); }
+        if (detailY + 12 > pageHeight - 18) { doc.addPage(); detailY = pdfPageHeader(doc, assets, 'Teacher Effect — Detail', '', [15, 23, 42]); }
         doc.setFontSize(9);
         doc.setTextColor(15, 23, 42);
-        doc.text('Subject-by-subject preparation review', margin, detailY + 2);
-        detailY += 8;
+        doc.text('Teacher Attendance and Preparation — Detail', margin, detailY);
+        detailY += 7;
+
+        // Small phrase pools so consecutive teachers read differently
+        const ATT_OPENERS = [
+          (n, p, t, pct) => n + ' was confirmed present on ' + p + ' of ' + t + ' expected working days (' + pct + '%).',
+          (n, p, t, pct) => 'Attendance records place ' + n + ' at ' + p + ' approved check-in days out of ' + t + ' scheduled (' + pct + '%).',
+          (n, p, t, pct) => 'Over this reporting window, ' + n + ' clocked in on ' + p + ' of ' + t + ' working days — a ' + pct + '% attendance rate.',
+          (n, p, t, pct) => n + ' accumulated ' + p + ' headteacher-approved check-ins against ' + t + ' calendar working days (' + pct + '%).',
+          (n, p, t, pct) => 'For the selected period, ' + n + ' logged ' + p + ' present days out of an expected ' + t + ' (' + pct + '%).',
+        ];
+        const LATE_PHRASES = [
+          (l, lt) => 'Punctuality: ' + l + ' late arrival' + (l !== 1 ? 's' : '') + ', ' + lt + ' explanation letter' + (lt !== 1 ? 's' : '') + ' filed.',
+          (l, lt) => l + ' instance' + (l !== 1 ? 's' : '') + ' of late check-in recorded; ' + lt + ' written explanation' + (lt !== 1 ? 's' : '') + ' submitted.',
+          (l, lt) => 'Late log: ' + l + ' occurrence' + (l !== 1 ? 's' : '') + ', ' + lt + ' supporting letter' + (lt !== 1 ? 's' : '') + '.',
+          (l, lt) => 'Came late ' + l + ' time' + (l !== 1 ? 's' : '') + ' this window; ' + lt + ' reason letter' + (lt !== 1 ? 's' : '') + ' on file.',
+        ];
+        function nameHash(s) { let h = 0; for (let i = 0; i < s.length; i++) h = ((h * 31) + s.charCodeAt(i)) & 0xffff; return h; }
+
+        let teacherIdx = 0;
         Object.entries(effortData).forEach(([name, data]) => {
-          const attPct = Number(data.totalDays || 0) > 0 ? Math.round((data.presentDays / data.totalDays) * 100) : null;
-          const buckets = Object.values(data.subjectBreakdown || {});
-          const detailBuckets = buckets.length ? buckets : [{
-            subject: (data.subjects || []).join(', ') || 'subject not mapped',
+          const totalExp = Number(data.totalDays || 0);
+          const present  = Number(data.presentDays || 0);
+          const attPct   = totalExp > 0 ? Math.round((present / totalExp) * 100) : null;
+          const late     = Number(data.lateDays || 0);
+          const letters  = Number(data.explanationLetters || 0);
+          const h        = nameHash(name);
+
+          // ── Attendance sentence ──
+          let detail;
+          if (attPct !== null) {
+            detail = ATT_OPENERS[(teacherIdx + Math.floor(h / 1000)) % ATT_OPENERS.length](name, present, totalExp, attPct) + ' ';
+          } else {
+            detail = name + ': No approved check-in records were found for this teacher in the selected window. ';
+          }
+
+          // ── Punctuality sentence ──
+          if (late > 0) {
+            detail += LATE_PHRASES[(teacherIdx + (h % 4)) % LATE_PHRASES.length](late, letters) + ' ';
+            if (letters > 5) {
+              detail += 'A total of ' + letters + ' explanation letters in one reporting window goes beyond occasional lapses — this level of habitual lateness warrants a direct conversation rather than continued paperwork. ';
+            }
+          } else {
+            detail += 'No late arrivals recorded; punctuality was maintained throughout the window. ';
+          }
+
+          // ── Subject preparation lines (deduplicated by canonical name) ──
+          const buckets    = Object.values(data.subjectBreakdown || {});
+          const rawBuckets = buckets.length ? buckets : [{
+            subject: (data.subjects || []).join(', ') || 'not mapped',
             hoursPerWeek: data.periodsPerWeek || 0,
             expectedLessonPlans: data.expectedLessonPlans,
             expectedLessonNotes: data.expectedLessonNotes,
             lessonPlanCount: data.lessonPlanCount || 0,
             lessonNoteCount: data.lessonNoteCount || 0
           }];
-          detailBuckets.forEach((bucket) => {
-            const planExp = bucket.expectedLessonPlans;
-            const noteExp = bucket.expectedLessonNotes;
-            const planPct = planExp !== null && planExp > 0 ? Math.round((Number(bucket.lessonPlanCount || 0) / planExp) * 100) : null;
-            const notePct = noteExp !== null && noteExp > 0 ? Math.round((Number(bucket.lessonNoteCount || 0) / noteExp) * 100) : null;
-            const prepPctCandidates = [planPct, notePct].filter((value) => value !== null);
-            const prepPct = prepPctCandidates.length ? Math.min.apply(null, prepPctCandidates) : null;
-            let detail = name + ' (' + bucket.subject + '): ';
-            if (attPct !== null) {
-              detail += 'Within the selected reporting window, this teacher checked in on ' + data.presentDays + ' of ' + data.totalDays + ' recorded worker-attendance days, giving an attendance rate of ' + attPct + '%. ';
-            } else {
-              detail += 'No worker check-in records were found for this teacher inside the selected reporting window, so the attendance side of this review remains incomplete until matching attendance entries are available. ';
-            }
-            detail += 'The attendance file also shows ' + Number(data.lateDays || 0) + ' late arrival(s) and ' + Number(data.explanationLetters || 0) + ' explanation letter(s), counting written reasons captured during late check-in or reason-based check-out workflows. ';
+          const seenSubjectKeys = new Set();
+          const uniqueBuckets   = rawBuckets.filter((b) => {
+            const k = String(b.subject || '').trim().toUpperCase();
+            if (seenSubjectKeys.has(k)) return false;
+            seenSubjectKeys.add(k);
+            return true;
+          });
+
+          const subjectLines = uniqueBuckets.map((b) => {
+            const planExp = b.expectedLessonPlans;
+            const noteExp = b.expectedLessonNotes;
+            const plans   = Number(b.lessonPlanCount || 0);
+            const notes   = Number(b.lessonNoteCount || 0);
+            const planPct = planExp !== null && planExp > 0 ? Math.round((plans / planExp) * 100) : null;
+            let line = '  • ' + b.subject + ': ';
             if (planExp !== null || noteExp !== null) {
-              detail += 'For ' + bucket.subject + ', the active scheme of work shows ' + Number(bucket.hoursPerWeek || 0) + ' teaching period(s) per week. After removing weekends and student non-teaching days from the school calendar, this report window carries approximately ' + (data.teachingWeeks || 0).toFixed(1) + ' teaching week-equivalents. ';
-              detail += 'That produces an expected preparation load of ' + String(planExp !== null ? planExp : 0) + ' lesson plan(s) and ' + String(noteExp !== null ? noteExp : 0) + ' lesson note(s). ';
-              detail += 'The teacher completed ' + Number(bucket.lessonPlanCount || 0) + ' lesson plan(s) and ' + Number(bucket.lessonNoteCount || 0) + ' lesson note(s) for this subject';
-              if (prepPct !== null) {
-                detail += ', which places the weakest preparation coverage at about ' + prepPct + '%. ';
-                detail += prepPct < 60
-                  ? 'This is below the expected preparation standard and should be discussed in the academic meeting because weak planning and weak lesson-note documentation usually reduce classroom readiness, continuity, and follow-up quality.'
-                  : 'This level of preparation is acceptable for the current window and suggests the teacher is maintaining the expected planning and documentation rhythm for classroom delivery.';
-              } else {
-                detail += '. ';
+              line += plans + ' plan' + (plans !== 1 ? 's' : '') + ' / ' + String(planExp !== null ? planExp : '?') + ' expected';
+              line += '; ' + notes + ' note' + (notes !== 1 ? 's' : '') + ' / ' + String(noteExp !== null ? noteExp : '?') + ' expected';
+              if (planPct !== null) {
+                line += ' (' + planPct + '% plan coverage';
+                line += planPct < 60 ? ' — below standard)' : ' — acceptable)';
               }
             } else {
-              detail += 'Lesson plans and lesson notes have still been counted, but no usable scheme hours per week were found for this subject, so the report cannot yet calculate the expected preparation volume with confidence. ';
-              detail += 'That should be corrected by ensuring the teacher has a saved scheme of work for this class and subject in the selected academic year.';
+              line += plans + ' plan' + (plans !== 1 ? 's' : '') + ', ' + notes + ' note' + (notes !== 1 ? 's' : '') + ' filed. No scheme of work on record — expected totals cannot be computed until one is saved for this class and year.';
             }
-            if (detailY + 18 > pageHeight - 18) { doc.addPage(); detailY = pdfPageHeader(doc, assets, 'Teacher Effect - Detail (cont.)', '', [15, 23, 42]); }
-            doc.setFontSize(7.8);
-            doc.setTextColor(15, 23, 42);
-            const subjectLines = doc.splitTextToSize(detail, pageWidth - 2 * margin);
-            doc.text(subjectLines, margin, detailY);
-            detailY += subjectLines.length * 4.2 + 3;
+            return line;
           });
+          detail += subjectLines.join(' ');
+
+          if (detailY + 18 > pageHeight - 18) { doc.addPage(); detailY = pdfPageHeader(doc, assets, 'Teacher Effect — Detail (cont.)', '', [15, 23, 42]); }
+          doc.setFontSize(7.8);
+          doc.setTextColor(15, 23, 42);
+          const wrapped = doc.splitTextToSize(detail, pageWidth - 2 * margin);
+          doc.text(wrapped, margin, detailY);
+          detailY += wrapped.length * 4.2 + 4;
+          teacherIdx++;
         });
       } else {
         const noteY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : y + 130;
