@@ -1531,8 +1531,8 @@
         const fee = feesMap[adm] || { required: student.feeDue || 0, paid: student.feePaid || 0, balance: student.balance || 0, debtStatus: student.balance > 0 ? 'In Debt' : 'Cleared' };
         const subjectMap = {};
         subjectRows.forEach((row) => { subjectMap[row.subject] = row; });
-        const bestSubject = subjectRows.slice().sort((a, b) => b.pct - a.pct)[0] || null;
-        const weakestSubject = subjectRows.slice().sort((a, b) => a.pct - b.pct)[0] || null;
+        const bestSubject = subjectRows.filter((r) => Number(r.pct || 0) > 0).slice().sort((a, b) => b.pct - a.pct)[0] || null;
+        const weakestSubject = subjectRows.filter((r) => Number(r.pct || 0) > 0).slice().sort((a, b) => a.pct - b.pct)[0] || null;
         return {
           ...student,
           attendance,
@@ -1574,25 +1574,37 @@
 
     function buildSubjectStats(students, subjectList, className) {
       return (subjectList || []).map((subject) => {
-        const rows = (students || []).map((student) => ({ student, subjectRow: student.subjectMap && student.subjectMap[subject] })).filter((item) => item.subjectRow);
+        // Only count students where the exam actually had a max score set for this subject
+        const allRows = (students || []).map((student) => ({ student, subjectRow: student.subjectMap && student.subjectMap[subject] })).filter((item) => item.subjectRow && Number(item.subjectRow.max || 0) > 0);
+        // Only count students who actually sat the exam (scored > 0) for averages, best, weakest
+        const attemptedRows = allRows.filter((item) => Number(item.subjectRow.pct || 0) > 0);
+        const notAttempted = allRows.length === 0;
         const gradeCounts = { A: 0, B: 0, C: 0, D: 0, F: 0 };
-        rows.forEach((item) => { gradeCounts[gradeFromPercent(item.subjectRow.pct)] += 1; });
+        allRows.forEach((item) => {
+          const g = gradeFromPercent(item.subjectRow.pct);
+          if (gradeCounts[g] !== undefined) gradeCounts[g] += 1;
+        });
         return {
           subject,
           teacher: resolveTeacherForSubject(className, subject),
-          avgPct: mean(rows.map((item) => item.subjectRow.pct)),
-          trendDelta: mean(rows.map((item) => item.subjectRow.trend)),
+          avgPct: attemptedRows.length ? mean(attemptedRows.map((item) => item.subjectRow.pct)) : 0,
+          trendDelta: allRows.length ? mean(allRows.map((item) => item.subjectRow.trend)) : 0,
           gradeCounts,
-          attentionCount: rows.filter((item) => Number(item.subjectRow.pct || 0) < 40.5).length,
-          best: rows.slice().sort((a, b) => b.subjectRow.pct - a.subjectRow.pct)[0] || null,
-          low: rows.slice().sort((a, b) => a.subjectRow.pct - b.subjectRow.pct)[0] || null
+          attentionCount: attemptedRows.filter((item) => Number(item.subjectRow.pct || 0) < 40.5).length,
+          best: attemptedRows.length ? attemptedRows.slice().sort((a, b) => b.subjectRow.pct - a.subjectRow.pct)[0] : null,
+          low: attemptedRows.length ? attemptedRows.slice().sort((a, b) => a.subjectRow.pct - b.subjectRow.pct)[0] : null,
+          notAttempted
         };
-      }).sort((a, b) => Number(a.avgPct || 0) - Number(b.avgPct || 0));
+      }).sort((a, b) => {
+        if (a.notAttempted && !b.notAttempted) return 1;
+        if (!a.notAttempted && b.notAttempted) return -1;
+        return Number(a.avgPct || 0) - Number(b.avgPct || 0);
+      });
     }
 
     function buildTeacherInsights(subjectStats) {
       const map = new Map();
-      (subjectStats || []).forEach((row) => {
+      (subjectStats || []).filter((row) => !row.notAttempted && Number(row.avgPct || 0) > 0).forEach((row) => {
         const name = row.teacher || 'Teacher not mapped';
         if (!map.has(name)) map.set(name, { teacher: name, subjects: [], avgValues: [], trends: [], attention: 0 });
         const group = map.get(name);
@@ -1699,8 +1711,8 @@
         clearedPct,
         gradeCounts: countOverallGrades(students),
         classTrend: timeline.length >= 2 ? Number(timeline[timeline.length - 1].average || 0) - Number(timeline[0].average || 0) : 0,
-        bestSubject: subjectStats.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0))[0] || null,
-        subjectRisks: subjectStats.filter((item) => Number(item.avgPct || 0) < 50).slice(0, 4),
+        bestSubject: subjectStats.filter((item) => !item.notAttempted && Number(item.avgPct || 0) > 0).sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0))[0] || null,
+        subjectRisks: subjectStats.filter((item) => !item.notAttempted && Number(item.avgPct || 0) > 0 && Number(item.avgPct || 0) < 50).slice(0, 4),
         bestTeacher: teacherInsights.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0))[0] || null,
         teacherWeakness: teacherInsights.slice().sort((a, b) => Number(a.avgPct || 0) - Number(b.avgPct || 0))[0] || null,
         topImprover: watchlists.topImprovers[0] || null,
@@ -2116,24 +2128,28 @@
     function pdfPageHeader(doc, assets, title, subtitle, accent) {
       const pageWidth = doc.internal.pageSize.getWidth();
       doc.setFillColor(248, 250, 252);
-      doc.rect(0, 0, pageWidth, 24, 'F');
+      doc.rect(0, 0, pageWidth, 26, 'F');
       doc.setDrawColor(226, 232, 240);
-      doc.line(12, 24, pageWidth - 12, 24);
-      if (assets.logoDataUrl) {
-        doc.addImage(assets.logoDataUrl, imageFormatFromDataUrl(assets.logoDataUrl), 12, 5, 12, 12);
+      doc.line(12, 26, pageWidth - 12, 26);
+      // Small round teacher avatar (teacher photo if available, else school logo)
+      const avatarImg = assets.teacherDataUrl || assets.logoDataUrl;
+      if (avatarImg) {
+        doc.setFillColor(226, 232, 240);
+        doc.circle(19, 13, 8, 'F');
+        doc.addImage(avatarImg, imageFormatFromDataUrl(avatarImg), 11, 5, 16, 16);
       }
       doc.setTextColor(15, 23, 42);
-      doc.setFontSize(15);
-      doc.text(title, 28, 11);
-      doc.setFontSize(9);
+      doc.setFontSize(13);
+      doc.text(title, 32, 11);
+      doc.setFontSize(8.5);
       doc.setTextColor(71, 85, 105);
-      doc.text(subtitle, 28, 17);
+      doc.text(subtitle, 32, 18);
       doc.setFillColor.apply(doc, accent || [15, 118, 110]);
-      doc.roundedRect(pageWidth - 48, 6, 36, 10, 3, 3, 'F');
+      doc.roundedRect(pageWidth - 52, 7, 40, 10, 3, 3, 'F');
       doc.setTextColor(255, 255, 255);
-      doc.setFontSize(8);
-      doc.text(String(state.filters.className || 'Class').slice(0, 24), pageWidth - 46, 12.3);
-      return 30;
+      doc.setFontSize(7.5);
+      doc.text(String(state.filters.className || 'Class').slice(0, 28), pageWidth - 50, 13.5);
+      return 32;
     }
 
     function pdfFooter(doc) {
@@ -2279,6 +2295,69 @@
       doc.text(options.title || 'Profile', x + 3, y + 5);
     }
 
+    function drawVerticalBarChart(doc, x, y, w, h, bars, options) {
+      const list = Array.isArray(bars) ? bars : [];
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(203, 213, 225);
+      doc.rect(x, y, w, h);
+      if (!list.length) {
+        doc.setFontSize(8);
+        doc.setTextColor(100, 116, 139);
+        doc.text('No chart data', x + 4, y + h / 2);
+        return;
+      }
+      const max = Math.max(...list.map((item) => Number(item.value || 0)), 1);
+      const titleH = 9;
+      const labelH = 14;
+      const chartH = h - titleH - labelH - 4;
+      const chartY = y + titleH + 2;
+      const chartXstart = x + 14;
+      const chartW = w - 20;
+      const barCount = list.length;
+      const slotW = chartW / barCount;
+      const barW = Math.min(slotW * 0.65, 24);
+      // Y-axis gridlines
+      for (let i = 0; i <= 4; i += 1) {
+        const gy = chartY + (chartH * i / 4);
+        doc.setDrawColor(220, 228, 240);
+        doc.setLineWidth(0.2);
+        doc.line(chartXstart, gy, chartXstart + chartW, gy);
+        doc.setFontSize(6);
+        doc.setTextColor(120, 130, 150);
+        const gridVal = Math.round(max * (1 - i / 4));
+        doc.text(String(gridVal), x + 1, gy + 1.5, { align: 'left' });
+      }
+      list.forEach((item, index) => {
+        const value = Number(item.value || 0);
+        const barH = value > 0 ? Math.max(1, (value / max) * chartH) : 0;
+        const bx = chartXstart + index * slotW + (slotW - barW) / 2;
+        const barTop = chartY + chartH - barH;
+        // Background track
+        doc.setFillColor(237, 242, 248);
+        doc.roundedRect(bx, chartY, barW, chartH, 2, 2, 'F');
+        // Filled bar
+        if (barH > 0) {
+          doc.setFillColor.apply(doc, options.barColor || [15, 118, 110]);
+          doc.roundedRect(bx, barTop, barW, barH, 2, 2, 'F');
+        }
+        // Value label
+        const valStr = options.valueFormatter ? options.valueFormatter(value) : String(Math.round(value));
+        doc.setFontSize(6.5);
+        doc.setTextColor(15, 23, 42);
+        const valY = barH > 6 ? barTop + 5 : chartY - 2;
+        doc.text(valStr, bx + barW / 2, valY, { align: 'center' });
+        // X label
+        const rawLabel = String(item.label || '').slice(0, 14);
+        const labelLines = doc.splitTextToSize(rawLabel, slotW + 2);
+        doc.setFontSize(6.5);
+        doc.setTextColor(71, 85, 105);
+        doc.text(labelLines.slice(0, 2), bx + barW / 2, chartY + chartH + 5, { align: 'center' });
+      });
+      doc.setFontSize(8);
+      doc.setTextColor(15, 23, 42);
+      doc.text(options.title || 'Chart', x + 3, y + 7);
+    }
+
     function buildExecutiveParagraphs(analysis, assignment) {
       const summary = analysis.summary;
       const teacherName = assignment && assignment.classTeacher && assignment.classTeacher.name ? assignment.classTeacher.name : 'the class teacher';
@@ -2293,8 +2372,9 @@
 
     function buildPerformanceParagraphs(analysis) {
       const summary = analysis.summary;
-      const topStudent = analysis.students[0];
-      const lowStudent = analysis.students.slice().sort((a, b) => Number(a.overallPct || 0) - Number(b.overallPct || 0))[0];
+      const scoredStudents = analysis.students.filter((s) => Number(s.overallPct || 0) > 0 && Number(s.attemptedCount || 0) > 0);
+      const topStudent = scoredStudents[0];
+      const lowStudent = scoredStudents.slice().sort((a, b) => Number(a.overallPct || 0) - Number(b.overallPct || 0))[0];
       const topImprover = summary.watchlists.topImprovers[0];
       const gradeMix = ['A', 'B', 'C', 'D', 'F'].map((grade) => grade + ': ' + Number(summary.gradeCounts && summary.gradeCounts[grade] || 0)).join(', ');
       return [
@@ -2306,13 +2386,18 @@
     }
 
     function buildSubjectParagraphs(analysis) {
-      const best = analysis.subjectStats.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0))[0];
-      const weakest = analysis.subjectStats[0];
-      const unmapped = analysis.subjectStats.filter((row) => row.teacher === 'Teacher not mapped').length;
+      const activeSubjects = analysis.subjectStats.filter((row) => !row.notAttempted && Number(row.avgPct || 0) > 0);
+      const notAttemptedSubjects = analysis.subjectStats.filter((row) => row.notAttempted);
+      const best = activeSubjects.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0))[0];
+      const weakest = activeSubjects.slice().sort((a, b) => Number(a.avgPct || 0) - Number(b.avgPct || 0))[0];
+      const unmapped = activeSubjects.filter((row) => row.teacher === 'Teacher not mapped').length;
+      const notAttemptedNote = notAttemptedSubjects.length > 0
+        ? ' The following subjects had no exam scores recorded in this window and are excluded from averages: ' + notAttemptedSubjects.map((s) => s.subject).join(', ') + '. This does not mean these subjects are not taught; it means the exam records for those subjects were not captured or saved inside the selected date window.'
+        : '';
       return [
-        'Subject analysis is where the class engine becomes visible. ' + (best ? best.subject + ' is the highest-performing subject at ' + formatPercent(best.avgPct) + '.' : 'No best subject was found.') + ' ' + (weakest ? weakest.subject + ' is the lowest-performing subject at ' + formatPercent(weakest.avgPct) + '.' : ''),
-        'The table that follows is arranged to show average, trend direction, grade spread, learners needing attention, and the best and weakest learner per subject. This helps the academic meeting move from observation to action at subject level.',
-        unmapped > 0 ? ('There are ' + unmapped + ' subject blocks without teacher mapping. This weakens accountability in the report and should be corrected in the teacher setup records.') : 'All subjects in this report have a mapped teacher, which strengthens accountability.'
+        'Subject analysis is where the class engine becomes visible. ' + (best ? best.subject + ' is the highest-performing subject at ' + formatPercent(best.avgPct) + '.' : 'No best subject was found.') + ' ' + (weakest && weakest.subject !== (best && best.subject) ? weakest.subject + ' is the lowest-performing active subject at ' + formatPercent(weakest.avgPct) + '.' : '') + notAttemptedNote,
+        'The table that follows is arranged to show average, trend direction, grade spread, learners needing attention, and the best and weakest learner per subject. Subjects with no recorded exam scores are listed separately below the table. Only subjects with actual scores above zero are included in subject averages and class rankings.',
+        unmapped > 0 ? ('There are ' + unmapped + ' subject block(s) without teacher mapping in the active subjects. This weakens accountability in the report and should be corrected in the teacher setup records.') : 'All active subjects in this report have a mapped teacher, which strengthens accountability.'
       ];
     }
 
@@ -2436,7 +2521,7 @@
           record.examLabel || '-',
           String(Object.keys(record.data || {}).length),
           formatPercent(mean(examAverages)),
-          Object.keys(Object.values(record.data || {})[0] || {}).slice(0, 4).join(', ') || '-'
+          Array.from(new Set(Object.values(record.data || {}).flatMap((sm) => Object.keys(sm || {})))).join(', ') || '-'
         ];
       });
 
@@ -2485,17 +2570,6 @@
       doc.addPage();
       y = pdfPageHeader(doc, assets, 'Class Leadership and Movement', 'Ownership, learner movement, and continuity risk', [124, 58, 237]);
       y = pdfTextBlock(doc, margin, y, 182, 'Leadership Reading', buildLeadershipParagraphs(analysis, assignment));
-      if (assets.teacherDataUrl) {
-        doc.setFillColor(255, 255, 255);
-        doc.setDrawColor(226, 232, 240);
-        doc.roundedRect(140, y - 8, 48, 42, 4, 4, 'FD');
-        doc.addImage(assets.teacherDataUrl, imageFormatFromDataUrl(assets.teacherDataUrl), 144, y - 4, 18, 18);
-        doc.setTextColor(15, 23, 42);
-        doc.setFontSize(8);
-        doc.text('Class Teacher Photo', 166, y + 2);
-        doc.setFontSize(9);
-        doc.text(doc.splitTextToSize(assignment && assignment.classTeacher && assignment.classTeacher.name ? assignment.classTeacher.name : 'Not assigned', 20), 166, y + 8);
-      }
       doc.autoTable({
         startY: y + 4,
         head: [['Role', 'Name', 'Phone']],
@@ -2516,8 +2590,12 @@
       });
       doc.autoTable({
         startY: Math.max(doc.lastAutoTable.finalY || y, 160),
-        head: [['Shift / Follow-up Note', 'Contact / Learner']],
-        body: (summary.shiftReports || []).length ? (summary.shiftReports || []).slice(0, 8).map((entry) => ([entry.status || 'Alert', entry.parentContact || entry.parentName || entry.studentName || '-'])) : [['No shift follow-up record captured in this range', '-']],
+        head: [['Status', 'Learner / Parent Name', 'Contact']],
+        body: (summary.shiftReports || []).length ? (summary.shiftReports || []).slice(0, 12).map((entry) => ([
+          entry.status || 'Alert',
+          [entry.studentName || entry.learnerName || entry.name, entry.parentName].filter(Boolean).join(' / ') || '-',
+          entry.parentContact || entry.contact || entry.phone || '-'
+        ])) : [['No shift follow-up record captured in this range', '-', '-']],
         margin: { left: margin, right: margin },
         theme: 'grid',
         styles: { fontSize: 8.1, cellPadding: 2 },
@@ -2527,8 +2605,23 @@
       doc.addPage();
       y = pdfPageHeader(doc, assets, 'Performance Overview', 'How the class moved inside the selected report window', [37, 99, 235]);
       y = pdfTextBlock(doc, margin, y, 182, 'Performance Reading', buildPerformanceParagraphs(analysis));
-      drawLineChart(doc, margin, y + 2, 182, 50, (analysis.timeline || []).map((row) => ({ label: row.monthLabel, value: row.average })), { title: 'Class average by month block', lineColor: [37, 99, 235], pointColor: [15, 118, 110] });
-      drawBarChart(doc, margin, y + 58, 182, 52, gradeBars, { title: 'Overall class grade distribution', barColor: [124, 58, 237], valueFormatter: (value) => String(Math.round(Number(value || 0))) });
+      const scoredTotal = analysis.students.filter((s) => Number(s.attemptedCount || 0) > 0).length || 1;
+      // Line chart: class average per month
+      drawLineChart(doc, margin, y + 2, 182, 48, (analysis.timeline || []).map((row) => ({ label: row.monthLabel, value: row.average })), { title: 'Class average by month block', lineColor: [37, 99, 235], pointColor: [15, 118, 110] });
+      // Grade distribution as vertical columns
+      drawVerticalBarChart(doc, margin, y + 56, 182, 54, gradeBars, { title: 'Overall class grade distribution', barColor: [124, 58, 237], valueFormatter: (value) => String(Math.round(Number(value || 0))) });
+      // Per-grade explanation text
+      const gradeDescs = { 'A Grade': 'Distinction (80%+)', 'B Grade': 'Merit (65–79%)', 'C Grade': 'Average (50–64%)', 'D Grade': 'Below avg (40–49%)', 'F Grade': 'Below threshold (<40%)' };
+      let gradeTextY = y + 116;
+      doc.setFontSize(8);
+      doc.setTextColor(51, 65, 85);
+      gradeBars.forEach((bar) => {
+        const count = Math.round(Number(bar.value || 0));
+        const pctOfClass = Math.round((count / scoredTotal) * 100);
+        const desc = gradeDescs[bar.label] || bar.label;
+        doc.text(bar.label + ': ' + count + ' learner(s) — ' + pctOfClass + '% of class. ' + desc + '.', margin, gradeTextY);
+        gradeTextY += 5;
+      });
 
       doc.addPage();
       y = pdfPageHeader(doc, assets, 'Monthly Timeline and Exam Trend', 'Month blocks, exam count, and average trend notes', [37, 99, 235]);
@@ -2549,37 +2642,72 @@
       doc.addPage();
       y = pdfPageHeader(doc, assets, 'Subject Performance Profile', 'Subject averages, grade spread, and intervention needs', [15, 118, 110]);
       y = pdfTextBlock(doc, margin, y, 182, 'Subject Reading', buildSubjectParagraphs(analysis));
-      drawBarChart(doc, margin, y + 2, 182, 74, analysis.subjectStats.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0)).map((row) => ({ label: row.subject, value: Number(row.avgPct || 0) })), { title: 'Average percent by subject', barColor: [15, 118, 110], valueFormatter: (value) => Number(value || 0).toFixed(1) + '%' });
+      const activeSubjectBars = analysis.subjectStats.filter((row) => !row.notAttempted).slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0)).map((row) => ({ label: row.subject, value: Number(row.avgPct || 0) }));
+      const subChartH = Math.max(52, Math.min(72, 20 + activeSubjectBars.length * 8));
+      drawVerticalBarChart(doc, margin, y + 2, 182, subChartH, activeSubjectBars, { title: 'Average percent by subject (scored subjects only)', barColor: [15, 118, 110], valueFormatter: (value) => Number(value || 0).toFixed(1) + '%' });
+      // Per-subject explanation
+      let subTextY = y + subChartH + 10;
+      doc.setFontSize(8);
+      doc.setTextColor(51, 65, 85);
+      analysis.subjectStats.filter((row) => !row.notAttempted).slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0)).forEach((row) => {
+        const trend = (row.trendDelta >= 0 ? '↑ +' : '↓ ') + row.trendDelta.toFixed(1) + ' pts trend.';
+        const attn = row.attentionCount > 0 ? ' ' + row.attentionCount + ' learner(s) need attention.' : ' All learners are above the attention threshold.';
+        const line = row.subject + ': ' + formatPercent(row.avgPct) + ' avg — teacher: ' + row.teacher + '. ' + trend + attn;
+        const lines = doc.splitTextToSize(line, 182);
+        if (subTextY + lines.length * 4.5 > 270) return;
+        doc.text(lines, margin, subTextY);
+        subTextY += lines.length * 4.5 + 1.5;
+      });
 
       doc.addPage();
       y = pdfPageHeader(doc, assets, 'Subject Detail Table', 'Complete subject table for academic review', [15, 118, 110]);
+      const activeSubjectStats = (analysis.subjectStats || []).filter((row) => !row.notAttempted);
+      const skippedSubjects = (analysis.subjectStats || []).filter((row) => row.notAttempted);
       doc.autoTable({
         startY: y,
-        head: [['Subject', 'Teacher', 'Average', 'Trend', 'A/B/C/D/F', 'Need Attention', 'Best Learner', 'Weakest Learner']],
-        body: (analysis.subjectStats || []).map((row) => ([row.subject, row.teacher, formatPercent(row.avgPct), (row.trendDelta >= 0 ? '+' : '') + row.trendDelta.toFixed(1) + ' pts', ['A', 'B', 'C', 'D', 'F'].map((grade) => row.gradeCounts[grade] || 0).join(' / '), row.attentionCount, row.best ? row.best.student.name + ' | ' + formatPercent(row.best.subjectRow.pct) : '-', row.low ? row.low.student.name + ' | ' + formatPercent(row.low.subjectRow.pct) : '-'])),
+        head: [['Subject', 'Teacher', 'Avg', 'Trend', 'A', 'B', 'C', 'D', 'F', 'Attn', 'Best Learner', 'Weakest Learner']],
+        body: activeSubjectStats.map((row) => ([
+          row.subject,
+          row.teacher,
+          formatPercent(row.avgPct),
+          (row.trendDelta >= 0 ? '+' : '') + row.trendDelta.toFixed(1) + ' pts',
+          String(row.gradeCounts.A || 0),
+          String(row.gradeCounts.B || 0),
+          String(row.gradeCounts.C || 0),
+          String(row.gradeCounts.D || 0),
+          String(row.gradeCounts.F || 0),
+          String(row.attentionCount),
+          row.best ? row.best.student.name + ' | ' + formatPercent(row.best.subjectRow.pct) : '-',
+          row.low ? row.low.student.name + ' | ' + formatPercent(row.low.subjectRow.pct) : '-'
+        ])),
         margin: { left: margin, right: margin },
         theme: 'grid',
-        styles: { fontSize: 7.6, cellPadding: 1.8, overflow: 'linebreak' },
-        headStyles: { fillColor: [15, 118, 110] }
+        styles: { fontSize: 7.0, cellPadding: 1.6, overflow: 'linebreak' },
+        headStyles: { fillColor: [15, 118, 110] },
+        columnStyles: {
+          4: { fillColor: [220, 252, 231], textColor: [22, 101, 52], halign: 'center', fontStyle: 'bold' },
+          5: { fillColor: [219, 234, 254], textColor: [30, 64, 175], halign: 'center', fontStyle: 'bold' },
+          6: { fillColor: [254, 252, 232], textColor: [133, 77, 14], halign: 'center', fontStyle: 'bold' },
+          7: { fillColor: [255, 237, 213], textColor: [154, 52, 18], halign: 'center', fontStyle: 'bold' },
+          8: { fillColor: [254, 226, 226], textColor: [153, 27, 27], halign: 'center', fontStyle: 'bold' },
+          9: { halign: 'center' }
+        }
       });
+      if (skippedSubjects.length > 0) {
+        const skipY = (doc.lastAutoTable.finalY || y) + 7;
+        doc.setFontSize(8.5);
+        doc.setTextColor(180, 83, 9);
+        doc.setFillColor(255, 247, 237);
+        doc.roundedRect(margin, skipY - 4, pageWidth - 2 * margin, 10, 2, 2, 'F');
+        doc.text('Subjects with no exam scores recorded this window (not counted in averages): ' + skippedSubjects.map((s) => s.subject).join(', '), margin + 3, skipY + 2.5, { maxWidth: pageWidth - 2 * margin - 6 });
+      }
 
       doc.addPage();
       y = pdfPageHeader(doc, assets, 'Teacher Effect and Class Leadership', 'Teacher mapping, class leadership, and follow-up burden', [37, 99, 235]);
       y = pdfTextBlock(doc, margin, y, 182, 'Teacher Reading', buildTeacherParagraphs(analysis, assignment));
       drawBarChart(doc, margin, y + 2, 182, 46, teacherBars, { title: 'Average performance by teacher block', barColor: [37, 99, 235], valueFormatter: (value) => Number(value || 0).toFixed(1) + '%' });
-      if (assets.teacherDataUrl) {
-        doc.setFillColor(255, 255, 255);
-        doc.setDrawColor(226, 232, 240);
-        doc.roundedRect(margin, y + 54, 50, 34, 4, 4, 'FD');
-        doc.addImage(assets.teacherDataUrl, imageFormatFromDataUrl(assets.teacherDataUrl), margin + 3, y + 57, 18, 18);
-        doc.setTextColor(15, 23, 42);
-        doc.setFontSize(9);
-        doc.text('Class Teacher', margin + 24, y + 62);
-        doc.setFontSize(10);
-        doc.text(doc.splitTextToSize(assignment && assignment.classTeacher && assignment.classTeacher.name ? assignment.classTeacher.name : 'Not assigned', 24), margin + 24, y + 68);
-      }
       doc.autoTable({
-        startY: y + 92,
+        startY: y + 54,
         head: [['Teacher', 'Subjects', 'Average Block', 'Trend', 'Attention Count', 'Commentary']],
         body: (analysis.teacherInsights || []).map((row) => ([row.teacher, row.subjects.join(', '), formatPercent(row.avgPct), (row.trendDelta >= 0 ? '+' : '') + row.trendDelta.toFixed(1) + ' pts', row.attention, row.attention > 0 ? (row.attention + ' learners are flagged for closer support in this teacher block.') : 'No major attention count in this block.'])),
         margin: { left: margin, right: margin },
