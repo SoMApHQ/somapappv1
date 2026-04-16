@@ -2772,6 +2772,95 @@
       doc.text(options.title || 'Trend', x + 3, y + 5);
     }
 
+    // Palette for multi-series line charts (subjects / learners)
+    const SERIES_COLORS = [
+      [37,  99,  235], // blue
+      [15,  118, 110], // teal
+      [185, 28,  28],  // red
+      [124, 58,  237], // purple
+      [234, 88,  12],  // orange
+      [5,   150, 105], // green
+      [180, 83,  9],   // amber
+      [15,  23,  42],  // dark navy
+      [56,  189, 248], // sky
+      [168, 85,  247]  // violet
+    ];
+
+    // Multi-series line chart — series: [{name, color, points:[number|null]}], labels:[string]
+    function drawMultiLineChart(doc, x, y, w, h, series, labels, options) {
+      const opts = options || {};
+      const labelList = Array.isArray(labels) ? labels : [];
+      const seriesList = (Array.isArray(series) ? series : []).filter((s) => Array.isArray(s.points) && s.points.length);
+
+      doc.setFillColor(248, 250, 252);
+      doc.rect(x, y, w, h, 'F');
+      doc.setDrawColor(203, 213, 225);
+      doc.setLineWidth(0.3);
+      doc.rect(x, y, w, h);
+
+      if (!seriesList.length || !labelList.length) {
+        doc.setFontSize(8); doc.setTextColor(100, 116, 139);
+        doc.text('No chart data', x + 4, y + h / 2); return;
+      }
+      if (opts.title) {
+        doc.setFontSize(8); doc.setTextColor(15, 23, 42);
+        doc.text(opts.title, x + 4, y + 5);
+      }
+      const legendRows  = Math.ceil(seriesList.length / 4);
+      const legendH     = legendRows * 5 + 3;
+      const topPad      = opts.title ? 9 : 4;
+      const leftPad     = 12;
+      const botPad      = 10;
+      const chartH      = h - topPad - botPad - legendH;
+      const chartX      = x + leftPad;
+      const chartW      = w - leftPad - 2;
+      const chartY      = y + topPad;
+      // Grid lines
+      [0, 25, 50, 75, 100].forEach((val) => {
+        const gy = chartY + chartH - (val / 100) * chartH;
+        doc.setDrawColor(226, 232, 240); doc.setLineWidth(0.15);
+        doc.line(chartX, gy, chartX + chartW, gy);
+        doc.setFontSize(6); doc.setTextColor(148, 163, 184);
+        doc.text(String(val), x + 1, gy + 1.5);
+      });
+      // X coords
+      const n = labelList.length;
+      const stepX = n > 1 ? chartW / (n - 1) : 0;
+      const xCoords = labelList.map((_, i) => chartX + i * stepX);
+      // Series lines + dots
+      seriesList.forEach((s, si) => {
+        const color = Array.isArray(s.color) ? s.color : SERIES_COLORS[si % SERIES_COLORS.length];
+        const pts = labelList.map((_, i) => {
+          const val = s.points[i];
+          if (val === null || val === undefined || !Number.isFinite(Number(val))) return null;
+          return { x: xCoords[i], y: chartY + chartH - (Math.max(0, Math.min(100, Number(val))) / 100) * chartH };
+        });
+        doc.setDrawColor(color[0], color[1], color[2]); doc.setLineWidth(0.7);
+        for (let i = 1; i < pts.length; i++) {
+          if (pts[i - 1] && pts[i]) doc.line(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y);
+        }
+        doc.setFillColor(color[0], color[1], color[2]);
+        pts.forEach((p) => { if (p) doc.circle(p.x, p.y, 0.9, 'F'); });
+      });
+      // X labels (truncated, no rotation)
+      xCoords.forEach((lx, i) => {
+        doc.setFontSize(5.5); doc.setTextColor(71, 85, 105);
+        doc.text(String(labelList[i] || '').slice(0, 10), lx - 3, chartY + chartH + 4);
+      });
+      // Legend
+      const legendY0 = y + h - legendH + 2;
+      seriesList.forEach((s, si) => {
+        const color = Array.isArray(s.color) ? s.color : SERIES_COLORS[si % SERIES_COLORS.length];
+        const col = si % 4; const row = Math.floor(si / 4);
+        const lx = x + 4 + col * Math.floor(w / 4);
+        const ly = legendY0 + row * 5;
+        doc.setFillColor(color[0], color[1], color[2]);
+        doc.rect(lx, ly - 2.5, 4, 3, 'F');
+        doc.setFontSize(6); doc.setTextColor(51, 65, 85);
+        doc.text(String(s.name || '').slice(0, 22), lx + 5.5, ly);
+      });
+    }
+
     function drawBarChart(doc, x, y, w, h, bars, options) {
       const list = Array.isArray(bars) ? bars : [];
       doc.setDrawColor(203, 213, 225);
@@ -3122,19 +3211,63 @@
         styles: { fontSize: 8.1, cellPadding: 2 },
         headStyles: { fillColor: [37, 99, 235] }
       });
-      doc.autoTable({
-        startY: Math.max(doc.lastAutoTable.finalY || y, 160),
-        head: [['Status', 'Learner / Parent Name', 'Contact']],
-        body: (summary.shiftReports || []).length ? (summary.shiftReports || []).slice(0, 12).map((entry) => ([
-          entry.status || 'Alert',
-          [entry.studentName || entry.learnerName || entry.name, entry.parentName].filter(Boolean).join(' / ') || '-',
-          entry.parentContact || entry.contact || entry.phone || '-'
-        ])) : [['No shift follow-up record captured in this range', '-', '-']],
-        margin: { left: margin, right: margin },
-        theme: 'grid',
-        styles: { fontSize: 8.1, cellPadding: 2 },
-        headStyles: { fillColor: [180, 83, 9] }
-      });
+      // ── Shifted students detail ──────────────────────────────────────────
+      const shiftList = (summary.shiftReports || []).slice(0, 20);
+      const shiftStartY = Math.max((doc.lastAutoTable && doc.lastAutoTable.finalY) || y, 160);
+      if (shiftList.length > 0) {
+        // Brief narrative
+        const debtShifted = shiftList.filter((e) => Number(e.debtAmount || e.debt || 0) > 0 || String(e.status || '').toLowerCase().includes('debt')).length;
+        const shiftNarrative = shiftList.length + ' learner' + (shiftList.length !== 1 ? 's' : '') + ' left or were flagged as shifted during this reporting window. '
+          + (debtShifted > 0 ? debtShifted + ' departed with outstanding fees — contact records below should be followed up by the finance office. ' : 'No outstanding debt was linked to these departures. ')
+          + 'Reasons and destination schools are recorded where available; blanks indicate the information was not captured at the time of the shift.';
+        const shiftNarLines = doc.splitTextToSize(shiftNarrative, pageWidth - 2 * margin);
+        doc.setFontSize(7.8); doc.setTextColor(71, 85, 105);
+        doc.text(shiftNarLines, margin, shiftStartY);
+        const shiftTableY = shiftStartY + shiftNarLines.length * 4 + 3;
+        doc.autoTable({
+          startY: shiftTableY,
+          head: [['Learner', 'Date Shifted', 'Reason', 'Probable School', 'Debt', 'Contact', 'Status']],
+          body: shiftList.map((entry) => ([
+            entry.studentName || entry.learnerName || entry.name || '-',
+            entry.dateShifted || entry.shiftedAt || entry.flaggedDate || '-',
+            entry.reason || entry.shiftReason || '-',
+            entry.probableSchool || entry.destinationSchool || '-',
+            Number(entry.debtAmount || entry.debt || 0) > 0 ? formatCurrency(Number(entry.debtAmount || entry.debt || 0)) : 'Cleared',
+            entry.parentContact || entry.contact || entry.phone || '-',
+            entry.status || 'Alert'
+          ])),
+          margin: { left: margin, right: margin },
+          theme: 'grid',
+          styles: { fontSize: 7.5, cellPadding: 1.8, overflow: 'linebreak' },
+          headStyles: { fillColor: [180, 83, 9] },
+          columnStyles: { 2: { cellWidth: 34 }, 3: { cellWidth: 28 } },
+          didParseCell: function (data) {
+            if (data.section === 'body' && data.column.index === 6) {
+              const raw = String(data.cell.raw || '').toLowerCase();
+              if (raw.includes('debt') || raw.includes('alert')) {
+                data.cell.styles.textColor = [185, 28, 28]; data.cell.styles.fontStyle = 'bold';
+              } else if (raw === 'shifted') {
+                data.cell.styles.textColor = [22, 101, 52]; data.cell.styles.fontStyle = 'bold';
+              }
+            }
+            if (data.section === 'body' && data.column.index === 4) {
+              if (String(data.cell.raw || '') !== 'Cleared') {
+                data.cell.styles.fillColor = [254, 226, 226]; data.cell.styles.textColor = [185, 28, 28];
+              }
+            }
+          }
+        });
+      } else {
+        doc.autoTable({
+          startY: shiftStartY,
+          head: [['Learner', 'Date Shifted', 'Reason', 'Probable School', 'Debt', 'Contact', 'Status']],
+          body: [['No shift follow-up record captured in this date range', '-', '-', '-', '-', '-', '-']],
+          margin: { left: margin, right: margin },
+          theme: 'grid',
+          styles: { fontSize: 7.8, cellPadding: 2 },
+          headStyles: { fillColor: [180, 83, 9] }
+        });
+      }
 
       doc.addPage();
       y = pdfPageHeader(doc, assets, 'Performance Overview', 'How the class moved inside the selected report window', [37, 99, 235]);
@@ -3172,6 +3305,152 @@
         styles: { fontSize: 8.3, cellPadding: 2 },
         headStyles: { fillColor: [15, 23, 42] }
       });
+
+      // ── Subject performance across every individual exam ─────────────────
+      doc.addPage();
+      y = pdfPageHeader(doc, assets, 'Subject Performance Trend Across Exams', 'Each subject tracked exam-by-exam inside the selected window', [15, 118, 110]);
+
+      const examRecList  = analysis.summary.records || [];
+      // Short exam labels for x-axis (e.g. "Jan Drill", "Feb Monthly")
+      const examXLabels  = examRecList.map((r) => ((r.monthLabel || r.monthKey || '') + ' ' + (r.examLabel || '')).trim().slice(0, 14));
+      const activeSubjNms = (analysis.subjectStats || []).filter((r) => !r.notAttempted && Number(r.avgPct || 0) > 0).map((r) => r.subject);
+      // Per-exam, per-subject class averages
+      const examSubjMatrix = examRecList.map((record) => {
+        const bucket = {};
+        Object.values(record.data || {}).forEach((admSubjects) => {
+          Object.entries(admSubjects || {}).forEach(([sk, raw]) => {
+            const subj = canonicalSubjectName(sk);
+            if (!subj) return;
+            const sc = Number(raw && raw.score || 0);
+            const mx = Number(raw && raw.max   || 0);
+            if (mx <= 0) return;
+            if (!bucket[subj]) bucket[subj] = [];
+            bucket[subj].push((sc / mx) * 100);
+          });
+        });
+        const avgs = {};
+        Object.entries(bucket).forEach(([s, vals]) => { avgs[s] = mean(vals); });
+        return avgs;
+      });
+      const subjectLineSeries = activeSubjNms.map((subj, si) => ({
+        name: subj,
+        color: SERIES_COLORS[si % SERIES_COLORS.length],
+        points: examSubjMatrix.map((avgs) => (avgs[subj] !== undefined ? Number(avgs[subj]) : null))
+      }));
+
+      if (examXLabels.length > 0 && subjectLineSeries.length > 0) {
+        const subChartH2 = Math.max(68, Math.min(95, 50 + subjectLineSeries.length * 3));
+        drawMultiLineChart(doc, margin, y + 2, 182, subChartH2, subjectLineSeries, examXLabels,
+          { title: 'Subject average (%) per exam — ' + examXLabels.length + ' exams plotted' });
+        y += subChartH2 + 10;
+        // Companion table: subjects as rows, exams as columns
+        const subjTblHead = [['Subject', ...examXLabels.map((l) => l.slice(0, 10)), 'Net change']];
+        const subjTblBody = subjectLineSeries.map((s) => {
+          const cells = s.points.map((v) => v !== null ? formatPercent(v) : '-');
+          const valid  = s.points.filter((v) => v !== null);
+          const delta  = valid.length >= 2
+            ? ((valid[valid.length - 1] - valid[0]) >= 0 ? '+' : '') + (valid[valid.length - 1] - valid[0]).toFixed(1) + ' pts'
+            : '-';
+          return [s.name, ...cells, delta];
+        });
+        doc.autoTable({
+          startY: y,
+          head: subjTblHead,
+          body: subjTblBody,
+          margin: { left: margin, right: margin },
+          theme: 'grid',
+          styles: { fontSize: 7.2, cellPadding: 1.6 },
+          headStyles: { fillColor: [15, 118, 110] },
+          didParseCell: function (data) {
+            if (data.section === 'body' && data.column.index === subjTblHead[0].length - 1) {
+              const raw = String(data.cell.raw || '');
+              if (raw.startsWith('+')) { data.cell.styles.textColor = [22, 101, 52]; data.cell.styles.fontStyle = 'bold'; }
+              else if (raw.length > 1 && raw.startsWith('-')) { data.cell.styles.textColor = [185, 28, 28]; data.cell.styles.fontStyle = 'bold'; }
+            }
+          }
+        });
+      } else {
+        doc.setFontSize(8.5); doc.setTextColor(100, 116, 139);
+        doc.text('No scored exam data found for the subject trend chart.', margin, y + 6);
+      }
+
+      // ── Learner performance trends: top 10 and bottom 10 ─────────────────
+      doc.addPage();
+      y = pdfPageHeader(doc, assets, 'Learner Performance Trends', 'Top 10 and bottom 10 tracked across every exam in the window', [37, 99, 235]);
+
+      const examLblsForLearners = examRecList.map((r) => r.examLabel || r.examKey || '');
+      // students are already sorted best→worst
+      const top10    = analysis.students.filter((s) => Number(s.attemptedCount || 0) > 0).slice(0, 10);
+      const bottom10 = analysis.students.filter((s) => Number(s.attemptedCount || 0) > 0).slice(-10).reverse();
+
+      function buildLearnerSeries(studentList) {
+        return studentList.map((s, si) => ({
+          name: (s.name || 'Student').split(' ').slice(0, 2).join(' ').slice(0, 18),
+          color: SERIES_COLORS[si % SERIES_COLORS.length],
+          points: examLblsForLearners.map((label) => {
+            const entry = (s.examSeries || []).find((e) => e.examLabel === label);
+            return entry ? Number(entry.pct || 0) : null;
+          })
+        }));
+      }
+
+      if (examLblsForLearners.length > 0) {
+        const learnerChartH = 72;
+        doc.setFontSize(9); doc.setTextColor(15, 23, 42);
+        doc.text('Top 10 learners — performance across all exams', margin, y + 2);
+        drawMultiLineChart(doc, margin, y + 6, 182, learnerChartH, buildLearnerSeries(top10), examLblsForLearners, { title: '' });
+        y += learnerChartH + 12;
+
+        if (y + learnerChartH + 12 > pageHeight - 18) { doc.addPage(); y = pdfPageHeader(doc, assets, 'Learner Performance Trends (cont.)', '', [37, 99, 235]); }
+        doc.setFontSize(9); doc.setTextColor(15, 23, 42);
+        doc.text('Bottom 10 learners — performance across all exams', margin, y + 2);
+        drawMultiLineChart(doc, margin, y + 6, 182, learnerChartH, buildLearnerSeries(bottom10), examLblsForLearners, { title: '' });
+        y += learnerChartH + 12;
+      } else {
+        doc.setFontSize(8.5); doc.setTextColor(100, 116, 139);
+        doc.text('No exam series data found to plot learner trends.', margin, y + 6);
+        y += 12;
+      }
+      // Companion table: top 10 and bottom 10 averages with rank
+      const learnerRankHead = [['Rank', 'Learner', ...examLblsForLearners.map((l) => l.slice(0, 8)), 'Overall']];
+      const topRankBody = top10.map((s, i) => [
+        String(i + 1),
+        (s.name || '-').slice(0, 22),
+        ...examLblsForLearners.map((label) => {
+          const e = (s.examSeries || []).find((ex) => ex.examLabel === label);
+          return e ? formatPercent(e.pct) : '-';
+        }),
+        formatPercent(s.overallPct)
+      ]);
+      const botRankBody = bottom10.map((s, i) => [
+        String(analysis.students.length - i),
+        (s.name || '-').slice(0, 22),
+        ...examLblsForLearners.map((label) => {
+          const e = (s.examSeries || []).find((ex) => ex.examLabel === label);
+          return e ? formatPercent(e.pct) : '-';
+        }),
+        formatPercent(s.overallPct)
+      ]);
+      if (learnerRankHead[0].length > 2) {
+        doc.autoTable({
+          startY: y,
+          head: [['Top 10 learners', ...new Array(learnerRankHead[0].length - 1).fill('')]],
+          body: topRankBody,
+          margin: { left: margin, right: margin }, theme: 'grid',
+          styles: { fontSize: 7, cellPadding: 1.5 },
+          headStyles: { fillColor: [37, 99, 235] }
+        });
+        y = doc.lastAutoTable.finalY + 6;
+        if (y + 40 > pageHeight - 18) { doc.addPage(); y = pdfPageHeader(doc, assets, 'Learner Performance Trends (cont.)', '', [37, 99, 235]); }
+        doc.autoTable({
+          startY: y,
+          head: [['Bottom 10 learners', ...new Array(learnerRankHead[0].length - 1).fill('')]],
+          body: botRankBody,
+          margin: { left: margin, right: margin }, theme: 'grid',
+          styles: { fontSize: 7, cellPadding: 1.5 },
+          headStyles: { fillColor: [185, 28, 28] }
+        });
+      }
 
       doc.addPage();
       y = pdfPageHeader(doc, assets, 'Subject Performance Profile', 'Subject averages, grade spread, and intervention needs', [15, 118, 110]);
