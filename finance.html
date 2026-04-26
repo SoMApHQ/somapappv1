@@ -2558,7 +2558,7 @@ function buildFinanceStudents(
     const debtorRows = tableRows.filter((r) => r.periodDebtValue > 0);
     const rows = debtorRows.map((r) => [r.admissionNumber, r.fullName, r.parentContact, r.classLevel, r.paymentPlan, r.periodDebtLabel, fmt(r.periodDebtValue)]);
     const totalDebt = debtorRows.reduce((s, r) => s + r.periodDebtValue, 0);
-    return { rows, totalDebt: fmt(totalDebt) };
+    return { rows, totalDebt: fmt(totalDebt), debtorRows, totalDebtValue: totalDebt };
   }
 
   function downloadCSV_DebtNow() {
@@ -2598,10 +2598,120 @@ function buildFinanceStudents(
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation: 'landscape' });
     const header = [['Admission No', 'Full Name', 'Parent Contact', 'Class', 'Plan', 'Debt till …', 'Debt Amount']];
-    const { rows, totalDebt } = _gatherDebtNow();
+    const { rows, totalDebt, debtorRows, totalDebtValue } = _gatherDebtNow();
     const body = [...rows, ['TOTAL', '', '', '', '', '', totalDebt]];
-    doc.setFontSize(14); doc.text('Debt List (Current Period)', 14, 14);
-    doc.autoTable({ head: header, body: body, startY: 20, styles: { fontSize: 8 } });
+    const pageW = doc.internal.pageSize.getWidth();
+    const marginX = 14;
+    const cardGap = 4;
+    const cardW = (pageW - (marginX * 2) - (cardGap * 4)) / 5;
+    const dangerColor = [185, 28, 28];
+    const warnColor = [217, 119, 6];
+    const okColor = [22, 101, 52];
+    const infoColor = [37, 99, 235];
+    const inkColor = [15, 23, 42];
+    const mutedColor = [100, 116, 139];
+
+    const sortedByDebt = [...debtorRows].sort((a, b) => b.periodDebtValue - a.periodDebtValue);
+    const highest = sortedByDebt[0] || null;
+    const lowest = [...debtorRows].sort((a, b) => a.periodDebtValue - b.periodDebtValue)[0] || null;
+    const above100k = debtorRows.filter((r) => r.periodDebtValue > 100000);
+    const classStats = Array.from(debtorRows.reduce((map, r) => {
+      const key = r.classLevel || 'Unassigned';
+      const item = map.get(key) || { className: key, count: 0, total: 0 };
+      item.count += 1;
+      item.total += r.periodDebtValue;
+      map.set(key, item);
+      return map;
+    }, new Map()).values()).sort((a, b) => b.total - a.total || b.count - a.count || a.className.localeCompare(b.className));
+    const mostAffected = classStats[0] || null;
+    const leastAffected = classStats[classStats.length - 1] || null;
+    const maxClassTotal = Math.max(1, ...classStats.map((c) => c.total));
+
+    function smallText(text, x, y, maxW, opts = {}) {
+      const lines = doc.splitTextToSize(String(text || '--'), maxW);
+      doc.text(lines.slice(0, opts.maxLines || 1), x, y);
+    }
+
+    function drawCard(x, y, w, h, title, value, detail, color) {
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(color[0], color[1], color[2]);
+      doc.setLineWidth(0.7);
+      doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7);
+      doc.setTextColor(color[0], color[1], color[2]);
+      smallText(title, x + 3, y + 5, w - 6);
+      doc.setFontSize(11);
+      doc.setTextColor(inkColor[0], inkColor[1], inkColor[2]);
+      smallText(value, x + 3, y + 12, w - 6);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6.5);
+      doc.setTextColor(mutedColor[0], mutedColor[1], mutedColor[2]);
+      smallText(detail, x + 3, y + 18, w - 6, { maxLines: 2 });
+    }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(15);
+    doc.setTextColor(inkColor[0], inkColor[1], inkColor[2]);
+    doc.text('Debt List (Current Period)', marginX, 13);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(mutedColor[0], mutedColor[1], mutedColor[2]);
+    doc.text(`Generated: ${new Date().toLocaleDateString()}   |   Debtors: ${debtorRows.length} students`, marginX, 18);
+
+    const cardY = 24;
+    drawCard(marginX, cardY, cardW, 24, 'Total Current Debt', `Tsh ${fmt(totalDebtValue)}`, `${debtorRows.length} students with debt`, dangerColor);
+    drawCard(marginX + (cardW + cardGap), cardY, cardW, 24, 'Highest Debt Student', highest ? `Tsh ${fmt(highest.periodDebtValue)}` : 'Tsh 0', highest ? `${highest.fullName} | ${highest.classLevel}` : 'No debtors', dangerColor);
+    drawCard(marginX + ((cardW + cardGap) * 2), cardY, cardW, 24, 'Lowest Debt Student', lowest ? `Tsh ${fmt(lowest.periodDebtValue)}` : 'Tsh 0', lowest ? `${lowest.fullName} | ${lowest.classLevel}` : 'No debtors', okColor);
+    drawCard(marginX + ((cardW + cardGap) * 3), cardY, cardW, 24, 'Above Tsh 100,000', `${above100k.length} students`, `Total: Tsh ${fmt(above100k.reduce((s, r) => s + r.periodDebtValue, 0))}`, warnColor);
+    drawCard(marginX + ((cardW + cardGap) * 4), cardY, cardW, 24, 'Class Most Affected', mostAffected ? mostAffected.className : '--', mostAffected ? `${mostAffected.count} students | Tsh ${fmt(mostAffected.total)}` : 'No debtors', infoColor);
+
+    drawCard(marginX, 52, cardW, 22, 'Class Least Affected', leastAffected ? leastAffected.className : '--', leastAffected ? `${leastAffected.count} students | Tsh ${fmt(leastAffected.total)}` : 'No debtors', okColor);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(inkColor[0], inkColor[1], inkColor[2]);
+    doc.text('Debt by Class', marginX + cardW + 8, 57);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(mutedColor[0], mutedColor[1], mutedColor[2]);
+    const barStartX = marginX + cardW + 8;
+    const barMaxW = pageW - barStartX - marginX;
+    const barYStart = 61;
+    classStats.slice(0, 9).forEach((c, i) => {
+      const y = barYStart + (i * 5);
+      const barW = Math.max(4, (c.total / maxClassTotal) * (barMaxW - 62));
+      const color = i === 0 ? dangerColor : (i === classStats.length - 1 ? okColor : infoColor);
+      doc.setTextColor(inkColor[0], inkColor[1], inkColor[2]);
+      smallText(c.className, barStartX, y + 2.6, 38);
+      doc.setFillColor(color[0], color[1], color[2]);
+      doc.roundedRect(barStartX + 42, y, barW, 3, 1, 1, 'F');
+      doc.setTextColor(mutedColor[0], mutedColor[1], mutedColor[2]);
+      doc.text(`${c.count} kids | Tsh ${fmt(c.total)}`, barStartX + 45 + barW, y + 2.8);
+    });
+
+    doc.autoTable({
+      head: header,
+      body: body,
+      startY: Math.max(84, barYStart + (Math.min(classStats.length, 9) * 5) + 6),
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: dangerColor, textColor: 255 },
+      columnStyles: { 6: { halign: 'right', fontStyle: 'bold' } },
+      didParseCell: function(data) {
+        if (data.section === 'body' && data.column.index === 6) {
+          const raw = String(data.cell.raw || '').replace(/[^\d.-]/g, '');
+          const value = Number(raw) || 0;
+          if (value > 100000) {
+            data.cell.styles.textColor = dangerColor;
+            data.cell.styles.fillColor = [254, 242, 242];
+          }
+        }
+        if (data.section === 'body' && data.row.raw && data.row.raw[0] === 'TOTAL') {
+          data.cell.styles.fontStyle = 'bold';
+          data.cell.styles.fillColor = [241, 245, 249];
+        }
+      }
+    });
     doc.save(`debt_now_${Date.now()}.pdf`);
   }
 
