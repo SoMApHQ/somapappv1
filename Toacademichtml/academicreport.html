@@ -408,6 +408,7 @@
 
   <script>
     const SOMAP_DEFAULT_YEAR = 2025;
+    const SCHOOL_WIDE_VALUE = '__whole_school__';
     const CLASS_ORDER = ['Baby Class', 'Middle Class', 'Pre Unit Class', 'Class 1', 'Class 2', 'Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7'];
     const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const MONTH_LABELS = {
@@ -475,6 +476,7 @@
       classTeacherAssignments: {},
       teacherByClassSubject: new Map(),
       workerIdByTeacherName: new Map(),
+      workerProfilesById: new Map(),
       analysis: null
     };
 
@@ -1604,13 +1606,16 @@
     async function loadTeachers(year) {
       state.teacherByClassSubject = new Map();
       state.workerIdByTeacherName = new Map();
+      state.workerProfilesById = new Map();
       try {
         const workerNameById = new Map();
         const workerSnap = await scopedOrSocratesLegacy('years/' + year + '/workers', 'workers');
         const workers = workerSnap && workerSnap.exists && workerSnap.exists() ? (workerSnap.val() || {}) : {};
         Object.entries(workers || {}).forEach(([workerId, raw]) => {
           const profile = raw && (raw.profile || raw) || {};
+          const docs = raw && raw.docs || {};
           const fullName = firstText(profile.fullNameUpper, profile.fullName, [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ').trim());
+          state.workerProfilesById.set(workerId, { ...profile, workerId, fullName, photoUrl: firstText(docs.passportPhotoUrl, docs.idPhotoUrl, profile.photoUrl, profile.passportUrl) });
           if (fullName) {
             workerNameById.set(workerId, fullName);
             registerTeacherWorkerAlias(fullName, workerId);
@@ -1620,6 +1625,13 @@
         const configs = configSnap && configSnap.exists && configSnap.exists() ? (configSnap.val() || {}) : {};
         Object.entries(configs || {}).forEach(([workerId, cfg]) => {
           const teacherName = workerNameById.get(workerId) || firstText(cfg && cfg.name, cfg && cfg.teacherName, 'Teacher');
+          const existingProfile = state.workerProfilesById.get(workerId) || { workerId };
+          state.workerProfilesById.set(workerId, {
+            ...existingProfile,
+            teacherType: firstText(cfg && cfg.teacherType, existingProfile.teacherType),
+            fullName: firstText(existingProfile.fullName, teacherName),
+            fullNameUpper: firstText(existingProfile.fullNameUpper, teacherName)
+          });
           registerTeacherWorkerAlias(teacherName, workerId);
           registerTeacherWorkerAlias(cfg && cfg.name, workerId);
           registerTeacherWorkerAlias(cfg && cfg.teacherName, workerId);
@@ -2390,9 +2402,11 @@
     }
 
     function updateHero(filters) {
-      dom.heroScope.textContent = filters.className || 'Class -';
+      const label = filters.className === SCHOOL_WIDE_VALUE ? 'Whole School' : (filters.className || 'Class -');
+      dom.heroScope.textContent = label;
       dom.heroWindow.textContent = filters.fromDate + ' to ' + filters.toDate;
       dom.selectionChip.textContent = filters.className + ' • ' + (filters.stream || 'All Streams') + ' • ' + filters.year;
+      dom.selectionChip.textContent = label + ' | ' + (filters.className === SCHOOL_WIDE_VALUE ? 'All Classes' : (filters.stream || 'All Streams')) + ' | ' + filters.year;
       dom.statusChip.textContent = 'Window: ' + filters.fromDate + ' to ' + filters.toDate;
     }
 
@@ -2402,9 +2416,10 @@
     }
 
     function currentFilters() {
+      const rawClass = String(dom.classSelect.value || '').trim();
       return {
         schoolBranch: String(dom.schoolBranch.value || '').trim(),
-        className: normalizeDisplayClass(dom.classSelect.value || ''),
+        className: rawClass === SCHOOL_WIDE_VALUE ? SCHOOL_WIDE_VALUE : normalizeDisplayClass(rawClass),
         stream: String(dom.streamInput.value || '').trim(),
         year: normalizeYearValue(dom.yearSelect.value),
         fromDate: String(dom.fromDate.value || '').trim(),
@@ -2414,6 +2429,7 @@
 
     function validateFilters(filters) {
       if (!filters.className) throw new Error('Select a class first.');
+      if (filters.className === SCHOOL_WIDE_VALUE && state.assignedClass) throw new Error('Whole-school report is available to Academic Teacher, Head Teacher, and admin accounts only.');
       if (!filters.fromDate || !filters.toDate) throw new Error('Select both from and to dates.');
       if (filters.fromDate > filters.toDate) throw new Error('From date cannot be after to date.');
       if (filters.fromDate.slice(0, 4) !== filters.year || filters.toDate.slice(0, 4) !== filters.year) throw new Error('Keep the date range inside the selected academic year ' + filters.year + '.');
@@ -2423,14 +2439,46 @@
       const filters = currentFilters();
       const params = new URLSearchParams({
         year: filters.year,
-        class: filters.className,
+        class: filters.className === SCHOOL_WIDE_VALUE ? '' : filters.className,
         stream: filters.stream,
         month: resolveMonthKey(filters.fromDate) ? MONTH_NUMERIC[resolveMonthKey(filters.fromDate)] : filters.fromDate.slice(5, 7)
       });
+      if (filters.className === SCHOOL_WIDE_VALUE) params.set('scope', 'school');
       Object.entries(extra || {}).forEach(([key, value]) => {
         if (value !== undefined && value !== null) params.set(key, value);
       });
       return params.toString();
+    }
+
+    async function buildClassReportAnalysis(filters, className) {
+      const classFilters = { ...filters, className: normalizeDisplayClass(className), stream: filters.stream || '' };
+      const students = await fetchStudents(classFilters.className, classFilters.stream, classFilters.year);
+      const [attendanceRaw, examRecords, shiftReports] = await Promise.all([
+        fetchAttendanceRange(classFilters.year, classFilters.className, classFilters.fromDate, classFilters.toDate),
+        collectScoreRecordsInDateRange(classFilters.year, classFilters.className, classFilters.fromDate, classFilters.toDate),
+        fetchShiftReports(classFilters.year, classFilters.className, classFilters.fromDate, classFilters.toDate)
+      ]);
+      const feesRaw = await fetchFees(classFilters.year, classFilters.className, students);
+      const merged = mergeExamRecords(examRecords);
+      let subjectList = getSubjectList(classFilters.className, classFilters.year);
+      if (!subjectList.length) subjectList = inferSubjectsFromMerged(merged.mergedScores);
+      const scoreSync = remapScoreDataToRoster(students, merged.mergedScores, merged.detailsByAdm);
+      const attendance = remapSimpleMapToRoster(students, attendanceRaw, () => ({ present: 0, absent: 0, days: 0 }));
+      const fees = remapSimpleMapToRoster(students, feesRaw, (student) => ({
+        required: student.feeDue || 0,
+        paid: student.feePaid || 0,
+        balance: student.balance || 0,
+        debtStatus: student.balance > 0 ? 'In Debt' : 'Cleared',
+        debtTone: student.balance > 0 ? 'danger' : 'ok'
+      }));
+      const studentAnalytics = buildStudentAnalytics(students, subjectList, scoreSync.remappedScores, scoreSync.remappedDetails, attendance, fees)
+        .map((student) => ({ ...student, className: classFilters.className }));
+      const timeline = buildMonthlyTimeline(examRecords);
+      const subjectStats = buildSubjectStats(studentAnalytics, subjectList, classFilters.className);
+      const teacherInsights = buildTeacherInsights(subjectStats);
+      const movement = buildMovementSummary(studentAnalytics, classFilters.className, classFilters.year, shiftReports);
+      const teacherEffort = await fetchTeacherEffortDataDetailed(classFilters.year, classFilters.className, classFilters.fromDate, classFilters.toDate);
+      return analyzeClass(classFilters, studentAnalytics, timeline, subjectStats, teacherInsights, movement, shiftReports, examRecords, teacherEffort);
     }
 
     async function runReport() {
@@ -2443,43 +2491,245 @@
         }
         state.filters = filters;
         updateHero(filters);
-        setStatus('Loading class roster, exams, teachers, attendance, finance, and movement data...', false);
+        const schoolWide = filters.className === SCHOOL_WIDE_VALUE;
+        setStatus(schoolWide ? 'Loading whole-school academic evidence across all classes...' : 'Loading class roster, exams, teachers, attendance, finance, and movement data...', false);
         await Promise.all([loadCustomSubjectsForYear(filters.year), loadClassTeacherAssignmentsForYear(filters.year), loadTeachers(filters.year)]);
-        renderClassTeachers(filters);
-
-        const students = await fetchStudents(filters.className, filters.stream, filters.year);
-        const [attendanceRaw, examRecords, shiftReports] = await Promise.all([
-          fetchAttendanceRange(filters.year, filters.className, filters.fromDate, filters.toDate),
-          collectScoreRecordsInDateRange(filters.year, filters.className, filters.fromDate, filters.toDate),
-          fetchShiftReports(filters.year, filters.className, filters.fromDate, filters.toDate)
-        ]);
-        const feesRaw = await fetchFees(filters.year, filters.className, students);
-        const merged = mergeExamRecords(examRecords);
-        let subjectList = getSubjectList(filters.className, filters.year);
-        if (!subjectList.length) subjectList = inferSubjectsFromMerged(merged.mergedScores);
-        const scoreSync = remapScoreDataToRoster(students, merged.mergedScores, merged.detailsByAdm);
-        const attendance = remapSimpleMapToRoster(students, attendanceRaw, () => ({ present: 0, absent: 0, days: 0 }));
-        const fees = remapSimpleMapToRoster(students, feesRaw, (student) => ({
-          required: student.feeDue || 0,
-          paid: student.feePaid || 0,
-          balance: student.balance || 0,
-          debtStatus: student.balance > 0 ? 'In Debt' : 'Cleared',
-          debtTone: student.balance > 0 ? 'danger' : 'ok'
-        }));
-
-        const studentAnalytics = buildStudentAnalytics(students, subjectList, scoreSync.remappedScores, scoreSync.remappedDetails, attendance, fees);
-        const timeline = buildMonthlyTimeline(examRecords);
-        const subjectStats = buildSubjectStats(studentAnalytics, subjectList, filters.className);
-        const teacherInsights = buildTeacherInsights(subjectStats);
-        const movement = buildMovementSummary(studentAnalytics, filters.className, filters.year, shiftReports);
-        const teacherEffort = await fetchTeacherEffortDataDetailed(filters.year, filters.className, filters.fromDate, filters.toDate);
-        state.analysis = analyzeClass(filters, studentAnalytics, timeline, subjectStats, teacherInsights, movement, shiftReports, examRecords, teacherEffort);
-        renderAll(state.analysis);
-        setStatus('Academic report loaded for ' + filters.className + ' (' + filters.year + ').', true);
+        if (schoolWide) {
+          state.analysis = await buildSchoolReportAnalysis(filters);
+          renderSchoolReport(state.analysis);
+          setStatus('Whole-school academic report loaded for ' + filters.year + '.', true);
+        } else {
+          renderClassTeachers(filters);
+          state.analysis = await buildClassReportAnalysis(filters, filters.className);
+          renderAll(state.analysis);
+          setStatus('Academic report loaded for ' + filters.className + ' (' + filters.year + ').', true);
+        }
       } catch (error) {
         state.analysis = null;
         setStatus(error && error.message ? error.message : 'Failed to load academic report.', false);
       }
+    }
+
+    function classTeacherFor(className) {
+      if (window.SomapClassTeachers && window.SomapClassTeachers.resolveAssignment) {
+        const assignment = window.SomapClassTeachers.resolveAssignment(state.classTeacherAssignments, className, '');
+        if (assignment && assignment.classTeacher) return assignment.classTeacher;
+      }
+      const key = normalizeDisplayClass(className).toUpperCase() + '::';
+      const direct = state.classTeacherAssignments && state.classTeacherAssignments[key] || null;
+      if (direct) return direct.classTeacher || direct.teacher || direct;
+      const matches = Object.entries(state.classTeacherAssignments || {}).filter(([k]) => String(k || '').toUpperCase().startsWith(key));
+      const row = matches.length ? matches[0][1] : null;
+      return row && (row.classTeacher || row.teacher || row) || null;
+    }
+
+    function teacherProfileByName(name) {
+      const workerId = resolveTeacherWorkerId(name);
+      return workerId && state.workerProfilesById ? state.workerProfilesById.get(workerId) : null;
+    }
+
+    function topAcademicTeacherProfile() {
+      const configs = Array.from(state.workerProfilesById.values() || []);
+      return configs.find((profile) => String(profile.teacherType || profile.role || '').toLowerCase().includes('academic'))
+        || teacherProfileByName('BASIL OUMA OMONDI')
+        || configs[0]
+        || null;
+    }
+
+    async function buildSchoolReportAnalysis(filters) {
+      const classes = Object.keys(SomapSub().SUBJECTS_BY_CLASS || {}).filter(Boolean);
+      const classAnalyses = [];
+      for (const className of classes) {
+        try {
+          const analysis = await buildClassReportAnalysis({ ...filters, stream: '' }, className);
+          classAnalyses.push(analysis);
+        } catch (error) {
+          console.warn('[academicreport] school class analysis failed', className, error && error.message || error);
+        }
+      }
+
+      const students = classAnalyses.flatMap((analysis) => analysis.students || []);
+      const scored = students.filter((student) => Number(student.attemptedCount || 0) > 0);
+      const classRows = classAnalyses.map((analysis) => {
+        const teacher = classTeacherFor(analysis.summary && analysis.summary.movement ? analysis.filters.className : analysis.filters.className);
+        return {
+          className: analysis.filters.className,
+          classTeacher: firstText(teacher && teacher.name, teacher && teacher.fullName, teacher && teacher.teacherName, 'Not assigned'),
+          learners: analysis.students.length,
+          classAverage: analysis.summary.classAverage,
+          attendancePct: analysis.summary.attendancePct,
+          feeBalance: analysis.summary.feeBalance,
+          clearedCount: analysis.summary.clearedCount,
+          exams: analysis.summary.records.length,
+          warnings: analysis.narrative.warnings.length,
+          analysis
+        };
+      }).filter((row) => row.learners > 0 || row.exams > 0);
+
+      const subjectMap = new Map();
+      classAnalyses.forEach((analysis) => {
+        (analysis.subjectStats || []).forEach((row) => {
+          if (row.notAttempted || !(Number(row.avgPct || 0) > 0)) return;
+          const key = row.subject;
+          if (!subjectMap.has(key)) subjectMap.set(key, { subject: key, values: [], attention: 0, teachers: new Set(), classes: new Set() });
+          const bucket = subjectMap.get(key);
+          bucket.values.push(Number(row.avgPct || 0));
+          bucket.attention += Number(row.attentionCount || 0);
+          bucket.teachers.add(row.teacher || 'Teacher not mapped');
+          bucket.classes.add(analysis.filters.className);
+        });
+      });
+      const subjectStats = Array.from(subjectMap.values()).map((row) => ({
+        subject: row.subject,
+        avgPct: mean(row.values),
+        attentionCount: row.attention,
+        teachers: Array.from(row.teachers),
+        classCount: row.classes.size
+      })).sort((a, b) => Number(a.avgPct || 0) - Number(b.avgPct || 0));
+
+      const teacherMap = new Map();
+      classAnalyses.forEach((analysis) => {
+        (analysis.teacherInsights || []).forEach((row) => {
+          const name = row.teacher || 'Teacher not mapped';
+          if (!teacherMap.has(name)) teacherMap.set(name, { teacher: name, values: [], trends: [], attention: 0, subjects: new Set(), classes: new Set(), present: 0, total: 0, late: 0, letters: 0 });
+          const bucket = teacherMap.get(name);
+          bucket.values.push(Number(row.avgPct || 0));
+          bucket.trends.push(Number(row.trendDelta || 0));
+          bucket.attention += Number(row.attention || 0);
+          (row.subjects || []).forEach((subject) => bucket.subjects.add(subject));
+          bucket.classes.add(analysis.filters.className);
+        });
+        Object.values(analysis.teacherEffort || {}).forEach((effort) => {
+          const name = effort.teacher || effort.name || '';
+          if (!name) return;
+          if (!teacherMap.has(name)) teacherMap.set(name, { teacher: name, values: [], trends: [], attention: 0, subjects: new Set(), classes: new Set(), present: 0, total: 0, late: 0, letters: 0 });
+          const bucket = teacherMap.get(name);
+          bucket.present = Math.max(bucket.present, Number(effort.presentDays || 0));
+          bucket.total = Math.max(bucket.total, Number(effort.totalDays || 0));
+          bucket.late = Math.max(bucket.late, Number(effort.lateDays || 0));
+          bucket.letters = Math.max(bucket.letters, Number(effort.explanationLetters || 0));
+        });
+      });
+      const teacherInsights = Array.from(teacherMap.values()).map((row) => ({
+        teacher: row.teacher,
+        avgPct: mean(row.values),
+        trendDelta: mean(row.trends),
+        attention: row.attention,
+        subjects: Array.from(row.subjects),
+        classCount: row.classes.size,
+        attendancePct: row.total > 0 ? (row.present * 100) / row.total : null,
+        presentDays: row.present,
+        totalDays: row.total,
+        lateDays: row.late,
+        explanationLetters: row.letters
+      })).sort((a, b) => Number(a.avgPct || 0) - Number(b.avgPct || 0));
+
+      const present = students.reduce((sum, student) => sum + Number(student.attendance && student.attendance.present || 0), 0);
+      const days = students.reduce((sum, student) => sum + Number(student.attendance && student.attendance.days || 0), 0);
+      const feeBalance = students.reduce((sum, student) => sum + Number(student.fee && student.fee.balance || 0), 0);
+      const feeRequired = students.reduce((sum, student) => sum + Number(student.fee && student.fee.required || 0), 0);
+      const feePaid = students.reduce((sum, student) => sum + Number(student.fee && student.fee.paid || 0), 0);
+      const classBest = classRows.slice().filter((row) => row.classAverage > 0).sort((a, b) => b.classAverage - a.classAverage)[0] || null;
+      const classWeak = classRows.slice().filter((row) => row.classAverage > 0).sort((a, b) => a.classAverage - b.classAverage)[0] || null;
+      const bestAttendanceClass = classRows.slice().filter((row) => row.attendancePct > 0).sort((a, b) => b.attendancePct - a.attendancePct)[0] || null;
+      const weakAttendanceClass = classRows.slice().filter((row) => row.attendancePct > 0).sort((a, b) => a.attendancePct - b.attendancePct)[0] || null;
+      const bestTeacher = teacherInsights.slice().filter((row) => row.avgPct > 0).sort((a, b) => b.avgPct - a.avgPct)[0] || null;
+      const weakTeacher = teacherInsights.slice().filter((row) => row.avgPct > 0).sort((a, b) => a.avgPct - b.avgPct)[0] || null;
+      const earlyTeacher = teacherInsights.slice().filter((row) => row.attendancePct !== null).sort((a, b) => (b.attendancePct - a.attendancePct) || (a.lateDays - b.lateDays))[0] || null;
+      const lateTeacher = teacherInsights.slice().filter((row) => row.lateDays > 0 || row.attendancePct !== null).sort((a, b) => (b.lateDays - a.lateDays) || (a.attendancePct || 0) - (b.attendancePct || 0))[0] || null;
+      const topStudents = scored.slice().sort((a, b) => Number(b.overallPct || 0) - Number(a.overallPct || 0)).slice(0, 10);
+      const weakestStudent = scored.slice().sort((a, b) => Number(a.overallPct || 0) - Number(b.overallPct || 0))[0] || null;
+      const highDebt = students.slice().sort((a, b) => Number(b.fee && b.fee.balance || 0) - Number(a.fee && a.fee.balance || 0)).slice(0, 10);
+      const cleared = students.filter((student) => Number(student.fee && student.fee.balance || 0) <= 0.5);
+
+      const summary = {
+        classAverage: mean(scored.map((student) => student.overallPct)),
+        attendancePct: days > 0 ? (present * 100) / days : 0,
+        feeRequired,
+        feePaid,
+        feeBalance,
+        learners: students.length,
+        scoredLearners: scored.length,
+        clearedCount: cleared.length,
+        clearedPct: students.length ? (cleared.length * 100) / students.length : 0,
+        exams: classAnalyses.reduce((sum, analysis) => sum + analysis.summary.records.length, 0),
+        classBest,
+        classWeak,
+        bestAttendanceClass,
+        weakAttendanceClass,
+        bestTeacher,
+        weakTeacher,
+        earlyTeacher,
+        lateTeacher,
+        weakestStudent,
+        academicTeacher: topAcademicTeacherProfile()
+      };
+
+      return {
+        mode: 'school',
+        filters,
+        summary,
+        classAnalyses,
+        classRows,
+        subjectStats,
+        teacherInsights,
+        students,
+        topStudents,
+        highDebt,
+        cleared
+      };
+    }
+
+    function renderSchoolReport(report) {
+      const s = report.summary;
+      dom.classTeacherMeta.textContent = 'Whole-school academic leadership';
+      const academic = s.academicTeacher || {};
+      const academicName = firstText(academic.fullNameUpper, academic.fullName, academic.name, 'Academic Teacher');
+      const academicPhone = firstText(academic.phone, academic.phoneNumber, academic.contact, '-');
+      const academicPhoto = firstText(academic.photoUrl, academic.passportUrl, academic.profilePhoto, '../images/somap-logo.png.jpg');
+      dom.classTeacherCards.innerHTML = [
+        '<article class="teacher-card p-4"><div class="text-xs uppercase tracking-[0.16em] text-slate-500">Academic Teacher</div><div class="flex gap-3 items-center mt-3"><img src="' + safe(academicPhoto) + '" alt="' + safe(academicName) + '" class="w-16 h-16 rounded-2xl object-cover border border-slate-200" onerror="this.onerror=null;this.src=\'../images/somap-logo.png.jpg\';"><div><div class="text-base font-semibold text-slate-900">' + safe(academicName) + '</div><div class="text-sm text-slate-500">' + safe(academicPhone) + '</div><div class="text-sm text-slate-500">Whole-school academic report owner</div></div></div></article>',
+        '<article class="teacher-card p-4"><div class="text-xs uppercase tracking-[0.16em] text-slate-500">Report Scope</div><div class="text-2xl font-semibold text-slate-900 mt-3">' + safe(String(report.classRows.length)) + ' classes</div><div class="text-sm text-slate-500 mt-2">' + safe(report.filters.fromDate + ' to ' + report.filters.toDate) + '</div></article>'
+      ].join('');
+      dom.headlineTone.textContent = s.classAverage >= 65 ? 'Stable' : (s.classAverage >= 50 ? 'Mixed' : 'Urgent');
+      dom.headlineBox.innerHTML = [
+        '<div class="text-lg font-semibold text-slate-900">Whole-school academic story for ' + safe(report.filters.year) + '</div>',
+        '<p class="text-sm text-slate-700 mt-2">The school average for the selected window is <strong>' + formatPercent(s.classAverage) + '</strong>, with student attendance at <strong>' + formatPercent(s.attendancePct) + '</strong>. The strongest class is <strong>' + safe(s.classBest ? s.classBest.className : '-') + '</strong>, while the class requiring the closest academic rescue is <strong>' + safe(s.classWeak ? s.classWeak.className : '-') + '</strong>.</p>',
+        '<p class="text-sm text-slate-700 mt-3">Teacher performance points to <strong>' + safe(s.bestTeacher ? s.bestTeacher.teacher : '-') + '</strong> as the strongest academic block and <strong>' + safe(s.weakTeacher ? s.weakTeacher.teacher : '-') + '</strong> as the block needing review. Attendance leadership points to <strong>' + safe(s.bestAttendanceClass ? s.bestAttendanceClass.classTeacher : '-') + '</strong> through ' + safe(s.bestAttendanceClass ? s.bestAttendanceClass.className : '-') + '.</p>'
+      ].join('');
+      dom.overviewGrid.innerHTML = [
+        metricCard('School average', formatPercent(s.classAverage), String(s.scoredLearners) + ' scored learners counted; zero-only subjects excluded', '#2563eb'),
+        metricCard('Best class', s.classBest ? s.classBest.className + ' ' + formatPercent(s.classBest.classAverage) : '-', 'Highest class average in the window', '#16a34a'),
+        metricCard('Weakest class', s.classWeak ? s.classWeak.className + ' ' + formatPercent(s.classWeak.classAverage) : '-', 'Lowest class average needing support', '#dc2626'),
+        metricCard('Attendance', formatPercent(s.attendancePct), 'Whole-school learner attendance in selected dates', '#0f766e'),
+        metricCard('Best teacher block', s.bestTeacher ? s.bestTeacher.teacher : '-', s.bestTeacher ? formatPercent(s.bestTeacher.avgPct) : 'No teacher average', '#7c3aed'),
+        metricCard('Weakest teacher block', s.weakTeacher ? s.weakTeacher.teacher : '-', s.weakTeacher ? formatPercent(s.weakTeacher.avgPct) : 'No teacher average', '#ea580c'),
+        metricCard('Fee balance', formatCurrency(s.feeBalance), String(s.clearedCount) + ' learners cleared fees', '#b45309'),
+        metricCard('Exams found', String(s.exams), 'Exam records across all classes in range', '#0891b2')
+      ].join('');
+      dom.timelineMeta.textContent = 'Class-by-class academic table';
+      dom.timelineBody.innerHTML = report.classRows.length ? report.classRows.map((row) => '<tr><td class="font-semibold text-slate-900">' + safe(row.className) + '</td><td>' + safe(String(row.exams)) + '</td><td><div class="font-semibold">' + formatPercent(row.classAverage) + '</div><div class="bar mt-2"><span style="width:' + Math.max(0, Math.min(100, row.classAverage)) + '%"></span></div></td><td>' + safe(row.classTeacher) + '</td><td>' + formatPercent(row.attendancePct) + '</td><td>' + safe(formatCurrency(row.feeBalance)) + '</td></tr>').join('') : '<tr><td colspan="6" class="text-slate-500">No class data found.</td></tr>';
+      dom.movementMeta.textContent = 'Class teacher attendance responsibility';
+      dom.movementBox.innerHTML = '<div class="grid sm:grid-cols-2 gap-3">' + [
+        metricCard('Best class attendance', s.bestAttendanceClass ? s.bestAttendanceClass.className : '-', s.bestAttendanceClass ? s.bestAttendanceClass.classTeacher + ' | ' + formatPercent(s.bestAttendanceClass.attendancePct) : '-', '#16a34a'),
+        metricCard('Weakest class attendance', s.weakAttendanceClass ? s.weakAttendanceClass.className : '-', s.weakAttendanceClass ? s.weakAttendanceClass.classTeacher + ' | ' + formatPercent(s.weakAttendanceClass.attendancePct) : '-', '#dc2626'),
+        metricCard('Earliest/steady teacher', s.earlyTeacher ? s.earlyTeacher.teacher : '-', s.earlyTeacher ? formatPercent(s.earlyTeacher.attendancePct) + ' worker attendance' : '-', '#2563eb'),
+        metricCard('Latest/late concern', s.lateTeacher ? s.lateTeacher.teacher : '-', s.lateTeacher ? String(s.lateTeacher.lateDays) + ' late record(s)' : '-', '#ea580c')
+      ].join('') + '</div>';
+      dom.subjectMeta.textContent = report.subjectStats.length + ' school subject groups';
+      dom.subjectBody.innerHTML = report.subjectStats.length ? report.subjectStats.map((row) => '<tr><td class="font-semibold text-slate-900">' + safe(row.subject) + '</td><td>' + safe(row.teachers.slice(0, 3).join(', ')) + '</td><td><div class="font-semibold">' + formatPercent(row.avgPct) + '</div><div class="bar mt-2"><span style="width:' + Math.max(0, Math.min(100, row.avgPct)) + '%"></span></div></td><td>-</td><td>' + safe(String(row.classCount)) + ' classes</td><td>' + safe(String(row.attentionCount)) + '</td><td>-</td><td>-</td></tr>').join('') : '<tr><td colspan="8" class="text-slate-500">No subject data found.</td></tr>';
+      dom.teacherMeta.textContent = report.teacherInsights.length + ' teacher blocks across the school';
+      dom.teacherGrid.innerHTML = report.teacherInsights.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0)).map((row) => '<article class="teacher-card p-4"><div class="flex items-center justify-between gap-3"><div class="text-base font-semibold text-slate-900">' + safe(row.teacher) + '</div><div class="mini-chip">' + safe(String(row.classCount)) + ' classes</div></div><div class="text-sm text-slate-500 mt-2">' + safe(row.subjects.slice(0, 6).join(', ') || 'Subject mapping only') + '</div><div class="grid grid-cols-2 gap-3 mt-4"><div><div class="text-xs text-slate-500 uppercase">Academic avg</div><div class="text-xl font-semibold mt-1">' + formatPercent(row.avgPct) + '</div></div><div><div class="text-xs text-slate-500 uppercase">Attendance</div><div class="text-xl font-semibold mt-1">' + (row.attendancePct === null ? '-' : formatPercent(row.attendancePct)) + '</div></div></div><div class="text-sm text-slate-700 mt-4">' + safe(String(row.lateDays || 0)) + ' late record(s), ' + safe(String(row.attention || 0)) + ' learner attention points.</div></article>').join('');
+      dom.financeMeta.textContent = formatCurrency(s.feeRequired) + ' required | ' + formatCurrency(s.feePaid) + ' paid | ' + formatCurrency(s.feeBalance) + ' balance';
+      dom.financeStory.innerHTML = '<div class="text-sm text-slate-700">Highest fee balances are shown together with academic and attendance signals so finance follow-up can protect lesson continuity, not only cash collection.</div>';
+      dom.financeBody.innerHTML = report.highDebt.map((student) => '<tr><td class="font-semibold text-slate-900">' + safe(student.name) + '<div class="text-xs text-slate-500">' + safe(student.className || student.class || '-') + '</div></td><td>' + formatPercent(student.overallPct) + '</td><td>' + formatPercent(student.attendancePct) + '</td><td>' + safe(formatCurrency(student.fee.required)) + '</td><td>' + safe(formatCurrency(student.fee.paid)) + '</td><td>' + safe(formatCurrency(student.fee.balance)) + '</td><td>' + safe(student.fee.debtStatus || '-') + '</td><td>' + safe(student.parentContact || '-') + '</td></tr>').join('');
+      dom.watchMeta.textContent = 'School top ten, weakest learner, debt pressure, and paid-up learners.';
+      dom.watchlists.innerHTML = [
+        '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">Top 10 learners in the school</div><div class="mt-3 space-y-2">' + report.topStudents.map((student, idx) => '<div class="text-sm"><strong>' + (idx + 1) + '. ' + safe(student.name) + '</strong> | ' + safe(student.className || student.class || '-') + ' | ' + formatPercent(student.overallPct) + '</div>').join('') + '</div></article>',
+        '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">Weakest learner academically</div><div class="mt-3 text-sm text-slate-700">' + (s.weakestStudent ? safe(s.weakestStudent.name) + ' | ' + safe(s.weakestStudent.className || s.weakestStudent.class || '-') + ' | ' + formatPercent(s.weakestStudent.overallPct) : 'No scored learner found') + '</div></article>',
+        '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">Highest fee balances</div><div class="mt-3 space-y-2">' + report.highDebt.slice(0, 5).map((student) => '<div class="text-sm"><strong>' + safe(student.name) + '</strong> | ' + safe(student.className || student.class || '-') + ' | ' + safe(formatCurrency(student.fee.balance)) + '</div>').join('') + '</div></article>',
+        '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">Fee cleared learners</div><div class="mt-3 text-sm text-slate-700">' + safe(String(report.cleared.length)) + ' learner(s) have cleared fees in this school year. Clearance rate: ' + formatPercent(s.clearedPct) + '.</div></article>'
+      ].join('');
     }
 
     function drawPdfCover(doc, analysis) {
@@ -3079,9 +3329,140 @@
       ];
     }
 
+    function downloadSchoolPdf(report) {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const margin = 14;
+      const s = report.summary;
+      const schoolName = (state.currentSchool && state.currentSchool.name) || report.filters.schoolBranch || 'School';
+      const academic = s.academicTeacher || {};
+      const academicName = firstText(academic.fullNameUpper, academic.fullName, academic.name, 'Academic Teacher');
+
+      doc.setFillColor(15, 23, 42);
+      doc.rect(0, 0, pageWidth, 92, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(22);
+      doc.text('Whole School Academic Report', margin, 22);
+      doc.setFontSize(12);
+      doc.text(schoolName + ' | ' + report.filters.year, margin, 32);
+      doc.text(report.filters.fromDate + ' to ' + report.filters.toDate, margin, 40);
+      doc.setFontSize(10);
+      doc.text(doc.splitTextToSize('Prepared for the Academic Teacher meeting. This report aggregates class reports, subject performance, teacher blocks, attendance, fee pressure, and learner watchlists using the same score rules as the class academic report.', pageWidth - 2 * margin), margin, 52);
+      doc.setFontSize(11);
+      doc.text('Academic Teacher: ' + academicName, margin, 78);
+
+      const cards = [
+        ['School average', formatPercent(s.classAverage)],
+        ['Learner attendance', formatPercent(s.attendancePct)],
+        ['Best class', s.classBest ? s.classBest.className : '-'],
+        ['Weakest class', s.classWeak ? s.classWeak.className : '-'],
+        ['Fee balance', formatCurrency(s.feeBalance)],
+        ['Exams found', String(s.exams)]
+      ];
+      let x = margin;
+      let y = 104;
+      cards.forEach((card, index) => {
+        doc.setFillColor(index % 2 ? 239 : 236, index % 2 ? 246 : 253, 255);
+        doc.roundedRect(x, y, 58, 25, 4, 4, 'F');
+        doc.setTextColor(71, 85, 105);
+        doc.setFontSize(8);
+        doc.text(card[0], x + 3, y + 8);
+        doc.setTextColor(15, 23, 42);
+        doc.setFontSize(13);
+        doc.text(String(card[1]).slice(0, 23), x + 3, y + 18);
+        x += 62;
+        if ((index + 1) % 3 === 0) {
+          x = margin;
+          y += 31;
+        }
+      });
+
+      doc.setTextColor(15, 23, 42);
+      doc.setFontSize(14);
+      doc.text('Academic Reading', margin, 177);
+      doc.setFontSize(10);
+      const story = [
+        'The school average is ' + formatPercent(s.classAverage) + ' across ' + s.scoredLearners + ' scored learners. Subjects with zero-only records are excluded from averages so missing or not-done exams do not reduce the school score.',
+        (s.classBest ? s.classBest.className + ' is currently the strongest class at ' + formatPercent(s.classBest.classAverage) + '.' : 'No strongest class could be isolated.') + ' ' + (s.classWeak ? s.classWeak.className + ' needs the closest academic intervention at ' + formatPercent(s.classWeak.classAverage) + '.' : ''),
+        (s.bestTeacher ? s.bestTeacher.teacher + ' is leading the strongest academic teacher block at ' + formatPercent(s.bestTeacher.avgPct) + '.' : '') + ' ' + (s.weakTeacher ? s.weakTeacher.teacher + ' is the weakest teacher block in this window at ' + formatPercent(s.weakTeacher.avgPct) + '.' : ''),
+        (s.bestAttendanceClass ? s.bestAttendanceClass.classTeacher + ' carries the best class attendance signal through ' + s.bestAttendanceClass.className + ' at ' + formatPercent(s.bestAttendanceClass.attendancePct) + '.' : '') + ' ' + (s.lateTeacher ? s.lateTeacher.teacher + ' has the strongest lateness concern with ' + s.lateTeacher.lateDays + ' late record(s).' : '')
+      ];
+      doc.text(doc.splitTextToSize(story.join('\n\n'), pageWidth - 2 * margin), margin, 186);
+
+      doc.addPage();
+      doc.setFontSize(16);
+      doc.text('Class Performance Table', margin, 18);
+      doc.autoTable({
+        startY: 25,
+        head: [['Class', 'Class Teacher', 'Learners', 'Avg', 'Attendance', 'Exams', 'Fee Balance']],
+        body: report.classRows.map((row) => [row.className, row.classTeacher, row.learners, formatPercent(row.classAverage), formatPercent(row.attendancePct), row.exams, formatCurrency(row.feeBalance)]),
+        theme: 'grid',
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [37, 99, 235] }
+      });
+
+      doc.addPage();
+      doc.setFontSize(16);
+      doc.text('Teacher Academic and Attendance Blocks', margin, 18);
+      doc.autoTable({
+        startY: 25,
+        head: [['Teacher', 'Academic Avg', 'Classes', 'Subjects', 'Attendance', 'Late', 'Attention']],
+        body: report.teacherInsights.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0)).map((row) => [
+          row.teacher,
+          formatPercent(row.avgPct),
+          row.classCount,
+          row.subjects.slice(0, 5).join(', ') || '-',
+          row.attendancePct === null ? '-' : formatPercent(row.attendancePct),
+          row.lateDays || 0,
+          row.attention || 0
+        ]),
+        theme: 'grid',
+        styles: { fontSize: 7 },
+        headStyles: { fillColor: [15, 118, 110] }
+      });
+
+      doc.addPage();
+      doc.setFontSize(16);
+      doc.text('Learner Watchlists', margin, 18);
+      doc.autoTable({
+        startY: 25,
+        head: [['#', 'Top Learner', 'Class', 'Average']],
+        body: report.topStudents.map((student, index) => [index + 1, student.name, student.className || student.class || '-', formatPercent(student.overallPct)]),
+        theme: 'grid',
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [22, 163, 74] }
+      });
+      doc.autoTable({
+        startY: doc.lastAutoTable.finalY + 10,
+        head: [['Highest Debt Learner', 'Class', 'Average', 'Attendance', 'Balance', 'Parent Contact']],
+        body: report.highDebt.map((student) => [student.name, student.className || student.class || '-', formatPercent(student.overallPct), formatPercent(student.attendancePct), formatCurrency(student.fee.balance), student.parentContact || '-']),
+        theme: 'grid',
+        styles: { fontSize: 7 },
+        headStyles: { fillColor: [180, 83, 9] }
+      });
+
+      doc.addPage();
+      doc.setFontSize(16);
+      doc.text('Subject Performance Across the School', margin, 18);
+      doc.autoTable({
+        startY: 25,
+        head: [['Subject', 'Average', 'Classes', 'Teachers', 'Attention Count']],
+        body: report.subjectStats.map((row) => [row.subject, formatPercent(row.avgPct), row.classCount, row.teachers.slice(0, 4).join(', '), row.attentionCount]),
+        theme: 'grid',
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [124, 58, 237] }
+      });
+      doc.save('Whole_School_Academic_Report_' + report.filters.year + '_' + report.filters.fromDate + '_to_' + report.filters.toDate + '.pdf');
+    }
+
     async function downloadPdf() {
       if (!state.analysis) {
         alert('Run the report first.');
+        return;
+      }
+      if (state.analysis.mode === 'school') {
+        downloadSchoolPdf(state.analysis);
         return;
       }
       const { jsPDF } = window.jspdf;
@@ -3830,7 +4211,7 @@
         dom.classSelect.value = assignedCanonical;
         dom.classSelect.disabled = true;
       } else {
-        dom.classSelect.innerHTML = '<option value="">Select Class...</option>' + options.map((item) => '<option value="' + safe(item) + '">' + safe(item) + '</option>').join('');
+        dom.classSelect.innerHTML = '<option value="' + SCHOOL_WIDE_VALUE + '">Whole School</option><option value="">Select Class...</option>' + options.map((item) => '<option value="' + safe(item) + '">' + safe(item) + '</option>').join('');
         dom.classSelect.disabled = false;
       }
     }
@@ -3854,8 +4235,13 @@
       dom.fromDate.value = query.get('from') || (year + '-' + month + '-01');
       dom.toDate.value = query.get('to') || (year === String(today.getFullYear()) && month === String(today.getMonth() + 1).padStart(2, '0') ? today.toISOString().slice(0, 10) : year + '-' + month + '-' + String(monthEnd.getDate()).padStart(2, '0'));
       dom.schoolBranch.value = (state.currentSchool && state.currentSchool.name) || query.get('schoolBranch') || 'School';
-      const requestedClass = normalizeDisplayClass(query.get('class') || state.assignedClass || '');
-      if (requestedClass) dom.classSelect.value = requestedClass;
+      const scope = String(query.get('scope') || '').toLowerCase();
+      const requestedClass = query.get('class') ? normalizeDisplayClass(query.get('class')) : '';
+      if (!state.assignedClass && (scope === 'school' || query.get('schoolWide') === '1')) {
+        dom.classSelect.value = SCHOOL_WIDE_VALUE;
+      } else if (requestedClass || state.assignedClass) {
+        dom.classSelect.value = requestedClass || state.assignedClass;
+      }
       updateHero(currentFilters());
     }
 
@@ -3871,8 +4257,14 @@
       dom.fromDate.addEventListener('change', run);
       dom.toDate.addEventListener('change', run);
       document.getElementById('btnDownloadPdf').addEventListener('click', downloadPdf);
-      document.getElementById('btnOpenScoresheet').addEventListener('click', () => { window.location.href = 'scoresheet.html?' + queryStringForCurrentContext({}); });
-      document.getElementById('btnOpenReportForms').addEventListener('click', () => { window.location.href = 'generatereportform.html?' + queryStringForCurrentContext({ examType: 'Monthly' }); });
+      document.getElementById('btnOpenScoresheet').addEventListener('click', () => {
+        if (currentFilters().className === SCHOOL_WIDE_VALUE) { alert('Choose one class to open the scoresheet.'); return; }
+        window.location.href = 'scoresheet.html?' + queryStringForCurrentContext({});
+      });
+      document.getElementById('btnOpenReportForms').addEventListener('click', () => {
+        if (currentFilters().className === SCHOOL_WIDE_VALUE) { alert('Choose one class to open report forms.'); return; }
+        window.location.href = 'generatereportform.html?' + queryStringForCurrentContext({ examType: 'Monthly' });
+      });
     }
 
     firebase.auth().onAuthStateChanged(async (user) => {
