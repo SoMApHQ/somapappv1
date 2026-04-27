@@ -2701,6 +2701,20 @@
         academicTeachers: allAcademicTeacherProfiles()
       };
 
+      // Monthly school-wide trend for line chart
+      const monthBuckets = {};
+      examEvidence.forEach((ev) => {
+        const m = resolveMonthKey(ev.monthLabel) || ev.monthLabel;
+        if (!m) return;
+        if (!monthBuckets[m]) monthBuckets[m] = { sum: 0, count: 0 };
+        monthBuckets[m].sum += Number(ev.average || 0);
+        monthBuckets[m].count += 1;
+      });
+      const monthlyTrend = MONTHS.filter((m) => monthBuckets[m]).map((m) => ({
+        label: m,
+        value: monthBuckets[m].sum / monthBuckets[m].count
+      }));
+
       return {
         mode: 'school',
         filters,
@@ -2713,7 +2727,8 @@
         students,
         topStudents,
         highDebt,
-        cleared
+        cleared,
+        monthlyTrend
       };
     }
 
@@ -3383,42 +3398,152 @@
       // Load school logo
       const logoDataUrl = await loadImageAsDataUrl('../images/somap-logo.png.jpg');
 
-      // ── Horizontal bar-chart helper ──────────────────────────────────
-      function drawHBarChart(startX, startY, chartW, rows, title, subtitle) {
-        const maxVal = Math.max.apply(null, rows.map((r) => Number(r.value) || 0).concat([1]));
-        const rowH = 9;
-        let cy = startY;
-        doc.setFontSize(11);
+      // ── Vertical bar-chart helper ─────────────────────────────────────
+      function drawVBarChart(startX, startY, chartW, chartH, rows, title, subtitle) {
+        const pad = { top: 16, bottom: 24, left: 14, right: 4 };
+        const plotX = startX + pad.left;
+        const plotY = startY + pad.top;
+        const plotW = chartW - pad.left - pad.right;
+        const plotH = chartH - pad.top - pad.bottom;
+        // Title + subtitle
+        doc.setFontSize(10);
         doc.setTextColor(15, 23, 42);
-        doc.text(title, startX, cy);
-        cy += 4;
+        doc.text(title, startX, startY + 6);
         if (subtitle) {
-          doc.setFontSize(7.5);
+          doc.setFontSize(7);
           doc.setTextColor(100, 116, 139);
-          doc.text(subtitle, startX, cy);
-          cy += 4;
+          doc.text(subtitle, startX, startY + 11);
         }
-        const labelW = 52;
-        const barAreaX = startX + labelW;
-        const barAreaW = chartW - labelW - 22;
-        rows.forEach((row, i) => {
-          const rawVal = Number(row.value) || 0;
-          const barW = Math.max(0, (rawVal / maxVal) * barAreaW);
-          const color = rawVal >= 75 ? [22, 163, 74] : rawVal >= 60 ? [37, 99, 235] : [220, 38, 38];
-          doc.setFillColor(240, 245, 250);
-          doc.roundedRect(barAreaX, cy + i * rowH, barAreaW, rowH - 2, 1, 1, 'F');
-          if (barW > 1) {
-            doc.setFillColor.apply(doc, color);
-            doc.roundedRect(barAreaX, cy + i * rowH, barW, rowH - 2, 1, 1, 'F');
+        // Y-axis grid lines at 25 / 50 / 75 / 100
+        [25, 50, 75, 100].forEach((tick) => {
+          const ty = plotY + plotH - (tick / 100) * plotH;
+          if (ty >= plotY) {
+            doc.setDrawColor(230, 235, 242);
+            doc.line(plotX, ty, plotX + plotW, ty);
+            doc.setFontSize(6);
+            doc.setTextColor(150, 163, 175);
+            doc.text(tick + '%', startX, ty + 1.5);
           }
-          doc.setFontSize(7.5);
-          doc.setTextColor(51, 65, 85);
-          doc.text(String(row.label || '').slice(0, 24), startX, cy + i * rowH + 5.5);
-          doc.setFontSize(7.5);
-          doc.setTextColor(15, 23, 42);
-          doc.text(String(row.valueLabel || formatPercent(rawVal)), barAreaX + barAreaW + 2, cy + i * rowH + 5.5);
         });
-        return cy + rows.length * rowH + 5;
+        // Axes
+        doc.setDrawColor(180, 192, 205);
+        doc.line(plotX, plotY, plotX, plotY + plotH);
+        doc.line(plotX, plotY + plotH, plotX + plotW, plotY + plotH);
+        // Bars
+        const n = rows.length;
+        const barW = Math.min(16, (plotW * 0.7) / Math.max(n, 1));
+        const spacing = n > 1 ? (plotW - barW * n) / (n + 1) : (plotW - barW) / 2;
+        rows.forEach((row, i) => {
+          const val = Math.min(100, Math.max(0, Number(row.value) || 0));
+          const bH = (val / 100) * plotH;
+          const bX = plotX + spacing + i * (barW + spacing);
+          const bY = plotY + plotH - bH;
+          const color = val >= 75 ? [22, 163, 74] : val >= 60 ? [37, 99, 235] : [220, 38, 38];
+          if (bH > 0.5) {
+            doc.setFillColor.apply(doc, color);
+            doc.roundedRect(bX, bY, barW, bH, 1, 1, 'F');
+          }
+          // Value label above bar
+          if (val > 0) {
+            doc.setFontSize(6.5);
+            doc.setTextColor(15, 23, 42);
+            const vStr = val.toFixed(0) + '%';
+            const vW = doc.getTextWidth(vStr);
+            doc.text(vStr, bX + barW / 2 - vW / 2, Math.max(plotY + 3, bY - 1.5));
+          }
+          // X-axis label (short)
+          doc.setFontSize(6);
+          doc.setTextColor(51, 65, 85);
+          const lbl = String(row.label || '').slice(0, 11);
+          const lW = doc.getTextWidth(lbl);
+          doc.text(lbl, bX + barW / 2 - lW / 2, plotY + plotH + 6);
+        });
+        return startY + chartH + 4;
+      }
+
+      // ── Line-chart helper ─────────────────────────────────────────────
+      function drawLineChart(startX, startY, chartW, chartH, points, title, subtitle) {
+        const pad = { top: 16, bottom: 20, left: 14, right: 6 };
+        const plotX = startX + pad.left;
+        const plotY = startY + pad.top;
+        const plotW = chartW - pad.left - pad.right;
+        const plotH = chartH - pad.top - pad.bottom;
+        doc.setFontSize(10);
+        doc.setTextColor(15, 23, 42);
+        doc.text(title, startX, startY + 6);
+        if (subtitle) {
+          doc.setFontSize(7);
+          doc.setTextColor(100, 116, 139);
+          doc.text(subtitle, startX, startY + 11);
+        }
+        // Grid lines
+        [25, 50, 75, 100].forEach((tick) => {
+          const ty = plotY + plotH - (tick / 100) * plotH;
+          if (ty >= plotY) {
+            doc.setDrawColor(230, 235, 242);
+            doc.line(plotX, ty, plotX + plotW, ty);
+            doc.setFontSize(6);
+            doc.setTextColor(150, 163, 175);
+            doc.text(tick + '%', startX, ty + 1.5);
+          }
+        });
+        // Axes
+        doc.setDrawColor(180, 192, 205);
+        doc.line(plotX, plotY, plotX, plotY + plotH);
+        doc.line(plotX, plotY + plotH, plotX + plotW, plotY + plotH);
+        if (!points || points.length < 1) {
+          doc.setFontSize(8);
+          doc.setTextColor(150, 163, 175);
+          doc.text('No monthly data available for this window.', plotX + 4, plotY + plotH / 2);
+          return startY + chartH + 4;
+        }
+        const stepX = points.length > 1 ? plotW / (points.length - 1) : 0;
+        const getCoord = (i) => {
+          const val = Math.min(100, Math.max(0, Number(points[i].value) || 0));
+          return { px: plotX + i * stepX, py: plotY + plotH - (val / 100) * plotH, val };
+        };
+        // Shaded area under line
+        if (points.length >= 2) {
+          const polyPts = [];
+          points.forEach((_, i) => { const c = getCoord(i); polyPts.push([c.px, c.py]); });
+          polyPts.push([getCoord(points.length - 1).px, plotY + plotH]);
+          polyPts.push([plotX, plotY + plotH]);
+          doc.setFillColor(219, 234, 254);
+          doc.setDrawColor(219, 234, 254);
+          // jsPDF lines() draws a closed filled polygon
+          const lines = polyPts.slice(1).map((pt) => [pt]);
+          doc.lines(lines, polyPts[0][0], polyPts[0][1], [1, 1], 'F');
+        }
+        // Line segments
+        doc.setLineWidth(0.9);
+        doc.setDrawColor(37, 99, 235);
+        for (let i = 1; i < points.length; i += 1) {
+          const prev = getCoord(i - 1);
+          const curr = getCoord(i);
+          doc.line(prev.px, prev.py, curr.px, curr.py);
+        }
+        doc.setLineWidth(0.2);
+        // Dots + labels
+        points.forEach((pt, i) => {
+          const { px, py, val } = getCoord(i);
+          doc.setFillColor(255, 255, 255);
+          doc.circle(px, py, 2, 'F');
+          doc.setFillColor(37, 99, 235);
+          doc.circle(px, py, 1.4, 'F');
+          // Value above dot
+          doc.setFontSize(6.5);
+          doc.setTextColor(15, 23, 42);
+          const vStr = val.toFixed(1) + '%';
+          const vW = doc.getTextWidth(vStr);
+          doc.text(vStr, px - vW / 2, Math.max(plotY + 4, py - 3));
+          // Month label below x-axis
+          doc.setFontSize(6.5);
+          doc.setTextColor(51, 65, 85);
+          const lbl = String(pt.label || '').slice(0, 5);
+          const lW = doc.getTextWidth(lbl);
+          doc.text(lbl, px - lW / 2, plotY + plotH + 6);
+        });
+        return startY + chartH + 4;
       }
 
       // ── Page 1: Cover ────────────────────────────────────────────────
@@ -3532,126 +3657,133 @@
       });
 
       // ── Page 3: Class Performance Table + Bar Chart ──────────────────
+      // ── Page 3: Class Performance Table + Vertical Bar Chart ─────────
       doc.addPage();
       y = 14;
       doc.setFontSize(15);
       doc.setTextColor(15, 23, 42);
-      doc.text('Class Performance Table', margin, y);
+      doc.text(‘Class Performance Table’, margin, y);
       y += 4;
       doc.autoTable({
         startY: y,
-        head: [['Class', 'Class Teacher', 'Learners', 'Avg', 'Attendance', 'Exams', 'Fee Balance']],
+        head: [[‘Class’, ‘Class Teacher’, ‘Learners’, ‘Avg’, ‘Attendance’, ‘Exams’, ‘Fee Balance’]],
         body: report.classRows.map((row) => [row.className, row.classTeacher, row.learners, formatPercent(row.classAverage), formatPercent(row.attendancePct), row.exams, formatCurrency(row.feeBalance)]),
-        theme: 'grid',
+        theme: ‘grid’,
         styles: { fontSize: 8, cellPadding: 2.5 },
         headStyles: { fillColor: [37, 99, 235], fontSize: 8 },
         alternateRowStyles: { fillColor: [248, 250, 252] }
       });
 
       y = doc.lastAutoTable.finalY + 8;
-      if (y < pageHeight - 55) {
+      const classChartH = Math.min(68, pageHeight - y - 16);
+      if (classChartH > 40) {
         const classChartRows = report.classRows.slice().sort((a, b) => b.classAverage - a.classAverage).map((row) => ({
-          label: row.className, value: row.classAverage, valueLabel: formatPercent(row.classAverage)
+          label: String(row.className || ‘’).replace(‘Class ‘, ‘Cl.’), value: row.classAverage
         }));
-        y = drawHBarChart(margin, y, contentW, classChartRows, 'Class Average Performance — Ranked Strongest to Weakest', 'Green ≥75% | Blue 60–75% | Red <60%');
+        y = drawVBarChart(margin, y, contentW, classChartH, classChartRows, ‘Class Average Performance’, ‘Green ≥75% | Blue 60–75% | Red <60%  — ranked strongest to weakest’);
       }
 
-      // ── Page 4: Teacher Blocks Table + Bar Chart ─────────────────────
+      // ── Page 4: Monthly Trend Line Chart + Teacher Table ─────────────
       doc.addPage();
       y = 14;
-      doc.setFontSize(15);
+      const trend = report.monthlyTrend || [];
+      if (trend.length >= 2) {
+        y = drawLineChart(margin, y, contentW, 60, trend, ‘School Average — Monthly Trend Line’, ‘Each dot is the school-wide exam average for that month in the reporting window’);
+        y += 4;
+      }
+      doc.setFontSize(14);
       doc.setTextColor(15, 23, 42);
-      doc.text('Teacher Academic and Attendance Blocks', margin, y);
+      doc.text(‘Teacher Academic and Attendance Blocks’, margin, y);
       y += 4;
       doc.autoTable({
         startY: y,
-        head: [['Teacher', 'Academic Avg', 'Classes', 'Subjects', 'Late', 'Attention']],
+        head: [[‘Teacher’, ‘Academic Avg’, ‘Classes’, ‘Subjects’, ‘Late’, ‘Attention’]],
         body: report.teacherInsights.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0)).map((row) => [
           row.teacher,
           formatPercent(row.avgPct),
           row.classCount,
-          row.subjects.slice(0, 4).join(', ') || '-',
+          row.subjects.slice(0, 4).join(‘, ‘) || ‘-’,
           row.lateDays || 0,
           row.attention || 0
         ]),
-        theme: 'grid',
-        styles: { fontSize: 7.5, cellPadding: 2, overflow: 'linebreak' },
+        theme: ‘grid’,
+        styles: { fontSize: 7.5, cellPadding: 2, overflow: ‘linebreak’ },
         headStyles: { fillColor: [15, 118, 110], fontSize: 8 },
         alternateRowStyles: { fillColor: [248, 252, 250] },
         columnStyles: { 3: { cellWidth: 50 } }
       });
 
-      y = doc.lastAutoTable.finalY + 8;
-      if (y < pageHeight - 55) {
-        const teacherChartRows = report.teacherInsights.slice().sort((a, b) => b.avgPct - a.avgPct).map((row) => {
-          const parts = String(row.teacher || '').split(' ');
-          const shortName = parts[0] + (parts.length > 1 ? ' ' + parts[parts.length - 1] : '');
-          return { label: shortName, value: row.avgPct, valueLabel: formatPercent(row.avgPct) };
-        });
-        drawHBarChart(margin, y, contentW, teacherChartRows, 'Teacher Block Performance — Ranked Strongest to Weakest', 'Each bar shows the teacher’s average score across all learners and subjects in their block');
-      }
-
-      // ── Page 5: Learner Watchlists ────────────────────────────────────
+      // ── Page 5: Teacher Bar Chart + Learner Watchlists ───────────────
       doc.addPage();
       y = 14;
-      doc.setFontSize(15);
+      const tchChartRows = report.teacherInsights.slice().sort((a, b) => b.avgPct - a.avgPct).map((row) => {
+        const parts = String(row.teacher || ‘’).split(‘ ‘);
+        return { label: parts[0] + (parts.length > 1 ? ‘ ‘ + parts[parts.length - 1] : ‘’), value: row.avgPct };
+      });
+      const tchChartH = Math.min(60, Math.max(40, tchChartRows.length * 7 + 22));
+      if (tchChartRows.length > 0) {
+        y = drawVBarChart(margin, y, contentW, tchChartH, tchChartRows, ‘Teacher Block Performance’, ‘Vertical bars ranked strongest to weakest — Green ≥75% | Blue 60–75% | Red <60%’);
+        y += 6;
+      }
+      doc.setFontSize(14);
       doc.setTextColor(15, 23, 42);
-      doc.text('Learner Watchlists', margin, y);
+      doc.text(‘Learner Watchlists’, margin, y);
       y += 4;
       doc.autoTable({
         startY: y,
-        head: [['#', 'Top Learner', 'Class', 'Average']],
-        body: report.topStudents.map((student, index) => [index + 1, student.name, student.className || student.class || '-', formatPercent(student.overallPct)]),
-        theme: 'grid',
+        head: [[‘#’, ‘Top Learner’, ‘Class’, ‘Average’]],
+        body: report.topStudents.map((student, index) => [index + 1, student.name, student.className || student.class || ‘-’, formatPercent(student.overallPct)]),
+        theme: ‘grid’,
         styles: { fontSize: 8, cellPadding: 2.5 },
         headStyles: { fillColor: [22, 163, 74], fontSize: 8 },
         alternateRowStyles: { fillColor: [248, 252, 248] }
       });
       doc.autoTable({
         startY: doc.lastAutoTable.finalY + 8,
-        head: [['Highest Debt Learner', 'Class', 'Average', 'Attendance', 'Balance', 'Parent Contact']],
-        body: report.highDebt.map((student) => [student.name, student.className || student.class || '-', formatPercent(student.overallPct), formatPercent(student.attendancePct), formatCurrency(student.fee.balance), student.parentContact || '-']),
-        theme: 'grid',
+        head: [[‘Highest Debt Learner’, ‘Class’, ‘Average’, ‘Attendance’, ‘Balance’, ‘Parent Contact’]],
+        body: report.highDebt.map((student) => [student.name, student.className || student.class || ‘-’, formatPercent(student.overallPct), formatPercent(student.attendancePct), formatCurrency(student.fee.balance), student.parentContact || ‘-’]),
+        theme: ‘grid’,
         styles: { fontSize: 7.5, cellPadding: 2 },
         headStyles: { fillColor: [180, 83, 9], fontSize: 8 },
         alternateRowStyles: { fillColor: [255, 250, 245] }
       });
 
       y = doc.lastAutoTable.finalY + 8;
-      if (y < pageHeight - 35) {
+      if (y < pageHeight - 30) {
         doc.setFontSize(9);
         doc.setTextColor(51, 65, 85);
         const top = report.topStudents[0];
         const watchText = top
-          ? top.name + ' leads the school-wide academic ranking with ' + formatPercent(top.overallPct) + '. Recognition at the academic meeting matters for the same reason that intervention does: it shows learners, teachers, and parents what sustained, consistent performance looks like across a reporting window. The debt table above is not a finance list — it is a risk register. Every learner shown there carries a compounded profile of outstanding fees, interrupted class time, and academic pressure. These cases require a structured multi-week follow-up plan, not a single parent phone call.'
-          : 'Learner watchlists could not be generated from available data for this window.';
+          ? top.name + ‘ leads the school-wide academic ranking with ‘ + formatPercent(top.overallPct) + ‘. Recognition at the academic meeting matters for the same reason that intervention does: it shows learners, teachers, and parents what sustained, consistent performance looks like across a reporting window. The debt table above is not a finance list — it is a risk register. Every learner shown there carries a compounded profile of outstanding fees, interrupted class time, and academic pressure. These cases require a structured multi-week follow-up plan, not a single parent phone call.’
+          : ‘Learner watchlists could not be generated from available data for this window.’;
         doc.text(doc.splitTextToSize(watchText, contentW), margin, y);
       }
 
-      // ── Page 6: Subject Performance Table + Bar Chart ────────────────
+      // ── Page 6: Subject Table + Vertical Bar Chart ───────────────────
       doc.addPage();
       y = 14;
       doc.setFontSize(15);
       doc.setTextColor(15, 23, 42);
-      doc.text('Subject Performance Across the School', margin, y);
+      doc.text(‘Subject Performance Across the School’, margin, y);
       y += 4;
       doc.autoTable({
         startY: y,
-        head: [['Subject', 'Average', 'Classes', 'Teachers', 'Attention']],
-        body: report.subjectStats.map((row) => [row.subject, formatPercent(row.avgPct), row.classCount, row.teachers.slice(0, 3).join(', '), row.attentionCount]),
-        theme: 'grid',
-        styles: { fontSize: 8, cellPadding: 2.5, overflow: 'linebreak' },
+        head: [[‘Subject’, ‘Average’, ‘Classes’, ‘Teachers’, ‘Attention’]],
+        body: report.subjectStats.map((row) => [row.subject, formatPercent(row.avgPct), row.classCount, row.teachers.slice(0, 3).join(‘, ‘), row.attentionCount]),
+        theme: ‘grid’,
+        styles: { fontSize: 8, cellPadding: 2.5, overflow: ‘linebreak’ },
         headStyles: { fillColor: [124, 58, 237], fontSize: 8 },
         alternateRowStyles: { fillColor: [250, 248, 255] },
         columnStyles: { 3: { cellWidth: 50 } }
       });
 
       y = doc.lastAutoTable.finalY + 8;
-      if (y < pageHeight - 60) {
-        const subChartRows = report.subjectStats.slice().sort((a, b) => b.avgPct - a.avgPct).slice(0, 14).map((row) => ({
-          label: String(row.subject || '').slice(0, 22), value: row.avgPct, valueLabel: formatPercent(row.avgPct)
+      const subChartH = Math.min(65, pageHeight - y - 16);
+      if (subChartH > 40) {
+        const subChartRows = report.subjectStats.slice().sort((a, b) => b.avgPct - a.avgPct).slice(0, 12).map((row) => ({
+          label: String(row.subject || ‘’).slice(0, 9), value: row.avgPct
         }));
-        drawHBarChart(margin, y, contentW, subChartRows, 'Subject Average Chart (Top 14 — strongest to weakest)', 'Shows where teaching investment is landing across the school');
+        drawVBarChart(margin, y, contentW, subChartH, subChartRows, ‘Subject Averages — Vertical Bar Chart’, ‘Top 12 subjects ranked strongest to weakest — shows where teaching is landing’);
       }
 
       // ── Running footer on every page ─────────────────────────────────
@@ -4444,17 +4576,25 @@
       const month = query.get('month') || String(new Date().getMonth() + 1).padStart(2, '0');
       const today = new Date();
       const monthEnd = new Date(Number(year), Number(month), 0);
+      const todayIso = today.toISOString().slice(0, 10);
       dom.yearSelect.value = year;
       dom.streamInput.value = query.get('stream') || '';
-      dom.fromDate.value = query.get('from') || (year + '-' + month + '-01');
-      dom.toDate.value = query.get('to') || (year === String(today.getFullYear()) && month === String(today.getMonth() + 1).padStart(2, '0') ? today.toISOString().slice(0, 10) : year + '-' + month + '-' + String(monthEnd.getDate()).padStart(2, '0'));
       dom.schoolBranch.value = (state.currentSchool && state.currentSchool.name) || query.get('schoolBranch') || 'School';
       const scope = String(query.get('scope') || '').toLowerCase();
       const requestedClass = query.get('class') ? normalizeDisplayClass(query.get('class')) : '';
-      if (!state.assignedClass && (scope === 'school' || query.get('schoolWide') === '1')) {
+      const isSchoolWide = !state.assignedClass && (scope === 'school' || query.get('schoolWide') === '1');
+      if (isSchoolWide) {
+        // School-wide always spans from Jan 1 of the selected year so every class's
+        // exam records are captured, regardless of the URL's month or from param.
         dom.classSelect.value = SCHOOL_WIDE_VALUE;
-      } else if (requestedClass || state.assignedClass) {
-        dom.classSelect.value = requestedClass || state.assignedClass;
+        dom.fromDate.value = year + '-01-01';
+        dom.toDate.value = year === String(today.getFullYear()) ? todayIso : year + '-12-31';
+      } else {
+        dom.fromDate.value = query.get('from') || (year + '-' + month + '-01');
+        dom.toDate.value = query.get('to') || (year === String(today.getFullYear()) && month === String(today.getMonth() + 1).padStart(2, '0') ? todayIso : year + '-' + month + '-' + String(monthEnd.getDate()).padStart(2, '0'));
+        if (requestedClass || state.assignedClass) {
+          dom.classSelect.value = requestedClass || state.assignedClass;
+        }
       }
       updateHero(currentFilters());
     }
