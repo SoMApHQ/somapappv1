@@ -2063,7 +2063,7 @@
           attendance,
           attendancePct,
           fee,
-          overallPct: overall.pct,
+          overallPct: Math.min(100, overall.pct),
           overallGrade: overall.attemptedCount ? gradeFromPercent(overall.pct) : '-',
           attemptedCount: overall.attemptedCount,
           examSeries,
@@ -2537,6 +2537,19 @@
         || null;
     }
 
+    function allAcademicTeacherProfiles() {
+      const configs = Array.from(state.workerProfilesById.values() || []);
+      const academics = configs.filter((p) => String(p.teacherType || p.role || '').toLowerCase().includes('academic'));
+      if (academics.length >= 2) return academics.slice(0, 2);
+      const basil = teacherProfileByName('BASIL OUMA OMONDI');
+      const vumilia = teacherProfileByName('VUMILIA NDUMIAWINGA KIMARO');
+      const all = [];
+      if (academics[0]) all.push(academics[0]);
+      if (basil && !all.some((p) => teacherNamesMatch(p.name || p.fullName || '', 'BASIL OUMA OMONDI'))) all.push(basil);
+      if (vumilia && !all.some((p) => teacherNamesMatch(p.name || p.fullName || '', 'VUMILIA NDUMIAWINGA KIMARO'))) all.push(vumilia);
+      return all.slice(0, 2).filter(Boolean);
+    }
+
     async function buildSchoolReportAnalysis(filters) {
       const classes = Object.keys(SomapSub().SUBJECTS_BY_CLASS || {}).filter(Boolean);
       const classAnalyses = [];
@@ -2684,7 +2697,8 @@
         earlyTeacher,
         lateTeacher,
         weakestStudent,
-        academicTeacher: topAcademicTeacherProfile()
+        academicTeacher: topAcademicTeacherProfile(),
+        academicTeachers: allAcademicTeacherProfiles()
       };
 
       return {
@@ -2706,14 +2720,16 @@
     function renderSchoolReport(report) {
       const s = report.summary;
       dom.classTeacherMeta.textContent = 'Whole-school academic leadership';
-      const academic = s.academicTeacher || {};
-      const academicName = firstText(academic.fullNameUpper, academic.fullName, academic.name, 'Academic Teacher');
-      const academicPhone = firstText(academic.phone, academic.phoneNumber, academic.contact, '-');
-      const academicPhoto = firstText(academic.photoUrl, academic.passportUrl, academic.profilePhoto, '../images/somap-logo.png.jpg');
-      dom.classTeacherCards.innerHTML = [
-        '<article class="teacher-card p-4"><div class="text-xs uppercase tracking-[0.16em] text-slate-500">Academic Teacher</div><div class="flex gap-3 items-center mt-3"><img src="' + safe(academicPhoto) + '" alt="' + safe(academicName) + '" class="w-16 h-16 rounded-2xl object-cover border border-slate-200" onerror="this.onerror=null;this.src=\'../images/somap-logo.png.jpg\';"><div><div class="text-base font-semibold text-slate-900">' + safe(academicName) + '</div><div class="text-sm text-slate-500">' + safe(academicPhone) + '</div><div class="text-sm text-slate-500">Whole-school academic report owner</div></div></div></article>',
-        '<article class="teacher-card p-4"><div class="text-xs uppercase tracking-[0.16em] text-slate-500">Report Scope</div><div class="text-2xl font-semibold text-slate-900 mt-3">' + safe(String(report.classRows.length)) + ' classes</div><div class="text-sm text-slate-500 mt-2">' + safe(report.filters.fromDate + ' to ' + report.filters.toDate) + '</div></article>'
-      ].join('');
+      const academicTeachersArr = (s.academicTeachers && s.academicTeachers.length ? s.academicTeachers : [s.academicTeacher]).filter(Boolean);
+      const teacherCards = academicTeachersArr.map((academic, idx) => {
+        const aName = firstText(academic.fullNameUpper, academic.fullName, academic.name, 'Academic Teacher');
+        const aPhone = firstText(academic.phone, academic.phoneNumber, academic.contact, '-');
+        const aPhoto = firstText(academic.photoUrl, academic.passportUrl, academic.profilePhoto, '../images/somap-logo.png.jpg');
+        const label = idx === 0 ? 'Academic Teacher' : 'Academic Teacher 2';
+        return '<article class="teacher-card p-4"><div class="text-xs uppercase tracking-[0.16em] text-slate-500">' + label + '</div><div class="flex gap-3 items-center mt-3"><img src="' + safe(aPhoto) + '" alt="' + safe(aName) + '" class="w-16 h-16 rounded-2xl object-cover border border-slate-200" onerror="this.onerror=null;this.src=\'../images/somap-logo.png.jpg\';"><div><div class="text-base font-semibold text-slate-900">' + safe(aName) + '</div><div class="text-sm text-slate-500">' + safe(aPhone) + '</div><div class="text-sm text-slate-500">Academic report leadership</div></div></div></article>';
+      });
+      teacherCards.push('<article class="teacher-card p-4"><div class="text-xs uppercase tracking-[0.16em] text-slate-500">Report Scope</div><div class="text-2xl font-semibold text-slate-900 mt-3">' + safe(String(report.classRows.length)) + ' classes</div><div class="text-sm text-slate-500 mt-2">' + safe(report.filters.fromDate + ' to ' + report.filters.toDate) + '</div></article>');
+      dom.classTeacherCards.innerHTML = teacherCards.join('');
       dom.headlineTone.textContent = s.classAverage >= 65 ? 'Stable' : (s.classAverage >= 50 ? 'Mixed' : 'Urgent');
       dom.headlineBox.innerHTML = [
         '<div class="text-lg font-semibold text-slate-900">Whole-school academic story for ' + safe(report.filters.year) + '</div>',
@@ -3352,130 +3368,305 @@
       ];
     }
 
-    function downloadSchoolPdf(report) {
+    async function downloadSchoolPdf(report) {
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
       const margin = 14;
+      const contentW = pageWidth - 2 * margin;
       const s = report.summary;
       const schoolName = (state.currentSchool && state.currentSchool.name) || report.filters.schoolBranch || 'School';
-      const academic = s.academicTeacher || {};
-      const academicName = firstText(academic.fullNameUpper, academic.fullName, academic.name, 'Academic Teacher');
+      const academicTeachersArr = (s.academicTeachers && s.academicTeachers.length ? s.academicTeachers : [s.academicTeacher]).filter(Boolean);
+      const academicNamesLine = academicTeachersArr.map((a) => firstText(a.fullNameUpper, a.fullName, a.name, 'Academic Teacher')).join(' & ') || 'Academic Teacher';
 
+      // Load school logo
+      const logoDataUrl = await loadImageAsDataUrl('../images/somap-logo.png.jpg');
+
+      // ── Horizontal bar-chart helper ──────────────────────────────────
+      function drawHBarChart(startX, startY, chartW, rows, title, subtitle) {
+        const maxVal = Math.max.apply(null, rows.map((r) => Number(r.value) || 0).concat([1]));
+        const rowH = 9;
+        let cy = startY;
+        doc.setFontSize(11);
+        doc.setTextColor(15, 23, 42);
+        doc.text(title, startX, cy);
+        cy += 4;
+        if (subtitle) {
+          doc.setFontSize(7.5);
+          doc.setTextColor(100, 116, 139);
+          doc.text(subtitle, startX, cy);
+          cy += 4;
+        }
+        const labelW = 52;
+        const barAreaX = startX + labelW;
+        const barAreaW = chartW - labelW - 22;
+        rows.forEach((row, i) => {
+          const rawVal = Number(row.value) || 0;
+          const barW = Math.max(0, (rawVal / maxVal) * barAreaW);
+          const color = rawVal >= 75 ? [22, 163, 74] : rawVal >= 60 ? [37, 99, 235] : [220, 38, 38];
+          doc.setFillColor(240, 245, 250);
+          doc.roundedRect(barAreaX, cy + i * rowH, barAreaW, rowH - 2, 1, 1, 'F');
+          if (barW > 1) {
+            doc.setFillColor.apply(doc, color);
+            doc.roundedRect(barAreaX, cy + i * rowH, barW, rowH - 2, 1, 1, 'F');
+          }
+          doc.setFontSize(7.5);
+          doc.setTextColor(51, 65, 85);
+          doc.text(String(row.label || '').slice(0, 24), startX, cy + i * rowH + 5.5);
+          doc.setFontSize(7.5);
+          doc.setTextColor(15, 23, 42);
+          doc.text(String(row.valueLabel || formatPercent(rawVal)), barAreaX + barAreaW + 2, cy + i * rowH + 5.5);
+        });
+        return cy + rows.length * rowH + 5;
+      }
+
+      // ── Page 1: Cover ────────────────────────────────────────────────
       doc.setFillColor(15, 23, 42);
-      doc.rect(0, 0, pageWidth, 92, 'F');
+      doc.rect(0, 0, pageWidth, 88, 'F');
+      if (logoDataUrl) {
+        try { doc.addImage(logoDataUrl, 'JPEG', pageWidth - 46, 8, 30, 30); } catch (_) {}
+      }
       doc.setTextColor(255, 255, 255);
       doc.setFontSize(22);
       doc.text('Whole School Academic Report', margin, 22);
       doc.setFontSize(12);
       doc.text(schoolName + ' | ' + report.filters.year, margin, 32);
       doc.text(report.filters.fromDate + ' to ' + report.filters.toDate, margin, 40);
-      doc.setFontSize(10);
-      doc.text(doc.splitTextToSize('Prepared for the Academic Teacher meeting. This report aggregates class reports, subject performance, teacher blocks, attendance, fee pressure, and learner watchlists using the same score rules as the class academic report.', pageWidth - 2 * margin), margin, 52);
-      doc.setFontSize(11);
-      doc.text('Academic Teacher: ' + academicName, margin, 78);
+      doc.setFontSize(9);
+      doc.setTextColor(186, 230, 253);
+      doc.text(doc.splitTextToSize('Prepared for the Academic Teacher meeting. This report aggregates class performance, subject delivery, teacher blocks, attendance rates, fee pressure, and learner watchlists into one authoritative source for whole-school academic governance.', contentW - 6), margin, 51);
+      doc.setFontSize(10.5);
+      doc.setTextColor(255, 255, 255);
+      doc.text('Academic Leadership: ' + academicNamesLine, margin, 83);
 
+      // Metric cards
       const cards = [
-        ['School average', formatPercent(s.classAverage)],
-        ['Learner attendance', formatPercent(s.attendancePct)],
-        ['Best class', s.classBest ? s.classBest.className : '-'],
-        ['Weakest class', s.classWeak ? s.classWeak.className : '-'],
-        ['Fee balance', formatCurrency(s.feeBalance)],
-        ['Exams found', String(s.exams)]
+        ['School Average', formatPercent(s.classAverage), [37, 99, 235]],
+        ['Learner Attendance', formatPercent(s.attendancePct), [15, 118, 110]],
+        ['Best Class', s.classBest ? s.classBest.className : '-', [22, 163, 74]],
+        ['Weakest Class', s.classWeak ? s.classWeak.className : '-', [220, 38, 38]],
+        ['Fee Balance', formatCurrency(s.feeBalance), [180, 83, 9]],
+        ['Exams Found', String(s.exams), [8, 145, 178]]
       ];
-      let x = margin;
-      let y = 104;
-      cards.forEach((card, index) => {
-        doc.setFillColor(index % 2 ? 239 : 236, index % 2 ? 246 : 253, 255);
-        doc.roundedRect(x, y, 58, 25, 4, 4, 'F');
-        doc.setTextColor(71, 85, 105);
-        doc.setFontSize(8);
-        doc.text(card[0], x + 3, y + 8);
+      const cardW = (contentW - 8) / 3;
+      let cx = margin;
+      let cy = 97;
+      cards.forEach((card, i) => {
+        doc.setFillColor(255, 255, 255);
+        doc.setDrawColor(226, 232, 240);
+        doc.roundedRect(cx, cy, cardW, 26, 3, 3, 'FD');
+        doc.setFillColor.apply(doc, card[2]);
+        doc.roundedRect(cx, cy, 4, 26, 2, 2, 'F');
+        doc.setTextColor(100, 116, 139);
+        doc.setFontSize(7.5);
+        doc.text(card[0], cx + 7, cy + 8);
         doc.setTextColor(15, 23, 42);
         doc.setFontSize(13);
-        doc.text(String(card[1]).slice(0, 23), x + 3, y + 18);
-        x += 62;
-        if ((index + 1) % 3 === 0) {
-          x = margin;
-          y += 31;
-        }
+        doc.text(String(card[1]).slice(0, 20), cx + 7, cy + 18);
+        cx += cardW + 4;
+        if ((i + 1) % 3 === 0) { cx = margin; cy += 30; }
       });
 
+      // Intro text block
+      cy += 7;
+      doc.setFontSize(11);
       doc.setTextColor(15, 23, 42);
-      doc.setFontSize(14);
-      doc.text('Academic Reading', margin, 177);
-      doc.setFontSize(10);
-      const story = [
-        'The school average is ' + formatPercent(s.classAverage) + ' across ' + s.scoredLearners + ' scored learners. Subjects with zero-only records are excluded from averages so missing or not-done exams do not reduce the school score.',
-        (s.classBest ? s.classBest.className + ' is currently the strongest class at ' + formatPercent(s.classBest.classAverage) + '.' : 'No strongest class could be isolated.') + ' ' + (s.classWeak ? s.classWeak.className + ' needs the closest academic intervention at ' + formatPercent(s.classWeak.classAverage) + '.' : ''),
-        (s.bestTeacher ? s.bestTeacher.teacher + ' is leading the strongest academic teacher block at ' + formatPercent(s.bestTeacher.avgPct) + '.' : '') + ' ' + (s.weakTeacher ? s.weakTeacher.teacher + ' is the weakest teacher block in this window at ' + formatPercent(s.weakTeacher.avgPct) + '.' : ''),
-        (s.bestAttendanceClass ? s.bestAttendanceClass.classTeacher + ' carries the best class attendance signal through ' + s.bestAttendanceClass.className + ' at ' + formatPercent(s.bestAttendanceClass.attendancePct) + '.' : '') + ' ' + (s.lateTeacher ? s.lateTeacher.teacher + ' has the strongest lateness concern with ' + s.lateTeacher.lateDays + ' late record(s).' : '')
+      doc.text('Report Introduction', margin, cy);
+      cy += 5;
+      doc.setFontSize(9);
+      doc.setTextColor(51, 65, 85);
+      const introParas = [
+        'This report covers ' + report.classRows.length + ' classes across ' + schoolName + ' for the academic window ' + report.filters.fromDate + ' to ' + report.filters.toDate + '. It draws from exam scores, attendance registers, fee records, and teacher subject mappings recorded in SoMAp during the reporting period.',
+        'The school average of ' + formatPercent(s.classAverage) + ' reflects ' + s.scoredLearners + ' scored learners in classes where at least one exam was recorded. All percentages are computed as total marks earned divided by total marks available, with zero-only subjects excluded so untaught topics do not deflate class averages unfairly.'
       ];
-      doc.text(doc.splitTextToSize(story.join('\n\n'), pageWidth - 2 * margin), margin, 186);
+      const introLines = doc.splitTextToSize(introParas.join(' '), contentW);
+      doc.text(introLines, margin, cy);
 
+      // ── Page 2: School Academic Story ────────────────────────────────
       doc.addPage();
-      doc.setFontSize(16);
-      doc.text('Class Performance Table', margin, 18);
+      let y = 14;
+      doc.setFontSize(17);
+      doc.setTextColor(15, 23, 42);
+      doc.text('School Academic Story', margin, y);
+      y += 2;
+      doc.setDrawColor(15, 118, 110);
+      doc.setLineWidth(0.8);
+      doc.line(margin, y, margin + 70, y);
+      doc.setLineWidth(0.2);
+      y += 8;
+
+      const classDiff = (s.classBest && s.classWeak) ? formatPercent(Math.abs(s.classBest.classAverage - s.classWeak.classAverage)) : 'unknown';
+      const teacherDiff = (s.bestTeacher && s.weakTeacher) ? formatPercent(Math.abs(s.bestTeacher.avgPct - s.weakTeacher.avgPct)) : 'notable';
+      const performanceTone = s.classAverage >= 65 ? 'broadly stable' : s.classAverage >= 50 ? 'mixed' : 'concerning';
+      const attendanceTone = s.attendancePct >= 90 ? 'a strong foundation for academic delivery' : s.attendancePct >= 80 ? 'acceptable but warrants closer monitoring' : 'a significant concern already affecting learning outcomes';
+
+      const storyParas = [
+        'Overall School Picture. The school performance in this window tells a ' + performanceTone + ' academic story. ' + s.scoredLearners + ' learners across ' + report.classRows.length + ' classes produced a school average of ' + formatPercent(s.classAverage) + '. Whole-school attendance sits at ' + formatPercent(s.attendancePct) + ', which is ' + attendanceTone + '. Both figures must be read together: a class with strong exam scores but falling attendance is already at risk, because no assessment strategy compensates for lost teaching time.',
+
+        'Class Spread. The gap between the strongest and weakest class in this window is ' + classDiff + '. ' + (s.classBest ? s.classBest.className + ' leads the school at ' + formatPercent(s.classBest.classAverage) + ', demonstrating what consistent teaching, good attendance, and learner engagement can produce together.' : '') + ' ' + (s.classWeak ? s.classWeak.className + ' sits at ' + formatPercent(s.classWeak.classAverage) + ' and requires the most immediate structured intervention from the academic office. The meeting should assign a named accountability plan for this class before the next exam window.' : ''),
+
+        'Teacher Performance. The spread between the strongest and weakest teacher blocks is ' + teacherDiff + '. ' + (s.bestTeacher ? s.bestTeacher.teacher + ' is delivering the strongest academic output at ' + formatPercent(s.bestTeacher.avgPct) + '. This teacher block sets the benchmark for lesson planning, assessment design, and learner follow-up across the whole school.' : '') + ' ' + (s.weakTeacher ? s.weakTeacher.teacher + ' carries the weakest block at ' + formatPercent(s.weakTeacher.avgPct) + '. The academic meeting should review lesson notes, homework tracking, and marking quality for this block and agree on a concrete support structure.' : ''),
+
+        'Attendance Leadership. ' + (s.bestAttendanceClass ? s.bestAttendanceClass.classTeacher + ' through ' + s.bestAttendanceClass.className + ' leads attendance at ' + formatPercent(s.bestAttendanceClass.attendancePct) + '. Consistent class attendance creates the rhythm for learning that translates directly into stronger exam performance over time.' : 'No clear attendance leader was isolated in this window.') + ' ' + (s.weakAttendanceClass ? s.weakAttendanceClass.className + ' has the school\'s lowest attendance at ' + formatPercent(s.weakAttendanceClass.attendancePct) + '. Every lost school day in a class of this size represents cumulative teaching time that cannot be recovered through revision or extra exams alone.' : ''),
+
+        'Finance and Risk. Outstanding fee balance stands at ' + formatCurrency(s.feeBalance) + ' against a required collection of ' + formatCurrency(s.feeRequired) + '. ' + s.clearedCount + ' learners (' + formatPercent(s.clearedPct) + ') have cleared their fees for the year. High fee balances tracked alongside low attendance and weak exam scores form the sharpest learner risk profile. These learners need structured parent contact and an academic support plan, not just a payment reminder.',
+
+        'Meeting Recommendations. The academic office should use this report in three ways. First, recognise and publicly sustain the performance of high-performing classes and teachers — this signals school standards clearly. Second, design a named rescue plan for the two lowest-performing classes, assigning specific teachers, timelines, and test checkpoints. Third, call the parents of every learner carrying both a high fee balance and low attendance, because compounded financial and academic risk is the earliest measurable signal of potential dropout.'
+      ];
+
+      doc.setFontSize(9.5);
+      storyParas.forEach((para) => {
+        const [heading, ...rest] = para.split('. ');
+        doc.setTextColor(15, 23, 42);
+        doc.setFontSize(10);
+        doc.text(heading + '.', margin, y);
+        y += 4.5;
+        doc.setTextColor(51, 65, 85);
+        doc.setFontSize(9);
+        const body = rest.join('. ').trim();
+        const lines = doc.splitTextToSize(body, contentW);
+        doc.text(lines, margin, y);
+        y += (lines.length * 4.2) + 5;
+        if (y > pageHeight - 20) { doc.addPage(); y = 14; }
+      });
+
+      // ── Page 3: Class Performance Table + Bar Chart ──────────────────
+      doc.addPage();
+      y = 14;
+      doc.setFontSize(15);
+      doc.setTextColor(15, 23, 42);
+      doc.text('Class Performance Table', margin, y);
+      y += 4;
       doc.autoTable({
-        startY: 25,
+        startY: y,
         head: [['Class', 'Class Teacher', 'Learners', 'Avg', 'Attendance', 'Exams', 'Fee Balance']],
         body: report.classRows.map((row) => [row.className, row.classTeacher, row.learners, formatPercent(row.classAverage), formatPercent(row.attendancePct), row.exams, formatCurrency(row.feeBalance)]),
         theme: 'grid',
-        styles: { fontSize: 8 },
-        headStyles: { fillColor: [37, 99, 235] }
+        styles: { fontSize: 8, cellPadding: 2.5 },
+        headStyles: { fillColor: [37, 99, 235], fontSize: 8 },
+        alternateRowStyles: { fillColor: [248, 250, 252] }
       });
 
+      y = doc.lastAutoTable.finalY + 8;
+      if (y < pageHeight - 55) {
+        const classChartRows = report.classRows.slice().sort((a, b) => b.classAverage - a.classAverage).map((row) => ({
+          label: row.className, value: row.classAverage, valueLabel: formatPercent(row.classAverage)
+        }));
+        y = drawHBarChart(margin, y, contentW, classChartRows, 'Class Average Performance — Ranked Strongest to Weakest', 'Green ≥75% | Blue 60–75% | Red <60%');
+      }
+
+      // ── Page 4: Teacher Blocks Table + Bar Chart ─────────────────────
       doc.addPage();
-      doc.setFontSize(16);
-      doc.text('Teacher Academic and Attendance Blocks', margin, 18);
+      y = 14;
+      doc.setFontSize(15);
+      doc.setTextColor(15, 23, 42);
+      doc.text('Teacher Academic and Attendance Blocks', margin, y);
+      y += 4;
       doc.autoTable({
-        startY: 25,
-        head: [['Teacher', 'Academic Avg', 'Classes', 'Subjects', 'Attendance', 'Late', 'Attention']],
+        startY: y,
+        head: [['Teacher', 'Academic Avg', 'Classes', 'Subjects', 'Late', 'Attention']],
         body: report.teacherInsights.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0)).map((row) => [
           row.teacher,
           formatPercent(row.avgPct),
           row.classCount,
-          row.subjects.slice(0, 5).join(', ') || '-',
-          row.attendancePct === null ? '-' : formatPercent(row.attendancePct),
+          row.subjects.slice(0, 4).join(', ') || '-',
           row.lateDays || 0,
           row.attention || 0
         ]),
         theme: 'grid',
-        styles: { fontSize: 7 },
-        headStyles: { fillColor: [15, 118, 110] }
+        styles: { fontSize: 7.5, cellPadding: 2, overflow: 'linebreak' },
+        headStyles: { fillColor: [15, 118, 110], fontSize: 8 },
+        alternateRowStyles: { fillColor: [248, 252, 250] },
+        columnStyles: { 3: { cellWidth: 50 } }
       });
 
+      y = doc.lastAutoTable.finalY + 8;
+      if (y < pageHeight - 55) {
+        const teacherChartRows = report.teacherInsights.slice().sort((a, b) => b.avgPct - a.avgPct).map((row) => {
+          const parts = String(row.teacher || '').split(' ');
+          const shortName = parts[0] + (parts.length > 1 ? ' ' + parts[parts.length - 1] : '');
+          return { label: shortName, value: row.avgPct, valueLabel: formatPercent(row.avgPct) };
+        });
+        drawHBarChart(margin, y, contentW, teacherChartRows, 'Teacher Block Performance — Ranked Strongest to Weakest', 'Each bar shows the teacher’s average score across all learners and subjects in their block');
+      }
+
+      // ── Page 5: Learner Watchlists ────────────────────────────────────
       doc.addPage();
-      doc.setFontSize(16);
-      doc.text('Learner Watchlists', margin, 18);
+      y = 14;
+      doc.setFontSize(15);
+      doc.setTextColor(15, 23, 42);
+      doc.text('Learner Watchlists', margin, y);
+      y += 4;
       doc.autoTable({
-        startY: 25,
+        startY: y,
         head: [['#', 'Top Learner', 'Class', 'Average']],
         body: report.topStudents.map((student, index) => [index + 1, student.name, student.className || student.class || '-', formatPercent(student.overallPct)]),
         theme: 'grid',
-        styles: { fontSize: 8 },
-        headStyles: { fillColor: [22, 163, 74] }
+        styles: { fontSize: 8, cellPadding: 2.5 },
+        headStyles: { fillColor: [22, 163, 74], fontSize: 8 },
+        alternateRowStyles: { fillColor: [248, 252, 248] }
       });
       doc.autoTable({
-        startY: doc.lastAutoTable.finalY + 10,
+        startY: doc.lastAutoTable.finalY + 8,
         head: [['Highest Debt Learner', 'Class', 'Average', 'Attendance', 'Balance', 'Parent Contact']],
         body: report.highDebt.map((student) => [student.name, student.className || student.class || '-', formatPercent(student.overallPct), formatPercent(student.attendancePct), formatCurrency(student.fee.balance), student.parentContact || '-']),
         theme: 'grid',
-        styles: { fontSize: 7 },
-        headStyles: { fillColor: [180, 83, 9] }
+        styles: { fontSize: 7.5, cellPadding: 2 },
+        headStyles: { fillColor: [180, 83, 9], fontSize: 8 },
+        alternateRowStyles: { fillColor: [255, 250, 245] }
       });
 
+      y = doc.lastAutoTable.finalY + 8;
+      if (y < pageHeight - 35) {
+        doc.setFontSize(9);
+        doc.setTextColor(51, 65, 85);
+        const top = report.topStudents[0];
+        const watchText = top
+          ? top.name + ' leads the school-wide academic ranking with ' + formatPercent(top.overallPct) + '. Recognition at the academic meeting matters for the same reason that intervention does: it shows learners, teachers, and parents what sustained, consistent performance looks like across a reporting window. The debt table above is not a finance list — it is a risk register. Every learner shown there carries a compounded profile of outstanding fees, interrupted class time, and academic pressure. These cases require a structured multi-week follow-up plan, not a single parent phone call.'
+          : 'Learner watchlists could not be generated from available data for this window.';
+        doc.text(doc.splitTextToSize(watchText, contentW), margin, y);
+      }
+
+      // ── Page 6: Subject Performance Table + Bar Chart ────────────────
       doc.addPage();
-      doc.setFontSize(16);
-      doc.text('Subject Performance Across the School', margin, 18);
+      y = 14;
+      doc.setFontSize(15);
+      doc.setTextColor(15, 23, 42);
+      doc.text('Subject Performance Across the School', margin, y);
+      y += 4;
       doc.autoTable({
-        startY: 25,
-        head: [['Subject', 'Average', 'Classes', 'Teachers', 'Attention Count']],
-        body: report.subjectStats.map((row) => [row.subject, formatPercent(row.avgPct), row.classCount, row.teachers.slice(0, 4).join(', '), row.attentionCount]),
+        startY: y,
+        head: [['Subject', 'Average', 'Classes', 'Teachers', 'Attention']],
+        body: report.subjectStats.map((row) => [row.subject, formatPercent(row.avgPct), row.classCount, row.teachers.slice(0, 3).join(', '), row.attentionCount]),
         theme: 'grid',
-        styles: { fontSize: 8 },
-        headStyles: { fillColor: [124, 58, 237] }
+        styles: { fontSize: 8, cellPadding: 2.5, overflow: 'linebreak' },
+        headStyles: { fillColor: [124, 58, 237], fontSize: 8 },
+        alternateRowStyles: { fillColor: [250, 248, 255] },
+        columnStyles: { 3: { cellWidth: 50 } }
       });
+
+      y = doc.lastAutoTable.finalY + 8;
+      if (y < pageHeight - 60) {
+        const subChartRows = report.subjectStats.slice().sort((a, b) => b.avgPct - a.avgPct).slice(0, 14).map((row) => ({
+          label: String(row.subject || '').slice(0, 22), value: row.avgPct, valueLabel: formatPercent(row.avgPct)
+        }));
+        drawHBarChart(margin, y, contentW, subChartRows, 'Subject Average Chart (Top 14 — strongest to weakest)', 'Shows where teaching investment is landing across the school');
+      }
+
+      // ── Running footer on every page ─────────────────────────────────
+      const totalPages = doc.internal.getNumberOfPages();
+      for (let i = 1; i <= totalPages; i += 1) {
+        doc.setPage(i);
+        doc.setDrawColor(226, 232, 240);
+        doc.line(margin, pageHeight - 10, pageWidth - margin, pageHeight - 10);
+        doc.setFontSize(7.5);
+        doc.setTextColor(100, 116, 139);
+        doc.text(schoolName, margin, pageHeight - 5);
+        doc.text('Whole School Academic Report | ' + report.filters.year + ' | ' + report.filters.fromDate + ' to ' + report.filters.toDate, pageWidth / 2 - 25, pageHeight - 5);
+        doc.text('Page ' + i + ' of ' + totalPages, pageWidth - margin - 16, pageHeight - 5);
+      }
+
       doc.save('Whole_School_Academic_Report_' + report.filters.year + '_' + report.filters.fromDate + '_to_' + report.filters.toDate + '.pdf');
     }
 
@@ -3485,7 +3676,7 @@
         return;
       }
       if (state.analysis.mode === 'school') {
-        downloadSchoolPdf(state.analysis);
+        await downloadSchoolPdf(state.analysis);
         return;
       }
       const { jsPDF } = window.jspdf;
@@ -4314,10 +4505,10 @@
         window.location.href = '../workershtml/workertasks.html';
         return;
       }
-      state.academicTeacherAccess = openedAsAcademicTeacher || role === 'academic';
+      state.academicTeacherAccess = openedAsAcademicTeacher || role === 'academic' || role === 'admin' || role === 'head';
       const currentYear = new Date().getFullYear();
       dom.yearSelect.innerHTML = '';
-      for (let y = currentYear - 2; y <= currentYear + 2; y += 1) {
+      for (let y = 2020; y <= currentYear + 1; y += 1) {
         const opt = document.createElement('option');
         opt.value = String(y);
         opt.textContent = String(y);
