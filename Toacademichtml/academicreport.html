@@ -2479,7 +2479,7 @@
       const teacherInsights = buildTeacherInsights(subjectStats);
       const movement = buildMovementSummary(studentAnalytics, classFilters.className, classFilters.year, shiftReports);
       const teacherEffort = await fetchTeacherEffortDataDetailed(classFilters.year, classFilters.className, classFilters.fromDate, classFilters.toDate);
-      return analyzeClass(classFilters, studentAnalytics, timeline, subjectStats, teacherInsights, movement, shiftReports, examRecords, teacherEffort);
+      return { ...analyzeClass(classFilters, studentAnalytics, timeline, subjectStats, teacherInsights, movement, shiftReports, examRecords, teacherEffort), className: classFilters.className };
     }
 
     async function runReport() {
@@ -2551,22 +2551,42 @@
 
       const students = classAnalyses.flatMap((analysis) => analysis.students || []);
       const scored = students.filter((student) => Number(student.attemptedCount || 0) > 0);
+      const examEvidence = [];
+      classAnalyses.forEach((analysis) => {
+        const className = analysis.className || (analysis.filters && analysis.filters.className) || 'Unknown';
+        (analysis.summary && analysis.summary.records || []).forEach((record) => {
+          const examAverages = Object.values(record.data || {})
+            .map((subjectMap) => studentPercentFrom(Object.values(subjectMap || {})).pct)
+            .filter((value) => Number.isFinite(value) && value > 0);
+          const examAverage = mean(examAverages);
+          if (examAverage > 0) {
+            examEvidence.push({
+              className,
+              examLabel: record.examLabel || 'Exam',
+              monthLabel: record.monthLabel || record.monthKey || '-',
+              average: examAverage,
+              learners: examAverages.length
+            });
+          }
+        });
+      });
       const classRows = classAnalyses.map((analysis) => {
-        const className = analysis.filters && analysis.filters.className || 'Unknown';
+        const className = analysis.className || (analysis.filters && analysis.filters.className) || 'Unknown';
+        const classExamAverages = examEvidence.filter((row) => row.className === className).map((row) => row.average);
         const teacher = classTeacherFor(className);
         return {
           className,
           classTeacher: firstText(teacher && teacher.name, teacher && teacher.fullName, teacher && teacher.teacherName, 'Not assigned'),
           learners: analysis.students.length,
-          classAverage: analysis.summary.classAverage,
+          classAverage: classExamAverages.length ? mean(classExamAverages) : 0,
           attendancePct: analysis.summary.attendancePct,
           feeBalance: analysis.summary.feeBalance,
           clearedCount: analysis.summary.clearedCount,
-          exams: analysis.summary.records.length,
+          exams: classExamAverages.length,
           warnings: analysis.narrative.warnings.length,
           analysis
         };
-      }).filter((row) => row.learners > 0 || row.exams > 0);
+      }).filter((row) => row.exams > 0);
 
       const subjectMap = new Map();
       classAnalyses.forEach((analysis) => {
@@ -2578,7 +2598,7 @@
           bucket.values.push(Number(row.avgPct || 0));
           bucket.attention += Number(row.attentionCount || 0);
           bucket.teachers.add(row.teacher || 'Teacher not mapped');
-          bucket.classes.add(analysis.filters && analysis.filters.className || 'Unknown');
+          bucket.classes.add(analysis.className || (analysis.filters && analysis.filters.className) || 'Unknown');
         });
       });
       const subjectStats = Array.from(subjectMap.values()).map((row) => ({
@@ -2599,7 +2619,7 @@
           bucket.trends.push(Number(row.trendDelta || 0));
           bucket.attention += Number(row.attention || 0);
           (row.subjects || []).forEach((subject) => bucket.subjects.add(subject));
-          bucket.classes.add(analysis.filters && analysis.filters.className || 'Unknown');
+          bucket.classes.add(analysis.className || (analysis.filters && analysis.filters.className) || 'Unknown');
         });
         Object.values(analysis.teacherEffort || {}).forEach((effort) => {
           const name = effort.teacher || effort.name || '';
@@ -2645,7 +2665,7 @@
       const cleared = students.filter((student) => Number(student.fee && student.fee.balance || 0) <= 0.5);
 
       const summary = {
-        classAverage: mean(scored.map((student) => student.overallPct)),
+        classAverage: mean(examEvidence.map((row) => row.average)),
         attendancePct: days > 0 ? (present * 100) / days : 0,
         feeRequired,
         feePaid,
@@ -2654,7 +2674,7 @@
         scoredLearners: scored.length,
         clearedCount: cleared.length,
         clearedPct: students.length ? (cleared.length * 100) / students.length : 0,
-        exams: classAnalyses.reduce((sum, analysis) => sum + analysis.summary.records.length, 0),
+        exams: examEvidence.length,
         classBest,
         classWeak,
         bestAttendanceClass,
@@ -2671,6 +2691,7 @@
         mode: 'school',
         filters,
         summary,
+        examEvidence,
         classAnalyses,
         classRows,
         subjectStats,
