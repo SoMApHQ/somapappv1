@@ -736,6 +736,27 @@
                 />
               </div>
             </div>
+            <button
+              type="button"
+              id="joint-exams-card"
+              class="hidden w-full text-left rounded-2xl border border-sky-300/30 bg-slate-950/55 p-4 shadow-xl shadow-slate-950/20 hover:border-sky-300/70 hover:bg-slate-900/80 transition"
+            >
+              <div class="flex items-start gap-4">
+                <div class="w-12 h-12 rounded-2xl bg-gradient-to-br from-sky-500 to-indigo-600 text-white grid place-items-center text-lg">
+                  <i class="fas fa-chart-line"></i>
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <p class="text-xs font-black tracking-[0.28em] text-sky-200 uppercase">JOINT EXAMS</p>
+                      <p class="text-sm text-slate-300">Upload • Analyse • PDF Report</p>
+                    </div>
+                    <i class="fas fa-arrow-right text-sky-200"></i>
+                  </div>
+                  <div id="joint-exams-mini-stats" class="mt-3 text-xs leading-5 text-slate-300">No joint analysed yet</div>
+                </div>
+              </div>
+            </button>
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               <button class="quick-link" data-link="classattendance">
                 <div
@@ -1658,6 +1679,8 @@
           responsibilityProgress: el("responsibility-progress"),
           responsibilityFlash: el("responsibility-flash"),
           responsibilityHistory: el("responsibility-history"),
+          jointExamsCard: el("joint-exams-card"),
+          jointExamsMiniStats: el("joint-exams-mini-stats"),
         };
 
         const charts = {
@@ -1671,6 +1694,8 @@
         let searchTerm = "";
         let speechEnabled = false;
         let pendingShiftStudent = null;
+        let jointExamStatsRef = null;
+        let jointExamYearWatchArmed = false;
         const pathCache = {};
 
         initLayout();
@@ -1891,6 +1916,7 @@
             if (els.teacherName)
               els.teacherName.textContent = userCtx.displayName;
             if (els.heroClass) els.heroClass.textContent = userCtx.className;
+            configureJointExamCard();
             if (els.userBadge) {
               els.userBadge.innerHTML = `<strong>${userCtx.displayName}</strong><div class="text-xs text-slate-500">${userCtx.email}</div>`;
             }
@@ -2266,6 +2292,92 @@
             },
             (err) => console.error("responsibilities listener error", err)
           );
+        }
+
+        function getSelectedAcademicYear() {
+          return String(
+            window.somapYearContext?.getSelectedYear?.() ||
+              new Date().getFullYear()
+          );
+        }
+
+        function normalizeClassToken(value = "") {
+          return String(value || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+        }
+
+        function isJointExamClass(className = "") {
+          const key = normalizeClassToken(className);
+          return key === "class7" || key === "standard7" || key === "std7" || key === "class4" || key === "standard4" || key === "std4";
+        }
+
+        function configureJointExamCard() {
+          if (!els.jointExamsCard) return;
+          const allowed = isJointExamClass(userCtx.className);
+          els.jointExamsCard.classList.toggle("hidden", !allowed);
+          if (!allowed) {
+            if (jointExamStatsRef) {
+              jointExamStatsRef.off();
+              jointExamStatsRef = null;
+            }
+            return;
+          }
+          els.jointExamsCard.onclick = openJointExamIntelligence;
+          subscribeJointExamStats();
+          if (!jointExamYearWatchArmed && window.somapYearContext?.onYearChanged) {
+            jointExamYearWatchArmed = true;
+            window.somapYearContext.onYearChanged(() => {
+              if (isJointExamClass(userCtx.className)) subscribeJointExamStats();
+            });
+          }
+        }
+
+        function subscribeJointExamStats() {
+          if (!els.jointExamsMiniStats || !userCtx.className) return;
+          if (jointExamStatsRef) jointExamStatsRef.off();
+          const year = getSelectedAcademicYear();
+          jointExamStatsRef = schoolRef(
+            `academicJointExamStats/${year}/${encodeURIComponent(userCtx.className)}`
+          );
+          jointExamStatsRef.on(
+            "value",
+            (snap) => renderJointExamMiniStats(snap.val() || null),
+            (err) => console.warn("joint exam stats listener error", err)
+          );
+        }
+
+        function renderJointExamMiniStats(stats) {
+          if (!els.jointExamsMiniStats) return;
+          if (!stats || !stats.latestExamId) {
+            els.jointExamsMiniStats.textContent = "No joint analysed yet";
+            return;
+          }
+          const risk = Array.isArray(stats.riskSubjects) && stats.riskSubjects.length
+            ? stats.riskSubjects.slice(0, 3).join(", ")
+            : "No major risk flagged";
+          const position = stats.latestPosition
+            ? `${stats.latestPosition}${stats.totalSchools ? "/" + stats.totalSchools : ""}`
+            : "-";
+          els.jointExamsMiniStats.innerHTML = `
+            <span class="font-semibold text-white">Avg:</span> ${formatOne(stats.latestAverage)}
+            <span class="mx-2 text-slate-500">|</span><span class="font-semibold text-white">Grade:</span> ${stats.latestGrade || "-"}
+            <span class="mx-2 text-slate-500">|</span><span class="font-semibold text-white">Pos:</span> ${position}
+            <br><span class="font-semibold text-amber-200">Risk:</span> ${risk}
+          `;
+        }
+
+        function formatOne(value) {
+          const n = Number(value);
+          return Number.isFinite(n) ? n.toFixed(1) : "-";
+        }
+
+        function openJointExamIntelligence() {
+          const schoolId = currentSchool?.id || window.currentSchoolId || "socrates-school";
+          const year = getSelectedAcademicYear();
+          const url =
+            `Toacademichtml/joint_exam_intelligence.html?school=${encodeURIComponent(schoolId)}` +
+            `&class=${encodeURIComponent(userCtx.className || "")}` +
+            `&year=${encodeURIComponent(year)}`;
+          window.location.href = url;
         }
 
         function subscribeResponsibilityHistory() {
