@@ -151,7 +151,7 @@
     <section class="topbar">
       <div class="brand">
         <h1>Departmental Hub</h1>
-        <p id="schoolLine">Loading school...</p>
+        <p id="schoolLine">Socrates School - Academic Year 2026</p>
       </div>
       <div class="actions">
         <select id="yearSelect" class="select" data-somap-year-select data-somap-year-min="2024" data-somap-year-max="2042"></select>
@@ -163,7 +163,7 @@
     <section class="summary">
       <div class="summary-card"><strong id="deptCount">14</strong><span>Departments</span></div>
       <div class="summary-card"><strong id="assignedCount">0</strong><span>Assigned heads</span></div>
-      <div class="summary-card"><strong id="workerCount">0</strong><span>Selectable workers</span></div>
+      <div class="summary-card"><strong id="workerCount">...</strong><span>Selectable workers</span></div>
     </section>
 
     <div id="notice" class="notice hidden"></div>
@@ -237,16 +237,26 @@
       SOMAP.setSchool({ id: 'socrates-school', name: 'Socrates School' });
     }
 
-    const db = firebase.database();
-    const school = window.SOMAP?.getSchool?.() || { id: 'socrates-school', name: 'Socrates School' };
-    const schoolRef = (path) => db.ref(SOMAP.P(path));
+    const somap = window.SOMAP || {
+      getSchool: () => ({ id: 'socrates-school', name: 'Socrates School' }),
+      P: (path) => String(path || '').replace(/^\/+/, '')
+    };
+    const db = (window.firebase && firebase.apps && firebase.apps.length) ? firebase.database() : null;
+    const school = somap.getSchool?.() || { id: 'socrates-school', name: 'Socrates School' };
+    const schoolRef = (path) => db.ref(somap.P(path));
     const isSocrates = ['socrates-school', 'default', 'socrates'].includes(school.id);
 
     function scopedOrLegacy(scopedPath, legacyPath) {
-      return schoolRef(scopedPath).once('value').then(snap => {
-        if (snap.exists() || !isSocrates) return snap;
-        return db.ref(legacyPath).once('value');
-      });
+      if (!db) return Promise.resolve({ exists: () => false, val: () => ({}) });
+      const scoped = somap.P(scopedPath);
+      const candidates = [scoped, scopedPath];
+      if (school.id) candidates.push(`schools/${school.id}/${scopedPath}`);
+      if (isSocrates && legacyPath) candidates.push(legacyPath);
+      const unique = [...new Set(candidates.filter(Boolean))];
+      return unique.reduce(
+        (chain, path) => chain.then(found => found?.exists?.() ? found : db.ref(path).once('value')),
+        Promise.resolve(null)
+      ).then(snap => snap || { exists: () => false, val: () => ({}) });
     }
     function esc(value) {
       return String(value ?? '').replace(/[&<>"']/g, s => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[s]));
@@ -295,6 +305,12 @@
     }
     async function loadAll() {
       document.getElementById('schoolLine').textContent = `${school.name || school.id} - Academic Year ${state.year}`;
+      state.departments = state.departments.length ? state.departments : DEFAULT_DEPARTMENTS;
+      render();
+      if (!db) {
+        setNotice('Firebase is not ready. Refresh the page once.');
+        return;
+      }
       const [customSnap, assignmentsSnap, workersSnap] = await Promise.all([
         schoolRef(`years/${state.year}/departmentCatalog`).once('value').catch(() => null),
         schoolRef(`years/${state.year}/departmentHeads`).once('value').catch(() => null),
@@ -372,6 +388,7 @@
       }).join('');
     }
     async function assignWorker(workerId) {
+      if (!db) return setNotice('Firebase is not ready. Refresh the page once.');
       const dept = state.activeDept;
       const item = state.workers.find(w => w.id === workerId);
       if (!dept || !item || !canSelectWorker(item)) return;
@@ -392,10 +409,10 @@
         assignedAt: Date.now()
       };
       const updates = {};
-      updates[SOMAP.P(`years/${state.year}/departmentHeads/${dept.key}`)] = payload;
-      updates[SOMAP.P(`years/${state.year}/workerDepartmentHeads/${item.id}/${dept.key}`)] = payload;
+      updates[somap.P(`years/${state.year}/departmentHeads/${dept.key}`)] = payload;
+      updates[somap.P(`years/${state.year}/workerDepartmentHeads/${item.id}/${dept.key}`)] = payload;
       if (old?.workerId && old.workerId !== item.id) {
-        updates[SOMAP.P(`years/${state.year}/workerDepartmentHeads/${old.workerId}/${dept.key}`)] = null;
+        updates[somap.P(`years/${state.year}/workerDepartmentHeads/${old.workerId}/${dept.key}`)] = null;
       }
       await db.ref().update(updates);
       document.getElementById('workerModal').classList.remove('open');
@@ -403,15 +420,17 @@
       await loadAll();
     }
     async function clearDepartment(deptKey) {
+      if (!db) return setNotice('Firebase is not ready. Refresh the page once.');
       const old = state.assignments[deptKey];
       const updates = {};
-      updates[SOMAP.P(`years/${state.year}/departmentHeads/${deptKey}`)] = null;
-      if (old?.workerId) updates[SOMAP.P(`years/${state.year}/workerDepartmentHeads/${old.workerId}/${deptKey}`)] = null;
+      updates[somap.P(`years/${state.year}/departmentHeads/${deptKey}`)] = null;
+      if (old?.workerId) updates[somap.P(`years/${state.year}/workerDepartmentHeads/${old.workerId}/${deptKey}`)] = null;
       await db.ref().update(updates);
       setNotice('Department head cleared.');
       await loadAll();
     }
     async function saveCustomDepartment() {
+      if (!db) return setNotice('Firebase is not ready. Refresh the page once.');
       const title = document.getElementById('newDepartmentName').value.trim();
       const desc = document.getElementById('newDepartmentDescription').value.trim();
       if (!title) return setNotice('Enter department name.');
