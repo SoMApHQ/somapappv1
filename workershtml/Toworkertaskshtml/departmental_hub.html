@@ -342,6 +342,68 @@
       function canSelect(worker) {
         return worker && worker.role && reserved.indexOf(worker.role) === -1;
       }
+      function departmentByKey(key) {
+        var departments = (window.SOMAP_DEPARTMENT_FALLBACK && window.SOMAP_DEPARTMENT_FALLBACK.departments) || [];
+        return departments.find(function(dept) { return dept.key === key; }) || { key: key, title: key, hubKey: '' };
+      }
+      function workerById(id) {
+        var workers = (window.SOMAP_DEPARTMENT_FALLBACK && window.SOMAP_DEPARTMENT_FALLBACK.workers) || [];
+        return workers.find(function(worker) { return worker.id === id; });
+      }
+      function localAssignmentKey() {
+        var year = new URLSearchParams(location.search).get('year') || '2026';
+        return 'somap.departmentHeads.' + year;
+      }
+      function readLocalAssignments() {
+        try { return JSON.parse(localStorage.getItem(localAssignmentKey()) || '{}') || {}; }
+        catch (_) { return {}; }
+      }
+      function writeLocalAssignment(payload) {
+        var all = readLocalAssignments();
+        all[payload.deptKey] = payload;
+        localStorage.setItem(localAssignmentKey(), JSON.stringify(all));
+      }
+      function hubHref(dept, assigned) {
+        var year = new URLSearchParams(location.search).get('year') || '2026';
+        if (dept.hubKey === 'cook') return '../workerscooks.html?department=food&year=' + encodeURIComponent(year);
+        if (dept.hubKey === 'cleaner') return '../workersmsafi.html';
+        if (dept.hubKey === 'guard') return '../workersmlinzi.html';
+        if (dept.hubKey === 'storekeeper') return '../workersstorekeeper.html';
+        if (dept.hubKey === 'driver') {
+          return '../../transporthtml/transportdriver/transporthub.html?school=socrates-school&year=' + encodeURIComponent(year) + '&driverUid=' + encodeURIComponent(assigned.workerId || '') + '&driverName=' + encodeURIComponent(assigned.workerName || '');
+        }
+        return '';
+      }
+      function updateDepartmentCard(payload) {
+        var assignButton = document.querySelector('[data-assign="' + payload.deptKey + '"]');
+        var card = assignButton ? assignButton.closest('.dept-card') : null;
+        if (!card) return;
+        var pill = card.querySelector('.pill');
+        if (pill) {
+          pill.textContent = 'Assigned';
+          pill.classList.remove('waiting');
+        }
+        var person = card.querySelector('.person');
+        if (person) {
+          person.innerHTML = '<img src="' + esc(payload.photoUrl || '../../images/somap-logo.png.jpg') + '" alt=""><div><b>' + esc(payload.workerName) + '</b><small>' + esc(payload.workerRole || 'worker') + (payload.phone ? ' - ' + esc(payload.phone) : '') + '</small></div>';
+        }
+        var selectBtn = card.querySelector('[data-assign]');
+        if (selectBtn) selectBtn.textContent = 'Change Head';
+        var waitingBtn = card.querySelector('[data-waiting]');
+        var href = hubHref(departmentByKey(payload.deptKey), payload);
+        if (waitingBtn && href) {
+          var a = document.createElement('a');
+          a.className = 'btn soft';
+          a.href = href;
+          a.textContent = 'Open Hub';
+          waitingBtn.replaceWith(a);
+        }
+        document.getElementById('assignedCount').textContent = String(Object.keys(readLocalAssignments()).length);
+      }
+      function applyLocalAssignments() {
+        var all = readLocalAssignments();
+        Object.keys(all).forEach(function(key) { updateDepartmentCard(all[key]); });
+      }
       function renderWorkers(term) {
         var workers = (window.SOMAP_DEPARTMENT_FALLBACK && window.SOMAP_DEPARTMENT_FALLBACK.workers) || [];
         term = String(term || '').toLowerCase();
@@ -377,12 +439,35 @@
       document.getElementById('workerGrid').addEventListener('click', function(event) {
         var btn = event.target.closest('[data-basic-worker]');
         if (!btn || btn.disabled) return;
+        var worker = workerById(btn.getAttribute('data-basic-worker'));
+        var dept = departmentByKey(activeDeptKey);
+        if (worker && dept) {
+          var payload = {
+            deptKey: dept.key,
+            deptTitle: dept.title,
+            hubKey: dept.hubKey || '',
+            workerId: worker.id,
+            workerName: worker.name,
+            workerRole: worker.role,
+            phone: worker.phone || '',
+            photoUrl: worker.photo || '',
+            schoolId: 'socrates-school',
+            schoolName: 'Socrates School',
+            year: new URLSearchParams(location.search).get('year') || '2026',
+            assignedAt: Date.now()
+          };
+          writeLocalAssignment(payload);
+          updateDepartmentCard(payload);
+          document.getElementById('workerModal').classList.remove('open');
+          notice(worker.name + ' is now head of ' + dept.title + '.');
+        }
         if (typeof window.departmentHubAssignWorker === 'function') {
-          window.departmentHubAssignWorker(activeDeptKey, btn.getAttribute('data-basic-worker'));
-        } else {
-          notice('Worker selected. Live saving is still loading; refresh once and select again if it does not save.');
+          Promise.resolve(window.departmentHubAssignWorker(activeDeptKey, btn.getAttribute('data-basic-worker'))).catch(function() {
+            notice('Saved on this browser. Live sync will retry when Firebase is available.');
+          });
         }
       });
+      applyLocalAssignments();
     })();
   </script>
 
@@ -529,7 +614,8 @@
       ]);
       const custom = customSnap?.val() || {};
       state.departments = [...DEFAULT_DEPARTMENTS, ...Object.values(custom)].filter(Boolean);
-      state.assignments = assignmentsSnap?.val() || {};
+      const localAssignments = JSON.parse(localStorage.getItem(`somap.departmentHeads.${state.year}`) || '{}');
+      state.assignments = { ...localAssignments, ...(assignmentsSnap?.val() || {}) };
       state.workers = activeWorkers(workersSnap?.val() || {});
       if (!state.workers.length) {
         state.workers = FALLBACK_WORKERS;
@@ -607,7 +693,6 @@
       }).join('');
     }
     async function assignWorker(workerId) {
-      if (!db) return setNotice('Firebase is not ready. Refresh the page once.');
       const dept = state.activeDept;
       const item = state.workers.find(w => w.id === workerId);
       if (!dept || !item || !canSelectWorker(item)) return;
@@ -627,6 +712,12 @@
         assignedBy: localStorage.getItem('workerId') || sessionStorage.getItem('workerId') || '',
         assignedAt: Date.now()
       };
+      state.assignments[dept.key] = payload;
+      localStorage.setItem(`somap.departmentHeads.${state.year}`, JSON.stringify(state.assignments));
+      render();
+      document.getElementById('workerModal').classList.remove('open');
+      setNotice(`${item.name} is now head of ${dept.title}.`);
+      if (!db) return;
       const updates = {};
       updates[somap.P(`years/${state.year}/departmentHeads/${dept.key}`)] = payload;
       updates[somap.P(`years/${state.year}/workerDepartmentHeads/${item.id}/${dept.key}`)] = payload;
@@ -634,8 +725,6 @@
         updates[somap.P(`years/${state.year}/workerDepartmentHeads/${old.workerId}/${dept.key}`)] = null;
       }
       await db.ref().update(updates);
-      document.getElementById('workerModal').classList.remove('open');
-      setNotice(`${item.name} is now head of ${dept.title}.`);
       await loadAll();
     }
     window.departmentHubAssignWorker = function(deptKey, workerId) {
