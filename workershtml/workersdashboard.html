@@ -719,6 +719,7 @@
     const schoolKpi = document.getElementById('schoolKpiGrid');
     const yearSelect = document.getElementById('workersYearSelect');
     let currentWorkerContext = { workerId: '', fullName: '', role: '' };
+    let departmentAccess = { hubKeys: new Set(), departments: [] };
     if (window.somapYearContext && yearSelect) {
       somapYearContext.attachYearDropdown(yearSelect);
       somapYearContext.onYearChanged((y) => {
@@ -907,12 +908,15 @@
         }
         
         localStorage.setItem('role', role);
+        localStorage.setItem('workerRole', role);
         currentWorkerContext.role = role;
         roleChip.textContent = `Role: ${displayRole || role}`;
         console.log('?? FINAL ROLE SET TO:', role);
 
         // Status
         const active = (p.active!==false);
+
+        departmentAccess = await loadDepartmentAccess(workerId);
 
         // Render role-based hubs
         console.log('Calling renderRoleHubs with role:', role);
@@ -961,6 +965,47 @@
     /* ==============================
        ROLE-BASED HUBS SYSTEM
     ============================== */
+    async function loadDepartmentAccess(workerId) {
+      const empty = { hubKeys: new Set(), departments: [] };
+      if (!workerId) return empty;
+      try {
+        const snap = await schoolRef(`years/${currentYear}/workerDepartmentHeads/${workerId}`).once('value');
+        const departments = Object.values(snap.val() || {}).filter(Boolean);
+        return {
+          departments,
+          hubKeys: new Set(departments.map(item => item.hubKey).filter(Boolean))
+        };
+      } catch (err) {
+        console.warn('Failed to load department access', err);
+        return empty;
+      }
+    }
+
+    function departmentHubLabel(hubKey) {
+      const match = (departmentAccess.departments || []).find(item => item.hubKey === hubKey);
+      return match ? `Department Head: ${match.deptTitle || match.deptKey}` : '';
+    }
+
+    function renderAssignedDepartmentCards(hubMap, renderedKeys) {
+      (departmentAccess.departments || []).forEach((dept) => {
+        if (!dept || !dept.deptKey || renderedKeys.has(dept.deptKey)) return;
+        if (dept.hubKey && hubMap[dept.hubKey]) return;
+        const hubCard = document.createElement('div');
+        hubCard.className = 'role-card enabled';
+        hubCard.style.borderColor = '#3457d5';
+        hubCard.style.background = 'linear-gradient(135deg, rgba(52,87,213,0.10), rgba(7,150,111,0.14))';
+        hubCard.innerHTML = `
+          <div class="role-icon" style="color:#3457d5;font-size:4rem;margin-bottom:20px;">DH</div>
+          <div class="role-title" style="font-size:1.5rem;font-weight:700;color:#3457d5;margin-bottom:12px;">${dept.deptTitle || 'Department'} HUB</div>
+          <div class="role-description" style="font-size:1rem;margin-bottom:24px;">You are assigned as department head. This department is ready; its operational page has not been built yet.</div>
+          <div class="btn btn-primary" style="background:#3457d5;padding:12px 24px;font-size:1rem;font-weight:600;">Open Hub</div>
+        `;
+        hubCard.addEventListener('click', () => showToast(`${dept.deptTitle || 'Department'} hub is assigned and waiting for its operational page.`, 'info'));
+        hubsGrid.appendChild(hubCard);
+        renderedKeys.add(dept.deptKey);
+      });
+    }
+
     function renderRoleHubs(role){
       console.log('?? renderRoleHubs called with role:', role);
       console.log('?? hubsGrid element:', document.getElementById('hubsGrid'));
@@ -1075,6 +1120,7 @@
       hubsGrid.innerHTML = '';
       
       console.log('?? Rendering hub cards for role:', role);
+      const renderedDepartmentKeys = new Set();
       // Show all hub cards but make only the user's role clickable
       Object.entries(hubMap).forEach(([key, hub]) => {
         console.log(`?? Processing hub: ${key} - ${hub.title}`);
@@ -1082,7 +1128,8 @@
         hubCard.className = 'role-card';
         
         // Check if user can access this hub
-        const canAccess = hub.roles.includes(role);
+        const grantedByDepartment = departmentAccess.hubKeys?.has(key);
+        const canAccess = hub.roles.includes(role) || grantedByDepartment;
         console.log(`?? Hub ${key}: canAccess=${canAccess}, userRole=${role}, hubRoles=${hub.roles.join(',')}`);
         
         if (canAccess) {
@@ -1095,7 +1142,8 @@
           hubCard.innerHTML = `
             <div class="role-icon" style="color: ${hub.color}; font-size: 4rem; margin-bottom: 20px;">${hub.icon}</div>
             <div class="role-title" style="font-size: 1.5rem; font-weight: 700; color: ${hub.color}; margin-bottom: 12px;">${hub.title}</div>
-            <div class="role-description" style="font-size: 1rem; margin-bottom: 24px;">${hub.sub}</div>
+            <div class="role-description" style="font-size: 1rem; margin-bottom: 10px;">${hub.sub}</div>
+            ${grantedByDepartment ? `<div class="status-chip status-active" style="margin-bottom: 16px;">${departmentHubLabel(key)}</div>` : ''}
             <a href="${hub.href}" class="btn btn-primary" style="background: ${hub.color}; padding: 12px 24px; font-size: 1rem; font-weight: 600;">
               ?? Open Hub � Fungua
             </a>
@@ -1128,6 +1176,7 @@
         console.log(`?? Appending ${key} hub card to grid`);
         hubsGrid.appendChild(hubCard);
       });
+      renderAssignedDepartmentCards(hubMap, renderedDepartmentKeys);
       
       console.log(`? Rendered ${Object.keys(hubMap).length} hub cards for role: ${role}`);
     }
@@ -1470,11 +1519,17 @@
       const allow=new Set(['all', role]);
       if (admin) allow.add('admin');
       if (['hr','manager','accountant','head_finance'].includes(role)) allow.add(role);
+      const grantedLinkKeys = new Set();
+      if (departmentAccess.hubKeys?.has('cook')) grantedLinkKeys.add('cook');
+      if (departmentAccess.hubKeys?.has('guard')) grantedLinkKeys.add('guard');
+      if (departmentAccess.hubKeys?.has('cleaner')) grantedLinkKeys.add('cleaner');
+      if (departmentAccess.hubKeys?.has('storekeeper')) grantedLinkKeys.add('store');
+      if (departmentAccess.hubKeys?.has('driver')) grantedLinkKeys.add('driver');
 
       // Filter and order cards
       const ordered=[];
-      linkCards.forEach(c=>{ if (c.roles.includes(role)) ordered.push(c); });
-      linkCards.forEach(c=>{ if (c.roles.some(r=>allow.has(r)) && !ordered.find(x=>x.key===c.key)) ordered.push(c); });
+      linkCards.forEach(c=>{ if (c.roles.includes(role) || grantedLinkKeys.has(c.key)) ordered.push(c); });
+      linkCards.forEach(c=>{ if ((c.roles.some(r=>allow.has(r)) || grantedLinkKeys.has(c.key)) && !ordered.find(x=>x.key===c.key)) ordered.push(c); });
 
       ordered.forEach(c=>{
         const linkCard = document.createElement('a');
@@ -1900,4 +1955,3 @@
   </script>
 </body>
 </html>
-

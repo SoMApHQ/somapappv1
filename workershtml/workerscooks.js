@@ -1189,6 +1189,13 @@ function buildRegisterStats(studentMap, attendanceByClass) {
           h('p', { className: 'workers-card__subtitle' }, 'Invoice hii ndiyo mhasibu atatumia kutoa bidhaa stoo na kufanya manunuzi sokoni.')
         ]),
         h('div', { className: 'workers-card__actions' }, [
+          h('button', {
+            className: 'workers-btn secondary',
+            onClick: () => {
+              const schoolId = workerSession.schoolId || '';
+              window.location.href = `../Tofinancehtml/food-invoices.html?school=${encodeURIComponent(schoolId)}&year=${encodeURIComponent(currentYear)}`;
+            }
+          }, 'Open Food Invoices'),
           h('button', { className: 'workers-btn secondary', onClick: () => downloadFoodInvoiceFodt(foodInvoice) }, 'Download ODF (.fodt)')
         ])
       ]),
