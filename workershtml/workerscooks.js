@@ -1193,7 +1193,7 @@ function buildRegisterStats(studentMap, attendanceByClass) {
             className: 'workers-btn secondary',
             onClick: () => {
               const schoolId = workerSession.schoolId || '';
-              window.location.href = `../Tofinancehtml/food-invoices.html?school=${encodeURIComponent(schoolId)}&year=${encodeURIComponent(currentYear)}`;
+              window.location.href = `../Tofinancehtml/food-invoices.html?school=${encodeURIComponent(schoolId)}&year=${encodeURIComponent(currentYear)}&department=food&access=departmentHead`;
             }
           }, 'Open Food Invoices'),
           h('button', { className: 'workers-btn secondary', onClick: () => downloadFoodInvoiceFodt(foodInvoice) }, 'Download ODF (.fodt)')
