@@ -525,6 +525,14 @@
       return { pct: max > 0 ? (sum * 100) / max : 0, total: sum, max, attemptedCount: count };
     }
 
+    function hasAttemptedAcademicWork(student) {
+      return Number(student && student.attemptedCount || 0) > 0;
+    }
+
+    function academicPercentLabel(student) {
+      return hasAttemptedAcademicWork(student) ? formatPercent(student.overallPct) : 'Not sat';
+    }
+
     function gradeFromPercent(pct) {
       const x = Math.max(0, Math.min(100, Number(pct) || 0));
       if (x >= 80.5) return 'A';
@@ -2105,7 +2113,7 @@
         const attemptedRows = allRows.filter((item) => Number(item.subjectRow.pct || 0) > 0);
         const notAttempted = allRows.length === 0;
         const gradeCounts = { A: 0, B: 0, C: 0, D: 0, F: 0 };
-        allRows.forEach((item) => {
+        attemptedRows.forEach((item) => {
           const g = gradeFromPercent(item.subjectRow.pct);
           if (gradeCounts[g] !== undefined) gradeCounts[g] += 1;
         });
@@ -2163,7 +2171,7 @@
         topImprovers: withScores.slice().sort((a, b) => Number(b.improvement || 0) - Number(a.improvement || 0)).slice(0, 5),
         biggestDrops: withScores.slice().sort((a, b) => Number(a.improvement || 0) - Number(b.improvement || 0)).slice(0, 5),
         topDebtors: (students || []).slice().sort((a, b) => Number(b.fee && b.fee.balance || 0) - Number(a.fee && a.fee.balance || 0)).slice(0, 8),
-        attention: (students || []).slice().sort((a, b) => {
+        attention: withScores.slice().sort((a, b) => {
           const aRisk = (100 - Number(a.overallPct || 0)) + (100 - Number(a.attendancePct || 0)) + (Number(a.fee && a.fee.balance || 0) / 10000);
           const bRisk = (100 - Number(b.overallPct || 0)) + (100 - Number(b.attendancePct || 0)) + (Number(b.fee && b.fee.balance || 0) / 10000);
           return bRisk - aRisk;
@@ -2249,7 +2257,7 @@
         missingTeacherMappings: subjectStats.filter((item) => item.teacher === 'Teacher not mapped').length,
         teacherCount: teacherInsights.length,
         relationship: {
-          balanceVsPerformance: correlation(students.map((student) => Number(student.fee && student.fee.balance || 0)), students.map((student) => Number(student.overallPct || 0))),
+          balanceVsPerformance: correlation(scored.map((student) => Number(student.fee && student.fee.balance || 0)), scored.map((student) => Number(student.overallPct || 0))),
           balanceVsAttendance: correlation(students.map((student) => Number(student.fee && student.fee.balance || 0)), students.map((student) => Number(student.attendancePct || 0)))
         },
         movement,
@@ -2373,7 +2381,7 @@
         '<div class="text-sm text-slate-700">Balance vs performance correlation: <strong>' + summary.relationship.balanceVsPerformance.toFixed(2) + '</strong>. ' + safe(describeCorrelation(summary.relationship.balanceVsPerformance, 'Higher debt is strongly associated with lower academic performance in this class.', 'Higher debt appears to move with stronger performers, so the issue needs learner-by-learner review.')) + '</div>',
         '<div class="text-sm text-slate-700 mt-3">Balance vs attendance correlation: <strong>' + summary.relationship.balanceVsAttendance.toFixed(2) + '</strong>. ' + safe(describeCorrelation(summary.relationship.balanceVsAttendance, 'Higher debt is strongly associated with lower attendance in this class. This supports the concern that fee pressure is interrupting class time.', 'Attendance pressure is not explained by fee balance alone in this class window.')) + '</div>'
       ].join('');
-      dom.financeBody.innerHTML = debtors.length ? debtors.map((student) => '<tr><td class="font-semibold text-slate-900">' + safe(student.name) + '</td><td>' + formatPercent(student.overallPct) + '</td><td>' + formatPercent(student.attendancePct) + '</td><td>' + safe(formatCurrency(student.fee.required)) + '</td><td>' + safe(formatCurrency(student.fee.paid)) + '</td><td>' + safe(formatCurrency(student.fee.balance)) + '</td><td>' + safe(student.fee.debtStatus || '-') + '</td><td>' + safe(student.parentContact || '-') + '</td></tr>').join('') : '<tr><td colspan="8" class="text-slate-500">No finance records found for this class and year.</td></tr>';
+      dom.financeBody.innerHTML = debtors.length ? debtors.map((student) => '<tr><td class="font-semibold text-slate-900">' + safe(student.name) + '</td><td>' + safe(academicPercentLabel(student)) + '</td><td>' + formatPercent(student.attendancePct) + '</td><td>' + safe(formatCurrency(student.fee.required)) + '</td><td>' + safe(formatCurrency(student.fee.paid)) + '</td><td>' + safe(formatCurrency(student.fee.balance)) + '</td><td>' + safe(student.fee.debtStatus || '-') + '</td><td>' + safe(student.parentContact || '-') + '</td></tr>').join('') : '<tr><td colspan="8" class="text-slate-500">No finance records found for this class and year.</td></tr>';
     }
 
     function renderWatchlists(analysis) {
@@ -2585,21 +2593,22 @@
       });
       const classRows = classAnalyses.map((analysis) => {
         const className = analysis.className || (analysis.filters && analysis.filters.className) || 'Unknown';
-        const classExamAverages = examEvidence.filter((row) => row.className === className).map((row) => row.average);
         const teacher = classTeacherFor(className);
+        const classScoredLearners = (analysis.students || []).filter(hasAttemptedAcademicWork).length;
         return {
           className,
           classTeacher: firstText(teacher && teacher.name, teacher && teacher.fullName, teacher && teacher.teacherName, 'Not assigned'),
           learners: analysis.students.length,
-          classAverage: classExamAverages.length ? mean(classExamAverages) : 0,
+          scoredLearners: classScoredLearners,
+          classAverage: classScoredLearners ? analysis.summary.classAverage : 0,
           attendancePct: analysis.summary.attendancePct,
           feeBalance: analysis.summary.feeBalance,
           clearedCount: analysis.summary.clearedCount,
-          exams: classExamAverages.length,
+          exams: (analysis.summary.records || []).length,
           warnings: analysis.narrative.warnings.length,
           analysis
         };
-      }).filter((row) => row.exams > 0);
+      }).filter((row) => row.scoredLearners > 0);
 
       const subjectMap = new Map();
       classAnalyses.forEach((analysis) => {
@@ -2645,7 +2654,7 @@
           bucket.letters = Math.max(bucket.letters, Number(effort.explanationLetters || 0));
         });
       });
-      const teacherInsights = Array.from(teacherMap.values()).map((row) => ({
+      const teacherInsights = Array.from(teacherMap.values()).filter((row) => row.values.length > 0).map((row) => ({
         teacher: row.teacher,
         avgPct: mean(row.values),
         trendDelta: mean(row.trends),
@@ -2678,7 +2687,7 @@
       const cleared = students.filter((student) => Number(student.fee && student.fee.balance || 0) <= 0.5);
 
       const summary = {
-        classAverage: mean(examEvidence.map((row) => row.average)),
+        classAverage: mean(scored.map((student) => student.overallPct)),
         attendancePct: days > 0 ? (present * 100) / days : 0,
         feeRequired,
         feePaid,
@@ -2776,7 +2785,7 @@
       dom.teacherGrid.innerHTML = report.teacherInsights.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0)).map((row) => '<article class="teacher-card p-4"><div class="flex items-center justify-between gap-3"><div class="text-base font-semibold text-slate-900">' + safe(row.teacher) + '</div><div class="mini-chip">' + safe(String(row.classCount)) + ' classes</div></div><div class="text-sm text-slate-500 mt-2">' + safe(row.subjects.slice(0, 6).join(', ') || 'Subject mapping only') + '</div><div class="grid grid-cols-2 gap-3 mt-4"><div><div class="text-xs text-slate-500 uppercase">Academic avg</div><div class="text-xl font-semibold mt-1">' + formatPercent(row.avgPct) + '</div></div><div><div class="text-xs text-slate-500 uppercase">Attendance</div><div class="text-xl font-semibold mt-1">' + (row.attendancePct === null ? '-' : formatPercent(row.attendancePct)) + '</div></div></div><div class="text-sm text-slate-700 mt-4">' + safe(String(row.lateDays || 0)) + ' late record(s), ' + safe(String(row.attention || 0)) + ' learner attention points.</div></article>').join('');
       dom.financeMeta.textContent = formatCurrency(s.feeRequired) + ' required | ' + formatCurrency(s.feePaid) + ' paid | ' + formatCurrency(s.feeBalance) + ' balance';
       dom.financeStory.innerHTML = '<div class="text-sm text-slate-700">Highest fee balances are shown together with academic and attendance signals so finance follow-up can protect lesson continuity, not only cash collection.</div>';
-      dom.financeBody.innerHTML = report.highDebt.map((student) => '<tr><td class="font-semibold text-slate-900">' + safe(student.name) + '<div class="text-xs text-slate-500">' + safe(student.className || student.class || '-') + '</div></td><td>' + formatPercent(student.overallPct) + '</td><td>' + formatPercent(student.attendancePct) + '</td><td>' + safe(formatCurrency(student.fee.required)) + '</td><td>' + safe(formatCurrency(student.fee.paid)) + '</td><td>' + safe(formatCurrency(student.fee.balance)) + '</td><td>' + safe(student.fee.debtStatus || '-') + '</td><td>' + safe(student.parentContact || '-') + '</td></tr>').join('');
+      dom.financeBody.innerHTML = report.highDebt.map((student) => '<tr><td class="font-semibold text-slate-900">' + safe(student.name) + '<div class="text-xs text-slate-500">' + safe(student.className || student.class || '-') + '</div></td><td>' + safe(academicPercentLabel(student)) + '</td><td>' + formatPercent(student.attendancePct) + '</td><td>' + safe(formatCurrency(student.fee.required)) + '</td><td>' + safe(formatCurrency(student.fee.paid)) + '</td><td>' + safe(formatCurrency(student.fee.balance)) + '</td><td>' + safe(student.fee.debtStatus || '-') + '</td><td>' + safe(student.parentContact || '-') + '</td></tr>').join('');
       dom.watchMeta.textContent = 'School top ten, weakest learner, debt pressure, and paid-up learners.';
       dom.watchlists.innerHTML = [
         '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">Top 10 learners in the school</div><div class="mt-3 space-y-2">' + report.topStudents.map((student, idx) => '<div class="text-sm"><strong>' + (idx + 1) + '. ' + safe(student.name) + '</strong> | ' + safe(student.className || student.class || '-') + ' | ' + formatPercent(student.overallPct) + '</div>').join('') + '</div></article>',
@@ -2887,7 +2896,7 @@
       doc.autoTable({
         startY: 26,
         head: [['Learner', 'Average', 'Attendance', 'Balance', 'Debt Status', 'Parent Contact']],
-        body: analysis.students.slice().sort((a, b) => Number(b.fee && b.fee.balance || 0) - Number(a.fee && a.fee.balance || 0)).slice(0, 12).map((student) => ([student.name, formatPercent(student.overallPct), formatPercent(student.attendancePct), formatCurrency(student.fee.balance), student.fee.debtStatus || '-', student.parentContact || '-'])),
+        body: analysis.students.slice().sort((a, b) => Number(b.fee && b.fee.balance || 0) - Number(a.fee && a.fee.balance || 0)).slice(0, 12).map((student) => ([student.name, academicPercentLabel(student), formatPercent(student.attendancePct), formatCurrency(student.fee.balance), student.fee.debtStatus || '-', student.parentContact || '-'])),
         theme: 'grid',
         styles: { fontSize: 8.5 },
         headStyles: { fillColor: [185, 28, 28] }
@@ -3741,7 +3750,7 @@
       doc.autoTable({
         startY: doc.lastAutoTable.finalY + 8,
         head: [['Highest Debt Learner', 'Class', 'Average', 'Attendance', 'Balance', 'Parent Contact']],
-        body: report.highDebt.map((student) => [student.name, student.className || student.class || '-', formatPercent(student.overallPct), formatPercent(student.attendancePct), formatCurrency(student.fee.balance), student.parentContact || '-']),
+        body: report.highDebt.map((student) => [student.name, student.className || student.class || '-', academicPercentLabel(student), formatPercent(student.attendancePct), formatCurrency(student.fee.balance), student.parentContact || '-']),
         theme: 'grid',
         styles: { fontSize: 7.5, cellPadding: 2 },
         headStyles: { fillColor: [180, 83, 9], fontSize: 8 },
@@ -4469,7 +4478,7 @@
       doc.autoTable({
         startY: y + 66,
         head: [['Learner', 'Average', 'Attendance', 'Required', 'Paid', 'Balance', 'Debt Status', 'Parent Contact']],
-        body: analysis.students.slice().sort((a, b) => Number(b.fee && b.fee.balance || 0) - Number(a.fee && a.fee.balance || 0)).slice(0, 12).map((student) => ([student.name, formatPercent(student.overallPct), formatPercent(student.attendancePct), formatCurrency(student.fee.required), formatCurrency(student.fee.paid), formatCurrency(student.fee.balance), student.fee.debtStatus || '-', student.parentContact || '-'])),
+        body: analysis.students.slice().sort((a, b) => Number(b.fee && b.fee.balance || 0) - Number(a.fee && a.fee.balance || 0)).slice(0, 12).map((student) => ([student.name, academicPercentLabel(student), formatPercent(student.attendancePct), formatCurrency(student.fee.required), formatCurrency(student.fee.paid), formatCurrency(student.fee.balance), student.fee.debtStatus || '-', student.parentContact || '-'])),
         margin: { left: margin, right: margin },
         theme: 'grid',
         styles: { fontSize: 7.7, cellPadding: 1.9 }
@@ -4539,7 +4548,7 @@
       doc.autoTable({
         startY: y + 4,
         head: [['Learner', 'Average', 'Attendance', 'Balance', 'Parent Contact']],
-        body: analysis.students.map((student) => ([student.name, formatPercent(student.overallPct), formatPercent(student.attendancePct), formatCurrency(student.fee.balance), student.parentContact || '-'])),
+        body: analysis.students.map((student) => ([student.name, academicPercentLabel(student), formatPercent(student.attendancePct), formatCurrency(student.fee.balance), student.parentContact || '-'])),
         margin: { left: margin, right: margin },
         theme: 'grid',
         styles: { fontSize: 7.6, cellPadding: 1.8 }
