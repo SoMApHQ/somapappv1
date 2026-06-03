@@ -2558,17 +2558,37 @@
       return all.slice(0, 2).filter(Boolean);
     }
 
+    async function mapWithConcurrency(items, limit, iteratee) {
+      const list = Array.isArray(items) ? items : [];
+      const results = new Array(list.length);
+      let nextIndex = 0;
+      const workerCount = Math.max(1, Math.min(Number(limit) || 1, list.length || 1));
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (nextIndex < list.length) {
+          const index = nextIndex;
+          nextIndex += 1;
+          results[index] = await iteratee(list[index], index);
+        }
+      });
+      await Promise.all(workers);
+      return results;
+    }
+
     async function buildSchoolReportAnalysis(filters) {
       const classes = Object.keys(SomapSub().SUBJECTS_BY_CLASS || {}).filter(Boolean);
-      const classAnalyses = [];
-      for (const className of classes) {
+      let completedClasses = 0;
+      const loadedAnalyses = await mapWithConcurrency(classes, 3, async (className) => {
         try {
-          const analysis = await buildClassReportAnalysis({ ...filters, stream: '' }, className);
-          classAnalyses.push(analysis);
+          return await buildClassReportAnalysis({ ...filters, stream: '' }, className);
         } catch (error) {
           console.warn('[academicreport] school class analysis failed', className, error && error.message || error);
+          return null;
+        } finally {
+          completedClasses += 1;
+          setStatus('Loading whole-school academic evidence across all classes... ' + completedClasses + '/' + classes.length, false);
         }
-      }
+      });
+      const classAnalyses = loadedAnalyses.filter(Boolean);
 
       const students = classAnalyses.flatMap((analysis) => analysis.students || []);
       const scored = students.filter((student) => Number(student.attemptedCount || 0) > 0);
@@ -4593,11 +4613,9 @@
       const requestedClass = query.get('class') ? normalizeDisplayClass(query.get('class')) : '';
       const isSchoolWide = !state.assignedClass && (scope === 'school' || query.get('schoolWide') === '1');
       if (isSchoolWide) {
-        // School-wide always spans from Jan 1 of the selected year so every class's
-        // exam records are captured, regardless of the URL's month or from param.
         dom.classSelect.value = SCHOOL_WIDE_VALUE;
-        dom.fromDate.value = year + '-01-01';
-        dom.toDate.value = year === String(today.getFullYear()) ? todayIso : year + '-12-31';
+        dom.fromDate.value = query.get('from') || (year + '-01-01');
+        dom.toDate.value = query.get('to') || (year === String(today.getFullYear()) ? todayIso : year + '-12-31');
       } else {
         dom.fromDate.value = query.get('from') || (year + '-' + month + '-01');
         dom.toDate.value = query.get('to') || (year === String(today.getFullYear()) && month === String(today.getMonth() + 1).padStart(2, '0') ? todayIso : year + '-' + month + '-' + String(monthEnd.getDate()).padStart(2, '0'));
