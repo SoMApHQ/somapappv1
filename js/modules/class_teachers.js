@@ -158,7 +158,9 @@
     const bucket = normalized[classKey];
     if (!bucket) return null;
     const streamKey = normalizeStreamKey(stream);
-    return bucket[streamKey] || bucket[STREAM_ALL] || Object.values(bucket)[0] || null;
+    // A stream may inherit an explicit class-wide assignment, but it must never
+    // borrow another stream's teacher merely because that record is first.
+    return bucket[streamKey] || bucket[STREAM_ALL] || null;
   }
 
   function dateValue(value, fallback) {

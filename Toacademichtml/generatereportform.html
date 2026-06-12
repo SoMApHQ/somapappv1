@@ -1459,6 +1459,8 @@
       classTeacherAssignments: {},
       classTeacherAssignmentHistory: {},
       sharedClassStreams: {},
+      workerExitById: new Map(),
+      workerExitByName: new Map(),
       classTeacherPhotoCache: new Map(),
       logoDataUrl: null,
       schoolLogoDataUrl: null,
@@ -1527,7 +1529,6 @@
       populateSelectors();
       attachListeners();
       loadAllData();
-      refreshTeachersInBackground();
       loadExamRegistry({ includeDiscovery: true })
         .then(() => renderExamSelectors())
         .catch((err) => console.warn('[Report] custom exam discovery skipped', err?.message || err));
@@ -1706,17 +1707,6 @@
       }
     }
 
-    function refreshTeachersInBackground(){
-      loadTeachers()
-        .then(() => {
-          if (!state.students.length) return;
-          assignPositions(state.students, state.subjects || []);
-          renderTable();
-          updatePreview();
-        })
-        .catch((err) => console.warn('[Report] teacher load skipped', err?.message || err));
-    }
-
     function populateSelectors(){
       // Year
       const yearSel = document.getElementById('yearSelect');
@@ -1800,7 +1790,7 @@
         state.subjects = subjectListForClass(state.className, state.year);
         document.getElementById('previewYear').textContent = state.year;
         document.getElementById('previewYearBadge').textContent = String(state.year);
-        persistToSession(); loadAllData(); refreshTeachersInBackground();
+        persistToSession(); loadAllData();
       });
       document.getElementById('classSelect').addEventListener('change', e => {
         state.classKey = normalizeDisplayClass(e.target.value);
@@ -1829,7 +1819,6 @@
       document.getElementById('applyFilters').addEventListener('click', applyFilters);
       document.getElementById('refreshBtn').addEventListener('click', () => {
         loadAllData();
-        refreshTeachersInBackground();
       });
       document.getElementById('downloadPreviewPdf').addEventListener('click', () => {
         if (!state.selectedAdm) return Swal.fire('Select student', 'Choose a student first.', 'info');
@@ -1872,6 +1861,8 @@
         state.teachers = new Map();
         state.teacherByClassSubject = new Map();
         state.teacherBySubject = new Map();
+        state.workerExitById = new Map();
+        state.workerExitByName = new Map();
         const assignmentDateByKey = new Map();
         const referenceDate = reportReferenceDate();
 
@@ -1901,11 +1892,13 @@
           const normalized = String(fullName || '').trim();
           if (normalized) workerNameById.set(workerId, normalized);
           const exit = profile.exitDate || raw?.employment?.exitDate || '';
+          if (exit) state.workerExitById.set(String(workerId), exit);
           if (normalized && exit) {
             const key = normalized.toUpperCase();
             // keep the earliest exit date if the same name appears in multiple years
             const prev = exitDateByName.get(key);
             if (!prev || monthVal(exit) < monthVal(prev)) exitDateByName.set(key, exit);
+            if (!prev || monthVal(exit) < monthVal(prev)) state.workerExitByName.set(key, exit);
           }
         });
 
@@ -2103,13 +2096,13 @@
         const ids = Array.isArray(stream?.studentIds) ? stream.studentIds : [];
         return ids.some((id) => candidates.has(normalizeAdm(id)));
       });
-      return matched?.name ? sanitizeStreamFilter(matched.name) : '';
+      return matched?.name ? sanitizeStreamFilter(matched.name) : rawFallback;
     }
 
     function getAssignmentForStudent(student) {
       const studentClass = normalizeDisplayClass(state.className || student?.class || '');
-      const studentStream = sanitizeStreamForClass(student?.stream || state.stream || '', studentClass);
-      return window.SomapClassTeachers?.resolveAssignmentAt
+      const studentStream = resolveStudentEffectiveStream(student, state.stream || student?.stream || '');
+      const assignment = window.SomapClassTeachers?.resolveAssignmentAt
         ? window.SomapClassTeachers.resolveAssignmentAt(
             state.classTeacherAssignments,
             state.classTeacherAssignmentHistory,
@@ -2120,6 +2113,23 @@
         : window.SomapClassTeachers?.resolveAssignment
           ? window.SomapClassTeachers.resolveAssignment(state.classTeacherAssignments, studentClass, studentStream)
         : null;
+      if (!assignment) return null;
+      const referenceDate = reportReferenceDate();
+      const isAvailable = (person) => {
+        if (!person) return false;
+        const exitDate = state.workerExitById.get(String(person.workerId || ''))
+          || state.workerExitByName.get(String(person.name || '').trim().toUpperCase())
+          || '';
+        const referenceTs = Date.parse(referenceDate);
+        const exitTs = Date.parse(exitDate);
+        return !Number.isFinite(exitTs) || !Number.isFinite(referenceTs) || referenceTs <= exitTs;
+      };
+      const filtered = {
+        ...assignment,
+        classTeacher: isAvailable(assignment.classTeacher) ? assignment.classTeacher : null,
+        assistantTeacher: isAvailable(assignment.assistantTeacher) ? assignment.assistantTeacher : null
+      };
+      return filtered.classTeacher || filtered.assistantTeacher ? filtered : null;
     }
 
     function renderTeacherPreviewCard(person, label) {
@@ -2266,7 +2276,8 @@
         });
         await Promise.all([
           loadClassTeacherAssignmentsForYear(state.year),
-          loadCustomSubjectsForYear(state.year)
+          loadCustomSubjectsForYear(state.year),
+          loadTeachers()
         ]);
         state.subjects = subjectListForClass(state.className, state.year) || state.subjects || [];
         let dbClass = state.classKey || state.className;
