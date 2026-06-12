@@ -1869,10 +1869,18 @@
         const referenceDate = reportReferenceDate();
 
         // 1) Build workerId -> full name lookup
+        // Also load previous year workers so cross-year exits (e.g. teacher exited while
+        // HR was in year N-1 context but report is for year N) are still caught.
+        const prevYear = String(Number(state.year) - 1);
         const workerNameById = new Map();
-        const workerSnap = await getSnapScopedOrLegacy(`years/${state.year}/workers`);
+        const [workerSnap, prevWorkerSnap] = await Promise.all([
+          getSnapScopedOrLegacy(`years/${state.year}/workers`),
+          getSnapScopedOrLegacy(`years/${prevYear}/workers`)
+        ]);
         const workers = workerSnap?.val?.() || {};
-        Object.entries(workers).forEach(([workerId, raw]) => {
+        const prevWorkers = prevWorkerSnap?.val?.() || {};
+        const allWorkers = { ...prevWorkers, ...workers }; // current year takes precedence
+        Object.entries(allWorkers).forEach(([workerId, raw]) => {
           const profile = raw?.profile || raw || {};
           const fullName =
             profile.fullNameUpper ||
@@ -1887,9 +1895,21 @@
         const configSnap = await getSnapScopedOrLegacy(`years/${state.year}/teachers_config`);
         const configs = configSnap?.val?.() || {};
         Object.entries(configs).forEach(([workerId, cfg]) => {
-          const rawWorker = workers[workerId] || null;
+          const rawWorker = allWorkers[workerId] || null;
           const profile = rawWorker?.profile || rawWorker || null;
           if (rawWorker && !isWorkerAvailableOn(profile, rawWorker, referenceDate)) return;
+          // Also check effectiveTo on the teachers_config entry itself
+          // (written by workersadmission when a teacher exits going forward)
+          const cfgExitDate = cfg?.effectiveTo || cfg?.exitDate || '';
+          if (cfgExitDate) {
+            const toMatch = String(cfgExitDate).match(/^(\d{4})-(\d{2})/);
+            const refMatch = String(referenceDate).match(/^(\d{4})-(\d{2})/);
+            if (toMatch && refMatch) {
+              const toVal = Number(toMatch[1]) * 12 + Number(toMatch[2]) - 1;
+              const refVal = Number(refMatch[1]) * 12 + Number(refMatch[2]) - 1;
+              if (refVal > toVal) return;
+            }
+          }
           const fallbackName = String(cfg?.name || cfg?.teacherName || cfg?.fullName || '').trim();
           const teacherName = workerNameById.get(workerId) || fallbackName || 'Teacher';
           const mappings = Array.isArray(cfg?.classSubjectMappings) ? cfg.classSubjectMappings : [];
