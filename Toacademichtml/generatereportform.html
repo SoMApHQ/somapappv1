@@ -2224,7 +2224,7 @@
         if (student?.class) {
           state.className = normalizeDisplayClass(student.class);
           state.classKey = normalizeDisplayClass(student.class);
-          state.stream = sanitizeStreamFilter(student.stream || '');
+          state.stream = resolveStudentEffectiveStream(student, student.stream || '');
           console.log(`[Parent Mode] Found student ${state.parentAdm} in class ${state.className}${state.stream ? ' (' + state.stream + ')' : ''}`);
           return;
         }
@@ -2284,8 +2284,16 @@
       try {
         document.getElementById('bulkCount').textContent = '...';
         await loadSharedClassStreamsForYear(state.year);
-        if (state.parentMode && state.parentAdm && !state.className) {
-          await findStudentClass();
+        if (state.parentMode && state.parentAdm) {
+          try {
+            // Admission is authoritative in parent mode. URL class/stream values can
+            // be stale after promotion or stream reassignment.
+            await findStudentClass();
+          } catch (error) {
+            if (!state.className) throw error;
+            state.stream = '';
+            console.warn('[Parent Mode] Using URL class fallback without a stream filter', error?.message || error);
+          }
         }
 
         ensureCacheContext();
@@ -4612,27 +4620,29 @@
       const streamFilter = sanitizeStreamFilter(document.getElementById('streamInput').value || state.stream);
       const normalizedStream = String(streamFilter || '').toUpperCase().replace(/[\s-]/g, '');
       const sortBy = document.getElementById('sortSelect').value;
-      
-      let filtered = (state.students||[]).filter(s => {
-        const h = [s.adm, s.name, s.parentName, s.parentContact].filter(Boolean).join(' ').toLowerCase();
-        const matchesSearch = h.includes(search);
-        if (!matchesSearch) return false;
-        if (!normalizedStream) return true;
-        const studentStream = String(sanitizeStreamFilter(s.stream || '') || '').toUpperCase().replace(/[\s-]/g, '');
-        const reportLabel = String(reportClassLabel(s) || '').toUpperCase().replace(/[\s-]/g, '');
-        return studentStream.includes(normalizedStream) || reportLabel.includes(normalizedStream);
-      });
-      
-      // In parent mode, filter to only the specific student
+
+      let filtered;
+      // Parent links identify one learner by admission number. Do not let stale
+      // class-stream hints or hidden search controls remove that learner first.
       if (state.parentMode && state.parentAdm) {
         const parentAdm = normalizeAdm(state.parentAdm);
-        filtered = filtered.filter(s => normalizeAdm(s.adm) === parentAdm);
+        filtered = (state.students || []).filter(s => normalizeAdm(s.adm) === parentAdm);
         
         // Auto-select the student in parent mode
         if (filtered.length > 0) {
           state.selectedAdm = filtered[0].adm;
         }
       } else {
+        filtered = (state.students||[]).filter(s => {
+          const h = [s.adm, s.name, s.parentName, s.parentContact].filter(Boolean).join(' ').toLowerCase();
+          const matchesSearch = h.includes(search);
+          if (!matchesSearch) return false;
+          if (!normalizedStream) return true;
+          const studentStream = String(sanitizeStreamFilter(s.stream || '') || '').toUpperCase().replace(/[\s-]/g, '');
+          const reportLabel = String(reportClassLabel(s) || '').toUpperCase().replace(/[\s-]/g, '');
+          return studentStream.includes(normalizedStream) || reportLabel.includes(normalizedStream);
+        });
+
         // Normal teacher mode - auto-select first student if none selected
         if (!state.selectedAdm || !filtered.some(s => s.adm === state.selectedAdm)) {
           state.selectedAdm = filtered.length ? filtered[0].adm : null;
