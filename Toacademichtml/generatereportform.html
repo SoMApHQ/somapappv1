@@ -1349,9 +1349,7 @@
 
     function reportClassLabel(studentOrClass, maybeStream){
       const student = studentOrClass && typeof studentOrClass === 'object' ? studentOrClass : null;
-      const base = normalizeDisplayClass(
-        student ? (student.class || state.className || '') : (studentOrClass || state.className || '')
-      );
+      const base = normalizeDisplayClass(state.className || (student ? student.class : studentOrClass) || '');
       const stream = sanitizeStreamFilter(
         student ? (student.stream || state.stream || '') : (maybeStream || state.stream || '')
       );
@@ -1460,9 +1458,13 @@
 
     function isWorkerAvailableOn(profile, rawWorker, referenceDate){
       if (!profile || typeof profile !== 'object') return true;
-      const target = Date.parse(referenceDate);
-      const start = Date.parse(profile.employmentStartDate || profile.startDate || '');
-      const exit = Date.parse(profile.exitDate || rawWorker?.employment?.exitDate || '');
+      const monthValue = (value) => {
+        const match = String(value || '').match(/^(\d{4})-(\d{2})/);
+        return match ? (Number(match[1]) * 12 + Number(match[2]) - 1) : null;
+      };
+      const target = monthValue(referenceDate);
+      const start = monthValue(profile.employmentStartDate || profile.startDate || '');
+      const exit = monthValue(profile.exitDate || rawWorker?.employment?.exitDate || '');
       if (Number.isFinite(start) && target < start) return false;
       if (Number.isFinite(exit) && target > exit) return false;
       return true;
@@ -1889,11 +1891,15 @@
             // Register teacher under a given class key + list of subjects
             const registerSubjects = (classKey, streamName, subjectList, effectiveFrom, subjectDates = {}) => {
               if (!classKey) return;
-              const reportTs = Date.parse(referenceDate);
+              const monthValue = (value) => {
+                const match = String(value || '').match(/^(\d{4})-(\d{2})/);
+                return match ? (Number(match[1]) * 12 + Number(match[2]) - 1) : Number.NEGATIVE_INFINITY;
+              };
+              const reportTs = monthValue(referenceDate);
               (subjectList || []).forEach((subjectRaw) => {
                 const subjectCanon = canonicalSubjectName(subjectRaw || '');
                 if (!subjectCanon) return;
-                const effectiveTs = Date.parse(subjectDates?.[subjectRaw] || subjectDates?.[subjectCanon] || effectiveFrom || cfg?.assignmentEffectiveFrom || `${state.year}-01-01`);
+                const effectiveTs = monthValue(subjectDates?.[subjectRaw] || subjectDates?.[subjectCanon] || effectiveFrom || cfg?.assignmentEffectiveFrom || `${state.year}-01-01`);
                 if (Number.isFinite(effectiveTs) && effectiveTs > reportTs) return;
                 buildTeacherAssignmentKeys(classKey, streamName, subjectCanon).forEach((key) => {
                   if (!key) return;
@@ -2021,7 +2027,7 @@
     }
 
     function resolveStudentEffectiveStream(student, fallbackStream = '') {
-      const className = normalizeDisplayClass(student?.class || state.className || '');
+      const className = normalizeDisplayClass(state.className || student?.class || '');
       const classEntry = state.sharedClassStreams?.[className];
       const rawFallback = sanitizeStreamFilter(fallbackStream || student?.stream || student?.streamName || student?.section || '');
       if (!classEntry || !Object.keys(classEntry.streams || {}).length) {
@@ -2040,7 +2046,7 @@
     }
 
     function getAssignmentForStudent(student) {
-      const studentClass = normalizeDisplayClass(student?.class || state.className || '');
+      const studentClass = normalizeDisplayClass(state.className || student?.class || '');
       const studentStream = sanitizeStreamFilter(student?.stream || state.stream || '');
       return window.SomapClassTeachers?.resolveAssignmentAt
         ? window.SomapClassTeachers.resolveAssignmentAt(
@@ -2892,9 +2898,11 @@
     function normalizeStudentRecord(admKey, s){
       const name = resolveStudentName(s, admKey);
       const rawClass = s.class || s.currentClass || s.level || s.className || s.grade || s.classLevel || '';
-      const sClass = normalizeDisplayClass(rawClass);
+      const sClass = normalizeDisplayClass(state.className || rawClass);
       const embeddedStream = extractEmbeddedStream(rawClass);
-      const rawStream = s.stream || s.streamName || s.section || embeddedStream || '';
+      const storedClass = normalizeDisplayClass(rawClass);
+      const storedClassIsCurrent = !state.className || classMatches(state.className, storedClass);
+      const rawStream = state.stream || (storedClassIsCurrent ? (s.stream || s.streamName || s.section || embeddedStream || '') : '');
       const sStream = resolveStudentEffectiveStream({
         ...s,
         class: sClass,
