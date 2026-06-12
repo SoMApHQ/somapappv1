@@ -3106,7 +3106,12 @@
       }
 
       if (openSetupFormBtn) {
-        openSetupFormBtn.addEventListener('click', () => {
+        openSetupFormBtn.addEventListener('click', async () => {
+          await Promise.all([
+            loadAllTeacherConfigsForYear(currentYear),
+            loadSharedClassStreamsForYear(currentYear)
+          ]);
+          mergeSharedClassStreamsFromTeacherConfigs();
           populateSetupFormFromConfig();
           mainDashboard?.classList.add('hidden');
           setupSection?.classList.remove('hidden');
@@ -3308,6 +3313,48 @@
           const selectedYear = window.somapYearContext?.getSelectedYear?.() || currentYear || new Date().getFullYear();
           const selectedSchool = localStorage.getItem('somap.currentSchoolId') || 'socrates-school';
           window.location.href = `Toworkertaskshtml/school_calendar.html?school=${encodeURIComponent(selectedSchool)}&year=${encodeURIComponent(selectedYear)}`;
+        });
+      }
+
+      function mergeSharedClassStreamsFromTeacherConfigs() {
+        Object.entries(allTeacherConfigsCache || {}).forEach(([workerId, config]) => {
+          const teacherName = getWorkerDisplayName(
+            workerId,
+            config?.name || config?.teacherName || config?.fullName || workerId
+          );
+          (config?.classSubjectMappings || []).forEach((mapping) => {
+            const classDisplay = toDisplayClass(mapping?.class || '');
+            if (!classDisplay) return;
+            const entry = sharedClassStreams[classDisplay] || {
+              className: classDisplay,
+              ownerWorkerId: '',
+              ownerName: '',
+              streams: {},
+              updatedAt: 0
+            };
+            (mapping?.streams || []).filter((stream) => stream && stream.name).forEach((stream) => {
+              const name = normalizeStreamName(stream.name);
+              const streamKey = normalizeStreamKey(stream.streamKey || name);
+              if (!name || !streamKey) return;
+              const existing = entry.streams[streamKey] || {};
+              entry.streams[streamKey] = {
+                name: existing.name || name,
+                streamKey,
+                studentIds: Array.isArray(existing.studentIds) && existing.studentIds.length
+                  ? existing.studentIds.slice()
+                  : (Array.isArray(stream.studentIds) ? stream.studentIds.slice() : []),
+                studentNames: Array.isArray(existing.studentNames) && existing.studentNames.length
+                  ? existing.studentNames.slice()
+                  : (Array.isArray(stream.studentNames) ? stream.studentNames.slice() : []),
+                addedBy: existing.addedBy || stream.addedBy || stream.ownerWorkerId || workerId,
+                addedByName: existing.addedByName || stream.addedByName || stream.ownerName || teacherName,
+                updatedAt: existing.updatedAt || stream.updatedAt || 0
+              };
+              if (!entry.ownerWorkerId) entry.ownerWorkerId = stream.ownerWorkerId || stream.addedBy || workerId;
+              if (!entry.ownerName) entry.ownerName = stream.ownerName || stream.addedByName || teacherName;
+            });
+            if (Object.keys(entry.streams).length) sharedClassStreams[classDisplay] = entry;
+          });
         });
       }
 
@@ -3527,6 +3574,7 @@
               loadAllTeacherConfigsForYear(currentYear),
               loadSharedClassStreamsForYear(currentYear)
             ]);
+            mergeSharedClassStreamsFromTeacherConfigs();
             await loadCustomSubjectCatalogForYear();
             teacherConfig = payload;
             localStorage.setItem('somap_role', teacherType);
@@ -3638,6 +3686,7 @@
           loadAllTeacherConfigsForYear(currentYear),
           loadSharedClassStreamsForYear(currentYear)
         ]);
+        mergeSharedClassStreamsFromTeacherConfigs();
         initYearSelector();
         classSubjectMap = [];
         if (classSubjectMappings) classSubjectMappings.innerHTML = '';

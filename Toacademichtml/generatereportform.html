@@ -1348,12 +1348,18 @@
     }
 
     function reportClassLabel(studentOrClass, maybeStream){
-      // Always use the currently selected class and stream from state.
-      // Student .class and .stream fields may be stale from prior years
-      // (e.g. a student stored as "4A" who is now in Class 5).
-      const base = normalizeDisplayClass(state.className || '');
-      const stream = sanitizeStreamFilter(state.stream || '');
-      return stream ? `${base}${stream}` : base;
+      const student = studentOrClass && typeof studentOrClass === 'object' ? studentOrClass : null;
+      const base = normalizeDisplayClass(
+        student ? (student.class || state.className || '') : (studentOrClass || state.className || '')
+      );
+      const stream = sanitizeStreamFilter(
+        student ? (student.stream || state.stream || '') : (maybeStream || state.stream || '')
+      );
+      if (!stream) return base;
+      if (/^class\s*\d/i.test(stream)) return stream.replace(/^class\s*/i, 'Class ');
+      if (/^\d/.test(stream) && /^Class\s+\d/i.test(base)) return `Class ${stream}`;
+      if (/^[a-z]$/i.test(stream)) return `${base}${stream.toUpperCase()}`;
+      return `${base} ${stream}`.trim();
     }
 
     // Monthly attempted-only helpers (reuse existing monthly loader)
@@ -1924,7 +1930,10 @@
 
     async function loadSharedClassStreamsForYear(year) {
       try {
-        const snap = await getSnapScopedOrLegacy(`years/${year}/classStreams`);
+        const [snap, configSnap] = await Promise.all([
+          getSnapScopedOrLegacy(`years/${year}/classStreams`),
+          getSnapScopedOrLegacy(`years/${year}/teachers_config`)
+        ]);
         const raw = snap?.val?.() || {};
         const next = {};
         Object.values(raw || {}).forEach((entry) => {
@@ -1944,6 +1953,31 @@
             };
           });
           next[classDisplay] = { className: classDisplay, streams };
+        });
+        const configs = configSnap?.val?.() || {};
+        Object.values(configs).forEach((config) => {
+          (config?.classSubjectMappings || []).forEach((mapping) => {
+            const classDisplay = normalizeDisplayClass(mapping?.class || '');
+            if (!classDisplay) return;
+            const entry = next[classDisplay] || { className: classDisplay, streams: {} };
+            (mapping?.streams || []).filter((stream) => stream && stream.name).forEach((stream) => {
+              const name = sanitizeStreamFilter(stream.name);
+              const streamKey = String(stream.streamKey || name).trim();
+              if (!name || !streamKey) return;
+              const existing = entry.streams[streamKey] || {};
+              entry.streams[streamKey] = {
+                name: existing.name || name,
+                streamKey,
+                studentIds: Array.isArray(existing.studentIds) && existing.studentIds.length
+                  ? existing.studentIds.slice()
+                  : (Array.isArray(stream.studentIds) ? stream.studentIds.slice() : []),
+                studentNames: Array.isArray(existing.studentNames) && existing.studentNames.length
+                  ? existing.studentNames.slice()
+                  : (Array.isArray(stream.studentNames) ? stream.studentNames.slice() : [])
+              };
+            });
+            if (Object.keys(entry.streams).length) next[classDisplay] = entry;
+          });
         });
         state.sharedClassStreams = next;
       } catch (error) {
