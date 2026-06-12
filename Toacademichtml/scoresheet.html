@@ -789,32 +789,6 @@
       return null;
     }
 
-    async function readFirstExistingParallel(paths, concurrency = 8) {
-      const db = getDB();
-      if (!db) return null;
-      const candidates = [];
-      (paths || []).forEach(rawPath => {
-        buildCandidateDbPaths(rawPath).forEach(candidatePath => {
-          if (!candidates.includes(candidatePath)) candidates.push(candidatePath);
-        });
-      });
-      for (let start = 0; start < candidates.length; start += concurrency) {
-        const chunk = candidates.slice(start, start + concurrency);
-        const results = await Promise.all(chunk.map(async candidatePath => {
-          try {
-            const snap = await db.ref(candidatePath).get();
-            return snap?.exists?.() ? { snap, path: candidatePath } : null;
-          } catch (err) {
-            console.warn('[scoresheet] read failed', candidatePath, err?.message || err);
-            return null;
-          }
-        }));
-        const found = results.find(Boolean);
-        if (found) return found;
-      }
-      return null;
-    }
-
     async function loadClassTeacherAssignmentsForYear(year) {
       try {
         const [found, historyFound] = await Promise.all([
@@ -1186,9 +1160,17 @@
       });
 
       const uniquePaths = Array.from(new Set(paths));
-      const found = await readFirstExistingParallel(uniquePaths);
-      const snap = found?.snap || null;
-      const usedPath = found?.path || null;
+      let snap = null;
+      let usedPath = null;
+      for (const refPath of uniquePaths) {
+        const found = await readFirstExisting([refPath]);
+        const candidateSnap = found?.snap || null;
+        if (candidateSnap?.exists?.()) {
+          snap = candidateSnap;
+          usedPath = found?.path || refPath;
+          break;
+        }
+      }
 
       if (!snap) {
         console.warn(
@@ -1509,7 +1491,7 @@
         tdComment.innerHTML = `<textarea class="w-full sm:w-56 h-10 p-2 border rounded text-xs" placeholder="Teacher comment...">${comment}</textarea>`;
         tr.appendChild(tdComment);
 
-        scoresBody.appendChild(tr);
+        tableFragment.appendChild(tr);
 
         state.rowsByAdm[s.adm] = {
           tr, subjectCells,
@@ -2069,16 +2051,9 @@
 
       currentClass = state.className;
       currentYear = state.year;
-      lblStatus.innerHTML = '<span class="text-sky-600">Loading subjects, scores and class records...</span>';
-      const customSubjectsPromise = loadCustomSubjectsForYear(state.year);
-      const teacherAssignmentsPromise = loadClassTeacherAssignmentsForYear(state.year);
-      const recordsPromise = Promise.all([
-        fetchAttendance(state.year, state.month, state.className),
-        fetchFees(state.year, state.className),
-        fetchScores({ year: state.year, className: state.className, examKey: state.examKey, month: state.month })
-      ]);
-
-      await customSubjectsPromise;
+      lblStatus.innerHTML = '<span class="text-sky-600">Loading subjects and class records...</span>';
+      await loadCustomSubjectsForYear(state.year);
+      await loadClassTeacherAssignmentsForYear(state.year);
       state.subjectList = getSubjectsForClassAndYear(state.className, state.year);
       console.log('Subject list for', state.className, ':', state.subjectList.map(s => s.label));
 
@@ -2087,7 +2062,11 @@
         console.log('Available classes:', Object.keys(SomapSub().SUBJECTS_BY_CLASS || {}));
       }
       console.log('Fetching attendance, fees, and scores...');
-      const [attendanceData, feesData, scoresData] = await recordsPromise;
+      const [attendanceData, feesData, scoresData] = await Promise.all([
+        fetchAttendance(state.year, state.month, state.className),
+        fetchFees(state.year, state.className),
+        fetchScores({ year: state.year, className: state.className, examKey: state.examKey, month: state.month })
+      ]);
       state.attendance = attendanceData || {};
       console.log('Attendance data:', Object.keys(state.attendance).length, 'students');
       state.fees = feesData || {};
@@ -2097,10 +2076,10 @@
       cacheScoresheetRoster(state.students);
 
       console.log('Building table...');
+      renderClassTeacherBanner();
       buildTable();
       console.log('Recomputing all...');
       recomputeAll();
-      teacherAssignmentsPromise.then(renderClassTeacherBanner).catch(() => {});
       console.log('=== Load complete ===');
     }
 
@@ -2219,7 +2198,17 @@
   }
 
     // Load initial data
-    window.addEventListener('load', loadAll);
+    async function startScoresheet(){
+      try {
+        await loadAll();
+      } catch (error) {
+        console.error('[scoresheet] startup failed', error);
+        if (lblStatus) {
+          lblStatus.innerHTML = `<span class="text-red-600">Scoresheet failed to load: ${escapeHtml(error?.message || 'Unknown error')}. Reload the page or check the selected class, exam and month.</span>`;
+        }
+      }
+    }
+    window.addEventListener('load', startScoresheet);
 
     /* ---------- Small helpers ---------- */
     function hexToRgb(hex){ const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex); return m?{r:parseInt(m[1],16),g:parseInt(m[2],16),b:parseInt(m[3],16)}:{r:37,g:99,b:235}; }
