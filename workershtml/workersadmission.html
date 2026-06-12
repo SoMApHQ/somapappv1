@@ -70,6 +70,14 @@
     .role-manager__chip-del:hover{color:#dc2626}
     .role-manager__empty{font-size:.75rem;color:#9ca3af}
     .role-manager__panel--hidden{display:none}
+    .archive-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .archive-badge{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:28px;padding:0 9px;border-radius:999px;background:#fee2e2;color:#991b1b;font-weight:700}
+    .archive-panel[hidden]{display:none}
+    .exit-dialog{border:0;border-radius:16px;padding:0;max-width:480px;width:calc(100% - 32px);box-shadow:0 24px 70px rgba(15,23,42,.28)}
+    .exit-dialog::backdrop{background:rgba(15,23,42,.58)}
+    .exit-dialog__body{padding:20px;display:grid;gap:14px}
+    .exit-dialog__actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+    .danger{background:#b91c1c}
   </style>
 </head>
 <body>
@@ -195,10 +203,10 @@
         </select>
       </label>
       <label>Mshahara wa Msingi (TZS) <input name="baseSalary" type="number" min="0" required></label>
+      <label>Tarehe ya kuanza kazi <input name="employmentStartDate" type="date" required></label>
       <label>Hali ya kazi
         <select name="active">
           <option value="true" selected>Hai (Active)</option>
-          <option value="false">Imesimama</option>
         </select>
       </label>
       <label>Maelezo ya Afya (hiari) <textarea name="medicalConditions" placeholder="Magonjwa sugu / maelezo ya daktari"></textarea></label>
@@ -246,7 +254,45 @@
     <p id="workerCount" class="workers-section-count" aria-live="polite"></p>
     <div id="workerTable"></div>
   </section>
+
+  <section class="workers-card">
+    <div class="archive-summary">
+      <div>
+        <h2 style="margin:0">Wafanyakazi Walioondoka / Kusitishwa</h2>
+        <p class="workers-card__subtitle">Historia yao inahifadhiwa, lakini hawaonekani kwenye kazi na uteuzi wa sasa.</p>
+      </div>
+      <button type="button" class="workers-btn secondary" id="toggleArchiveBtn">Fungua Orodha <span class="archive-badge" id="archiveCount">0</span></button>
+    </div>
+    <div id="archivePanel" class="archive-panel" hidden>
+      <div id="archiveTable" style="margin-top:12px"></div>
+    </div>
+  </section>
 </main>
+
+<dialog id="exitWorkerDialog" class="exit-dialog">
+  <form method="dialog" class="exit-dialog__body" id="exitWorkerForm">
+    <div>
+      <h2 style="margin:0 0 6px">Ondoa Mfanyakazi Kwenye Ajira ya Sasa</h2>
+      <p class="workers-card__subtitle" id="exitWorkerName"></p>
+    </div>
+    <label>Sababu
+      <select id="exitReason" required>
+        <option value="left">Ameondoka mwenyewe (Left)</option>
+        <option value="terminated">Amesitishwa kazi (Terminated)</option>
+      </select>
+    </label>
+    <label>Tarehe ya mwisho kazini
+      <input id="exitDate" type="date" required>
+    </label>
+    <label>Maelezo (hiari)
+      <textarea id="exitNotes" rows="3" placeholder="Sababu au kumbukumbu fupi"></textarea>
+    </label>
+    <div class="exit-dialog__actions">
+      <button type="button" class="workers-btn secondary" id="cancelExitWorkerBtn">Ghairi</button>
+      <button type="submit" class="workers-btn danger">Thibitisha Kuondoka</button>
+    </div>
+  </form>
+</dialog>
 
 <script type="module">
   /* ---------- Firebase init (no auth required) ---------- */
@@ -322,11 +368,20 @@
   const transferClearBtn = $('transferClearBtn');
   const transferStatusEl = $('transferStatus');
   const transferTargetYearEl = $('transferTargetYear');
+  const archiveTableEl = $('archiveTable');
+  const archivePanelEl = $('archivePanel');
+  const archiveCountEl = $('archiveCount');
+  const toggleArchiveBtn = $('toggleArchiveBtn');
+  const exitWorkerDialog = $('exitWorkerDialog');
+  const exitWorkerForm = $('exitWorkerForm');
   let workersData = [];
+  let archivedWorkersData = [];
   let carryCandidates = [];
   let legacyWorkerIdSet = new Set();
   let currentEditingWorkerId = '';
   let currentEditingDocs = {};
+  let currentEditingProfile = {};
+  let pendingExitWorker = null;
   let skipResetHandler = false;
   let isSaving = false;
   let currentYear = (window.somapYearContext && somapYearContext.getSelectedYear && somapYearContext.getSelectedYear()) || String(new Date().getFullYear());
@@ -511,12 +566,45 @@
         <td>${statusText}</td>
         <td class="actions-cell">
           <button type="button" class="workers-btn secondary" data-action="edit" data-worker-id="${worker.id}">Edit</button>
-          <button type="button" class="workers-btn secondary" data-action="delete" data-worker-id="${worker.id}">Delete</button>
+          <button type="button" class="workers-btn danger" data-action="exit" data-worker-id="${worker.id}">Remove</button>
         </td>`;
       tb.appendChild(tr);
     });
     workerTableContainer.appendChild(tbl);
     updateTransferSelectAllState();
+  }
+  setField('employmentStartDate', `${currentYear}-01-01`);
+
+  function formatExitReason(value){
+    return String(value || '').toLowerCase() === 'terminated' ? 'Terminated' : 'Left';
+  }
+
+  function renderArchiveTable(rows){
+    if (archiveCountEl) archiveCountEl.textContent = String(rows.length);
+    if (!archiveTableEl) return;
+    archiveTableEl.innerHTML = '';
+    if (!rows.length){
+      archiveTableEl.textContent = 'Hakuna mfanyakazi aliyeondoka au kusitishwa kwa mwaka huu.';
+      return;
+    }
+    const tbl = document.createElement('table');
+    tbl.className = 'workers-table';
+    tbl.innerHTML = `<thead><tr><th>Jina Kamili</th><th>Jukumu</th><th>Sababu</th><th>Tarehe ya Mwisho</th><th>Maelezo</th><th>Tendo</th></tr></thead><tbody></tbody>`;
+    const body = tbl.querySelector('tbody');
+    rows.forEach((worker) => {
+      const profile = worker.profile || {};
+      const employment = worker.employment || {};
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${getDisplayName(profile)}</td>
+        <td>${profile.role || ''}</td>
+        <td>${formatExitReason(employment.exitReason || profile.employmentStatus)}</td>
+        <td>${employment.exitDate || profile.exitDate || '-'}</td>
+        <td>${employment.exitNotes || '-'}</td>
+        <td><button type="button" class="workers-btn secondary" data-action="restore" data-worker-id="${worker.id}">Re-activate</button></td>`;
+      body.appendChild(row);
+    });
+    archiveTableEl.appendChild(tbl);
   }
 
   function populateForm(worker){
@@ -524,6 +612,7 @@
     currentWorkersSource = worker.source || 'scoped';
     currentEditingWorkerId = worker.id;
     currentEditingDocs = worker.docs||{};
+    currentEditingProfile = worker.profile||{};
     skipResetHandler = true;
     formEl.reset();
     $('roleSelect').value = profile.role||'';
@@ -546,6 +635,7 @@
     setField('tribe', profile.tribe);
     setField('villageHome', profile.villageHome);
     setField('baseSalary', profile.baseSalary ?? '');
+    setField('employmentStartDate', profile.employmentStartDate || `${currentYear}-01-01`);
     setField('medicalConditions', profile.medicalConditions);
     const activeSelect = formEl.querySelector('[name="active"]');
     if (activeSelect) activeSelect.value = profile.active !== false ? 'true' : 'false';
@@ -555,33 +645,115 @@
     if (focusField) focusField.focus();
   }
 
-  async function deleteWorker(worker){
+  function openExitWorkerDialog(worker){
+    pendingExitWorker = worker;
+    $('exitWorkerName').textContent = getDisplayName(worker?.profile);
+    $('exitReason').value = 'left';
+    $('exitDate').value = new Date().toISOString().slice(0, 10);
+    $('exitNotes').value = '';
+    exitWorkerDialog?.showModal();
+  }
+
+  async function archiveCurrentAssignments(worker, exitDate, exitReason){
+    const workerId = worker?.id;
+    if (!workerId) return;
+    const workerName = getDisplayName(worker.profile).trim().toUpperCase();
+    const workerPhone = normalizePhoneValue(worker.profile?.phone).replace(/^\+255/, '').replace(/^255/, '');
+    const matchesWorker = (person) => {
+      if (!person) return false;
+      const personName = String(person.name || '').trim().toUpperCase();
+      const personPhone = normalizePhoneValue(person.phoneRaw || person.phone || '').replace(/^\+255/, '').replace(/^255/, '');
+      return person.workerId === workerId ||
+        Boolean(workerName && personName && workerName === personName) ||
+        Boolean(workerPhone && personPhone && workerPhone === personPhone);
+    };
+    const assignmentsSnap = await schoolRef(`years/${currentYear}/classTeacherAssignments`).get();
+    if (!assignmentsSnap.exists()) return;
+    const updates = {};
+    assignmentsSnap.forEach((classChild) => {
+      classChild.forEach((streamChild) => {
+        const assignment = streamChild.val() || {};
+        const classTeacherMatch = matchesWorker(assignment.classTeacher);
+        const assistantMatch = matchesWorker(assignment.assistantTeacher);
+        if (!classTeacherMatch && !assistantMatch) return;
+        const historyKey = schoolRef(`years/${currentYear}/classTeacherAssignmentHistory/${classChild.key}/${streamChild.key}`).push().key;
+        updates[`years/${currentYear}/classTeacherAssignmentHistory/${classChild.key}/${streamChild.key}/${historyKey}`] = {
+          ...assignment,
+          effectiveFrom: assignment.effectiveFrom || `${currentYear}-01-01`,
+          effectiveTo: exitDate,
+          endedReason: exitReason,
+          endedWorkerId: workerId,
+          archivedAt: firebase.database.ServerValue.TIMESTAMP
+        };
+        const next = {
+          ...assignment,
+          classTeacher: classTeacherMatch ? null : (assignment.classTeacher || null),
+          assistantTeacher: assistantMatch ? null : (assignment.assistantTeacher || null),
+          updatedAt: firebase.database.ServerValue.TIMESTAMP
+        };
+        const currentPath = `years/${currentYear}/classTeacherAssignments/${classChild.key}/${streamChild.key}`;
+        updates[currentPath] = next.classTeacher || next.assistantTeacher ? next : null;
+      });
+    });
+    if (Object.keys(updates).length) await schoolRef('').update(updates);
+  }
+
+  async function exitWorker(worker, { exitReason, exitDate, exitNotes }){
     const workerId = worker?.id;
     if (!workerId) return;
     try{
       const displayName = getDisplayName(worker.profile);
-      if (worker.source === 'legacy'){
-        await Promise.all([
-          schoolRef(`years/${currentYear}/workers/${workerId}`).remove(),
-          schoolRef(`years/${currentYear}/workersLegacyDeletes/${workerId}`).remove()
-        ]);
-      }else{
-        await schoolRef(`years/${currentYear}/workers/${workerId}`).remove();
-      }
+      const source = worker.source === 'legacy'
+        ? { profile: worker.profile || {}, docs: worker.docs || {}, contract: worker.contract || {} }
+        : ((await schoolRef(`years/${currentYear}/workers/${workerId}`).get()).val() || worker);
+      const payload = {
+        ...source,
+        profile: {
+          ...(source.profile || worker.profile || {}),
+          active: false,
+          employmentStatus: exitReason,
+          exitDate,
+          updatedAt: firebase.database.ServerValue.TIMESTAMP
+        },
+        employment: {
+          status: exitReason,
+          exitReason,
+          exitDate,
+          exitNotes: String(exitNotes || '').trim(),
+          recordedAt: firebase.database.ServerValue.TIMESTAMP
+        }
+      };
+      await schoolRef(`years/${currentYear}/workers/${workerId}`).set(payload);
+      await archiveCurrentAssignments(worker, exitDate, exitReason);
       if (currentEditingWorkerId === workerId){
         currentEditingWorkerId = '';
         currentEditingDocs = {};
+        currentEditingProfile = {};
         setStatus('');
         formEl.reset();
         renderRoleDocs();
       }
       loadWorkers();
-      setStatus(`Deleted ${displayName}`);
-      alert(`Deleted ${displayName} successfully`);
+      setStatus(`${displayName} amewekwa kwenye historia ya walioondoka.`);
+      alert(`${displayName} ameondolewa kwenye ajira ya sasa bila kufuta historia yake.`);
     }catch(err){
-      console.error('Delete worker error:', err);
-      alert('Imeshindikana kufuta mfanyakazi. Jaribu tena.');
+      console.error('Exit worker error:', err);
+      alert('Imeshindikana kurekodi kuondoka kwa mfanyakazi. Jaribu tena.');
     }
+  }
+
+  async function restoreWorker(worker){
+    const ref = schoolRef(`years/${currentYear}/workers/${worker.id}`);
+    const snap = await ref.get();
+    const current = snap.val() || worker;
+    await ref.update({
+      'profile/active': true,
+      'profile/employmentStatus': 'active',
+      'profile/exitDate': null,
+      employment: null
+    });
+    await loadWorkers();
+    setStatus(`${getDisplayName(current.profile)} amerudishwa kuwa Active.`);
   }
 
   workerTableContainer.addEventListener('click', async (event)=>{
@@ -596,11 +768,37 @@
       populateForm(worker);
       return;
     }
-    if (btn.dataset.action==='delete'){
-      if (!confirm('Una hakika unataka kufuta mfanyakazi huyu?')) return;
-      currentWorkersSource = worker.source || 'scoped';
-      await deleteWorker(worker);
+    if (btn.dataset.action==='exit'){
+      openExitWorkerDialog(worker);
     }
+  });
+
+  archiveTableEl?.addEventListener('click', async (event) => {
+    const btn = event.target.closest('button[data-action="restore"]');
+    if (!btn) return;
+    const worker = archivedWorkersData.find((item) => item.id === btn.dataset.workerId);
+    if (!worker || !confirm(`Rudisha ${getDisplayName(worker.profile)} kuwa Active?`)) return;
+    await restoreWorker(worker);
+  });
+
+  toggleArchiveBtn?.addEventListener('click', () => {
+    archivePanelEl.hidden = !archivePanelEl.hidden;
+  });
+
+  $('cancelExitWorkerBtn')?.addEventListener('click', () => {
+    pendingExitWorker = null;
+    exitWorkerDialog?.close();
+  });
+
+  exitWorkerForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const exitReason = $('exitReason').value;
+    const exitDate = $('exitDate').value;
+    if (!pendingExitWorker || !exitReason || !exitDate) return;
+    const worker = pendingExitWorker;
+    pendingExitWorker = null;
+    exitWorkerDialog?.close();
+    await exitWorker(worker, { exitReason, exitDate, exitNotes: $('exitNotes').value });
   });
 
   workerTableContainer.addEventListener('change', (event)=>{
@@ -711,6 +909,7 @@
           profile: v.profile||{},
           docs: v.docs||{},
           contract: v.contract||{},
+          employment: v.employment||{},
           source
         });
       });
@@ -719,13 +918,17 @@
         const nameB = (b.profile?.fullNameUpper||'').toUpperCase();
         return nameA.localeCompare(nameB,'sw-TZ');
       });
-      workersData = rows;
-      renderWorkersTable(rows);
+      workersData = rows.filter((worker) => worker.profile?.active !== false);
+      archivedWorkersData = rows.filter((worker) => worker.profile?.active === false);
+      renderWorkersTable(workersData);
+      renderArchiveTable(archivedWorkersData);
       refreshCarryWorkersUI();
     }catch(e){
       console.error('Load workers error:', e);
       workersData = [];
+      archivedWorkersData = [];
       renderWorkersTable([]);
+      renderArchiveTable([]);
       refreshCarryWorkersUI();
     }
   }
@@ -838,6 +1041,7 @@
       const rows = [];
       prevSnap.forEach(ch=>{
         const v = ch.val()||{};
+        if (v.profile?.active === false) return;
         rows.push({
           id: ch.key,
           profile: v.profile||{},
@@ -971,6 +1175,54 @@
     return duplicate;
   }
 
+  async function findHistoricalWorkerId(fullName, phone){
+    const targetName = String(fullName || '').trim().toUpperCase();
+    const targetPhone = normalizePhoneValue(phone).replace(/^\+255/, '').replace(/^255/, '');
+    const matchesPerson = (person) => {
+      if (!person || typeof person !== 'object') return false;
+      const personName = String(person.name || '').trim().toUpperCase();
+      const personPhone = normalizePhoneValue(person.phoneRaw || person.phone || '').replace(/^\+255/, '').replace(/^255/, '');
+      return Boolean(
+        (targetName && personName && targetName === personName) ||
+        (targetPhone && personPhone && targetPhone === personPhone)
+      );
+    };
+    try {
+      const [assignmentsSnap, configsSnap, workersSnap] = await Promise.all([
+        schoolRef(`years/${currentYear}/classTeacherAssignments`).get(),
+        schoolRef(`years/${currentYear}/teachers_config`).get(),
+        schoolRef(`years/${currentYear}/workers`).get()
+      ]);
+      const existingIds = new Set();
+      workersSnap.forEach((child) => existingIds.add(child.key));
+      let foundId = '';
+      assignmentsSnap.forEach((classChild) => {
+        classChild.forEach((streamChild) => {
+          if (foundId) return;
+          const assignment = streamChild.val() || {};
+          [assignment.classTeacher, assignment.assistantTeacher].forEach((person) => {
+            if (!foundId && matchesPerson(person) && person.workerId && !existingIds.has(person.workerId)) {
+              foundId = person.workerId;
+            }
+          });
+        });
+      });
+      if (foundId) return foundId;
+      configsSnap.forEach((child) => {
+        if (foundId || existingIds.has(child.key)) return;
+        const config = child.val() || {};
+        if (matchesPerson({
+          name: config.name || config.teacherName || config.fullName,
+          phone: config.phone || config.phoneNumber
+        })) foundId = child.key;
+      });
+      return foundId;
+    } catch (error) {
+      console.warn('Historical worker ID lookup failed', error);
+      return '';
+    }
+  }
+
   formEl.addEventListener('reset', ()=>{
     if (skipResetHandler){
       skipResetHandler = false;
@@ -978,9 +1230,13 @@
     }
     currentEditingWorkerId = '';
     currentEditingDocs = {};
+    currentEditingProfile = {};
     currentWorkersSource = 'scoped';
     setStatus('');
-    setTimeout(renderRoleDocs,0);
+    setTimeout(() => {
+      renderRoleDocs();
+      setField('employmentStartDate', `${currentYear}-01-01`);
+    },0);
   });
 
   formEl.addEventListener('submit', async (e)=>{
@@ -1004,7 +1260,8 @@
     if (!role) return alert('Chagua jukumu (Role)');
 
     const isEditing = Boolean(currentEditingWorkerId);
-    const workerId = isEditing ? currentEditingWorkerId : schoolRef(`years/${currentYear}/workers`).push().key;
+    const historicalWorkerId = isEditing ? '' : await findHistoricalWorkerId(fullNameUpper, phone);
+    const workerId = isEditing ? currentEditingWorkerId : (historicalWorkerId || schoolRef(`years/${currentYear}/workers`).push().key);
     const baseHint = `w_${workerId}_${Date.now()}`;
     const duplicate = await findDuplicateWorkerInYear(workerId, phone, fd.get('nidaOrPassport'));
     if (duplicate){
@@ -1055,10 +1312,13 @@
       villageHome:(fd.get('villageHome')||'').trim(),
       role,
       baseSalary:Number(fd.get('baseSalary')||0),
+      employmentStartDate:(fd.get('employmentStartDate')||`${currentYear}-01-01`).trim(),
       active:(fd.get('active')||'true')!=='false',
       medicalConditions:(fd.get('medicalConditions')||'').trim(),
       createdBy: '',
-      admissionDate: Date.now()
+      admissionDate: currentEditingProfile.admissionDate || Date.now(),
+      employmentStatus: 'active',
+      exitDate: null
     };
 
     try{
@@ -1076,6 +1336,7 @@
       alert('SAVED SUCCESSFULLY');
       currentEditingWorkerId = '';
       currentEditingDocs = {};
+      currentEditingProfile = {};
       currentWorkersSource = 'scoped';
       skipResetHandler = true;
       formEl.reset();

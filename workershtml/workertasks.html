@@ -1630,6 +1630,7 @@
       let sharedClassStreams = {};
       let allTeacherConfigsCache = {};
       let workerNameCache = new Map();
+      let workerEmploymentCache = new Map();
 
       function toggleSetupReminder(show) {
         if (!setupReminder) return;
@@ -1846,6 +1847,7 @@
               stream: target.stream,
               classTeacher: nextClassTeacher,
               assistantTeacher: nextAssistant,
+              effectiveFrom: existing.effectiveFrom || new Date().toISOString().slice(0, 10),
               updatedBy: buildWorkerSnapshot()
             })
           : null;
@@ -1867,6 +1869,7 @@
               stream: target.stream,
               classTeacher: roleKey === 'classTeacher' ? null : existing.classTeacher,
               assistantTeacher: roleKey === 'assistantTeacher' ? null : existing.assistantTeacher,
+              effectiveFrom: existing.effectiveFrom || new Date().toISOString().slice(0, 10),
               updatedBy: buildWorkerSnapshot()
             })
           : null;
@@ -2150,6 +2153,8 @@
         const key = buildTeachingClaimKey(className, streamName, subjectName);
         for (const [workerId, cfg] of Object.entries(allTeacherConfigsCache || {})) {
           if (!cfg || workerId === ignoreWorkerId) continue;
+          const employment = workerEmploymentCache.get(workerId);
+          if (employment && employment.active === false) continue;
           const teacherName = getWorkerDisplayName(
             workerId,
             cfg?.name || cfg?.teacherName || cfg?.fullName || workerId
@@ -2282,6 +2287,7 @@
 
       async function loadWorkerNameCacheForYear(year) {
         workerNameCache = new Map();
+        workerEmploymentCache = new Map();
         try {
           const snap = await scopedOrSocratesLegacy(`years/${year}/workers`, 'workers');
           snap.forEach((child) => {
@@ -2294,6 +2300,11 @@
             if (fullName) {
               workerNameCache.set(child.key, fullName);
             }
+            workerEmploymentCache.set(child.key, {
+              active: profile.active !== false,
+              status: profile.employmentStatus || child.val()?.employment?.status || 'active',
+              exitDate: profile.exitDate || child.val()?.employment?.exitDate || ''
+            });
           });
         } catch (error) {
           console.warn('Failed to load worker names', error);
@@ -3521,21 +3532,49 @@
             }
           }
           // Normalize mappings: include filtered streams (skip null slots from removed streams)
-          const normalizedMappings = validMappings.map((m) => ({
-            class: toDisplayClass(m.class),
-            subjects: uniqueSubjects(m.subjects || []),
-            streams: (m.streams || []).filter((s) => s && s.name).map((s) => ({
-              name: normalizeStreamName(s.name),
-              streamKey: s.streamKey || normalizeStreamKey(s.name),
-              subjects: uniqueSubjects(s.subjects || []),
-              studentIds: s.studentIds || [],
-              studentNames: s.studentNames || [],
-              addedBy: s.addedBy || currentWorkerId || '',
-              addedByName: s.addedByName || buildWorkerSnapshot().name || '',
-              ownerWorkerId: s.ownerWorkerId || '',
-              ownerName: s.ownerName || ''
-            }))
-          }));
+          const assignmentToday = new Date().toISOString().slice(0, 10);
+          const previousMappings = teacherConfig?.classSubjectMappings || [];
+          const normalizedMappings = validMappings.map((m) => {
+            const classDisplay = toDisplayClass(m.class);
+            const previous = previousMappings.find((entry) => toDisplayClass(entry?.class || '') === classDisplay) || {};
+            const previousSubjects = new Set(uniqueSubjects(previous.subjects || []).map((subject) => subject.toLowerCase()));
+            const subjects = uniqueSubjects(m.subjects || []);
+            const subjectEffectiveFrom = {};
+            subjects.forEach((subject) => {
+              subjectEffectiveFrom[subject] = previous.subjectEffectiveFrom?.[subject]
+                || (previousSubjects.has(subject.toLowerCase()) ? (previous.effectiveFrom || teacherConfig?.assignmentEffectiveFrom || `${currentYear}-01-01`) : assignmentToday);
+            });
+            return {
+              class: classDisplay,
+              subjects,
+              subjectEffectiveFrom,
+              effectiveFrom: previous.effectiveFrom || teacherConfig?.assignmentEffectiveFrom || `${currentYear}-01-01`,
+              streams: (m.streams || []).filter((s) => s && s.name).map((s) => {
+                const streamKey = s.streamKey || normalizeStreamKey(s.name);
+                const previousStream = (previous.streams || []).find((entry) => normalizeStreamKey(entry?.streamKey || entry?.name) === streamKey) || {};
+                const previousStreamSubjects = new Set(uniqueSubjects(previousStream.subjects || []).map((subject) => subject.toLowerCase()));
+                const streamSubjects = uniqueSubjects(s.subjects || []);
+                const streamSubjectEffectiveFrom = {};
+                streamSubjects.forEach((subject) => {
+                  streamSubjectEffectiveFrom[subject] = previousStream.subjectEffectiveFrom?.[subject]
+                    || (previousStreamSubjects.has(subject.toLowerCase()) ? (previousStream.effectiveFrom || previous.effectiveFrom || `${currentYear}-01-01`) : assignmentToday);
+                });
+                return {
+                  name: normalizeStreamName(s.name),
+                  streamKey,
+                  subjects: streamSubjects,
+                  subjectEffectiveFrom: streamSubjectEffectiveFrom,
+                  studentIds: s.studentIds || [],
+                  studentNames: s.studentNames || [],
+                  addedBy: s.addedBy || currentWorkerId || '',
+                  addedByName: s.addedByName || buildWorkerSnapshot().name || '',
+                  ownerWorkerId: s.ownerWorkerId || '',
+                  ownerName: s.ownerName || '',
+                  effectiveFrom: previousStream.effectiveFrom || previous.effectiveFrom || `${currentYear}-01-01`
+                };
+              })
+            };
+          });
           const currentTeacherName = buildWorkerSnapshot().name || getWorkerDisplayName(currentWorkerId, currentWorkerId);
           const pendingClaims = extractTeacherClaimsFromMappings(normalizedMappings, currentWorkerId, currentTeacherName);
           const duplicateOwnClaim = pendingClaims.find((claim, index) => pendingClaims.findIndex((item) => item.key === claim.key) !== index);
@@ -3562,6 +3601,7 @@
             classSubjectMappings: normalizedMappings,
             classes: allClasses,
             subjects: allSubjects,
+            assignmentEffectiveFrom: teacherConfig?.assignmentEffectiveFrom || new Date().toISOString().slice(0, 10),
             setupCompleted: true,
             setupDate: localTs()
           };
@@ -3745,6 +3785,12 @@
           }
           workerProfile = workerSnap.val() || {};
           if (workerProfile.profile) workerProfile = workerProfile.profile;
+          if (workerProfile.active === false) {
+            const exitDate = workerProfile.exitDate || '';
+            toast(`Ajira hii ilifungwa${exitDate ? ` tarehe ${exitDate}` : ''}. Dashboard hairuhusiwi.`, 'warning');
+            setTimeout(() => window.location.href = '../index.html', 1800);
+            return;
+          }
           const configSnap = await scopedOrSocratesLegacy(
             `years/${currentYear}/teachers_config/${currentWorkerId}`,
             `teachers_config/${currentWorkerId}`

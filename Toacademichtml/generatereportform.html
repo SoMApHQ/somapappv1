@@ -1442,6 +1442,7 @@
       rawStudents: {}, students: [], filtered: [], selectedAdm: null, subjects: [], teachers: new Map(),
       teacherByClassSubject: new Map(), teacherBySubject: new Map(),
       classTeacherAssignments: {},
+      classTeacherAssignmentHistory: {},
       sharedClassStreams: {},
       classTeacherPhotoCache: new Map(),
       logoDataUrl: null,
@@ -1450,6 +1451,22 @@
       // Parent mode parameters
       parentMode: false, parentAdm: null, parentName: '', parentPhone: ''
     };
+
+    function reportReferenceDate(){
+      const month = resolveMonthKey(state.month || state.monthRaw) || String(state.month || '').slice(0, 3);
+      const monthIndex = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'].indexOf(month);
+      return `${state.year}-${String(Math.max(0, monthIndex) + 1).padStart(2, '0')}-01`;
+    }
+
+    function isWorkerAvailableOn(profile, rawWorker, referenceDate){
+      if (!profile || typeof profile !== 'object') return true;
+      const target = Date.parse(referenceDate);
+      const start = Date.parse(profile.employmentStartDate || profile.startDate || '');
+      const exit = Date.parse(profile.exitDate || rawWorker?.employment?.exitDate || '');
+      if (Number.isFinite(start) && target < start) return false;
+      if (Number.isFinite(exit) && target > exit) return false;
+      return true;
+    }
 
     /* -------------------------- INIT -------------------------- */
     let reportBooted = false;
@@ -1836,6 +1853,8 @@
         state.teachers = new Map();
         state.teacherByClassSubject = new Map();
         state.teacherBySubject = new Map();
+        const assignmentDateByKey = new Map();
+        const referenceDate = reportReferenceDate();
 
         // 1) Build workerId -> full name lookup
         const workerNameById = new Map();
@@ -1856,6 +1875,9 @@
         const configSnap = await getSnapScopedOrLegacy(`years/${state.year}/teachers_config`);
         const configs = configSnap?.val?.() || {};
         Object.entries(configs).forEach(([workerId, cfg]) => {
+          const rawWorker = workers[workerId] || null;
+          const profile = rawWorker?.profile || rawWorker || null;
+          if (rawWorker && !isWorkerAvailableOn(profile, rawWorker, referenceDate)) return;
           const fallbackName = String(cfg?.name || cfg?.teacherName || cfg?.fullName || '').trim();
           const teacherName = workerNameById.get(workerId) || fallbackName || 'Teacher';
           const mappings = Array.isArray(cfg?.classSubjectMappings) ? cfg.classSubjectMappings : [];
@@ -1865,19 +1887,26 @@
             const streams = Array.isArray(mapping?.streams) ? mapping.streams.filter((s) => s && s.name) : [];
 
             // Register teacher under a given class key + list of subjects
-            const registerSubjects = (classKey, streamName, subjectList) => {
+            const registerSubjects = (classKey, streamName, subjectList, effectiveFrom, subjectDates = {}) => {
               if (!classKey) return;
+              const reportTs = Date.parse(referenceDate);
               (subjectList || []).forEach((subjectRaw) => {
                 const subjectCanon = canonicalSubjectName(subjectRaw || '');
                 if (!subjectCanon) return;
+                const effectiveTs = Date.parse(subjectDates?.[subjectRaw] || subjectDates?.[subjectCanon] || effectiveFrom || cfg?.assignmentEffectiveFrom || `${state.year}-01-01`);
+                if (Number.isFinite(effectiveTs) && effectiveTs > reportTs) return;
                 buildTeacherAssignmentKeys(classKey, streamName, subjectCanon).forEach((key) => {
-                  if (!key || state.teacherByClassSubject.has(key)) return;
+                  if (!key) return;
+                  const previousTs = assignmentDateByKey.get(key) ?? Number.NEGATIVE_INFINITY;
+                  const candidateTs = Number.isFinite(effectiveTs) ? effectiveTs : Number.NEGATIVE_INFINITY;
+                  if (candidateTs < previousTs) return;
                   state.teacherByClassSubject.set(key, teacherName);
+                  assignmentDateByKey.set(key, candidateTs);
                 });
               });
             };
 
-            registerSubjects(classCanon, '', Array.isArray(mapping?.subjects) ? mapping.subjects : []);
+            registerSubjects(classCanon, '', Array.isArray(mapping?.subjects) ? mapping.subjects : [], mapping?.effectiveFrom, mapping?.subjectEffectiveFrom);
             if (false) {
               // No streams — register under the base class
               registerSubjects(classCanon, '', Array.isArray(mapping?.subjects) ? mapping.subjects : []);
@@ -1886,7 +1915,7 @@
               // The base class ("Class 3") is NOT registered here: different teachers teach it.
               streams.forEach((stream) => {
                 const streamSubjects = Array.isArray(stream?.subjects) ? stream.subjects : [];
-                registerSubjects(classCanon, stream.name, streamSubjects);
+                registerSubjects(classCanon, stream.name, streamSubjects, stream?.effectiveFrom || mapping?.effectiveFrom, stream?.subjectEffectiveFrom);
               });
             }
           });
@@ -1917,14 +1946,19 @@
 
     async function loadClassTeacherAssignmentsForYear(year) {
       try {
-        const snap = await getSnapScopedOrLegacy(`years/${year}/classTeacherAssignments`);
+        const [snap, historySnap] = await Promise.all([
+          getSnapScopedOrLegacy(`years/${year}/classTeacherAssignments`),
+          getSnapScopedOrLegacy(`years/${year}/classTeacherAssignmentHistory`)
+        ]);
         const raw = snap?.val?.() || {};
         state.classTeacherAssignments = window.SomapClassTeachers?.normalizeAssignmentsMap
           ? window.SomapClassTeachers.normalizeAssignmentsMap(raw)
           : (raw || {});
+        state.classTeacherAssignmentHistory = historySnap?.val?.() || {};
       } catch (error) {
         console.warn('[Report] class teacher assignments load failed', error?.message || error);
         state.classTeacherAssignments = {};
+        state.classTeacherAssignmentHistory = {};
       }
     }
 
@@ -2008,8 +2042,16 @@
     function getAssignmentForStudent(student) {
       const studentClass = normalizeDisplayClass(student?.class || state.className || '');
       const studentStream = sanitizeStreamFilter(student?.stream || state.stream || '');
-      return window.SomapClassTeachers?.resolveAssignment
-        ? window.SomapClassTeachers.resolveAssignment(state.classTeacherAssignments, studentClass, studentStream)
+      return window.SomapClassTeachers?.resolveAssignmentAt
+        ? window.SomapClassTeachers.resolveAssignmentAt(
+            state.classTeacherAssignments,
+            state.classTeacherAssignmentHistory,
+            studentClass,
+            studentStream,
+            reportReferenceDate()
+          )
+        : window.SomapClassTeachers?.resolveAssignment
+          ? window.SomapClassTeachers.resolveAssignment(state.classTeacherAssignments, studentClass, studentStream)
         : null;
     }
 

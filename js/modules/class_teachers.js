@@ -119,6 +119,8 @@
       streamKey: normalizeStreamKey(stream),
       classTeacher: normalizeAssignmentPerson(input?.classTeacher),
       assistantTeacher: normalizeAssignmentPerson(input?.assistantTeacher),
+      effectiveFrom: String(input?.effectiveFrom || "").trim(),
+      effectiveTo: String(input?.effectiveTo || "").trim(),
       updatedAt: Number(input?.updatedAt) || Date.now(),
       updatedBy: input?.updatedBy
         ? {
@@ -159,6 +161,36 @@
     return bucket[streamKey] || bucket[STREAM_ALL] || Object.values(bucket)[0] || null;
   }
 
+  function dateValue(value, fallback) {
+    const parsed = Date.parse(String(value || ""));
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function resolveAssignmentAt(assignments, history, className, stream, date) {
+    const target = dateValue(date, Date.now());
+    const classKey = normalizeClassKey(className);
+    const streamKey = normalizeStreamKey(stream);
+    const candidates = [];
+    const current = resolveAssignment(assignments, className, stream);
+    if (current) candidates.push(current);
+    const classHistory = history?.[classKey] || {};
+    const buckets = [classHistory?.[streamKey], classHistory?.[STREAM_ALL]];
+    buckets.forEach((bucket) => {
+      if (!bucket || typeof bucket !== "object") return;
+      Object.values(bucket).forEach((entry) => {
+        if (!entry || typeof entry !== "object") return;
+        candidates.push(buildAssignmentPayload(entry));
+      });
+    });
+    return candidates
+      .filter((entry) => {
+        const from = dateValue(entry.effectiveFrom, Number.NEGATIVE_INFINITY);
+        const to = dateValue(entry.effectiveTo, Number.POSITIVE_INFINITY);
+        return target >= from && target <= to;
+      })
+      .sort((a, b) => dateValue(b.effectiveFrom, 0) - dateValue(a.effectiveFrom, 0))[0] || null;
+  }
+
   global.SomapClassTeachers = {
     STREAM_ALL,
     CLASS_OPTIONS,
@@ -172,5 +204,6 @@
     buildAssignmentPayload,
     normalizeAssignmentsMap,
     resolveAssignment,
+    resolveAssignmentAt,
   };
 })(window);
