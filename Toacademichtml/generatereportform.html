@@ -36,6 +36,7 @@
   <!-- SoMAp multischool context + DB helpers -->
   <script src="../somapappv1multischool/js/context.js"></script>
   <script src="../somapappv1multischool/js/dbhelpers.js"></script>
+  <script src="../shared/finance_math.js"></script>
   <script src="../js/finance_core.js"></script>
   <script src="../js/modules/class_teachers.js"></script>
 
@@ -3689,7 +3690,7 @@
           byAdmission[normalizeFeeKey(adm)] = Object.assign({}, byAdmission[normalizeFeeKey(adm)] || {}, value || {});
         });
 
-        const missingViaCore = [];
+        const authoritativeRequests = [];
         const classFeesByAdm = classFeesSnap?.val?.() || {};
         const feeStructureByClass = feesStructureSnap?.val?.() || {};
         const studentFeesById = studentFeesSnap?.val?.() || {};
@@ -3767,22 +3768,35 @@
           };
           out[adm] = entry;
           outByNormalized[normalizeFeeKey(adm)] = entry;
-          if (
-            eagerAdmissions.has(adm) &&
-            (!raw || (required <= 0 && paid <= 0 && balance <= 0)) &&
-            window.SOMAP_FINANCE?.loadStudentYearSummary
-          ) {
-            missingViaCore.push({ adm, stu, classFee: classFeeRow });
-          }
+          if (eagerAdmissions.has(adm)) authoritativeRequests.push({ adm, stu, classFee: classFeeRow });
         });
-        if (missingViaCore.length && window.SOMAP_FINANCE?.loadStudentYearSummary) {
-          await Promise.all(missingViaCore.map(async ({ adm, stu, classFee }) => {
-            const keys = [normalizeAdm(stu?.id), normalizeAdm(stu?.admissionNo), adm].filter(Boolean);
+        if (authoritativeRequests.length) {
+          await Promise.all(authoritativeRequests.map(async ({ adm, stu, classFee }) => {
+            const keys = [stu?.id, stu?.studentId, stu?.admissionNo, stu?.adm, adm]
+              .map((value) => String(value || '').trim())
+              .filter(Boolean);
             let summary = null;
             for (const key of keys) {
               if (!key) continue;
               try {
-                summary = await window.SOMAP_FINANCE.loadStudentYearSummary(key, year);
+                const derived = window.SomapFinance?.loadStudentFinance
+                  ? await window.SomapFinance.loadStudentFinance(year, key)
+                  : null;
+                if (derived && (
+                  derived.hasYearData ||
+                  Number(derived.due || 0) > 0 ||
+                  (derived.scheduleItems || []).length
+                )) {
+                  summary = {
+                    due: derived.due,
+                    paid: derived.paid,
+                    outstanding: derived.outstanding,
+                    paymentPlan: derived.paymentPlan,
+                    scheduleItems: derived.scheduleItems
+                  };
+                } else if (window.SOMAP_FINANCE?.loadStudentYearSummary) {
+                  summary = await window.SOMAP_FINANCE.loadStudentYearSummary(key, year);
+                }
               } catch (_) {}
               if (summary) break;
             }
