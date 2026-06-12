@@ -491,7 +491,7 @@
   function updateTransferSelectAllState(){
     const selectAll = workerTableContainer.querySelector('#transferSelectAll');
     if (!selectAll) return;
-    const selectableIds = workersData.map(w=>w.id);
+    const selectableIds = workersData.filter((worker) => !worker.recoveredReference).map(w=>w.id);
     if (!selectableIds.length){
       selectAll.checked = false;
       selectAll.indeterminate = false;
@@ -550,14 +550,15 @@
       const photoHtml = photoUrl
         ? `<img src="${photoUrl}" alt="${getDisplayName(profile)}" class="workers-table__photo">`
         : `<span class="workers-table__photo-placeholder">Hakuna picha</span>`;
-      const statusText = profile.active !== false ? 'Active' : 'Inactive';
+      const statusText = worker.recoveredReference ? 'Recovered missing record' : (profile.active !== false ? 'Active' : 'Inactive');
       const salary = Number(profile.baseSalary||0).toLocaleString('sw-TZ');
       const tr = document.createElement('tr');
       tr.dataset.workerId = worker.id;
       tr.dataset.source = worker.source || 'scoped';
       const checkedAttr = transferSelection.has(worker.id) ? 'checked' : '';
+      const transferDisabled = worker.recoveredReference ? 'disabled' : '';
       tr.innerHTML = `
-        <td class="transfer-select-cell"><input type="checkbox" data-transfer-select="true" data-worker-id="${worker.id}" aria-label="Chagua ${getDisplayName(profile)}" ${checkedAttr}></td>
+        <td class="transfer-select-cell"><input type="checkbox" data-transfer-select="true" data-worker-id="${worker.id}" aria-label="Chagua ${getDisplayName(profile)}" ${checkedAttr} ${transferDisabled}></td>
         <td class="photo-cell">${photoHtml}</td>
         <td>${getDisplayName(profile)}</td>
         <td>${profile.role||''}</td>
@@ -565,7 +566,7 @@
         <td>${salary}</td>
         <td>${statusText}</td>
         <td class="actions-cell">
-          <button type="button" class="workers-btn secondary" data-action="edit" data-worker-id="${worker.id}">Edit</button>
+          ${worker.recoveredReference ? '' : `<button type="button" class="workers-btn secondary" data-action="edit" data-worker-id="${worker.id}">Edit</button>`}
           <button type="button" class="workers-btn danger" data-action="exit" data-worker-id="${worker.id}">Remove</button>
         </td>`;
       tb.appendChild(tr);
@@ -805,7 +806,7 @@
     const selectAll = event.target.closest('#transferSelectAll');
     if (selectAll){
       if (selectAll.checked){
-        workersData.forEach(worker=>transferSelection.add(worker.id));
+        workersData.filter((worker) => !worker.recoveredReference).forEach(worker=>transferSelection.add(worker.id));
       }else{
         workersData.forEach(worker=>transferSelection.delete(worker.id));
       }
@@ -893,6 +894,74 @@
     }
   }
 
+  async function loadOrphanedWorkerReferences(existingIds){
+    const recovered = new Map();
+    const ensureWorker = (workerId, seed = {}) => {
+      const id = String(workerId || '').trim();
+      if (!id || existingIds.has(id)) return null;
+      if (!recovered.has(id)) {
+        const name = String(seed.name || '').trim();
+        const parts = name.split(/\s+/).filter(Boolean);
+        recovered.set(id, {
+          id,
+          profile: {
+            firstName: parts[0] || '',
+            middleName: parts.length > 2 ? parts.slice(1, -1).join(' ') : '',
+            lastName: parts.length > 1 ? parts[parts.length - 1] : '',
+            fullNameUpper: name.toUpperCase() || `MISSING WORKER ${id}`,
+            phone: seed.phoneRaw || seed.phone || '',
+            role: seed.role || 'teacher',
+            baseSalary: 0,
+            active: true,
+            employmentStartDate: `${currentYear}-01-01`
+          },
+          docs: {
+            passportPhotoUrl: seed.photoUrl || '',
+            cvPdfUrl: seed.cvUrl || ''
+          },
+          contract: {},
+          employment: {},
+          source: 'recovered-reference',
+          recoveredReference: true
+        });
+      }
+      return recovered.get(id);
+    };
+
+    try {
+      const [assignmentResult, configResult] = await Promise.all([
+        scopedOrSocratesLegacy(`years/${currentYear}/classTeacherAssignments`, `years/${currentYear}/classTeacherAssignments`),
+        scopedOrSocratesLegacy(`years/${currentYear}/teachers_config`, `years/${currentYear}/teachers_config`)
+      ]);
+      assignmentResult.snap.forEach((classChild) => {
+        classChild.forEach((streamChild) => {
+          const assignment = streamChild.val() || {};
+          [assignment.classTeacher, assignment.assistantTeacher].forEach((person) => {
+            if (!person?.workerId) return;
+            const worker = ensureWorker(person.workerId, person);
+            if (!worker) return;
+            if (person.name) worker.profile.fullNameUpper = String(person.name).trim().toUpperCase();
+            if (person.phoneRaw || person.phone) worker.profile.phone = person.phoneRaw || person.phone;
+            if (person.role) worker.profile.role = person.role;
+          });
+        });
+      });
+      configResult.snap.forEach((child) => {
+        const config = child.val() || {};
+        const worker = ensureWorker(child.key, {
+          name: config.name || config.teacherName || config.fullName || '',
+          phone: config.phone || config.phoneNumber || '',
+          role: 'teacher'
+        });
+        if (!worker) return;
+        worker.teacherConfig = config;
+      });
+    } catch (error) {
+      console.warn('Unable to recover missing worker references', error);
+    }
+    return Array.from(recovered.values());
+  }
+
   async function loadWorkers(){
     try{
       currentWorkersSource = 'scoped';
@@ -902,7 +971,9 @@
       const rows = [];
       const { snap, source } = await scopedOrSocratesLegacy(`years/${currentYear}/workers`, 'workers');
       currentWorkersSource = source;
+      const existingIds = new Set();
       snap.forEach(ch=>{
+        existingIds.add(ch.key);
         const v = ch.val()||{};
         rows.push({
           id: ch.key,
@@ -913,6 +984,8 @@
           source
         });
       });
+      const recoveredRows = await loadOrphanedWorkerReferences(existingIds);
+      rows.push(...recoveredRows);
       rows.sort((a,b)=>{
         const nameA = (a.profile?.fullNameUpper||'').toUpperCase();
         const nameB = (b.profile?.fullNameUpper||'').toUpperCase();
