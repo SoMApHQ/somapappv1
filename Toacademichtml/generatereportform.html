@@ -906,6 +906,7 @@
       return Number.isFinite(n) ? String(n) : String(SOMAP_DEFAULT_YEAR);
     }
     function cleanPath(path) { return String(path || '').replace(/^\/+/, ''); }
+    const SNAPSHOT_PROMISE_CACHE = new Map();
     function buildCandidateDbPaths(path) {
       const clean = cleanPath(path);
       const scoped = (window.SOMAP && typeof SOMAP.P === 'function') ? SOMAP.P(clean) : clean;
@@ -929,6 +930,8 @@
     }
     async function getSnapScopedOrLegacy(path) {
       const clean = cleanPath(path);
+      if (SNAPSHOT_PROMISE_CACHE.has(clean)) return SNAPSHOT_PROMISE_CACHE.get(clean);
+      const pending = (async () => {
       let scopedSnap = null;
       try {
         const scopedPath = (window.SOMAP && typeof SOMAP.P === 'function') ? SOMAP.P(clean) : clean;
@@ -944,6 +947,14 @@
         } catch (_) {}
       }
       return scopedSnap || { exists: () => false, val: () => null };
+      })();
+      SNAPSHOT_PROMISE_CACHE.set(clean, pending);
+      try {
+        return await pending;
+      } catch (error) {
+        SNAPSHOT_PROMISE_CACHE.delete(clean);
+        throw error;
+      }
     }
     
     const LOGO_PATH = '../images/somap-logo.png.jpg';
@@ -1525,15 +1536,26 @@
       await waitForFirebaseSession();
       // Check for parent mode URL parameters first
       checkParentMode();
-      preloadLogo();
       hydrateFromSession();
-      await loadExamRegistry();
+      if (state.parentMode) customExamRegistryCache = readLocalExamRegistry();
+      else await loadExamRegistry();
       populateSelectors();
       attachListeners();
       loadAllData();
-      loadExamRegistry({ includeDiscovery: true })
-        .then(() => renderExamSelectors())
-        .catch((err) => console.warn('[Report] custom exam discovery skipped', err?.message || err));
+      const runDeferredSetup = () => {
+        preloadLogo();
+        if (state.parentMode) {
+          loadExamRegistry()
+            .then(() => renderExamSelectors())
+            .catch((err) => console.warn('[Report] exam registry refresh skipped', err?.message || err));
+        } else {
+          loadExamRegistry({ includeDiscovery: true })
+            .then(() => renderExamSelectors())
+            .catch((err) => console.warn('[Report] custom exam discovery skipped', err?.message || err));
+        }
+      };
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(runDeferredSetup, { timeout: 2000 });
+      else setTimeout(runDeferredSetup, 500);
     }
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -2261,7 +2283,7 @@
       try {
         document.getElementById('bulkCount').textContent = '...';
         await loadSharedClassStreamsForYear(state.year);
-        if (state.parentMode && state.parentAdm) {
+        if (state.parentMode && state.parentAdm && !state.className) {
           await findStudentClass();
         }
 
@@ -2364,9 +2386,9 @@
 
         let [attendance, fees, scoresRaw] = await Promise.all([
           fetchAttendance(state.year, state.month, dbClass, state.examKey, state.monthRaw),
-          fetchFees(state.year, dbClass, students, {
-            eagerAdmissions: state.parentMode && state.parentAdm ? [state.parentAdm] : []
-          }),
+          state.parentMode
+            ? Promise.resolve({})
+            : fetchFees(state.year, dbClass, students),
           fetchScores({year: state.year, className: dbClass, examKey: state.examKey, month: state.month, rawMonth: state.monthRaw})
         ]);
         console.log('[Report] scoresRaw student count', Object.keys(scoresRaw || {}).length);
