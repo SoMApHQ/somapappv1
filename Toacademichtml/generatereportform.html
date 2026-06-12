@@ -1880,6 +1880,10 @@
         const workers = workerSnap?.val?.() || {};
         const prevWorkers = prevWorkerSnap?.val?.() || {};
         const allWorkers = { ...prevWorkers, ...workers }; // current year takes precedence
+        // exitDateByName: name (UPPER) -> earliest exit date found across all worker records
+        // This catches cases where workerId in teachers_config doesn't match workers collection
+        const exitDateByName = new Map();
+        const monthVal = (v) => { const m = String(v||'').match(/^(\d{4})-(\d{2})/); return m ? Number(m[1])*12+Number(m[2])-1 : null; };
         Object.entries(allWorkers).forEach(([workerId, raw]) => {
           const profile = raw?.profile || raw || {};
           const fullName =
@@ -1889,6 +1893,13 @@
             '';
           const normalized = String(fullName || '').trim();
           if (normalized) workerNameById.set(workerId, normalized);
+          const exit = profile.exitDate || raw?.employment?.exitDate || '';
+          if (normalized && exit) {
+            const key = normalized.toUpperCase();
+            // keep the earliest exit date if the same name appears in multiple years
+            const prev = exitDateByName.get(key);
+            if (!prev || monthVal(exit) < monthVal(prev)) exitDateByName.set(key, exit);
+          }
         });
 
         // 2) Use teacher setup mappings: years/{year}/teachers_config/{workerId}
@@ -1912,6 +1923,19 @@
           }
           const fallbackName = String(cfg?.name || cfg?.teacherName || cfg?.fullName || '').trim();
           const teacherName = workerNameById.get(workerId) || fallbackName || 'Teacher';
+          // Safety net: check exit date by resolved name in case workerId doesn't match workers collection
+          if (teacherName && teacherName !== 'Teacher') {
+            const nameExitDate = exitDateByName.get(teacherName.toUpperCase()) || '';
+            if (nameExitDate) {
+              const refMatch = String(referenceDate).match(/^(\d{4})-(\d{2})/);
+              const exitMatch = String(nameExitDate).match(/^(\d{4})-(\d{2})/);
+              if (refMatch && exitMatch) {
+                const refVal = Number(refMatch[1])*12+Number(refMatch[2])-1;
+                const exitVal = Number(exitMatch[1])*12+Number(exitMatch[2])-1;
+                if (refVal > exitVal) return;
+              }
+            }
+          }
           const mappings = Array.isArray(cfg?.classSubjectMappings) ? cfg.classSubjectMappings : [];
 
           mappings.forEach((mapping) => {
