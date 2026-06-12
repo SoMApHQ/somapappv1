@@ -668,9 +668,15 @@
         Boolean(workerName && personName && workerName === personName) ||
         Boolean(workerPhone && personPhone && workerPhone === personPhone);
     };
-    const assignmentsSnap = await schoolRef(`years/${currentYear}/classTeacherAssignments`).get();
+    let assignmentsSnap;
+    try {
+      assignmentsSnap = await schoolRef(`years/${currentYear}/classTeacherAssignments`).get();
+    } catch (readError) {
+      console.warn('Unable to read current class assignments during worker exit.', readError);
+      return [];
+    }
     if (!assignmentsSnap.exists()) return;
-    const updates = {};
+    const archivedAssignments = [];
     assignmentsSnap.forEach((classChild) => {
       classChild.forEach((streamChild) => {
         const assignment = streamChild.val() || {};
@@ -678,7 +684,7 @@
         const assistantMatch = matchesWorker(assignment.assistantTeacher);
         if (!classTeacherMatch && !assistantMatch) return;
         const historyKey = schoolRef(`years/${currentYear}/classTeacherAssignmentHistory/${classChild.key}/${streamChild.key}`).push().key;
-        updates[`years/${currentYear}/classTeacherAssignmentHistory/${classChild.key}/${streamChild.key}/${historyKey}`] = {
+        const historyRecord = {
           ...assignment,
           effectiveFrom: assignment.effectiveFrom || `${currentYear}-01-01`,
           effectiveTo: exitDate,
@@ -686,17 +692,36 @@
           endedWorkerId: workerId,
           archivedAt: firebase.database.ServerValue.TIMESTAMP
         };
+        archivedAssignments.push({
+          classKey: classChild.key,
+          streamKey: streamChild.key,
+          historyKey,
+          record: historyRecord
+        });
         const next = {
           ...assignment,
           classTeacher: classTeacherMatch ? null : (assignment.classTeacher || null),
           assistantTeacher: assistantMatch ? null : (assignment.assistantTeacher || null),
           updatedAt: firebase.database.ServerValue.TIMESTAMP
         };
-        const currentPath = `years/${currentYear}/classTeacherAssignments/${classChild.key}/${streamChild.key}`;
-        updates[currentPath] = next.classTeacher || next.assistantTeacher ? next : null;
+        archivedAssignments[archivedAssignments.length - 1].nextAssignment = next.classTeacher || next.assistantTeacher ? next : null;
       });
     });
-    if (Object.keys(updates).length) await schoolRef('').update(updates);
+    for (const item of archivedAssignments) {
+      try {
+        await schoolRef(`years/${currentYear}/classTeacherAssignmentHistory/${item.classKey}/${item.streamKey}/${item.historyKey}`).set(item.record);
+      } catch (historyError) {
+        console.warn('Central assignment history write failed; worker backup will be used.', historyError);
+      }
+      try {
+        const currentRef = schoolRef(`years/${currentYear}/classTeacherAssignments/${item.classKey}/${item.streamKey}`);
+        if (item.nextAssignment) await currentRef.set(item.nextAssignment);
+        else await currentRef.remove();
+      } catch (assignmentError) {
+        console.warn('Current class assignment cleanup failed.', assignmentError);
+      }
+    }
+    return archivedAssignments;
   }
 
   async function exitWorker(worker, { exitReason, exitDate, exitNotes }){
@@ -704,9 +729,13 @@
     if (!workerId) return;
     try{
       const displayName = getDisplayName(worker.profile);
-      const source = worker.source === 'legacy'
-        ? { profile: worker.profile || {}, docs: worker.docs || {}, contract: worker.contract || {} }
-        : ((await schoolRef(`years/${currentYear}/workers/${workerId}`).get()).val() || worker);
+      const existingSnap = await schoolRef(`years/${currentYear}/workers/${workerId}`).get();
+      const existing = existingSnap.exists() ? (existingSnap.val() || {}) : {};
+      const source = {
+        profile: existing.profile || worker.profile || {},
+        docs: existing.docs || worker.docs || {},
+        contract: existing.contract || worker.contract || {}
+      };
       const payload = {
         ...source,
         profile: {
@@ -725,7 +754,18 @@
         }
       };
       await schoolRef(`years/${currentYear}/workers/${workerId}`).set(payload);
-      await archiveCurrentAssignments(worker, exitDate, exitReason);
+      const archivedAssignments = await archiveCurrentAssignments(worker, exitDate, exitReason);
+      if (archivedAssignments?.length) {
+        const backup = {};
+        archivedAssignments.forEach((item) => {
+          backup[`${item.classKey}/${item.streamKey}/${item.historyKey}`] = item.record;
+        });
+        try {
+          await schoolRef(`years/${currentYear}/workers/${workerId}/employment/assignmentHistory`).update(backup);
+        } catch (backupError) {
+          console.warn('Worker assignment-history backup failed.', backupError);
+        }
+      }
       if (currentEditingWorkerId === workerId){
         currentEditingWorkerId = '';
         currentEditingDocs = {};
@@ -739,6 +779,7 @@
       alert(`${displayName} ameondolewa kwenye ajira ya sasa bila kufuta historia yake.`);
     }catch(err){
       console.error('Exit worker error:', err);
+      setStatus(`Imeshindikana: ${err?.message || 'Firebase write failed'}`, true);
       alert('Imeshindikana kurekodi kuondoka kwa mfanyakazi. Jaribu tena.');
     }
   }
