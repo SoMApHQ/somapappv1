@@ -1546,7 +1546,10 @@
     function hydrateFromSession(){
       const urlParams = new URLSearchParams(window.location.search || '');
       const ss = window.sessionStorage;
-      const classFromSession = urlParams.get('class') || urlParams.get('className') || ss.getItem('className') || ss.getItem(PREFS.CLASS_KEY) || 'Class 1';
+      const classFromUrl = urlParams.get('class') || urlParams.get('className') || '';
+      const classFromSession = classFromUrl || (state.parentMode
+        ? ''
+        : (ss.getItem('className') || ss.getItem(PREFS.CLASS_KEY) || 'Class 1'));
       state.classKey = normalizeDisplayClass(classFromSession);
       state.className = normalizeDisplayClass(classFromSession);
       state.stream = sanitizeStreamFilter(urlParams.get('stream') || ss.getItem('stream') || ss.getItem(PREFS.STREAM_KEY) || '');
@@ -2203,13 +2206,12 @@
           return;
         }
 
-        console.warn(`[Parent Mode] Could not find class for student ${state.parentAdm}, defaulting to Class 1`);
-        state.className = 'Class 1';
-        state.classKey = 'Class 1';
+        throw new Error(`No ${state.year} enrollment was found for admission ${state.parentAdm}.`);
       } catch (e) {
         console.error('[Parent Mode] Error finding student class:', e);
-        state.className = 'Class 1';
-        state.classKey = 'Class 1';
+        state.className = '';
+        state.classKey = '';
+        throw e;
       }
     }
 
@@ -2972,7 +2974,9 @@
     function normalizeStudentRecord(admKey, s){
       const name = resolveStudentName(s, admKey);
       const rawClass = s.class || s.currentClass || s.level || s.className || s.grade || s.classLevel || '';
-      const sClass = normalizeDisplayClass(state.className || rawClass);
+      // Preserve the student's selected-year enrollment class while discovering
+      // parent records. The page selection is only a fallback for score-only rows.
+      const sClass = normalizeDisplayClass(rawClass || state.className);
       const embeddedStream = extractEmbeddedStream(rawClass);
       const storedClass = normalizeDisplayClass(rawClass);
       const storedClassIsCurrent = !state.className || classMatches(state.className, storedClass);
@@ -4585,7 +4589,8 @@
       
       // In parent mode, filter to only the specific student
       if (state.parentMode && state.parentAdm) {
-        filtered = filtered.filter(s => s.adm === state.parentAdm);
+        const parentAdm = normalizeAdm(state.parentAdm);
+        filtered = filtered.filter(s => normalizeAdm(s.adm) === parentAdm);
         
         // Auto-select the student in parent mode
         if (filtered.length > 0) {
