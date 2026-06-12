@@ -789,6 +789,32 @@
       return null;
     }
 
+    async function readFirstExistingParallel(paths, concurrency = 8) {
+      const db = getDB();
+      if (!db) return null;
+      const candidates = [];
+      (paths || []).forEach(rawPath => {
+        buildCandidateDbPaths(rawPath).forEach(candidatePath => {
+          if (!candidates.includes(candidatePath)) candidates.push(candidatePath);
+        });
+      });
+      for (let start = 0; start < candidates.length; start += concurrency) {
+        const chunk = candidates.slice(start, start + concurrency);
+        const results = await Promise.all(chunk.map(async candidatePath => {
+          try {
+            const snap = await db.ref(candidatePath).get();
+            return snap?.exists?.() ? { snap, path: candidatePath } : null;
+          } catch (err) {
+            console.warn('[scoresheet] read failed', candidatePath, err?.message || err);
+            return null;
+          }
+        }));
+        const found = results.find(Boolean);
+        if (found) return found;
+      }
+      return null;
+    }
+
     async function loadClassTeacherAssignmentsForYear(year) {
       try {
         const [found, historyFound] = await Promise.all([
@@ -1159,28 +1185,15 @@
         });
       });
 
-      let snap = null;
-      let usedPath = null;
-
-      for (const refPath of paths) {
-        try {
-          const found = await readFirstExisting([refPath]);
-          const candidateSnap = found?.snap || null;
-          console.log('[scoresheet.fetchScores] trying', refPath, candidateSnap && candidateSnap.exists && candidateSnap.exists());
-          if (candidateSnap && candidateSnap.exists && candidateSnap.exists()) {
-            snap = candidateSnap;
-            usedPath = refPath;
-            break;
-          }
-        } catch (e) {
-          console.warn('[scoresheet.fetchScores] error on', refPath, e);
-        }
-      }
+      const uniquePaths = Array.from(new Set(paths));
+      const found = await readFirstExistingParallel(uniquePaths);
+      const snap = found?.snap || null;
+      const usedPath = found?.path || null;
 
       if (!snap) {
         console.warn(
           '[scoresheet.fetchScores] NO DATA for',
-          { year, className, examKey, month, classCandidates, pathsTried: paths }
+          { year, className, examKey, month, classCandidates, pathsTried: uniquePaths }
         );
         return {};
       }
@@ -1396,6 +1409,7 @@
 
       scoresBody.innerHTML = '';
       state.rowsByAdm = {};
+      const tableFragment = document.createDocumentFragment();
 
       // If no students found, show a message
       if(state.students.length === 0) {
@@ -1468,8 +1482,8 @@
             maxInp.title = 'Automatic exam';
           }
 
-          scoreInp.addEventListener('input', recomputeAll);
-          maxInp.addEventListener('input', recomputeAll);
+          scoreInp.addEventListener('input', scheduleRecompute);
+          maxInp.addEventListener('input', scheduleRecompute);
 
           tr.appendChild(tds[0]); tr.appendChild(tds[1]); tr.appendChild(tds[2]);
 
@@ -1506,6 +1520,8 @@
           meta: s
         };
       });
+
+      scoresBody.appendChild(tableFragment);
 
       lblCount.textContent = String(state.students.length);
       lblSubjects.textContent = String(state.subjectList.length);
@@ -1600,6 +1616,15 @@
         return b.attendance - a.attendance;
       });
       ranked.forEach((r,i)=> state.rowsByAdm[r.adm].tdPstn.textContent = String(i+1));
+    }
+
+    let recomputeFrame = 0;
+    function scheduleRecompute(){
+      if (recomputeFrame) cancelAnimationFrame(recomputeFrame);
+      recomputeFrame = requestAnimationFrame(() => {
+        recomputeFrame = 0;
+        recomputeAll();
+      });
     }
 
     /* ---------- Exports (scoresheet table) ---------- */
@@ -1989,9 +2014,12 @@
         const cached = sessionStorage.getItem('somap_scoresheet_roster');
         if (cached) {
           const parsed = JSON.parse(cached);
+          const requestedStream = String(state.stream || '').toUpperCase().replace(/[\s-]/g, '');
+          const cachedStream = String(parsed.stream || '').toUpperCase().replace(/[\s-]/g, '');
           const match = parsed.className && parsed.year && 
             (canonicalClassKey(parsed.className) === canonicalClassKey(state.className)) &&
-            String(parsed.year) === String(state.year);
+            String(parsed.year) === String(state.year) &&
+            cachedStream === requestedStream;
           if (match && Array.isArray(parsed.students) && parsed.students.length > 0) {
             state.students = parsed.students;
             useCached = true;
@@ -2041,8 +2069,16 @@
 
       currentClass = state.className;
       currentYear = state.year;
-      await loadCustomSubjectsForYear(state.year);
-      await loadClassTeacherAssignmentsForYear(state.year);
+      lblStatus.innerHTML = '<span class="text-sky-600">Loading subjects, scores and class records...</span>';
+      const customSubjectsPromise = loadCustomSubjectsForYear(state.year);
+      const teacherAssignmentsPromise = loadClassTeacherAssignmentsForYear(state.year);
+      const recordsPromise = Promise.all([
+        fetchAttendance(state.year, state.month, state.className),
+        fetchFees(state.year, state.className),
+        fetchScores({ year: state.year, className: state.className, examKey: state.examKey, month: state.month })
+      ]);
+
+      await customSubjectsPromise;
       state.subjectList = getSubjectsForClassAndYear(state.className, state.year);
       console.log('Subject list for', state.className, ':', state.subjectList.map(s => s.label));
 
@@ -2051,11 +2087,7 @@
         console.log('Available classes:', Object.keys(SomapSub().SUBJECTS_BY_CLASS || {}));
       }
       console.log('Fetching attendance, fees, and scores...');
-      const [attendanceData, feesData, scoresData] = await Promise.all([
-        fetchAttendance(state.year, state.month, state.className),
-        fetchFees(state.year, state.className),
-        fetchScores({ year: state.year, className: state.className, examKey: state.examKey, month: state.month })
-      ]);
+      const [attendanceData, feesData, scoresData] = await recordsPromise;
       state.attendance = attendanceData || {};
       console.log('Attendance data:', Object.keys(state.attendance).length, 'students');
       state.fees = feesData || {};
@@ -2065,10 +2097,10 @@
       cacheScoresheetRoster(state.students);
 
       console.log('Building table...');
-      renderClassTeacherBanner();
       buildTable();
       console.log('Recomputing all...');
       recomputeAll();
+      teacherAssignmentsPromise.then(renderClassTeacherBanner).catch(() => {});
       console.log('=== Load complete ===');
     }
 
