@@ -747,12 +747,24 @@
               <div class="flex gap-2">
                 <select id="reportExamSelect" class="btn-ghost px-3 py-2">
                   <option value="monthly">Monthly</option>
-                  <option value="term">Term</option>
+                  <option value="midterm1">Midterm 1</option>
+                  <option value="midterm2">Midterm 2</option>
+                  <option value="endterm">End Term</option>
+                  <option value="annual">Annual</option>
                 </select>
                 <select id="reportMonth" class="btn-ghost px-3 py-2">
+                  <option value="01">January</option>
+                  <option value="02">February</option>
+                  <option value="03">March</option>
+                  <option value="04">April</option>
+                  <option value="05">May</option>
+                  <option value="06">June</option>
+                  <option value="07">July</option>
                   <option value="08">August</option>
                   <option value="09">September</option>
-                  <option value="01">January</option>
+                  <option value="10">October</option>
+                  <option value="11">November</option>
+                  <option value="12">December</option>
                 </select>
                 <button class="btn" id="genReportBtn">
                   <i class="fas fa-download mr-2"></i>Download
@@ -1249,6 +1261,11 @@
       const exportCsvBtn = q("#exportCsvBtn");
       const exportPdfBtn = q("#exportPdfBtn");
       const genReportBtn = q("#genReportBtn");
+      const reportExamSelect = q("#reportExamSelect");
+      const reportMonth = q("#reportMonth");
+      if (reportMonth) {
+        reportMonth.value = String(new Date().getMonth() + 1).padStart(2, "0");
+      }
 
       const detailClass = q("#detailClass");
       const detailStream = q("#detailStream");
@@ -2532,35 +2549,33 @@
 
       async function renderFinanceStats() {
         if (!currentStudentKey || !window.SomapFinance) return;
+        latestYearHasFinanceRecord = false;
+        latestFinanceSnapshot = null;
         const yearStr = getActiveYearString();
         const admissionRef =
           currentStudent?.admissionNumber || currentStudent?.pupilId || "";
         try {
-          const [firstActiveYear, hasSelectedYearRecord] = await Promise.all([
-            resolveFirstActiveYear(currentStudentKey, admissionRef, currentStudent),
-            studentHasActualYearRecord(currentStudentKey, admissionRef, yearStr),
-          ]);
-          if (
-            !hasSelectedYearRecord ||
-            Number(yearStr) < Number(firstActiveYear || MIN_DATA_YEAR)
-          ) {
+          // SomapFinance already resolves current-year enrollments, promoted
+          // classes, class fee structures, overrides, legacy ledgers and base
+          // student records. A second path-existence gate here caused valid
+          // promoted learners to be rejected before that resolution ran.
+          const fin = await window.SomapFinance.loadStudentFinance(
+            yearStr,
+            currentStudentKey
+          );
+          if (!fin || !fin.hasYearData) {
             applyNoYearRecordState(yearStr);
             return;
           }
           latestYearHasFinanceRecord = true;
-          const [fin, carryMeta] = await Promise.all([
-            window.SomapFinance.loadStudentFinance(yearStr, currentStudentKey),
-            resolveCarryForwardDebt(
-              currentStudentKey,
-              yearStr,
-              admissionRef,
-              firstActiveYear
-            ),
-          ]);
-          if (!fin) {
-            applyNoYearRecordState(yearStr);
-            return;
-          }
+          const firstActiveYear =
+            extractStudentStartYear(currentStudent) || MIN_DATA_YEAR;
+          const carryMeta = await resolveCarryForwardDebt(
+            currentStudentKey,
+            yearStr,
+            admissionRef,
+            firstActiveYear
+          );
           latestFinanceSnapshot = fin;
 
           const currentFee = Number(fin.due || fin.record?.feePerYear || 0);
@@ -2658,13 +2673,20 @@
           currentStudentKey;
         const classLevel = currentStudent.classLevel || "";
         await renderFinanceStats();
+        const resolvedClassLevel =
+          latestFinanceSnapshot?.classLevel || classLevel;
         await loadPaymentsAllSources(
           currentStudentKey,
           adm,
-          classLevel,
+          resolvedClassLevel,
           getActiveYearString()
         );
-        await loadGraduationSummary(adm, classLevel, getActiveYearString());
+        await loadScoresForStudent(adm);
+        await loadGraduationSummary(
+          adm,
+          resolvedClassLevel,
+          getActiveYearString()
+        );
         updateYearBadge();
       }
 
@@ -2973,7 +2995,6 @@
         const classLevel = currentStudent.classLevel || "";
         await refreshYearDependentData();
         await loadAttendanceForStudent(currentStudent.admissionNumber);
-        await loadScoresForStudent(currentStudent.admissionNumber);
         await checkTransportAccess(adm);
         await loadParentTransportHome();
         await refreshParentBooksPanel();
@@ -3528,34 +3549,49 @@
             '<tr><td colspan="4" class="muted p-3">Loading scoresΓÇª</td></tr>';
           const snap = await schoolRef("scores").once("value");
           const root = snap.val() || {};
+          const selectedYear = getActiveYearString();
+          const selectedYearScores = root[selectedYear] || {};
+          const normalizedAdm = String(admNo || "")
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]/g, "");
+          const findStudentScore = (records) => {
+            if (!records || typeof records !== "object") return null;
+            if (records[admNo]) return records[admNo];
+            const matchedKey = Object.keys(records).find(
+              (key) =>
+                String(key).trim().toLowerCase().replace(/[^a-z0-9]/g, "") ===
+                normalizedAdm
+            );
+            return matchedKey ? records[matchedKey] : null;
+          };
           let found = null;
-          outer: for (const year of Object.keys(root).sort().reverse()) {
-            const classes = root[year] || {};
-            for (const className of Object.keys(classes || {})) {
-              const examKeys = classes[className] || {};
-              for (const examKey of Object.keys(examKeys || {})) {
-                const months = examKeys[examKey] || {};
-                for (const monthKey of Object.keys(months || {})
-                  .sort()
-                  .reverse()) {
-                  const mdata = months[monthKey] || {};
-                  if (mdata && mdata[admNo]) {
-                    found = {
-                      year,
-                      className,
-                      examKey,
-                      monthKey,
-                      data: mdata[admNo],
-                    };
-                    break outer;
-                  }
+          outer: for (const className of Object.keys(selectedYearScores)) {
+            const examKeys = selectedYearScores[className] || {};
+            for (const examKey of Object.keys(examKeys || {})) {
+              const months = examKeys[examKey] || {};
+              for (const monthKey of Object.keys(months || {})
+                .sort()
+                .reverse()) {
+                const data = findStudentScore(months[monthKey]);
+                if (data) {
+                  found = {
+                    year: selectedYear,
+                    className,
+                    examKey,
+                    monthKey,
+                    data,
+                  };
+                  break outer;
                 }
               }
             }
           }
           if (!found) {
             scoresTbody.innerHTML =
-              '<tr><td colspan="4" class="muted p-3">No scores found for this student.</td></tr>';
+              `<tr><td colspan="4" class="muted p-3">No scores found for this student in ${safe(
+                selectedYear
+              )}.</td></tr>`;
             window.__soMap_scores_for_chart = null;
             renderScoresChart();
             return;
@@ -3742,9 +3778,13 @@
         );
         const year = getActiveYearString();
         const resolvedClass = await resolveParentDisplayClass(year);
+        const examKey = reportExamSelect?.value || "monthly";
+        const examType =
+          reportExamSelect?.selectedOptions?.[0]?.textContent || "Monthly";
+        const month = reportMonth?.value || "";
         // The report page resolves the current stream from the admission record.
         // Student profile stream fields may still contain a previous assignment.
-        const url = `Toacademichtml/generatereportform.html?adm=${adm}&name=${name}&phone=${phone}&year=${encodeURIComponent(year)}&class=${encodeURIComponent(resolvedClass || "")}`;
+        const url = `Toacademichtml/generatereportform.html?adm=${adm}&name=${name}&phone=${phone}&year=${encodeURIComponent(year)}&class=${encodeURIComponent(resolvedClass || "")}&examKey=${encodeURIComponent(examKey)}&examType=${encodeURIComponent(examType.trim())}&month=${encodeURIComponent(month)}`;
         window.open(url, "_blank");
       }
 
