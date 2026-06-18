@@ -1513,6 +1513,9 @@
                   <option value="debtors">Debtors only</option>
                   <option value="paid">Paid up to date</option>
                 </select>
+                <button id="remedialOpenConcessionBtn" class="remedial-btn p-2 min-w-0 text-amber-100 hover:text-amber-200 hover:bg-amber-500/20 border-amber-300/45" title="Give a student a special favor">
+                  <i class="fas fa-hand-holding-heart"></i>
+                </button>
               </div>
 
               <div class="remedial-toolbar mb-3">
@@ -2763,6 +2766,7 @@
         year: String(SOMAP_DEFAULT_YEAR),
         students: [],
         paymentsByStudent: {},
+        concessionsByStudent: {},
         expenses: {},
         incomes: {},
         settings: { ...REMEDIAL_DEFAULT_SETTINGS },
@@ -2860,6 +2864,62 @@
         return out;
       }
 
+      function monthLabelByKey(monthKey) {
+        return REMEDIAL_MONTHS.find((m) => m.key === monthKey)?.label || "";
+      }
+
+      function normalizeRemedialConcession(raw) {
+        if (!raw || typeof raw !== "object") return null;
+        const monthlyPrice = parseMoney(raw.monthlyPrice);
+        const startMonth = normalizeMonthKey(raw.startMonth);
+        const endMonth = normalizeMonthKey(raw.endMonth) || "08";
+        if (monthlyPrice <= 0 || !startMonth) return null;
+        return {
+          monthlyPrice,
+          startMonth,
+          endMonth,
+          reason: String(raw.reason || "").trim(),
+          updatedAt: raw.updatedAt || null,
+          updatedBy: raw.updatedBy || "",
+        };
+      }
+
+      function remedialConcessionApplies(concession, monthKey) {
+        if (!concession || !monthKey) return false;
+        return monthKey >= concession.startMonth && monthKey <= concession.endMonth;
+      }
+
+      function remedialExpectedForMonths(studentId, months) {
+        const standardPrice = parseMoney(remedialState.settings.monthlyPrice);
+        const concession = normalizeRemedialConcession(
+          remedialState.concessionsByStudent?.[studentId]
+        );
+        return months.reduce((sum, m) => {
+          const price = remedialConcessionApplies(concession, m.key)
+            ? concession.monthlyPrice
+            : standardPrice;
+          return sum + price;
+        }, 0);
+      }
+
+      function remedialEffectiveMonthPrice(studentId, monthKey) {
+        const concession = normalizeRemedialConcession(
+          remedialState.concessionsByStudent?.[studentId]
+        );
+        if (remedialConcessionApplies(concession, monthKey)) {
+          return concession.monthlyPrice;
+        }
+        return parseMoney(remedialState.settings.monthlyPrice);
+      }
+
+      function remedialConcessionSummary(concession) {
+        if (!concession) return "";
+        const start = monthLabelByKey(concession.startMonth) || concession.startMonth;
+        const end = monthLabelByKey(concession.endMonth) || concession.endMonth;
+        const range = concession.endMonth === "08" ? `from ${start}` : `${start} to ${end}`;
+        return `Special: ${formatTsh(concession.monthlyPrice)} ${range}`;
+      }
+
       function extractPaymentDetailsList(rawStudentPayments) {
         const list = [];
         Object.entries(rawStudentPayments || {}).forEach(([rawMonth, value]) => {
@@ -2896,7 +2956,6 @@
       }
 
       function remedialRowsFromState() {
-        const monthlyPrice = parseMoney(remedialState.settings.monthlyPrice);
         const dueMonthCount = dueMonthCountForYear(
           remedialState.year,
           remedialState.settings.dueDay
@@ -2916,8 +2975,14 @@
             (sum, m) => sum + parseMoney(monthPaid[m.key]),
             0
           );
-          const expectedToDate = dueMonthCount * monthlyPrice;
-          const expectedToAug = 8 * monthlyPrice;
+          const concession = normalizeRemedialConcession(
+            remedialState.concessionsByStudent?.[st.id]
+          );
+          const expectedToDate = remedialExpectedForMonths(
+            st.id,
+            REMEDIAL_MONTHS.slice(0, dueMonthCount)
+          );
+          const expectedToAug = remedialExpectedForMonths(st.id, REMEDIAL_MONTHS);
           const debtToDate = Math.max(0, expectedToDate - paidToDate);
           const debtToAugust = Math.max(0, expectedToAug - totalPaidAug);
           const isDebtor = debtToDate > 0;
@@ -2940,6 +3005,8 @@
             expectedToAug,
             debtToDate,
             debtToAugust,
+            concession,
+            concessionSummary: remedialConcessionSummary(concession),
             status: isDebtor ? "SEND HOME (UNPAID)" : "OK",
             isDebtor,
           };
@@ -3053,9 +3120,12 @@
           .map((r) => {
             const currentMonthPaid = parseMoney(r.monthPaid[selectedMonth] || 0);
             const actionLabel = currentMonthPaid > 0 ? "Update Payment" : "Mark Paid";
+            const statusText = r.concessionSummary
+              ? `${r.status} (${r.concessionSummary})`
+              : r.status;
             const actionCell = isRO
               ? `<td><button class="remedial-btn p-1.5 min-w-0 text-slate-300 hover:text-cyan-300 hover:bg-slate-600/40 border border-slate-500/40" data-remedial-view="${remedialEsc(r.id)}" title="View payment details"><i class="fas fa-eye text-xs"></i></button></td>`
-              : `<td><span class="inline-flex items-center gap-1"><button class="remedial-btn p-1.5 min-w-0 text-slate-300 hover:text-cyan-300 hover:bg-slate-600/40 border border-slate-500/40" data-remedial-view="${remedialEsc(r.id)}" title="View payment details"><i class="fas fa-eye text-xs"></i></button><button class="remedial-btn bg-indigo-500/35 text-indigo-100 border-indigo-200/50" data-remedial-pay="${remedialEsc(r.id)}">${remedialEsc(actionLabel)}</button></span></td>`;
+              : `<td><span class="inline-flex items-center gap-1"><button class="remedial-btn p-1.5 min-w-0 text-slate-300 hover:text-cyan-300 hover:bg-slate-600/40 border border-slate-500/40" data-remedial-view="${remedialEsc(r.id)}" title="View payment details"><i class="fas fa-eye text-xs"></i></button><button class="remedial-btn p-1.5 min-w-0 text-amber-100 hover:text-amber-200 hover:bg-amber-500/20 border border-amber-300/45" data-remedial-concession="${remedialEsc(r.id)}" title="Special favor / reduced monthly fee"><i class="fas fa-hand-holding-heart text-xs"></i></button><button class="remedial-btn bg-indigo-500/35 text-indigo-100 border-indigo-200/50" data-remedial-pay="${remedialEsc(r.id)}">${remedialEsc(actionLabel)}</button></span></td>`;
             return `
             <tr class="${r.isDebtor ? "remedial-row-risk" : "remedial-row-ok"}">
               <td>${r.index}</td>
@@ -3066,7 +3136,7 @@
               <td>${r.paidMonthsCount} (${remedialEsc(r.paidMonths.join(", ") || "-")})</td>
               <td>${formatTsh(r.debtToDate)}</td>
               <td>${formatTsh(r.debtToAugust)}</td>
-              <td>${remedialEsc(r.status)}</td>
+              <td>${remedialEsc(statusText)}</td>
               ${actionCell}
             </tr>`;
           })
@@ -3076,10 +3146,11 @@
       async function loadRemedialYearData(year) {
         const y = String(year || SOMAP_DEFAULT_YEAR);
         remedialState.year = y;
-        const [settingsSnap, paymentsSnap, expensesSnap, incomesSnap] =
+        const [settingsSnap, paymentsSnap, concessionsSnap, expensesSnap, incomesSnap] =
           await Promise.all([
             schoolRef(`remedial/settings/${y}`).once("value"),
             schoolRef(`remedial/payments/${y}`).once("value"),
+            schoolRef(`remedial/concessions/${y}`).once("value"),
             schoolRef(`remedial/expenses/${y}`).once("value"),
             schoolRef(`remedial/incomeExtras/${y}`).once("value"),
           ]);
@@ -3094,6 +3165,7 @@
           ),
         };
         remedialState.paymentsByStudent = paymentsSnap.val() || {};
+        remedialState.concessionsByStudent = concessionsSnap.val() || {};
         remedialState.expenses = expensesSnap.val() || {};
         remedialState.incomes = incomesSnap.val() || {};
       }
@@ -3133,7 +3205,10 @@
         );
         const totalPaid = r.totalPaidAug;
         const debtLeft = r.debtToDate;
-        const expectedFull = 8 * parseMoney(remedialState.settings.monthlyPrice);
+        const expectedFull = r.expectedToAug;
+        const concessionHtml = r.concessionSummary
+          ? `<p><strong>Special favor:</strong> ${remedialEsc(r.concessionSummary)}${r.concession?.reason ? ` (${remedialEsc(r.concession.reason)})` : ""}</p>`
+          : "";
         const rowsHtml =
           details.length > 0
             ? details
@@ -3150,6 +3225,7 @@
             `<p><strong>Total paid (Jan–Aug):</strong> ${formatTsh(totalPaid)}</p>` +
             `<p><strong>Amount left to clear:</strong> ${formatTsh(debtLeft)}</p>` +
             `<p><strong>Expected full year (8 months):</strong> ${formatTsh(expectedFull)}</p>` +
+            concessionHtml +
             `<table class="w-full text-sm border border-slate-600/50 rounded overflow-hidden"><thead><tr class="bg-slate-700/50"><th class="px-2 py-1 text-left">Date</th><th class="px-2 py-1 text-left">Month</th><th class="px-2 py-1 text-right">Amount</th></tr></thead><tbody>${rowsHtml}</tbody></table>` +
             `</div>`,
           width: "480px",
@@ -3157,6 +3233,98 @@
           color: "#e2e8f0",
           confirmButtonColor: "#38bdf8",
         });
+      }
+
+      async function editRemedialConcession(studentId) {
+        const r = remedialState.rows.find((row) => row.id === studentId);
+        if (!r) return;
+        const current = normalizeRemedialConcession(
+          remedialState.concessionsByStudent?.[studentId]
+        );
+        const monthOptions = (selected) =>
+          REMEDIAL_MONTHS.map(
+            (m) =>
+              `<option value="${m.key}"${m.key === selected ? " selected" : ""}>${m.label}</option>`
+          ).join("");
+        const picked = await Swal.fire({
+          title: `Special Favor - ${remedialEsc(r.name)}`,
+          html:
+            `<div class="text-left text-slate-200">` +
+            `<label class="block text-xs mb-1">Reduced price per month</label>` +
+            `<input id="remConcessionAmount" class="swal2-input" type="number" min="0" step="100" placeholder="Example: 15000" value="${current?.monthlyPrice || ""}" />` +
+            `<label class="block text-xs mt-3 mb-1">Starts from</label>` +
+            `<select id="remConcessionStart" class="swal2-select">${monthOptions(current?.startMonth || "01")}</select>` +
+            `<label class="block text-xs mt-3 mb-1">Ends at</label>` +
+            `<select id="remConcessionEnd" class="swal2-select">${monthOptions(current?.endMonth || "08")}</select>` +
+            `<label class="block text-xs mt-3 mb-1">Reason</label>` +
+            `<textarea id="remConcessionReason" class="swal2-textarea" placeholder="Reason for the special favor">${remedialEsc(current?.reason || "")}</textarea>` +
+            `<p class="text-xs text-slate-400 mt-2">This changes only this child. Standard price remains ${formatTsh(remedialState.settings.monthlyPrice)}.</p>` +
+            `</div>`,
+          showCancelButton: true,
+          showDenyButton: !!current,
+          confirmButtonText: "Save Favor",
+          denyButtonText: "Remove Favor",
+          preConfirm: () => {
+            const monthlyPrice = parseMoney(
+              document.getElementById("remConcessionAmount")?.value
+            );
+            const startMonth = document.getElementById("remConcessionStart")?.value || "01";
+            const endMonth = document.getElementById("remConcessionEnd")?.value || "08";
+            const reason = String(
+              document.getElementById("remConcessionReason")?.value || ""
+            ).trim();
+            if (monthlyPrice <= 0) {
+              Swal.showValidationMessage("Enter the reduced monthly price.");
+              return null;
+            }
+            if (endMonth < startMonth) {
+              Swal.showValidationMessage("End month cannot be before start month.");
+              return null;
+            }
+            return { monthlyPrice, startMonth, endMonth, reason };
+          },
+        });
+        const ref = schoolRef(`remedial/concessions/${remedialState.year}/${studentId}`);
+        if (picked.isDenied) {
+          await ref.remove();
+        } else if (picked.isConfirmed && picked.value) {
+          await ref.set({
+            ...picked.value,
+            updatedAt: firebase.database.ServerValue.TIMESTAMP,
+            updatedBy: auth.currentUser?.email || "system",
+          });
+        } else {
+          return;
+        }
+        await loadRemedialYearData(remedialState.year);
+        remedialState.rows = remedialRowsFromState();
+        renderRemedialCard();
+        renderRemedialModal();
+      }
+
+      async function chooseRemedialConcessionStudent() {
+        if (!remedialState.rows.length) {
+          Swal.fire("No students", "No remedial students are available.", "info");
+          return;
+        }
+        const options = remedialState.rows
+          .slice()
+          .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+          .map(
+            (r) =>
+              `<option value="${remedialEsc(r.id)}">${remedialEsc(r.name)} - ${remedialEsc(r.className)} (${remedialEsc(r.admission)})</option>`
+          )
+          .join("");
+        const picked = await Swal.fire({
+          title: "Choose Student",
+          html: `<select id="remedialConcessionStudent" class="swal2-select">${options}</select>`,
+          showCancelButton: true,
+          confirmButtonText: "Continue",
+          preConfirm: () => document.getElementById("remedialConcessionStudent")?.value || "",
+        });
+        if (picked.isConfirmed && picked.value) {
+          await editRemedialConcession(picked.value);
+        }
       }
 
       async function upsertRemedialPayment(studentId) {
@@ -3171,7 +3339,7 @@
           title: `Remedial Payment - ${monthLabel} ${year}`,
           html:
             `<input id="remAmount" class="swal2-input" type="number" min="0" step="100" placeholder="Amount" value="${existing || parseMoney(
-              remedialState.settings.monthlyPrice
+              remedialEffectiveMonthPrice(studentId, month)
             )}" />` +
             `<input id="remDate" class="swal2-input" type="date" value="${new Date()
               .toISOString()
@@ -3279,13 +3447,15 @@
           Class: r.className,
           "Parent Contact": r.parentContact,
           "Monthly Price": parseMoney(remedialState.settings.monthlyPrice),
+          "Special Favor": r.concessionSummary || "",
+          "Expected Jan-Aug": r.expectedToAug,
           "Paid Months Count": r.paidMonthsCount,
           "Paid Months": r.paidMonths.join(", "),
           "Total Paid (Jan-Aug)": r.totalPaidAug,
           "Debt To Date": r.debtToDate,
           "Debt To August": r.debtToAugust,
           "Class Filter Used": classFilterKey,
-          Status: r.status,
+          Status: r.concessionSummary ? `${r.status} (${r.concessionSummary})` : r.status,
           "Generated At": generatedAt,
         }));
       }
@@ -3620,9 +3790,11 @@
         const ro = remedialState.readOnly;
         const editWrap = document.getElementById("remedialEditSettingsWrap");
         const expSection = document.getElementById("remedialExpenseIncomeSection");
+        const concessionBtn = document.getElementById("remedialOpenConcessionBtn");
         const badge = document.getElementById("remedialReadOnlyBadge");
         if (editWrap) editWrap.style.display = ro ? "none" : "";
         if (expSection) expSection.style.display = ro ? "none" : "";
+        if (concessionBtn) concessionBtn.style.display = ro ? "none" : "";
         if (badge) badge.classList.toggle("hidden", !ro);
       }
 
@@ -3684,12 +3856,29 @@
           .getElementById("remedialClassFilter")
           ?.addEventListener("change", renderRemedialModal);
         document
+          .getElementById("remedialOpenConcessionBtn")
+          ?.addEventListener("click", () =>
+            chooseRemedialConcessionStudent().catch((err) =>
+              Swal.fire("Error", err?.message || "Failed to open special favor", "error")
+            )
+          );
+        document
           .getElementById("remedialTableBody")
           ?.addEventListener("click", (e) => {
             const viewBtn = e.target.closest("[data-remedial-view]");
             if (viewBtn) {
               const sid = viewBtn.getAttribute("data-remedial-view");
               if (sid) showRemedialPaymentDetails(sid);
+              return;
+            }
+            const concessionBtn = e.target.closest("[data-remedial-concession]");
+            if (concessionBtn) {
+              const sid = concessionBtn.getAttribute("data-remedial-concession");
+              if (sid) {
+                editRemedialConcession(sid).catch((err) =>
+                  Swal.fire("Error", err?.message || "Failed to save special favor", "error")
+                );
+              }
               return;
             }
             const btn = e.target.closest("[data-remedial-pay]");
