@@ -7,8 +7,7 @@
   const DAY_OPTIONS = [...DAYS, 'Saturday'];
   const TERM_OPTIONS = [
     { value: 'term1', label: 'Term 1' },
-    { value: 'term2', label: 'Term 2' },
-    { value: 'term3', label: 'Term 3' }
+    { value: 'term2', label: 'Term 2' }
   ];
   const GROUPS = {
     nursery_group: {
@@ -333,7 +332,7 @@
       sessionStorage.getItem('somap.activeTerm'),
       localStorage.getItem('somap.activeTerm')
     ];
-    const valid = candidates.find((value) => /^(term\s*[123]|[123])$/i.test(String(value || '').trim()));
+    const valid = candidates.find((value) => /^(term\s*[12]|[12])$/i.test(String(value || '').trim()));
     return normalizeTermKey(valid);
   }
 
@@ -4266,7 +4265,6 @@
   function normalizeTermKey(value) {
     const normalized = String(value || '').trim().toLowerCase().replace(/\s+/g, '');
     if (normalized === 'term2' || normalized === '2') return 'term2';
-    if (normalized === 'term3' || normalized === '3') return 'term3';
     return 'term1';
   }
 

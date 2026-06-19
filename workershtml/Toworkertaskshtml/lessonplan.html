@@ -553,7 +553,6 @@
             <option value="">All Terms</option>
             <option value="Term 1">Term 1</option>
             <option value="Term 2">Term 2</option>
-            <option value="Term 3">Term 3</option>
           </select>
         </div>
       </div>
@@ -587,7 +586,6 @@
           <select id="planTerm" required>
             <option value="Term 1">Term 1</option>
             <option value="Term 2">Term 2</option>
-            <option value="Term 3">Term 3</option>
           </select>
         </div>
         <div class="form-group">
@@ -615,8 +613,15 @@
         </div>
         <div class="form-group">
           <label>Duration (minutes) *</label>
-          <input type="number" id="planDuration" min="30" max="180" placeholder="e.g., 45" required>
+          <input type="number" id="planDuration" min="1" max="240" placeholder="Auto from timetable" readonly required style="background: rgba(255,255,255,0.08); cursor: not-allowed;">
         </div>
+        <div class="form-group">
+          <label>Scheduled Time *</label>
+          <input type="text" id="planScheduledTime" placeholder="Auto from saved timetable" readonly required style="background: rgba(255,255,255,0.08); cursor: not-allowed;">
+        </div>
+      </div>
+      <div id="timetableSlotStatus" style="margin: -4px 0 14px; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12); color: rgba(255,255,255,0.72); font-size: 0.86rem;">
+        Pick class, subject, term, and lesson date to load the scheduled time from the saved general timetable.
       </div>
 
       <!-- Attendance Stats Cards -->
@@ -909,6 +914,7 @@
     let lessonHomeworkSourceMeta = null;
     let activeLessonPlanDraftKey = '';
     let schoolLogoDataUrlPromise = null;
+    let activeTimetableLessonSlot = null;
 
     // UI Elements
     const teacherName = document.getElementById('teacherName');
@@ -930,6 +936,9 @@
     const planWeek = document.getElementById('planWeek');
     const planDate = document.getElementById('planDate');
     const planDayOfWeek = document.getElementById('planDayOfWeek');
+    const planDuration = document.getElementById('planDuration');
+    const planScheduledTime = document.getElementById('planScheduledTime');
+    const timetableSlotStatus = document.getElementById('timetableSlotStatus');
     const planTopic = document.getElementById('planTopic');
     const planObjectives = document.getElementById('planObjectives');
     const planIntro = document.getElementById('planIntro');
@@ -1162,6 +1171,11 @@
         term: compactTextBlock(plan.term || fallback.term || ''),
         week: String(plan.week || fallback.week || ''),
         date,
+        timetableGroupId: plan.timetableGroupId || fallback.timetableGroupId || '',
+        timetableSlotId: plan.timetableSlotId || fallback.timetableSlotId || '',
+        timetableSlotLabel: plan.timetableSlotLabel || fallback.timetableSlotLabel || '',
+        startTime: plan.startTime || fallback.startTime || '',
+        endTime: plan.endTime || fallback.endTime || '',
         durationMinutes: Number(plan.durationMinutes || plan.duration || fallback.durationMinutes || 0) || 0,
         topic: plan.topic || '',
         objectives: plan.objectives || '',
@@ -1260,14 +1274,186 @@
     function termToSchemeKey(termLabel) {
       const normalized = L(termLabel);
       if (normalized === 'term 2' || normalized === 'term2') return 'term2';
-      if (normalized === 'term 3' || normalized === 'term3') return 'term3';
       return 'term1';
     }
 
     function termLabelFromKey(termKey) {
       if (termKey === 'term2') return 'Term 2';
-      if (termKey === 'term3') return 'Term 3';
       return 'Term 1';
+    }
+
+    function normalizeTimetableTermKey(value) {
+      return termToSchemeKey(value);
+    }
+
+    function getLessonDayName(dateStr) {
+      if (!dateStr) return '';
+      try {
+        const d = new Date(`${dateStr}T00:00:00`);
+        return ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d.getDay()] || '';
+      } catch (_) {
+        return '';
+      }
+    }
+
+    function parseLessonTimeToMinutes(value) {
+      const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+      if (!match) return null;
+      const hours = Number(match[1]);
+      const minutes = Number(match[2]);
+      if (!Number.isFinite(hours) || !Number.isFinite(minutes) || hours > 23 || minutes > 59) return null;
+      return hours * 60 + minutes;
+    }
+
+    function getLessonSlotDuration(slot) {
+      const start = parseLessonTimeToMinutes(slot?.start);
+      const end = parseLessonTimeToMinutes(slot?.end);
+      if (start == null || end == null || end <= start) return 0;
+      return end - start;
+    }
+
+    function formatLessonTime(value) {
+      const mins = parseLessonTimeToMinutes(value);
+      if (mins == null) return String(value || '');
+      const hours24 = Math.floor(mins / 60);
+      const minutes = mins % 60;
+      const suffix = hours24 >= 12 ? 'PM' : 'AM';
+      const hours12 = ((hours24 + 11) % 12) + 1;
+      return `${hours12}:${String(minutes).padStart(2, '0')} ${suffix}`;
+    }
+
+    function classMatchesLessonPlan(left, right) {
+      const a = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(left || '') : compactTextBlock(left || '');
+      const b = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(right || '') : compactTextBlock(right || '');
+      return L(a) === L(b);
+    }
+
+    function subjectMatchesLessonPlan(left, right) {
+      return L(left) === L(right);
+    }
+
+    function setTimetableSlotStatus(message, type = 'neutral') {
+      if (!timetableSlotStatus) return;
+      const palettes = {
+        success: ['rgba(16,185,129,0.12)', 'rgba(16,185,129,0.42)', 'rgba(220,252,231,0.95)'],
+        warning: ['rgba(245,158,11,0.12)', 'rgba(245,158,11,0.45)', 'rgba(254,243,199,0.95)'],
+        error: ['rgba(239,68,68,0.13)', 'rgba(239,68,68,0.5)', 'rgba(254,226,226,0.95)'],
+        neutral: ['rgba(255,255,255,0.05)', 'rgba(255,255,255,0.12)', 'rgba(255,255,255,0.72)']
+      };
+      const palette = palettes[type] || palettes.neutral;
+      timetableSlotStatus.style.background = palette[0];
+      timetableSlotStatus.style.borderColor = palette[1];
+      timetableSlotStatus.style.color = palette[2];
+      timetableSlotStatus.textContent = message;
+    }
+
+    function clearTimetableLessonSlot(message = 'Pick class, subject, term, and lesson date to load the scheduled time from the saved general timetable.') {
+      activeTimetableLessonSlot = null;
+      if (planScheduledTime) planScheduledTime.value = '';
+      if (planDuration) planDuration.value = '';
+      try { sessionStorage.removeItem('somap_lp_tt_meta'); } catch (_) {}
+      setTimetableSlotStatus(message, 'neutral');
+    }
+
+    function applyTimetableLessonSlot(match) {
+      activeTimetableLessonSlot = match || null;
+      if (!match) {
+        clearTimetableLessonSlot();
+        return;
+      }
+      const duration = getLessonSlotDuration(match);
+      const timeLabel = match.start && match.end
+        ? `${formatLessonTime(match.start)} to ${formatLessonTime(match.end)}`
+        : (match.slotLabel || '');
+      if (planScheduledTime) planScheduledTime.value = timeLabel;
+      if (planDuration) planDuration.value = duration ? String(duration) : '';
+      try {
+        sessionStorage.setItem('somap_lp_tt_meta', JSON.stringify({
+          groupId: match.groupId || '',
+          slotId: match.slotId || '',
+          slotLabel: match.slotLabel || '',
+          start: match.start || '',
+          end: match.end || ''
+        }));
+      } catch (_) {}
+      setTimetableSlotStatus(`Scheduled from saved timetable: ${timeLabel}${duration ? ` (${duration} minutes)` : ''}.`, 'success');
+    }
+
+    async function findSavedTimetableLessonSlot({ year, termKey, className, subject, date }) {
+      const dayName = getLessonDayName(date);
+      if (!year || !termKey || !className || !subject || !dayName) return { status: 'missing-selection' };
+
+      const snap = await schoolRef(`years/${year}/timetable/generated/${termKey}`).once('value').catch(() => null);
+      const generatedByGroup = (snap && snap.val && snap.val()) || {};
+      const groups = Object.entries(generatedByGroup || {}).filter(([, payload]) => payload && typeof payload === 'object');
+      if (!groups.length) return { status: 'no-timetable', dayName };
+
+      for (const [groupId, payload] of groups) {
+        const grid = payload.grid || {};
+        const classKey = Object.keys(grid).find((key) => classMatchesLessonPlan(key, className));
+        if (!classKey) continue;
+        const dayGrid = grid[classKey]?.[dayName] || {};
+        const slots = Array.isArray(payload.slots) ? payload.slots : [];
+        for (const [slotId, cell] of Object.entries(dayGrid || {})) {
+          if (!cell || cell.type !== 'teaching') continue;
+          const sameTeacher = String(cell.teacherId || '') === String(workerId || '');
+          const sameTeacherName = !cell.teacherId && L(cell.teacherName || cell.teacher || '') === L(getCurrentTeacherDisplayName());
+          if (!sameTeacher && !sameTeacherName) continue;
+          if (!subjectMatchesLessonPlan(cell.subject || '', subject)) continue;
+          const slot = slots.find((entry) => String(entry.id || '') === String(slotId)) || {};
+          const start = slot.start || cell.start || '';
+          const end = slot.end || cell.end || '';
+          const slotLabel = slot.label || cell.slotLabel || cell.label || '';
+          return {
+            status: 'matched',
+            groupId,
+            className: classKey,
+            dayName,
+            slotId,
+            slotLabel: start && end ? `${start}-${end} | ${slotLabel || 'Lesson'}` : slotLabel,
+            start,
+            end,
+            subject: cell.subject || subject,
+            teacherId: cell.teacherId || ''
+          };
+        }
+      }
+
+      return { status: 'no-match', dayName };
+    }
+
+    async function refreshTimetableLessonSlot() {
+      const className = planClass?.value?.trim() || '';
+      const subject = planSubject?.value?.trim() || '';
+      const date = planDate?.value || '';
+      const year = date ? String(new Date(`${date}T00:00:00`).getFullYear()) : String(getYear());
+      const termKey = normalizeTimetableTermKey(planTerm?.value || '');
+
+      if (!className || !subject || !date || !termKey) {
+        clearTimetableLessonSlot();
+        return null;
+      }
+
+      setTimetableSlotStatus('Checking the saved general timetable...', 'neutral');
+      try {
+        const result = await findSavedTimetableLessonSlot({ year, termKey, className, subject, date });
+        if (result.status === 'matched') {
+          applyTimetableLessonSlot(result);
+          return result;
+        }
+        clearTimetableLessonSlot('');
+        if (result.status === 'no-timetable') {
+          setTimetableSlotStatus(`No saved timetable was found for ${termLabelFromKey(termKey)} ${year}. Ask management to save the general timetable first.`, 'error');
+        } else {
+          setTimetableSlotStatus(`According to the saved timetable, you do not teach ${subject} in ${className} on ${result.dayName || 'this date'}. Change the lesson date, class, subject, or term.`, 'warning');
+        }
+        return null;
+      } catch (error) {
+        console.warn('Timetable lesson lookup failed:', error);
+        clearTimetableLessonSlot('Unable to check the saved timetable right now. Refresh and try again.');
+        setTimetableSlotStatus('Unable to check the saved timetable right now. Refresh and try again.', 'error');
+        return null;
+      }
     }
 
     function getMonthName(dateStr) {
@@ -2821,6 +3007,7 @@
         }
         if (totalInp) totalInp.value = total || 0;
         if (statTotal) statTotal.textContent = total || 0;
+        await refreshTimetableLessonSlot();
         await loadSchemeGuidance();
         await maybeSyncHomeworkFromNotes({ force: false });
         publishLessonPlanJournalDraft();
@@ -2846,6 +3033,7 @@
     ['planSubject', 'planTerm'].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.addEventListener('change', () => {
+        refreshTimetableLessonSlot();
         loadSchemeGuidance({ force: true });
         maybeSyncHomeworkFromNotes({ force: false });
       });
@@ -3024,6 +3212,7 @@
       if (typeof resetHomeworkPlanState === 'function') resetHomeworkPlanState();
       if (typeof resetDelayWorkflow === 'function') resetDelayWorkflow();
       if (typeof clearSchemeGuidance === 'function') clearSchemeGuidance();
+      if (typeof clearTimetableLessonSlot === 'function') clearTimetableLessonSlot();
 
       // Set date
       if (dateParam && planDate) {
@@ -3068,6 +3257,19 @@
           lessonForm.insertBefore(hintEl, lessonForm.firstChild);
         }
         hintEl.textContent = `📅 Pre-filled from timetable slot: ${timeHint}`;
+      }
+
+      if ((slotLabel || start || end) && typeof applyTimetableLessonSlot === 'function') {
+        applyTimetableLessonSlot({
+          groupId: _lpUrlPrefill.groupId || '',
+          slotId: _lpUrlPrefill.slotId || '',
+          slotLabel,
+          start,
+          end,
+          className: classParam || '',
+          subject: subjectParam || '',
+          dayName: dateParam ? getLessonDayName(dateParam) : ''
+        });
       }
 
       lessonForm.classList.remove('hidden');
@@ -3330,6 +3532,19 @@ ${plan.reflection || 'N/A'}
       document.getElementById('lpAbsentBoys').value = plan.totals?.absentBoys || 0;
       document.getElementById('lpAbsentGirls').value = plan.totals?.absentGirls || 0;
       document.getElementById('planDuration').value = plan.durationMinutes || plan.duration || '';
+      if (planScheduledTime) planScheduledTime.value = getPlanScheduledTimeLabel(plan) || '';
+      if (plan.startTime || plan.endTime || plan.timetableSlotId) {
+        applyTimetableLessonSlot({
+          groupId: plan.timetableGroupId || '',
+          slotId: plan.timetableSlotId || '',
+          slotLabel: plan.timetableSlotLabel || '',
+          start: plan.startTime || '',
+          end: plan.endTime || '',
+          className: planClass,
+          subject: plan.subject || '',
+          dayName: plan.date ? getLessonDayName(plan.date) : ''
+        });
+      }
       document.getElementById('planTopic').value = plan.topic || '';
       document.getElementById('planObjectives').value = plan.objectives || '';
       document.getElementById('planIntro').value = plan.intro || '';
@@ -3425,6 +3640,7 @@ ${plan.reflection || 'N/A'}
       resetHomeworkPlanState();
       resetDelayWorkflow();
       clearSchemeGuidance();
+      clearTimetableLessonSlot();
 
       const today = new Date();
       const yyyy = today.getFullYear();
@@ -3448,6 +3664,7 @@ ${plan.reflection || 'N/A'}
       preferredSchemeEntryId = null;
       clearLessonPlanJournalDraft();
       resetHomeworkPlanState();
+      clearTimetableLessonSlot();
     });
 
     function validateSchemeTrackingBeforeSave() {
@@ -3498,7 +3715,7 @@ ${plan.reflection || 'N/A'}
 
       // Validate
       const required = ['planClass', 'planSubject', 'planTerm', 'planWeek', 'planDate', 
-                       'totalStudents', 'studentsPresent', 'planDuration', 'planTopic', 
+                       'totalStudents', 'studentsPresent', 'planTopic', 
                        'planObjectives', 'planIntro', 'planActivities', 'planAssessment', 'planConclusion'];
       
       for (const id of required) {
@@ -3508,6 +3725,13 @@ ${plan.reflection || 'N/A'}
           if (el) el.focus();
           return;
         }
+      }
+
+      const timetableSlot = await refreshTimetableLessonSlot();
+      if (!timetableSlot) {
+        toast('This lesson plan must match a saved general timetable lesson for this teacher, class, subject, date, and term.', 'warning');
+        if (planScheduledTime) planScheduledTime.focus();
+        return;
       }
 
       const schemeValidation = validateSchemeTrackingBeforeSave();
@@ -3531,7 +3755,14 @@ ${plan.reflection || 'N/A'}
         try {
           return JSON.parse(sessionStorage.getItem('somap_lp_tt_meta') || 'null') || {};
         } catch (_) { return {}; }
-      })();
+      })() || {};
+      const resolvedSlotMeta = {
+        groupId: activeTimetableLessonSlot?.groupId || _ttMeta.groupId || '',
+        slotId: activeTimetableLessonSlot?.slotId || _ttMeta.slotId || '',
+        slotLabel: activeTimetableLessonSlot?.slotLabel || _ttMeta.slotLabel || '',
+        start: activeTimetableLessonSlot?.start || _ttMeta.start || '',
+        end: activeTimetableLessonSlot?.end || _ttMeta.end || ''
+      };
 
       const planData = {
         id: editingPlanId || '',
@@ -3551,11 +3782,11 @@ ${plan.reflection || 'N/A'}
         date: dateVal,
         dayName: (() => { try { const d = new Date(dateVal + 'T00:00:00'); return ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d.getDay()] || ''; } catch(_) { return ''; } })(),
         // Timetable slot metadata (for exact matching in attendance check)
-        timetableGroupId: _ttMeta.groupId || '',
-        timetableSlotId: _ttMeta.slotId || '',
-        timetableSlotLabel: _ttMeta.slotLabel || '',
-        startTime: _ttMeta.start || '',
-        endTime: _ttMeta.end || '',
+        timetableGroupId: resolvedSlotMeta.groupId,
+        timetableSlotId: resolvedSlotMeta.slotId,
+        timetableSlotLabel: resolvedSlotMeta.slotLabel,
+        startTime: resolvedSlotMeta.start,
+        endTime: resolvedSlotMeta.end,
         totals: {
           totalStudents: parseInt(document.getElementById('totalStudents').value),
           present: parseInt(document.getElementById('studentsPresent').value),
@@ -3708,6 +3939,7 @@ ${plan.reflection || 'N/A'}
       const totalStudents = plan.totals?.totalStudents || plan.totalStudents || 0;
       const present = plan.totals?.present || plan.studentsPresent || 0;
       const duration = plan.durationMinutes || plan.duration || 0;
+      const scheduledTime = getPlanScheduledTimeLabel(plan) || 'N/A';
       const scheme = plan.schemeTracking || {};
 
       return `
@@ -3717,6 +3949,7 @@ Class: ${planClass}
 Subject: ${plan.subject || 'N/A'}
 Term: ${plan.term || 'N/A'} - Week ${plan.week || 'N/A'}
 Date: ${plan.date || 'N/A'}
+Scheduled Time: ${scheduledTime}
 Duration: ${duration} minutes
 Students: ${present}/${totalStudents} present
 Present Boys/Girls: ${plan.totals?.presentBoys || 0}/${plan.totals?.presentGirls || 0}
@@ -3779,6 +4012,7 @@ ${plan.reflection || 'N/A'}
         const totalStudents = plan.totals?.totalStudents || 0;
         const present = plan.totals?.present || 0;
         const duration = plan.durationMinutes || 0;
+        const scheduledTime = getPlanScheduledTimeLabel(plan);
         const schemeStatus = plan.schemeTracking?.scheduleLabel || 'Scheme not linked';
         const coverage = plan.coverageStatus || 'started';
         return `
@@ -3799,7 +4033,7 @@ ${plan.reflection || 'N/A'}
             </div>
             <div class="plan-details">
               <p><strong>Objectives:</strong> ${(plan.objectives || '').substring(0, 150)}${(plan.objectives || '').length > 150 ? '...' : ''}</p>
-              <p><strong>Students:</strong> ${present}/${totalStudents} present | <strong>Duration:</strong> ${duration} mins | <strong>Recorder:</strong> ${plan.recordedBy || plan.teacherName || 'N/A'}</p>
+              <p><strong>Students:</strong> ${present}/${totalStudents} present | <strong>Time:</strong> ${scheduledTime || 'Not recorded'} | <strong>Duration:</strong> ${duration} mins | <strong>Recorder:</strong> ${plan.recordedBy || plan.teacherName || 'N/A'}</p>
               ${plan.schemeTracking?.delayExplanation ? `<p><strong>Late-topic explanation:</strong> ${plan.schemeTracking.delayExplanation}</p>` : ''}
             </div>
             <div class="plan-actions">
@@ -3842,6 +4076,7 @@ ${plan.reflection || 'N/A'}
         plan.totals?.presentGirls || 0,
         plan.totals?.absentBoys || 0,
         plan.totals?.absentGirls || 0,
+        getPlanScheduledTimeLabel(plan) || '',
         plan.durationMinutes || '',
         plan.coverageStatus || '',
         plan.recordedBy || ''
@@ -3894,8 +4129,18 @@ ${plan.reflection || 'N/A'}
       return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('en-GB');
     }
 
+    function getPlanScheduledTimeLabel(plan) {
+      if (plan?.startTime && plan?.endTime) {
+        return `${formatLessonTime(plan.startTime)} to ${formatLessonTime(plan.endTime)}`;
+      }
+      return plan?.timetableSlotLabel || '';
+    }
+
     function getDurationLabel(plan) {
       const minutes = Number(plan?.durationMinutes || 0) || 0;
+      const time = getPlanScheduledTimeLabel(plan);
+      if (time && minutes) return `${time} (${minutes} mins)`;
+      if (time) return time;
       return minutes ? `Duration ${minutes} mins` : 'Duration not recorded';
     }
 
@@ -4236,7 +4481,7 @@ ${plan.reflection || 'N/A'}
         if (!plans.length) return toast('No lesson plans found for the current filters.', 'warning');
         const ws = XLSX.utils.aoa_to_sheet([[
           'Date','Class','Subject','Term','Week','Topic','Teacher Name','Teacher ID','Total','Present','Present Boys','Present Girls',
-          'Absent Boys','Absent Girls','Minutes','Coverage','Recorded By'
+          'Absent Boys','Absent Girls','Scheduled Time','Minutes','Coverage','Recorded By'
         ], ...plansToExportRows(plans)]);
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'LessonPlans');
