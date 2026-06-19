@@ -2998,6 +2998,22 @@
       return 32;
     }
 
+    function pdfSectionHeading(doc, x, y, w, title, subtitle, accent) {
+      const color = accent || [15, 118, 110];
+      doc.setDrawColor.apply(doc, color);
+      doc.setLineWidth(0.45);
+      doc.line(x, y, x + w, y);
+      doc.setTextColor.apply(doc, color);
+      doc.setFontSize(10.5);
+      doc.text(title, x, y + 6);
+      if (subtitle) {
+        doc.setTextColor(100, 116, 139);
+        doc.setFontSize(7.5);
+        doc.text(doc.splitTextToSize(subtitle, w), x, y + 10.5);
+      }
+      return y + (subtitle ? 16 : 12);
+    }
+
     function pdfFooter(doc) {
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
@@ -3848,6 +3864,8 @@
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
       const margin = 14;
+      const contentWidth = pageWidth - 2 * margin;
+      const pageBottom = pageHeight - 18;
       const summary = analysis.summary;
       const leadershipRows = [
         ['Class Teacher', assignment && assignment.classTeacher && assignment.classTeacher.name ? assignment.classTeacher.name : 'Not assigned', assignment && assignment.classTeacher && assignment.classTeacher.phone ? assignment.classTeacher.phone : '-'],
@@ -3882,6 +3900,23 @@
           Array.from(new Set(Object.values(record.data || {}).flatMap((sm) => Object.keys(sm || {})))).join(', ') || '-'
         ];
       });
+
+      function startPdfSection(title, subtitle, accent, minNeeded, forceNew) {
+        const currentY = y || 32;
+        if (forceNew || currentY + (minNeeded || 58) > pageBottom) {
+          doc.addPage();
+          return pdfPageHeader(doc, assets, title, subtitle, accent);
+        }
+        return pdfSectionHeading(doc, margin, currentY + 7, contentWidth, title, subtitle, accent);
+      }
+
+      function ensurePdfSpace(currentY, minNeeded, title, subtitle, accent) {
+        if (currentY + minNeeded > pageBottom) {
+          doc.addPage();
+          return pdfPageHeader(doc, assets, title, subtitle || '', accent);
+        }
+        return currentY;
+      }
 
       // ── Cover page ──────────────────────────────────────────────────
       // Layout: left text zone (x=14..146) | right photo zone (x=152..196)
@@ -3939,6 +3974,18 @@
       pdfMetricCard(doc, 74, 144, 58, 28, 'Learners', String(analysis.students.length), 'Current class roster counted', [124, 58, 237]);
       pdfMetricCard(doc, 134, 144, 58, 28, 'Cleared learners', String(analysis.summary.clearedCount), formatPercent(analysis.summary.clearedPct) + ' of class has cleared fees', [234, 88, 12]);
 
+      const coverSubjectBars = (analysis.subjectStats || [])
+        .filter((row) => !row.notAttempted && Number(row.avgPct || 0) > 0)
+        .slice()
+        .sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0))
+        .slice(0, 8)
+        .map((row) => ({ label: row.subject, value: Number(row.avgPct || 0) }));
+      drawVerticalBarChart(doc, margin, 184, pageWidth - 2 * margin, 58, coverSubjectBars, {
+        title: 'Subject snapshot for this reporting window',
+        barColor: [15, 118, 110],
+        valueFormatter: (value) => Number(value || 0).toFixed(1) + '%'
+      });
+
       doc.setTextColor(200, 220, 240);
       doc.setFontSize(9);
       doc.text('Prepared for academic meetings, parent follow-up, and school reporting.', margin, pageHeight - 12);
@@ -3948,10 +3995,9 @@
       y = pdfTextBlock(doc, margin, y, 182, 'Meeting Brief', buildExecutiveParagraphs(analysis, assignment));
       const warnEnd = pdfBulletList(doc, margin, y + 2, 82, 'Warnings', analysis.narrative.warnings.length ? analysis.narrative.warnings : ['No major warning triggered from current thresholds.'], [180, 83, 9]);
       const appEnd = pdfBulletList(doc, 110, y + 2, 82, 'Appreciation', analysis.narrative.appreciations.length ? analysis.narrative.appreciations : ['No strong appreciation note yet.'], [5, 150, 105]);
-      pdfBulletList(doc, margin, Math.max(warnEnd, appEnd) + 4, 178, 'Immediate Actions for the Academic Meeting', analysis.narrative.actions.length ? analysis.narrative.actions : ['Continue collecting stronger evidence for the next report.'], [37, 99, 235]);
+      y = pdfBulletList(doc, margin, Math.max(warnEnd, appEnd) + 4, 178, 'Immediate Actions for the Academic Meeting', analysis.narrative.actions.length ? analysis.narrative.actions : ['Continue collecting stronger evidence for the next report.'], [37, 99, 235]);
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Class Leadership and Movement', 'Ownership, learner movement, and continuity risk', [124, 58, 237]);
+      y = startPdfSection('Class Leadership and Movement', 'Ownership, learner movement, and continuity risk', [124, 58, 237], 88);
       y = pdfTextBlock(doc, margin, y, 182, 'Leadership Reading', buildLeadershipParagraphs(analysis, assignment));
       doc.autoTable({
         startY: y + 4,
@@ -3973,7 +4019,8 @@
       });
       // ── Shifted students detail ──────────────────────────────────────────
       const shiftList = (summary.shiftReports || []).slice(0, 20);
-      const shiftStartY = Math.max((doc.lastAutoTable && doc.lastAutoTable.finalY) || y, 160);
+      let shiftStartY = Math.max((doc.lastAutoTable && doc.lastAutoTable.finalY) || y, y) + 8;
+      shiftStartY = ensurePdfSpace(shiftStartY, shiftList.length > 0 ? 42 : 22, 'Class Leadership and Movement (cont.)', 'Shifted learner follow-up', [124, 58, 237]);
       if (shiftList.length > 0) {
         // Brief narrative
         const debtShifted = shiftList.filter((e) => Number(e.debtAmount || e.debt || 0) > 0 || String(e.status || '').toLowerCase().includes('debt')).length;
@@ -4028,9 +4075,9 @@
           headStyles: { fillColor: [180, 83, 9] }
         });
       }
+      y = (doc.lastAutoTable && doc.lastAutoTable.finalY) || shiftStartY;
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Performance Overview', 'How the class moved inside the selected report window', [37, 99, 235]);
+      y = startPdfSection('Performance Overview', 'How the class moved inside the selected report window', [37, 99, 235], 150);
       y = pdfTextBlock(doc, margin, y, 182, 'Performance Reading', buildPerformanceParagraphs(analysis));
       const scoredTotal = analysis.students.filter((s) => Number(s.attemptedCount || 0) > 0).length || 1;
       // Line chart: class average per month
@@ -4049,9 +4096,9 @@
         doc.text(bar.label + ': ' + count + ' learner(s) — ' + pctOfClass + '% of class. ' + desc + '.', margin, gradeTextY);
         gradeTextY += 5;
       });
+      y = gradeTextY;
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Monthly Timeline and Exam Trend', 'Month blocks, exam count, and average trend notes', [37, 99, 235]);
+      y = startPdfSection('Monthly Timeline and Exam Trend', 'Month blocks, exam count, and average trend notes', [37, 99, 235], 56);
       doc.autoTable({
         startY: y,
         head: [['Month', 'Exams', 'Class Avg', 'Best Exam', 'Lowest Exam', 'Trend Note']],
@@ -4067,8 +4114,8 @@
       });
 
       // ── Subject performance across every individual exam ─────────────────
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Subject Performance Trend Across Exams', 'Each subject tracked exam-by-exam inside the selected window', [15, 118, 110]);
+      y = Math.max(y, (doc.lastAutoTable && doc.lastAutoTable.finalY) || 0);
+      y = startPdfSection('Subject Performance Trend Across Exams', 'Each subject tracked exam-by-exam inside the selected window', [15, 118, 110], 118);
 
       const examRecList  = analysis.summary.records || [];
       // Short exam labels for x-axis (e.g. "Jan Drill", "Feb Monthly")
@@ -4132,11 +4179,12 @@
       } else {
         doc.setFontSize(8.5); doc.setTextColor(100, 116, 139);
         doc.text('No scored exam data found for the subject trend chart.', margin, y + 6);
+        y += 14;
       }
 
       // ── Learner performance trends: top 10 and bottom 10 ─────────────────
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Learner Performance Trends', 'Top 10 and bottom 10 tracked across every exam in the window', [37, 99, 235]);
+      y = Math.max(y, (doc.lastAutoTable && doc.lastAutoTable.finalY) || 0);
+      y = startPdfSection('Learner Performance Trends', 'Top 10 and bottom 10 tracked across every exam in the window', [37, 99, 235], 156);
 
       const examLblsForLearners = examRecList.map((r) => r.examLabel || r.examKey || '');
       // students are already sorted best→worst
@@ -4212,8 +4260,8 @@
         });
       }
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Subject Performance Profile', 'Subject averages, grade spread, and intervention needs', [15, 118, 110]);
+      y = Math.max(y, (doc.lastAutoTable && doc.lastAutoTable.finalY) || 0);
+      y = startPdfSection('Subject Performance Profile', 'Subject averages, grade spread, and intervention needs', [15, 118, 110], 138);
       y = pdfTextBlock(doc, margin, y, 182, 'Subject Reading', buildSubjectParagraphs(analysis));
       const activeSubjectBars = analysis.subjectStats.filter((row) => !row.notAttempted).slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0)).map((row) => ({ label: row.subject, value: Number(row.avgPct || 0) }));
       const subChartH = Math.max(52, Math.min(72, 20 + activeSubjectBars.length * 8));
@@ -4241,8 +4289,8 @@
         }
       });
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Subject Detail Table', 'Complete subject table for academic review', [15, 118, 110]);
+      y = Math.max(y, (doc.lastAutoTable && doc.lastAutoTable.finalY) || 0);
+      y = startPdfSection('Subject Detail Table', 'Complete subject table for academic review', [15, 118, 110], 88);
       const activeSubjectStats = (analysis.subjectStats || []).filter((row) => !row.notAttempted);
       const skippedSubjects = (analysis.subjectStats || []).filter((row) => row.notAttempted);
       doc.autoTable({
@@ -4282,10 +4330,11 @@
         doc.setFillColor(255, 247, 237);
         doc.roundedRect(margin, skipY - 4, pageWidth - 2 * margin, 10, 2, 2, 'F');
         doc.text('Subjects with no exam scores recorded this window (not counted in averages): ' + skippedSubjects.map((s) => s.subject).join(', '), margin + 3, skipY + 2.5, { maxWidth: pageWidth - 2 * margin - 6 });
+        y = skipY + 9;
       }
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Teacher Effect and Class Leadership', 'Teacher mapping, class leadership, and follow-up burden', [37, 99, 235]);
+      y = Math.max(y, (doc.lastAutoTable && doc.lastAutoTable.finalY) || 0);
+      y = startPdfSection('Teacher Effect and Class Leadership', 'Teacher mapping, class leadership, and follow-up burden', [37, 99, 235], 150);
       y = pdfTextBlock(doc, margin, y, 182, 'Teacher Reading', buildTeacherParagraphs(analysis, assignment));
       drawVerticalBarChart(doc, margin, y + 2, 182, 52, teacherBars, { title: 'Average performance by teacher block', barColor: [37, 99, 235], valueFormatter: (value) => Number(value || 0).toFixed(1) + '%' });
       doc.autoTable({
@@ -4333,6 +4382,7 @@
         else flag = 'OK';
         return [name, attStr, lateStr, letterStr, plansStr, notesStr, flag];
       });
+      let teacherEndY = (doc.lastAutoTable && doc.lastAutoTable.finalY) || y;
       if (effortRows.length > 0) {
         const effortStartY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 8 : y + 130;
         doc.setFontSize(10);
@@ -4484,15 +4534,17 @@
           detailY += wrapped.length * 4.2 + 4;
           teacherIdx++;
         });
+        teacherEndY = detailY;
       } else {
         const noteY = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 10 : y + 130;
         doc.setFontSize(8.5);
         doc.setTextColor(120, 130, 150);
         doc.text('Teacher attendance, lesson plans, and lesson notes will appear here once teacher check-in records, schemes of work, and preparation records are linked to this class for the selected reporting window.', margin, noteY, { maxWidth: pageWidth - 2 * margin });
+        teacherEndY = noteY + 18;
       }
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Finance, Attendance, and Learning Continuity', 'Where payment pressure meets classroom reality', [185, 28, 28]);
+      y = teacherEndY;
+      y = startPdfSection('Finance, Attendance, and Learning Continuity', 'Where payment pressure meets classroom reality', [185, 28, 28], 134);
       y = pdfTextBlock(doc, margin, y, 182, 'Finance Reading', buildFinanceParagraphs(analysis));
       drawVerticalBarChart(doc, margin, y + 2, 182, 58, analysis.students.slice().sort((a, b) => Number(b.fee && b.fee.balance || 0) - Number(a.fee && a.fee.balance || 0)).slice(0, 6).map((student) => ({ label: student.name.split(' ')[0] + ' ' + (student.name.split(' ')[1] || ''), value: Number(student.fee && student.fee.balance || 0) })), { title: 'Highest balances in the class (TSh)', barColor: [185, 28, 28], valueFormatter: (value) => Math.round(Number(value || 0) / 1000) + 'k' });
       doc.autoTable({
@@ -4504,8 +4556,8 @@
         styles: { fontSize: 7.7, cellPadding: 1.9 }
       });
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Learners Requiring Immediate Attention', 'Parent-contact list for class teacher and academic office', [180, 83, 9]);
+      y = Math.max(y, (doc.lastAutoTable && doc.lastAutoTable.finalY) || 0);
+      y = startPdfSection('Learners Requiring Immediate Attention', 'Parent-contact list for class teacher and academic office', [180, 83, 9], 84);
       y = pdfTextBlock(doc, margin, y, 182, 'Intervention Reading', buildLearnerAttentionParagraphs(analysis));
       doc.autoTable({
         startY: y + 2,
@@ -4516,8 +4568,8 @@
         styles: { fontSize: 7.5, cellPadding: 1.8, overflow: 'linebreak' }
       });
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Improvement, Decline, and Appreciation Lists', 'Who is rising, who is dropping, and who deserves mention', [5, 150, 105]);
+      y = Math.max(y, (doc.lastAutoTable && doc.lastAutoTable.finalY) || 0);
+      y = startPdfSection('Improvement, Decline, and Appreciation Lists', 'Who is rising, who is dropping, and who deserves mention', [5, 150, 105], 110);
       y = pdfTextBlock(doc, margin, y, 182, 'Recognition Reading', buildAppreciationParagraphs(analysis));
       doc.autoTable({
         startY: y + 2,
@@ -4549,8 +4601,8 @@
         headStyles: { fillColor: [5, 150, 105] }
       });
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Exam Inventory Appendix', 'Saved exams that contributed to this reporting window', [234, 88, 12]);
+      y = Math.max(y, (doc.lastAutoTable && doc.lastAutoTable.finalY) || 0);
+      y = startPdfSection('Exam Inventory Appendix', 'Saved exams that contributed to this reporting window', [234, 88, 12], 82);
       y = pdfTextBlock(doc, margin, y, 182, 'Exam Evidence Reading', buildExamInventoryParagraphs(analysis));
       doc.autoTable({
         startY: y + 2,
@@ -4562,8 +4614,8 @@
         headStyles: { fillColor: [234, 88, 12] }
       });
 
-      doc.addPage();
-      y = pdfPageHeader(doc, assets, 'Data Quality and Appendix', 'What the report can prove clearly, and what should be cleaned', [15, 23, 42]);
+      y = Math.max(y, (doc.lastAutoTable && doc.lastAutoTable.finalY) || 0);
+      y = startPdfSection('Data Quality and Appendix', 'What the report can prove clearly, and what should be cleaned', [15, 23, 42], 98);
       y = pdfTextBlock(doc, margin, y, 182, 'Data Quality Notes', buildDataQualityParagraphs(analysis));
       doc.autoTable({
         startY: y + 4,
