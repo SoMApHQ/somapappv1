@@ -774,6 +774,9 @@
         <label>Reflection / Notes</label>
         <textarea id="planReflection" placeholder="Post-lesson reflections, what went well, areas for improvement..."></textarea>
       </div>
+      <div id="lessonFinalizationStatus" style="margin: 4px 0 16px; padding: 10px 12px; border-radius: 10px; background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.35); color: rgba(254,243,199,0.96); font-size: 0.86rem;">
+        Lesson finalization opens after the scheduled lesson end time.
+      </div>
 
       <div style="display: flex; gap: 12px; margin-top: 24px; flex-wrap: wrap;">
         <button class="btn btn-success" id="savePlanBtn">💾 Save Lesson Plan</button>
@@ -952,6 +955,7 @@
     const markHomeworkGivenBtn = document.getElementById('markHomeworkGivenBtn');
     const clearHomeworkGivenBtn = document.getElementById('clearHomeworkGivenBtn');
     const homeworkSyncNote = document.getElementById('homeworkSyncNote');
+    const lessonFinalizationStatus = document.getElementById('lessonFinalizationStatus');
     const planCoverageStatus = document.getElementById('planCoverageStatus');
     const schemeSyncSummary = document.getElementById('schemeSyncSummary');
     const schemeSourcePill = document.getElementById('schemeSourcePill');
@@ -1188,6 +1192,10 @@
         homeworkGivenMeta: plan.homeworkGivenMeta || null,
         homeworkSourceMeta: plan.homeworkSourceMeta || null,
         reflection: plan.reflection || '',
+        lessonPlanStatus: plan.lessonPlanStatus || (plan.isFinal ? 'final' : 'preparation_draft'),
+        isFinal: plan.isFinal === true || plan.lessonPlanStatus === 'final',
+        finalizedAt: plan.finalizedAt || null,
+        draftSavedAt: plan.draftSavedAt || null,
         totals: {
           totalStudents: Number(plan?.totals?.totalStudents || plan.totalStudents || 0) || 0,
           present: Number(plan?.totals?.present || plan.studentsPresent || 0) || 0,
@@ -1322,6 +1330,76 @@
       return `${hours12}:${String(minutes).padStart(2, '0')} ${suffix}`;
     }
 
+    function getNairobiNow() {
+      return new Date(new Date().toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
+    }
+
+    function getScheduledLessonEndDate() {
+      const dateValue = planDate?.value || '';
+      const endTime = activeTimetableLessonSlot?.end || (() => {
+        try {
+          const meta = JSON.parse(sessionStorage.getItem('somap_lp_tt_meta') || 'null') || {};
+          return meta.end || '';
+        } catch (_) {
+          return '';
+        }
+      })();
+      if (!dateValue || !endTime || parseLessonTimeToMinutes(endTime) == null) return null;
+      return new Date(`${dateValue}T${endTime}:00`);
+    }
+
+    function canFinalizeLessonNow() {
+      const endDate = getScheduledLessonEndDate();
+      if (!endDate) return false;
+      return getNairobiNow().getTime() >= endDate.getTime();
+    }
+
+    function getFinalizationTimeLabel() {
+      const endDate = getScheduledLessonEndDate();
+      if (!endDate) return 'after the scheduled lesson end time';
+      const dateLabel = endDate.toLocaleDateString('en-GB');
+      const timeLabel = formatLessonTime(`${String(endDate.getHours()).padStart(2, '0')}:${String(endDate.getMinutes()).padStart(2, '0')}`);
+      return `after ${timeLabel} on ${dateLabel}`;
+    }
+
+    function setFinalizationFieldLock(locked) {
+      [planAssessment, planHomework, planConclusion, planReflection].forEach((el) => {
+        if (!el) return;
+        el.readOnly = locked;
+        el.style.background = locked ? 'rgba(255,255,255,0.08)' : '';
+        el.style.cursor = locked ? 'not-allowed' : '';
+      });
+      [loadHomeworkFromNotesBtn, markHomeworkGivenBtn, clearHomeworkGivenBtn].forEach((btn) => {
+        if (btn) btn.disabled = locked;
+      });
+    }
+
+    function updateLessonFinalizationControls() {
+      const unlocked = canFinalizeLessonNow();
+      setFinalizationFieldLock(!unlocked);
+      if (lessonFinalizationStatus) {
+        if (unlocked) {
+          lessonFinalizationStatus.style.background = 'rgba(16,185,129,0.12)';
+          lessonFinalizationStatus.style.borderColor = 'rgba(16,185,129,0.38)';
+          lessonFinalizationStatus.style.color = 'rgba(220,252,231,0.96)';
+          lessonFinalizationStatus.textContent = 'Lesson time has passed. You can now complete assessment, homework, conclusion, and reflection, then save the final lesson plan.';
+        } else {
+          lessonFinalizationStatus.style.background = 'rgba(245,158,11,0.1)';
+          lessonFinalizationStatus.style.borderColor = 'rgba(245,158,11,0.35)';
+          lessonFinalizationStatus.style.color = 'rgba(254,243,199,0.96)';
+          lessonFinalizationStatus.textContent = `Preparation draft mode: assessment, homework, conclusion, and reflection can only be completed ${getFinalizationTimeLabel()}.`;
+        }
+      }
+      if (savePlanBtn) {
+        savePlanBtn.textContent = unlocked ? '💾 Save Final Lesson Plan' : '💾 Save Preparation Draft';
+      }
+    }
+
+    function showFinalizationLockedMessage() {
+      if (canFinalizeLessonNow()) return;
+      toast(`You can only fill this section ${getFinalizationTimeLabel()}, after you have taught the lesson.`, 'warning', 6500);
+    }
+
     function classMatchesLessonPlan(left, right) {
       const a = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(left || '') : compactTextBlock(left || '');
       const b = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(right || '') : compactTextBlock(right || '');
@@ -1353,6 +1431,7 @@
       if (planDuration) planDuration.value = '';
       try { sessionStorage.removeItem('somap_lp_tt_meta'); } catch (_) {}
       setTimetableSlotStatus(message, 'neutral');
+      updateLessonFinalizationControls();
     }
 
     function applyTimetableLessonSlot(match) {
@@ -1377,6 +1456,7 @@
         }));
       } catch (_) {}
       setTimetableSlotStatus(`Scheduled from saved timetable: ${timeLabel}${duration ? ` (${duration} minutes)` : ''}.`, 'success');
+      updateLessonFinalizationControls();
     }
 
     async function findSavedTimetableLessonSlot({ year, termKey, className, subject, date }) {
@@ -3069,6 +3149,11 @@
         el.addEventListener('change', publishLessonPlanJournalDraft);
       }
     });
+    [planAssessment, planHomework, planConclusion, planReflection].forEach((el) => {
+      if (!el) return;
+      el.addEventListener('focus', showFinalizationLockedMessage);
+      el.addEventListener('click', showFinalizationLockedMessage);
+    });
     schemeLessonItem.addEventListener('change', () => {
       if (!activeSchemeBundle?.rows?.length) return;
       const previousEntry = selectedSchemeEntry;
@@ -3559,6 +3644,7 @@ ${plan.reflection || 'N/A'}
       publishLessonPlanJournalDraft();
       document.getElementById('planReflection').value = plan.reflection || '';
       if (planCoverageStatus) planCoverageStatus.value = plan.coverageStatus || 'started';
+      updateLessonFinalizationControls();
       preferredSchemeEntryId = plan.schemeTracking?.entryId || null;
       continueDelayedTopic.value = plan.schemeTracking?.continueDelayedTopic || '';
       lateHandlingMode.value = plan.schemeTracking?.lateHandlingMode || '';
@@ -3716,7 +3802,7 @@ ${plan.reflection || 'N/A'}
       // Validate
       const required = ['planClass', 'planSubject', 'planTerm', 'planWeek', 'planDate', 
                        'totalStudents', 'studentsPresent', 'planTopic', 
-                       'planObjectives', 'planIntro', 'planActivities', 'planAssessment', 'planConclusion'];
+                       'planObjectives', 'planIntro', 'planActivities', 'planResources'];
       
       for (const id of required) {
         const el = document.getElementById(id);
@@ -3732,6 +3818,24 @@ ${plan.reflection || 'N/A'}
         toast('This lesson plan must match a saved general timetable lesson for this teacher, class, subject, date, and term.', 'warning');
         if (planScheduledTime) planScheduledTime.focus();
         return;
+      }
+
+      const isFinalSave = canFinalizeLessonNow();
+      if (isFinalSave) {
+        const finalRequired = ['planAssessment', 'planConclusion', 'planReflection'];
+        for (const id of finalRequired) {
+          const el = document.getElementById(id);
+          if (!el || !String(el.value || '').trim()) {
+            toast(`Please complete after-teaching field: ${el ? el.previousElementSibling.textContent : id}`, 'warning');
+            if (el) el.focus();
+            return;
+          }
+        }
+        if (!homeworkGivenMeta?.given && !String(planHomework?.value || '').trim()) {
+          toast('Please record homework/assignment given, or write that no homework was given, before final saving.', 'warning');
+          if (planHomework) planHomework.focus();
+          return;
+        }
       }
 
       const schemeValidation = validateSchemeTrackingBeforeSave();
@@ -3808,6 +3912,10 @@ ${plan.reflection || 'N/A'}
         homeworkSourceMeta: lessonHomeworkSourceMeta || null,
         reflection: document.getElementById('planReflection').value || '',
         coverageStatus: planCoverageStatus.value || 'started',
+        lessonPlanStatus: isFinalSave ? 'final' : 'preparation_draft',
+        isFinal: isFinalSave,
+        finalizedAt: isFinalSave ? firebase.database.ServerValue.TIMESTAMP : (existingPlan?.finalizedAt || null),
+        draftSavedAt: !isFinalSave ? firebase.database.ServerValue.TIMESTAMP : (existingPlan?.draftSavedAt || null),
         schemeTracking: schemeValidation.tracking,
         recordedBy: currentTeacherName,
         createdAt: existingPlan?.createdAt || firebase.database.ServerValue.TIMESTAMP,
@@ -3830,11 +3938,11 @@ ${plan.reflection || 'N/A'}
           } else {
             await db.ref(`${basePath}/${saveYear}/${cls}/${date}/${editingPlanId}`).update(planData);
           }
-          toast('Lesson plan updated successfully!', 'success');
+          toast(isFinalSave ? 'Final lesson plan updated successfully!' : 'Preparation draft updated. Come back after the lesson to finalize it.', 'success');
         } else {
           const recRef = db.ref(`${basePath}/${saveYear}/${cls}/${date}`).push();
           await recRef.set({ ...planData, id: recRef.key });
-          toast('Lesson plan saved successfully!', 'success');
+          toast(isFinalSave ? 'Final lesson plan saved successfully!' : 'Preparation draft saved. Come back after the lesson to finalize it.', 'success');
         }
 
         editingPlanId = null;
@@ -4015,6 +4123,7 @@ ${plan.reflection || 'N/A'}
         const scheduledTime = getPlanScheduledTimeLabel(plan);
         const schemeStatus = plan.schemeTracking?.scheduleLabel || 'Scheme not linked';
         const coverage = plan.coverageStatus || 'started';
+        const planStatus = plan.isFinal || plan.lessonPlanStatus === 'final' ? 'Final saved' : 'Preparation draft';
         return `
           <div class="plan-card">
             <div class="plan-header">
@@ -4026,6 +4135,7 @@ ${plan.reflection || 'N/A'}
                   <span class="meta-tag">${plan.term || 'N/A'} - Week ${plan.week || 'N/A'}</span>
                   <span class="meta-tag">${plan.date || 'N/A'}</span>
                   <span class="meta-tag">Teacher: ${plan.teacherName || plan.recordedBy || 'N/A'}</span>
+                  <span class="meta-tag">Status: ${planStatus}</span>
                   <span class="meta-tag">Scheme: ${schemeStatus}</span>
                   <span class="meta-tag">Coverage: ${coverage}</span>
                 </div>
@@ -4518,6 +4628,7 @@ ${plan.reflection || 'N/A'}
     filterTerm.addEventListener('change', renderPlans);
 
     // Initialize
+    setInterval(updateLessonFinalizationControls, 30000);
     loadTeacherConfig();
 
     // Homework lesson notes picker modal

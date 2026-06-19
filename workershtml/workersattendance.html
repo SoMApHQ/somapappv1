@@ -1468,9 +1468,7 @@
     // ======= TEACHER CHECK-IN READINESS =======
 
     function getTermFromMonth(monthIndex) { // monthIndex 0-11
-      if (monthIndex <= 3) return 'term1';
-      if (monthIndex <= 7) return 'term2';
-      return 'term3';
+      return monthIndex <= 5 ? 'term1' : 'term2';
     }
 
     function toSchemeKey(str) {
@@ -1767,6 +1765,301 @@
       return result;
     }
 
+    function escapeAttendanceHtml(value) {
+      return String(value || '').replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[ch]));
+    }
+
+    function dateFromDayKey(dayKey) {
+      const text = String(dayKey || '');
+      if (!/^\d{8}$/.test(text)) return null;
+      return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
+    }
+
+    function parseClockMinutes(value) {
+      const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+      if (!match) return null;
+      return Number(match[1]) * 60 + Number(match[2]);
+    }
+
+    function lessonPlanUrlForLesson(lesson, dateYmd, year) {
+      const qp = new URLSearchParams({
+        school: state.schoolId || '',
+        year: year || state.year || '',
+        class: lesson.className || '',
+        subject: lesson.subject || '',
+        date: dateYmd || '',
+        slotId: lesson.slotId || '',
+        slotLabel: lesson.slotLabel || '',
+        start: lesson.start || '',
+        end: lesson.end || '',
+        groupId: lesson.groupId || ''
+      });
+      return `Toworkertaskshtml/lessonplan.html?${qp.toString()}`;
+    }
+
+    function lessonWindowLabel(lesson) {
+      if (lesson.start && lesson.end) return `${lesson.start} - ${lesson.end}`;
+      return lesson.slotLabel || 'Muda wa somo';
+    }
+
+    function isFinalLessonPlanRecord(plan) {
+      return plan?.isFinal === true || String(plan?.lessonPlanStatus || '').toLowerCase() === 'final';
+    }
+
+    function lessonPlanMatchesTimetableLesson(plan, lesson) {
+      const planTeacherId = String(plan?.teacherId || '').trim();
+      if (planTeacherId && planTeacherId !== state.workerId) return false;
+
+      const lessonClassAliases = collectClassAliases(lesson.className);
+      const storedClass = plan?._storedClass || plan?.className || plan?.class || '';
+      const planClass = plan?.className || plan?.class || storedClass;
+      const classMatch =
+        lessonClassAliases.some((alias) => classesEquivalent(alias, storedClass)) ||
+        lessonClassAliases.some((alias) => classesEquivalent(alias, planClass));
+      if (!classMatch) return false;
+
+      const planSubject = String(plan?.subject || plan?.subjectName || '').toLowerCase().trim();
+      const lessonSubject = String(lesson.subject || '').toLowerCase().trim();
+      if (!(planSubject === lessonSubject || planSubject.includes(lessonSubject) || lessonSubject.includes(planSubject))) {
+        return false;
+      }
+
+      const planSlotId = String(plan?.timetableSlotId || '').trim();
+      if (planSlotId && lesson.slotId) return planSlotId === lesson.slotId;
+      return true;
+    }
+
+    async function loadTeacherTimetableLessonsForDate(year, dateYmd) {
+      const result = { lessons: [], isWeekend: false, noTimetableForWeek: false, timetableSource: '' };
+      const date = new Date(`${dateYmd}T00:00:00`);
+      if (Number.isNaN(date.getTime())) return result;
+      const dayIndex = date.getDay();
+      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      result.isWeekend = dayIndex === 0 || dayIndex === 6;
+      if (result.isWeekend) return result;
+
+      const termKey = getTermFromMonth(date.getMonth());
+      const weekKey = getMondayYMD(date);
+      const weekMondayTs = new Date(`${weekKey}T00:00:00`).getTime();
+      const myWorkerIdNorm = String(state.workerId || '').trim().toLowerCase();
+      let ttGroupsData = null;
+
+      try {
+        const snap = await schoolRef(`years/${year}/timetable/weeklySnapshots/${termKey}/${weekKey}/generated`).once('value');
+        const data = snap.val();
+        if (data && typeof data === 'object' && Object.keys(data).length > 0) {
+          ttGroupsData = data;
+          result.timetableSource = 'weeklySnapshot';
+        }
+      } catch (error) {
+        console.warn('Weekly timetable snapshot lookup failed', error);
+      }
+
+      try {
+        const snap = await schoolRef(`years/${year}/timetable/generated/${termKey}`).once('value');
+        const data = snap.val();
+        if (data && typeof data === 'object') {
+          Object.entries(data).forEach(([groupId, groupData]) => {
+            if (!groupData || typeof groupData !== 'object') return;
+            if (Number(groupData.generatedAt || 0) < weekMondayTs) return;
+            if (ttGroupsData && ttGroupsData[groupId]) return;
+            ttGroupsData = ttGroupsData || {};
+            ttGroupsData[groupId] = groupData;
+            if (result.timetableSource !== 'weeklySnapshot') result.timetableSource = 'generated';
+          });
+        }
+      } catch (error) {
+        console.warn('Generated timetable lookup failed', error);
+      }
+
+      if (!ttGroupsData) {
+        result.noTimetableForWeek = true;
+        return result;
+      }
+
+      const dayName = dayNames[dayIndex];
+      const lessons = [];
+      Object.entries(ttGroupsData).forEach(([groupId, groupData]) => {
+        if (!groupData || typeof groupData !== 'object') return;
+        const grid = groupData.grid || {};
+        const slots = Array.isArray(groupData.slots) ? groupData.slots : [];
+        const legend = Array.isArray(groupData.teacherLegend) ? groupData.teacherLegend : [];
+        const legendEntry = legend.find((teacher) => String(teacher.workerId || '').trim().toLowerCase() === myWorkerIdNorm);
+        const myNumber = legendEntry ? String(legendEntry.number) : null;
+
+        Object.entries(grid).forEach(([className, days]) => {
+          const daySlots = (days && days[dayName]) || {};
+          Object.entries(daySlots).forEach(([slotId, cell]) => {
+            if (!cell || cell.type === 'fixed' || !cell.subject) return;
+            const byId = String(cell.teacherId || '').trim().toLowerCase() === myWorkerIdNorm;
+            const byNumber = myNumber !== null && String(cell.teacherNumber || '') === myNumber;
+            if (!byId && !byNumber) return;
+            const slotInfo = slots.find((slot) => slot.id === slotId) || {};
+            lessons.push({
+              className,
+              subject: cell.subject,
+              slotId,
+              start: slotInfo.start || '',
+              end: slotInfo.end || '',
+              slotLabel: slotInfo.label || slotId,
+              groupId
+            });
+          });
+        });
+      });
+
+      result.lessons = dedupeLessons(lessons);
+      return result;
+    }
+
+    async function loadLessonPlansForDate(year, dateYmd) {
+      const snap = await schoolRef(`lessonPlans/${year}`).once('value');
+      const data = snap.val() || {};
+      const plans = [];
+      Object.entries(data).forEach(([storedClass, dates]) => {
+        Object.values((dates && dates[dateYmd]) || {}).forEach((plan) => {
+          if (plan && typeof plan === 'object') plans.push({ ...plan, _storedClass: storedClass });
+        });
+      });
+      return plans;
+    }
+
+    async function getUnfinalizedTeacherLessons(year, dateYmd, { onlyEnded = false } = {}) {
+      const timetable = await loadTeacherTimetableLessonsForDate(year, dateYmd);
+      if (!timetable.lessons.length) return { ...timetable, missingLessons: [] };
+      const plans = await loadLessonPlansForDate(year, dateYmd);
+      const now = new Date(localTs());
+      const nowMinutes = now.getHours() * 60 + now.getMinutes();
+      const today = todayYMD(now);
+      const missingLessons = timetable.lessons.filter((lesson) => {
+        if (onlyEnded && dateYmd === today) {
+          const endMinutes = parseClockMinutes(lesson.end);
+          if (endMinutes !== null && endMinutes > nowMinutes) return false;
+        }
+        return !plans.some((plan) => isFinalLessonPlanRecord(plan) && lessonPlanMatchesTimetableLesson(plan, lesson));
+      });
+      return { ...timetable, missingLessons };
+    }
+
+    async function validateTeacherLessonFinalizationCheckout(year, dayKey) {
+      if (!getCurrentRoleKey().includes('teacher')) return { valid: true };
+      const dateYmd = dateFromDayKey(dayKey);
+      if (!dateYmd) return { valid: true };
+      const result = await getUnfinalizedTeacherLessons(year, dateYmd, { onlyEnded: true });
+      if (!result.missingLessons.length) return { valid: true };
+      return {
+        valid: false,
+        year,
+        dateYmd,
+        dayKey,
+        dayLabel: formatDayKey(dayKey),
+        missingLessons: result.missingLessons,
+        message: `Bado hujahifadhi lesson plan kamili kwa somo ${result.missingLessons.length}. Kamilisha assessment, homework, conclusion, na reflection kabla ya check-out.`
+      };
+    }
+
+    async function isWorkingDate(date) {
+      const meta = getDayMeta(date);
+      if (date.getDay() === 0 || date.getDay() === 6) return false;
+      if (await isHolidayDate(meta.year, meta.dayKey)) return false;
+      const isoDate = `${meta.year}-${meta.month}-${meta.day}`;
+      const calendarStatus = await resolveWorkerCalendarStatus(isoDate, meta.year);
+      return !calendarStatus?.blockWorkerAttendance;
+    }
+
+    async function workingDaysSince(dateYmd, referenceDate) {
+      const start = new Date(`${dateYmd}T00:00:00`);
+      const end = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate());
+      let count = 0;
+      for (let d = new Date(start.getTime() + 86400000); d <= end; d = new Date(d.getTime() + 86400000)) {
+        if (await isWorkingDate(d)) count += 1;
+      }
+      return count;
+    }
+
+    async function checkPreviousTeacherLessonFinalization(referenceTs = localTs()) {
+      if (!getCurrentRoleKey().includes('teacher')) return { blocked: false };
+      const referenceDate = new Date(referenceTs);
+      for (let delta = 1; delta <= 14; delta += 1) {
+        const date = new Date(referenceDate.getTime() - delta * 86400000);
+        if (!(await isWorkingDate(date))) continue;
+        const meta = getDayMeta(date);
+        const dateYmd = `${meta.year}-${meta.month}-${meta.day}`;
+        const result = await getUnfinalizedTeacherLessons(meta.year, dateYmd, { onlyEnded: false });
+        if (!result.missingLessons.length) continue;
+        const lateWorkingDays = await workingDaysSince(dateYmd, referenceDate);
+        return {
+          blocked: true,
+          requiresLetter: lateWorkingDays >= 3,
+          lateWorkingDays,
+          year: meta.year,
+          dateYmd,
+          dayKey: meta.dayKey,
+          dayLabel: formatDayKey(meta.dayKey),
+          missingLessons: result.missingLessons,
+          message: `Bado hujakamilisha lesson plan za ${formatDayKey(meta.dayKey)}. Lazima uzihifadhi kamili kabla ya kuendelea.`
+        };
+      }
+      return { blocked: false };
+    }
+
+    async function saveLessonPlanFinalizationDelayLetter(blockInfo, explanationText) {
+      const text = String(explanationText || '').trim();
+      if (!blockInfo?.dayKey || !text) return;
+      await schoolRef(`years/${blockInfo.year}/lessonPlanFinalizationLetters/${state.workerId}/${blockInfo.dayKey}`).push({
+        text,
+        wordCount: countWords(text),
+        submittedAt: Date.now(),
+        lateWorkingDays: blockInfo.lateWorkingDays || 0,
+        lessons: (blockInfo.missingLessons || []).map((lesson) => ({
+          className: lesson.className || '',
+          subject: lesson.subject || '',
+          slotId: lesson.slotId || '',
+          start: lesson.start || '',
+          end: lesson.end || '',
+          groupId: lesson.groupId || ''
+        }))
+      });
+    }
+
+    function showTeacherLessonFinalizationBlock(info) {
+      const lessons = info.missingLessons || [];
+      const cards = lessons.map((lesson) => {
+        const href = lessonPlanUrlForLesson(lesson, info.dateYmd, info.year);
+        return `
+          <div style="background:rgba(251,113,133,0.12);border:1px solid rgba(251,113,133,0.45);border-radius:10px;padding:12px;margin-top:8px;">
+            <div style="font-weight:700;color:#fecdd3;">${escapeAttendanceHtml(lesson.className)} &middot; ${escapeAttendanceHtml(lesson.subject)}</div>
+            <div style="color:var(--muted);font-size:0.86rem;margin-top:3px;">${escapeAttendanceHtml(lessonWindowLabel(lesson))}</div>
+            <a href="${escapeAttendanceHtml(href)}" target="_blank" rel="noopener"
+               style="display:inline-block;margin-top:8px;padding:7px 12px;background:rgba(251,113,133,0.22);border:1px solid rgba(251,113,133,0.6);border-radius:8px;color:#fb7185;text-decoration:none;font-weight:700;font-size:0.85rem;">
+              Fungua Lesson Plan
+            </a>
+          </div>`;
+      }).join('');
+      const overlay = document.createElement('div');
+      overlay.className = 'mini-modal-overlay';
+      overlay.innerHTML = `
+        <div class="mini-modal-card" role="dialog" aria-modal="true" style="width:min(620px,100%);max-height:82vh;overflow-y:auto;display:grid;gap:0;">
+          <h3 style="color:#fb7185;">Lesson Plan Haijakamilika</h3>
+          <p style="color:var(--muted);font-size:0.92rem;margin-bottom:8px;">${escapeAttendanceHtml(info.message || 'Kamilisha lesson plan kabla ya kuendelea.')}</p>
+          ${info.requiresLetter ? `<p style="color:#fbbf24;font-size:0.88rem;margin:0 0 8px;">Umechelewa siku ${Number(info.lateWorkingDays || 0)} za kazi. Barua ya maneno 400 imehifadhiwa, lakini bado lazima uhifadhi lesson plan kamili.</p>` : ''}
+          ${cards}
+          <div class="mini-modal-actions" style="margin-top:16px;">
+            <button type="button" class="mini-modal-btn primary" data-act="close">Sawa</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      overlay.addEventListener('click', (event) => {
+        if (event.target.closest('[data-act="close"]') || event.target === overlay) overlay.remove();
+      });
+    }
+
     function showTeacherBlockModal(result) {
       const somap = getSomap();
       const schoolId = state.schoolId || '';
@@ -1992,6 +2285,26 @@
           }
           const role = getCurrentRoleKey();
           if (role.includes('teacher')) {
+            if (btn) btn.textContent = 'Inaangalia lesson plans za nyuma...';
+            const previousFinalization = await checkPreviousTeacherLessonFinalization(timestamp);
+            if (previousFinalization.blocked) {
+              if (previousFinalization.requiresLetter) {
+                const input = await openReasonModal({
+                  title: 'Lesson Plan Zilizochelewa - Barua ya Maneno 400',
+                  message: `${previousFinalization.message} Umefika siku ${previousFinalization.lateWorkingDays} za kazi bila kuhifadhi kamili. Andika barua ya maneno 400 au zaidi kueleza kwa nini hukukamilisha lesson plan zako. Baada ya barua bado lazima uzikamilishe kabla ya check-in.`,
+                  placeholder: 'Andika maelezo ya kwa nini hukuhifadhi lesson plan zako kamili kwa wakati...',
+                  minWords: 400
+                });
+                if (input === null) {
+                  toast('Check-in imeghairiwa; barua na lesson plan kamili zinahitajika kwanza.', 'warning', 6500);
+                  return;
+                }
+                await saveLessonPlanFinalizationDelayLetter(previousFinalization, input);
+              }
+              showTeacherLessonFinalizationBlock(previousFinalization);
+              toast('Check-in imezuiwa mpaka uhifadhi lesson plan hizo kamili.', 'error', 7000);
+              return;
+            }
             if (btn) btn.textContent = 'Inathibitisha mahitaji...';
             try {
               const readiness = await checkTeacherReadiness();
@@ -2110,6 +2423,15 @@
           if (!generalTaskValidation.valid) {
             toast(generalTaskValidation.message, 'error', 6000);
             return;
+          }
+          if (getCurrentRoleKey().includes('teacher')) {
+            if (btn) btn.textContent = 'Inaangalia lesson plans za leo...';
+            const lessonFinalization = await validateTeacherLessonFinalizationCheckout(systemYear, dayKey);
+            if (!lessonFinalization.valid) {
+              showTeacherLessonFinalizationBlock(lessonFinalization);
+              toast(lessonFinalization.message, 'error', 7000);
+              return;
+            }
           }
         }
 
