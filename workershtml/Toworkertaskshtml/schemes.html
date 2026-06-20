@@ -496,6 +496,17 @@
         <button class="btn secondary" type="button" id="addRowBtn">Add Row</button>
         <span class="tag" id="bookTopicsInfo">Select class and subject to load book topics</span>
         </div>
+        <div class="grid" style="margin-top:12px;align-items:end;">
+          <div>
+            <label>Active Classbook Source</label>
+            <select id="schemeBookSource">
+              <option value="">Loading active classbooks...</option>
+            </select>
+          </div>
+          <div>
+            <button class="btn secondary" type="button" id="reloadBookTopicsBtn">Reload Table of Contents</button>
+          </div>
+        </div>
 
         <div class="table-wrap">
           <table class="scheme-table">
@@ -599,6 +610,8 @@
     const cancelSchemeBtn = document.getElementById('cancelSchemeBtn');
     const downloadPdfBtn = document.getElementById('downloadPdfBtn');
     const bookTopicsInfo = document.getElementById('bookTopicsInfo');
+    const schemeBookSource = document.getElementById('schemeBookSource');
+    const reloadBookTopicsBtn = document.getElementById('reloadBookTopicsBtn');
 
     const ClassUtils = window.SomapAcademicClassUtils || {};
     let teacherConfig = null;
@@ -613,6 +626,7 @@
     let currentStructuredRows = null;
     let bookTopicCatalog = [];
     let bookCatalogRequest = 0;
+    let availableSchemeBooks = [];
 
     currentDateEl.textContent = new Date().toLocaleDateString('en-US', {
       timeZone: 'Africa/Nairobi',
@@ -732,24 +746,50 @@
       }
     }
 
+    function bookFileLabel(book) {
+      const hint = String(book.primary_file_type || book.word_file_name || book.word_url || book.url || book.cloudinaryUrl || '').toLowerCase();
+      return hint.includes('docx') || book.word_text_available ? 'Word' : hint.includes('pdf') ? 'PDF' : 'Book';
+    }
+
+    function renderSchemeBookSources(selectedBookId = '') {
+      schemeBookSource.innerHTML = '';
+      if (!availableSchemeBooks.length) {
+        schemeBookSource.add(new Option('No active matching classbook found', ''));
+        schemeBookSource.value = '';
+        return '';
+      }
+      availableSchemeBooks.forEach((book) => {
+        schemeBookSource.add(new Option(`${book.title || 'Classbook'} — ${bookFileLabel(book)}`, book.bookId));
+      });
+      const selected = availableSchemeBooks.some((book) => book.bookId === selectedBookId)
+        ? selectedBookId
+        : (availableSchemeBooks.find((book) => bookFileLabel(book) === 'Word') || availableSchemeBooks[0]).bookId;
+      schemeBookSource.value = selected;
+      return selected;
+    }
+
     async function loadBookTopicCatalog() {
       const requestId = ++bookCatalogRequest;
       const className = schemeClass.value;
       const subjectName = schemeSubject.value;
       const year = academicYear.value || filterYear.value || String(getYear());
+      const requestedBookId = schemeBookSource.value || editingScheme?.bookSourceId || '';
       bookTopicCatalog = specialBookTopics();
       refreshBookTopicSelects();
       if (!className || !subjectName) {
+        availableSchemeBooks = [];
+        renderSchemeBookSources();
         bookTopicsInfo.textContent = 'Select class and subject to load book topics';
         return;
       }
       bookTopicsInfo.textContent = 'Loading topics from class books...';
       const indexPath = `classbooksIndex/${year}/${safeKey(className).toLowerCase()}/${safeKey(subjectName).toLowerCase()}`;
-      const [snapshots, indexedSnapshot] = await Promise.all([
+      const [snapshots, indexedSnapshot, booksSnapshot] = await Promise.all([
         Promise.all(bookIndexPaths(className, year).map(async (path) => {
           try { return await db.ref(path).once('value'); } catch (_error) { return null; }
         })),
-        db.ref(indexPath).once('value').catch(() => null)
+        db.ref(indexPath).once('value').catch(() => null),
+        db.ref('books').once('value').catch(() => null)
       ]);
       if (requestId !== bookCatalogRequest) return;
       const books = new Map();
@@ -767,7 +807,20 @@
           books.set(indexedBookId, { ...indexedBook, bookId: indexedBookId });
         }
       }
-      const topicGroups = await Promise.all([...books.values()].map(async (book) => {
+      Object.entries(booksSnapshot?.val?.() || {}).forEach(([bookId, book]) => {
+        if (!book || ['archived', 'deleted'].includes(String(book.status || 'active').toLowerCase())) return;
+        if (!classMatches(book.class || '', className) || !subjectMatches(book.subject || '', subjectName)) return;
+        const bookYear = String(book.year || book.academicYear || year);
+        if (bookYear !== String(year)) return;
+        books.set(bookId, { ...book, bookId });
+      });
+      availableSchemeBooks = [...books.values()].sort((left, right) => {
+        const wordDiff = Number(bookFileLabel(right) === 'Word') - Number(bookFileLabel(left) === 'Word');
+        return wordDiff || String(left.title || '').localeCompare(String(right.title || ''));
+      });
+      const selectedBookId = renderSchemeBookSources(requestedBookId);
+      const selectedBooks = selectedBookId ? availableSchemeBooks.filter((book) => book.bookId === selectedBookId) : [];
+      const topicGroups = await Promise.all(selectedBooks.map(async (book) => {
         try {
           const contentIndex = window.SomapBookContentIndex?.parse(await loadBookTextForIndex(book));
           const toc = (contentIndex?.chapters || []).map((chapter) => ({
@@ -820,9 +873,14 @@
       });
       refreshBookTopicSelects();
       const bookTopics = bookTopicCatalog.filter((item) => item.kind === 'book').length;
+      const selectedBook = availableSchemeBooks.find((book) => book.bookId === selectedBookId);
+      const chapterCount = new Set(bookTopicCatalog.filter((item) => item.kind === 'book').map((item) => `${item.bookId}:${item.chapter}`)).size;
+      const subtopicCount = bookTopicCatalog.filter((item) => item.kind === 'book' && item.subtopic).length;
       bookTopicsInfo.textContent = bookTopics
-        ? `${bookTopics} topic/subtopic choices from ${books.size} book(s)`
-        : `No Table of Contents found for ${subjectName} ${className}; planning options are still available`;
+        ? `Loaded ${chapterCount} chapters and ${subtopicCount} subtopics from ${selectedBook?.title || 'the active classbook'} (${bookFileLabel(selectedBook || {})})`
+        : selectedBook
+          ? `${selectedBook.title || 'Active classbook'} was found, but its Table of Contents could not be read`
+          : `No active ${subjectName} book was found for ${className}`;
     }
 
     function populateBookTopicSelect(select, savedMapping = null) {
@@ -1984,6 +2042,8 @@
         generalObjectives: generalObjectives.value || '',
         assessmentMethods: assessmentMethods.value || '',
         teachingResources: teachingResources.value || '',
+        bookSourceId: schemeBookSource.value || editingScheme?.bookSourceId || '',
+        bookSourceTitle: availableSchemeBooks.find((book) => book.bookId === schemeBookSource.value)?.title || editingScheme?.bookSourceTitle || '',
         rows: editorMode === 'editable_document' ? (currentStructuredRows || editingScheme?.rows || editingScheme?.parsedTemplate?.rows || null) : rows,
         editableDocument: editorMode === 'editable_document' ? serializeEditableDocument() : (editingScheme?.editableDocument || null),
         parsedTemplate: parsedTemplateSnapshot,
@@ -2127,6 +2187,8 @@
     schemeClass.addEventListener('change', loadBookTopicCatalog);
     schemeSubject.addEventListener('change', loadBookTopicCatalog);
     academicYear.addEventListener('change', loadBookTopicCatalog);
+    schemeBookSource.addEventListener('change', loadBookTopicCatalog);
+    reloadBookTopicsBtn.addEventListener('click', loadBookTopicCatalog);
 
     newSchemeBtn.addEventListener('click', () => {
       clearForm();
