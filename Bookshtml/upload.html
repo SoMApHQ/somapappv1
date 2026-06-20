@@ -125,6 +125,9 @@
           <span class="chip" id="fileType">PDF</span>
         </div>
 
+        <div class="mt-2 small muted">If your PDF is too large, SoMAp can try to compress it before upload.</div>
+        <div id="compressionResult" class="mt-3" style="display:none"></div>
+
         <div class="mt-4">
           <label class="small">Upload progress</label>
           <div class="progress mt-2"><i id="progressBar"></i></div>
@@ -179,6 +182,18 @@
             <label class="small">Permanent delete endpoint (server only)</label>
             <input id="deleteEndpoint" placeholder="https://REGION-PROJECT.cloudfunctions.net/deleteCloudinaryBookAsset" class="w-full px-3 py-2 rounded-md border mt-1" />
             <div class="small muted-italic mt-1">Uses a signed backend function. Never put Cloudinary API secrets in this page.</div>
+          </div>
+
+          <div>
+            <label class="small">PDF compression endpoint (server only)</label>
+            <input id="compressionEndpoint" placeholder="https://REGION-PROJECT.cloudfunctions.net/compressPdfForUpload" class="w-full px-3 py-2 rounded-md border mt-1" />
+            <div class="small muted-italic mt-1">Compresses oversized PDFs before Cloudinary upload.</div>
+          </div>
+
+          <div>
+            <label class="small">Upload safe limit (MB)</label>
+            <input id="uploadLimitMb" type="number" min="1" step="0.1" placeholder="9.5" class="w-full px-3 py-2 rounded-md border mt-1" />
+            <div class="small muted-italic mt-1">Default is 9.5 MB, safely below the current Cloudinary 10 MB limit.</div>
           </div>
         </div>
 
@@ -283,6 +298,9 @@
     const parserWebhookInput = document.getElementById('parserWebhook');
     const parserApiKeyInput = document.getElementById('parserApiKey');
     const deleteEndpointInput = document.getElementById('deleteEndpoint');
+    const compressionEndpointInput = document.getElementById('compressionEndpoint');
+    const uploadLimitMbInput = document.getElementById('uploadLimitMb');
+    const compressionResult = document.getElementById('compressionResult');
     const recentList = document.getElementById('recentList');
     const bookManagerList = document.getElementById('bookManagerList');
     const bookSearchInput = document.getElementById('bookSearchInput');
@@ -304,6 +322,8 @@
     const loggedEmail = document.getElementById('loggedEmail');
 
     let selectedFile = null;
+    let originalSelectedFile = null;
+    let selectedFileNeedsCompression = false;
     let currentUser = null;
     let allManagedBooks = [];
     let replaceTarget = null;
@@ -316,6 +336,16 @@
     function showError(msg){ showMessage(el('<div class="error-box">'+msg+'</div>')); }
     function setProgress(p){ progressBar.style.width = Math.max(0,Math.min(100,p)) + '%'; }
     function readableSize(bytes){ return (bytes/1024/1024).toFixed(2) + ' MB'; }
+    function uploadLimitBytes(){
+      const mb = Number(uploadLimitMbInput && uploadLimitMbInput.value);
+      const safeMb = Number.isFinite(mb) && mb > 0 ? mb : 9.5;
+      return safeMb * 1024 * 1024;
+    }
+    function uploadLimitLabel(){ return readableSize(uploadLimitBytes()); }
+    function savedPercent(originalSize, newSize){
+      if (!originalSize || !newSize) return 0;
+      return Math.max(0, Math.round(((originalSize - newSize) / originalSize) * 100));
+    }
     function normalizeEmailKey(email){ if(!email) return ''; return email.replace(/\./g,'_'); } // matches your DB keys
     function activeStatus(book){ return String(book && book.status ? book.status : 'active').toLowerCase(); }
     function isHiddenBook(book){ const s = activeStatus(book); return s === 'archived' || s === 'deleted'; }
@@ -437,11 +467,150 @@
       if(!f.name.toLowerCase().endsWith('.pdf') && f.type !== 'application/pdf'){ showError('Please upload a PDF file.'); return; }
       if(f.size > MAX_FILE_SIZE){ showError('File too large. Keep file under ' + readableSize(MAX_FILE_SIZE)); return; }
       selectedFile = f;
+      originalSelectedFile = f;
       fileNameEl.textContent = f.name;
       fileSizeEl.textContent = readableSize(f.size);
       fileTypeEl.textContent = 'PDF';
       selectedMeta.style.display = 'flex';
-      showMessage(el('<div class="small">Ready to upload. Fill book details then click <strong>Upload & Register Book</strong>.</div>'));
+      evaluateSelectedFileSize(f);
+    }
+
+    function evaluateSelectedFileSize(file){
+      const limit = uploadLimitBytes();
+      if (!file) return;
+      fileNameEl.textContent = file.name;
+      fileSizeEl.textContent = readableSize(file.size);
+      if (file.size <= limit) {
+        selectedFileNeedsCompression = false;
+        if (compressionResult) compressionResult.style.display = compressionResult.innerHTML ? 'block' : 'none';
+        showMessage(el('<div class="small">Ready to upload. Fill book details then click <strong>Upload & Register Book</strong>.</div>'));
+        if (currentUser) uploadBtn.disabled = false;
+        return;
+      }
+      selectedFileNeedsCompression = true;
+      uploadBtn.disabled = true;
+      showOversizedPdfOptions(file, limit);
+    }
+
+    function showOversizedPdfOptions(file, limit){
+      showMessage(el(`
+        <div class="warn-box">
+          <strong>This PDF is too large for the current upload limit.</strong>
+          <div class="small mt-1">Selected: ${escapeHtml(file.name)} (${readableSize(file.size)}). Safe limit: ${readableSize(limit)}.</div>
+          <div class="small mt-1">Would you like SoMAp to compress it automatically?</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+            <button class="chip" id="compressPdfBtn" type="button">Compress Automatically</button>
+            <button class="chip" id="chooseAnotherPdfBtn" type="button">Choose Another File</button>
+            <button class="chip" id="cancelOversizedPdfBtn" type="button">Cancel</button>
+          </div>
+        </div>
+      `));
+      const compressBtn = document.getElementById('compressPdfBtn');
+      const chooseBtn = document.getElementById('chooseAnotherPdfBtn');
+      const cancelBtn = document.getElementById('cancelOversizedPdfBtn');
+      if (compressBtn) compressBtn.addEventListener('click', compressSelectedPdf);
+      if (chooseBtn) chooseBtn.addEventListener('click', ()=> fileInput.click());
+      if (cancelBtn) cancelBtn.addEventListener('click', clearSelectedFile);
+    }
+
+    function clearSelectedFile(){
+      selectedFile=null;
+      originalSelectedFile=null;
+      selectedFileNeedsCompression=false;
+      selectedMeta.style.display='none';
+      fileInput.value='';
+      messages.innerHTML='';
+      setProgress(0);
+      if (compressionResult) {
+        compressionResult.style.display='none';
+        compressionResult.innerHTML='';
+      }
+    }
+
+    async function compressSelectedPdf(){
+      if (!selectedFile) { showError('Choose a PDF file first.'); return; }
+      const endpoint = (compressionEndpointInput.value || '').trim();
+      if (!endpoint) {
+        showError('Set the PDF compression endpoint first. Compression is server-side to protect book quality.');
+        return;
+      }
+      if (!currentUser) {
+        showError('Sign in as admin before compressing.');
+        return;
+      }
+
+      const sourceFile = originalSelectedFile || selectedFile;
+      const originalSize = sourceFile.size;
+      const limit = uploadLimitBytes();
+      uploadBtn.disabled = true;
+      clearBtn.disabled = true;
+      setProgress(0);
+      showMessage(el('<div class="small">Compressing PDF on the server. This may take a minute for large books...</div>'));
+
+      try {
+        const token = await currentUser.getIdToken();
+        const formData = new FormData();
+        formData.append('file', sourceFile, sourceFile.name);
+        formData.append('targetBytes', String(Math.floor(limit)));
+
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: formData
+        });
+        if (!res.ok) {
+          const errorText = await res.text().catch(()=>res.statusText);
+          throw new Error(errorText || `Compression failed with HTTP ${res.status}`);
+        }
+        const blob = await res.blob();
+        const resultOriginal = Number(res.headers.get('x-original-size')) || originalSize;
+        const resultCompressed = Number(res.headers.get('x-compressed-size')) || blob.size;
+        const resultSaved = Number(res.headers.get('x-reduction-percent')) || savedPercent(resultOriginal, resultCompressed);
+        const compressedName = sourceFile.name.replace(/\.pdf$/i, '') + '.compressed.pdf';
+        const compressedFile = new File([blob], compressedName, { type: 'application/pdf', lastModified: Date.now() });
+
+        const stillTooLarge = compressedFile.size > limit;
+        if (compressionResult) {
+          compressionResult.style.display = 'block';
+          compressionResult.innerHTML = `
+            <div class="${stillTooLarge ? 'warn-box' : 'success-box'}">
+              <strong>Compression result</strong>
+              <div class="small mt-1">Original file: ${escapeHtml(sourceFile.name)}</div>
+              <div class="small">Original size: ${readableSize(resultOriginal)}</div>
+              <div class="small">Compressed size: ${readableSize(resultCompressed)}</div>
+              <div class="small">Saved space: ${resultSaved}%</div>
+              <div class="small">Status: ${stillTooLarge ? 'Still above upload limit' : 'Ready to upload'}</div>
+            </div>
+          `;
+        }
+
+        if (stillTooLarge) {
+          selectedFile = sourceFile;
+          selectedFileNeedsCompression = true;
+          fileNameEl.textContent = sourceFile.name;
+          fileSizeEl.textContent = readableSize(sourceFile.size);
+          showError('Compression completed, but the file is still above the upload limit. Please compress further manually or upgrade the Cloudinary plan.');
+          uploadBtn.disabled = true;
+          return;
+        }
+
+        selectedFile = compressedFile;
+        selectedFileNeedsCompression = false;
+        fileNameEl.textContent = compressedFile.name;
+        fileSizeEl.textContent = readableSize(compressedFile.size);
+        fileTypeEl.textContent = 'Compressed PDF';
+        selectedMeta.style.display = 'flex';
+        showSuccess(`Compression completed. ${escapeHtml(compressedFile.name)} is ready to upload.`);
+        uploadBtn.disabled = false;
+      } catch (error) {
+        console.error(error);
+        selectedFile = sourceFile;
+        selectedFileNeedsCompression = true;
+        showError('Compression failed: ' + (error.message || error));
+      } finally {
+        clearBtn.disabled = false;
+        setProgress(0);
+      }
     }
 
     /* ---------- Firebase readiness & role check ---------- */
@@ -468,9 +637,13 @@
       const ph = localStorage.getItem('parserWebhook') || '';
       const pak = localStorage.getItem('parserApiKey') || '';
       const delEndpoint = localStorage.getItem('deleteEndpoint') || '';
+      const compressionEndpoint = localStorage.getItem('compressionEndpoint') || '';
+      const uploadLimitMb = localStorage.getItem('uploadLimitMb') || '9.5';
       cloudNameInput.value = cN; uploadPresetInput.value = up;
       parserWebhookInput.value = ph; parserApiKeyInput.value = pak;
       deleteEndpointInput.value = delEndpoint;
+      compressionEndpointInput.value = compressionEndpoint;
+      uploadLimitMbInput.value = uploadLimitMb;
       PARSER_WEBHOOK = ph; PARSER_API_KEY = pak;
 
       // auth state
@@ -498,6 +671,11 @@
       parserWebhookInput.addEventListener('change', ()=> { localStorage.setItem('parserWebhook', parserWebhookInput.value.trim()); PARSER_WEBHOOK = parserWebhookInput.value.trim(); });
       parserApiKeyInput.addEventListener('change', ()=> { localStorage.setItem('parserApiKey', parserApiKeyInput.value.trim()); PARSER_API_KEY = parserApiKeyInput.value.trim(); });
       deleteEndpointInput.addEventListener('change', ()=> localStorage.setItem('deleteEndpoint', deleteEndpointInput.value.trim()));
+      compressionEndpointInput.addEventListener('change', ()=> localStorage.setItem('compressionEndpoint', compressionEndpointInput.value.trim()));
+      uploadLimitMbInput.addEventListener('change', ()=> {
+        localStorage.setItem('uploadLimitMb', uploadLimitMbInput.value.trim() || '9.5');
+        if (selectedFile) evaluateSelectedFileSize(selectedFile);
+      });
       if (bookSearchInput) bookSearchInput.addEventListener('input', renderBookManager);
       if (bookStatusFilter) bookStatusFilter.addEventListener('change', renderBookManager);
       if (refreshManagerBtn) refreshManagerBtn.addEventListener('click', loadBookManager);
@@ -514,6 +692,11 @@
     uploadBtn.addEventListener('click', async ()=>{
       if(!currentUser){ showError('Not signed in. Sign in from main app then return to upload page.'); return; }
       if(!selectedFile){ showError('Choose a PDF file first.'); return; }
+      if(selectedFileNeedsCompression || selectedFile.size > uploadLimitBytes()){
+        selectedFileNeedsCompression = true;
+        showOversizedPdfOptions(selectedFile, uploadLimitBytes());
+        return;
+      }
 
       const title = titleInput.value.trim();
       const cls = classSelect.value;
@@ -765,7 +948,8 @@
         // Reset form (keep cloud settings)
         replaceTarget = null;
         updateReplaceBanner();
-        selectedFile=null; selectedMeta.style.display='none';
+        selectedFile=null; originalSelectedFile=null; selectedFileNeedsCompression=false; selectedMeta.style.display='none';
+        if (compressionResult) { compressionResult.style.display='none'; compressionResult.innerHTML=''; }
         titleInput.value = ''; editionInput.value = ''; descriptionInput.value = ''; fileInput.value = '';
 
         // refresh list
@@ -783,7 +967,7 @@
 
     // Clear button
     clearBtn.addEventListener('click', ()=> {
-      selectedFile=null; selectedMeta.style.display='none'; fileInput.value=''; messages.innerHTML=''; setProgress(0);
+      clearSelectedFile();
       replaceTarget=null; updateReplaceBanner();
     });
 
