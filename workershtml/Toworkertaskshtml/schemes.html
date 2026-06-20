@@ -827,8 +827,8 @@
             chapter: chapter.chapter,
             topic: chapter.topic,
             page: chapter.tocPage || '',
-            pageStart: chapter.tocPage || '',
-            pageEnd: '',
+            pageStart: chapter.pageStart || chapter.tocPage || '',
+            pageEnd: chapter.pageEnd || '',
             sectionStart: chapter.sectionStart || '',
             sectionEnd: chapter.sectionEnd || '',
             subtopics: chapter.subtopics || []
@@ -857,7 +857,7 @@
             ...base,
             key: `book:${book.bookId}:${entryIndex}:topic`,
             subtopic: '',
-            label: `${entry.chapter} — ${entry.topic} (§ ${entry.sectionStart}-${entry.sectionEnd})`
+            label: `${entry.chapter} — ${entry.topic}`
           });
           entry.subtopics.forEach((subtopicEntry, subtopicIndex) => bookTopicCatalog.push({
             ...base,
@@ -867,7 +867,7 @@
             pageEnd: base.pageEnd,
             sectionStart: subtopicEntry.sectionStart || base.sectionStart,
             sectionEnd: subtopicEntry.sectionEnd || base.sectionEnd,
-            label: `↳ ${subtopicEntry.title || subtopicEntry} (§ ${subtopicEntry.sectionStart || base.pageStart}-${subtopicEntry.sectionEnd || base.pageEnd})`
+            label: `↳ ${subtopicEntry.title || subtopicEntry}`
           }));
         });
       });
@@ -1951,8 +1951,12 @@
           const original = btn.textContent;
           btn.textContent = 'Preparing PDF...';
           try {
-            const loaded = await loadSchemeForEdit(btn.dataset);
-            if (loaded) await downloadPdf();
+            const scheme = findTeacherScheme(btn.dataset);
+            if (scheme) await downloadSavedSchemePdf(scheme);
+            else toast('Saved scheme not found. Refresh and try again.');
+          } catch (error) {
+            console.error('Saved scheme download failed', error);
+            toast('Unable to download this scheme right now.');
           } finally {
             btn.disabled = false;
             btn.textContent = original;
@@ -1962,6 +1966,16 @@
       schemesList.querySelectorAll('.delete-scheme').forEach(btn => {
         btn.addEventListener('click', () => deleteScheme(btn.dataset.id, btn.dataset.year, btn.dataset.class, btn.dataset.subject, btn.dataset.term));
       });
+    }
+
+    function findTeacherScheme(meta) {
+      return teacherSchemesCache.find(s =>
+        s.schemeId === meta.id &&
+        s.year === meta.year &&
+        (s.classKey === meta.class || classMatches(s.className || s.classKey, meta.class)) &&
+        (s.subjectKey === meta.subject || subjectMatches(s.subjectName || s.subjectKey, meta.subject)) &&
+        s.termKey === meta.term
+      ) || null;
     }
 
     async function deleteScheme(schemeId, year, classKey, subjectKey, termKey) {
@@ -1978,13 +1992,7 @@
     }
 
     async function loadSchemeForEdit(meta) {
-      const scheme = teacherSchemesCache.find(s =>
-        s.schemeId === meta.id &&
-        s.year === meta.year &&
-        (s.classKey === meta.class || classMatches(s.className || s.classKey, meta.class)) &&
-        (s.subjectKey === meta.subject || subjectMatches(s.subjectName || s.subjectKey, meta.subject)) &&
-        s.termKey === meta.term
-      );
+      const scheme = findTeacherScheme(meta);
       if (!scheme) return null;
       editingScheme = scheme;
       currentTemplateId = scheme.fromTemplateId || null;
@@ -2062,17 +2070,52 @@
       await loadTeacherSchemes();
     }
 
-    async function downloadPdf() {
-      if (editorMode === 'editable_document') {
+    async function downloadSavedSchemePdf(scheme) {
+      if (scheme.editorMode !== 'editable_document') {
+        await downloadPdf(scheme);
+        return;
+      }
+
+      const previous = {
+        nodes: Array.from(templatePdfPages.childNodes),
+        editableDocument: currentEditableDocument,
+        sourcePdf: currentSourcePdf,
+        className: schemeClass.value,
+        subjectName: schemeSubject.value,
+        term: schemeTerm.value,
+        year: academicYear.value
+      };
+      try {
+        templatePdfPages.replaceChildren();
+        schemeClass.value = resolvePreferredClassValue(scheme.className || '');
+        schemeSubject.value = resolvePreferredSubjectValue(scheme.subjectName || scheme.subjectKey || '');
+        schemeTerm.value = scheme.termKey || 'term1';
+        academicYear.value = scheme.year || '';
+        currentSourcePdf = scheme.sourcePdf || scheme.pdf || null;
+        await renderEditableDocument(currentSourcePdf, scheme.editableDocument || null);
+        await exportEditableDocumentPdf();
+      } finally {
+        templatePdfPages.replaceChildren(...previous.nodes);
+        currentEditableDocument = previous.editableDocument;
+        currentSourcePdf = previous.sourcePdf;
+        schemeClass.value = previous.className;
+        schemeSubject.value = previous.subjectName;
+        schemeTerm.value = previous.term;
+        academicYear.value = previous.year;
+      }
+    }
+
+    async function downloadPdf(savedScheme = null) {
+      if (!savedScheme && editorMode === 'editable_document') {
         await exportEditableDocumentPdf();
         return;
       }
-      const cls = schemeClass.value || 'Class';
-      const subj = schemeSubject.value || 'Subject';
-      const term = termLabel(schemeTerm.value);
-      const year = academicYear.value || '';
-      const rowsObj = collectRows();
-      const rows = Object.values(rowsObj);
+      const cls = savedScheme?.className || schemeClass.value || 'Class';
+      const subj = savedScheme?.subjectName || savedScheme?.subjectKey || schemeSubject.value || 'Subject';
+      const termKey = savedScheme?.termKey || schemeTerm.value;
+      const term = termLabel(termKey);
+      const year = savedScheme?.year || academicYear.value || '';
+      const rows = sortedRowValues(savedScheme?.rows || collectRows());
       if (!rows.length) {
         toast('Add at least one row before exporting.');
         return;
@@ -2133,9 +2176,9 @@
         y += (lines.length * 10) + 10;
       };
 
-      drawSection('General Objectives / Learning Outcomes', generalObjectives.value);
-      drawSection('Assessment Methods', assessmentMethods.value);
-      drawSection('Teaching Resources / Materials', teachingResources.value);
+      drawSection('General Objectives / Learning Outcomes', savedScheme?.generalObjectives || generalObjectives.value);
+      drawSection('Assessment Methods', savedScheme?.assessmentMethods || assessmentMethods.value);
+      drawSection('Teaching Resources / Materials', savedScheme?.teachingResources || teachingResources.value);
 
       const body = rows.map((r, idx) => [
         idx + 1,
@@ -2176,7 +2219,7 @@
           doc.text(`Teacher: ${teacherNameEl.textContent}`, pageWidth - 170, pageHeight - 14);
         }
       });
-      const fileName = `scheme-${subj}-${cls}-${year}-${schemeTerm.value}.pdf`.replace(/\s+/g, '-').toLowerCase();
+      const fileName = `scheme-${subj}-${cls}-${year}-${termKey}.pdf`.replace(/\s+/g, '-').toLowerCase();
       doc.save(fileName);
     }
 
@@ -2199,7 +2242,7 @@
     addRowBtn.addEventListener('click', () => createRow());
     saveSchemeBtn.addEventListener('click', saveScheme);
     cancelSchemeBtn.addEventListener('click', () => schemeFormCard.classList.add('hidden'));
-    downloadPdfBtn.addEventListener('click', downloadPdf);
+    downloadPdfBtn.addEventListener('click', () => downloadPdf());
     backBtn.addEventListener('click', () => window.location.href = '../workertasks.html');
 
     (async function init() {

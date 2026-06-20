@@ -3,8 +3,21 @@
 
   const CHAPTER_WORDS = {
     one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
-    nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15
+    nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15,
+    sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20,
+    'twenty-one': 21, 'twenty-two': 22, 'twenty-three': 23, 'twenty-four': 24,
+    'twenty-five': 25, 'twenty-six': 26, 'twenty-seven': 27, 'twenty-eight': 28,
+    'twenty-nine': 29, thirty: 30
   };
+
+  const ROMAN_NUMBERS = {
+    i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8, ix: 9, x: 10,
+    xi: 11, xii: 12, xiii: 13, xiv: 14, xv: 15, xvi: 16, xvii: 17, xviii: 18,
+    xix: 19, xx: 20
+  };
+
+  const SECTION_LABEL = '(chapter|topic|unit)';
+  const SECTION_NUMBER = '([a-z]+(?:-[a-z]+)?|[ivxlcdm]+|\\d+)';
 
   function cleanLine(value) {
     return String(value || '')
@@ -20,7 +33,7 @@
 
   function chapterNumber(token) {
     const value = String(token || '').toLowerCase();
-    return Number(value) || CHAPTER_WORDS[value] || 0;
+    return Number(value) || CHAPTER_WORDS[value] || ROMAN_NUMBERS[value] || 0;
   }
 
   function usefulTopic(value) {
@@ -30,7 +43,7 @@
   }
 
   function parseToc(lines) {
-    const tocStart = lines.findIndex((line) => /^(?:table of contents|contents)$/i.test(line));
+    const tocStart = lines.findIndex((line) => /^(?:table of contents|contents)\s*[:.-]?$/i.test(line.replace(/^\[\[HEADING\]\]\s*/, '')));
     if (tocStart === -1) return { entries: [], start: -1, end: -1 };
     const entries = [];
     let tocEnd = Math.min(lines.length, tocStart + 120);
@@ -41,14 +54,16 @@
         tocEnd = index + 1;
         break;
       }
-      if (/^chapter\s+main topic\s+page$/i.test(line) || /^(?:chapter|main topic|page)$/i.test(line)) continue;
+      if (/^(?:chapter|topic|unit)\s+(?:main topic|title|topic)\s+page$/i.test(line) || /^(?:chapter|unit|main topic|topic|title|page)$/i.test(line)) continue;
 
-      const chapterMatch = line.match(/^chapter\s+([a-z]+|\d+)\s*(?:[:.\-]\s*)?(.*)$/i);
+      const chapterMatch = line.match(new RegExp(`^(?:\\[\\[HEADING\\]\\]\\s*)?${SECTION_LABEL}\\s+${SECTION_NUMBER}\\s*(?:[:.\\-]\\s*)?(.*)$`, 'i'));
       if (!chapterMatch) continue;
-      const number = chapterNumber(chapterMatch[1]);
+      const sectionType = chapterMatch[1];
+      const sectionToken = chapterMatch[2];
+      const number = chapterNumber(sectionToken);
       if (!number) continue;
 
-      let remainder = cleanLine(chapterMatch[2]);
+      let remainder = cleanLine(chapterMatch[3]);
       let page = '';
       const pageMatch = remainder.match(/\s+(\d{1,4})$/);
       if (pageMatch) {
@@ -59,7 +74,7 @@
       if (!remainder) {
         let cursor = index + 1;
         while (cursor < Math.min(lines.length, index + 5) && !remainder) {
-          if (/^chapter\s+/i.test(lines[cursor]) || /teacher'?s note/i.test(lines[cursor])) break;
+          if (/^(?:chapter|topic|unit)\s+/i.test(lines[cursor]) || /teacher'?s note/i.test(lines[cursor])) break;
           if (/^\d{1,4}$/.test(lines[cursor])) page = lines[cursor];
           else remainder = usefulTopic(lines[cursor]);
           cursor += 1;
@@ -73,7 +88,7 @@
       const tocSubtopics = topicParts.join(':').split(/\s*[,;]\s*/).map(cleanLine).filter(Boolean);
       entries.push({
         number,
-        chapter: `Chapter ${chapterMatch[1]}`,
+        chapter: `${sectionType[0].toUpperCase()}${sectionType.slice(1).toLowerCase()} ${sectionToken}`,
         topic,
         tocSubtopics,
         tocPage: page,
@@ -81,6 +96,27 @@
       });
     }
     return { entries, start: tocStart, end: tocEnd };
+  }
+
+  function parseHeadingFallback(lines) {
+    const entries = [];
+    lines.forEach((line, index) => {
+      const match = line.match(new RegExp(`^(?:\\[\\[HEADING\\]\\]\\s*)?${SECTION_LABEL}\\s+${SECTION_NUMBER}\\s*(?:[:.\\-]\\s*)?(.+)$`, 'i'));
+      if (!match) return;
+      const number = chapterNumber(match[2]);
+      const topic = usefulTopic(match[3]);
+      if (!number || !topic || entries.some((entry) => entry.number === number)) return;
+      entries.push({
+        number,
+        chapter: `${match[1][0].toUpperCase()}${match[1].slice(1).toLowerCase()} ${match[2]}`,
+        topic,
+        tocSubtopics: [],
+        tocPage: '',
+        tocLine: index,
+        bodyStart: index
+      });
+    });
+    return { entries, start: -1, end: 0 };
   }
 
   function headingScore(line, entry) {
@@ -116,8 +152,12 @@
   }
 
   function buildChapterRanges(lines, toc) {
-    const chapters = toc.entries.map((entry) => ({ ...entry, bodyStart: -1 }));
+    const chapters = toc.entries.map((entry) => ({
+      ...entry,
+      bodyStart: Number.isInteger(entry.bodyStart) ? entry.bodyStart : -1
+    }));
     chapters.forEach((entry) => {
+      if (entry.bodyStart >= 0) return;
       let best = { index: -1, score: 0 };
       for (let index = Math.max(toc.end, entry.tocLine + 1); index < lines.length; index += 1) {
         const score = headingScore(lines[index], entry);
@@ -157,20 +197,24 @@
     return ranged.map((entry, index) => {
       const pageStart = Number(entry.tocPage) || entry.sectionStart;
       const nextTocPage = Number(ranged[index + 1]?.tocPage) || 0;
-      const pageEnd = nextTocPage > pageStart ? nextTocPage - 1 : entry.sectionEnd;
+      const pageEnd = nextTocPage > pageStart
+        ? nextTocPage - 1
+        : (entry.tocPage ? pageStart : entry.sectionEnd);
       return { ...entry, pageStart, pageEnd };
     });
   }
 
   function parse(text) {
     const lines = String(text || '').replace(/\r/g, '').split('\n').map(cleanLine).filter(Boolean);
-    const toc = parseToc(lines);
+    let toc = parseToc(lines);
+    if (!toc.entries.length) toc = parseHeadingFallback(lines);
     return {
       lines,
       chapters: buildChapterRanges(lines, toc),
-      hasTableOfContents: toc.entries.length > 0
+      hasTableOfContents: toc.start >= 0,
+      usedHeadingFallback: toc.start < 0 && toc.entries.length > 0
     };
   }
 
-  global.SomapBookContentIndex = { parse, parseToc, cleanLine, normalize };
+  global.SomapBookContentIndex = { parse, parseToc, parseHeadingFallback, cleanLine, normalize };
 })(window);
