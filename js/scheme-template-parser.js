@@ -29,6 +29,7 @@
     'Construct',
     'Solve',
     'Perform',
+    'Investigate',
     'Master',
     'Understand'
   ];
@@ -56,6 +57,12 @@
     'charts',
     'textbook',
     'textbooks',
+    'text',
+    'list of',
+    'model',
+    'diagram',
+    'lens',
+    'first aid box',
     'manila',
     'online program',
     'online programs',
@@ -186,7 +193,8 @@
       [
         /general objectives?\s*\/?\s*learning outcomes?/i,
         /objectives of primary education[\s\S]{0,80}?are to:?/i,
-        /the objectives of primary education[\s\S]{0,80}?are to:?/i
+        /the objectives of primary education[\s\S]{0,80}?are to:?/i,
+        /the objectives? of teaching[\s\S]{0,180}?are to(?: enable the pupils to)?\s*[;:\-]?/i
       ],
       [
         /assessment methods?/i,
@@ -269,21 +277,21 @@
       return { learningActivities: '', specificActivities: '' };
     }
 
-    const learningMarker = /to facilitate pupil to/gi;
+    const learningMarker = /to (?:facilitate|guide) pupils? to/gi;
     const matches = findAllMatches(cleaned, learningMarker).filter((match) => match.index !== undefined);
     if (matches.length >= 2) {
       return {
         learningActivities: compactText(cleaned.slice(0, matches[1].index)),
-        specificActivities: compactText(cleaned.slice(matches[1].index).replace(/^to facilitate pupil to\s*/i, ''))
+        specificActivities: compactText(cleaned.slice(matches[1].index).replace(/^to (?:facilitate|guide) pupils? to\s*/i, ''))
       };
     }
 
-    if (/^to facilitate pupil to/i.test(cleaned)) {
-      const withoutPrefix = compactText(cleaned.replace(/^to facilitate pupil to\s*/i, ''));
+    if (/^to (?:facilitate|guide) pupils? to/i.test(cleaned)) {
+      const withoutPrefix = compactText(cleaned.replace(/^to (?:facilitate|guide) pupils? to\s*/i, ''));
       const tailSplit = withoutPrefix.match(/\b(?:Recognize|Identify|Explain|Use|Read|Write|Compare|Solve|Construct|Demonstrate)\b/i);
       if (tailSplit && tailSplit.index !== undefined && tailSplit.index > 20) {
         return {
-          learningActivities: compactText(`To facilitate pupil to ${withoutPrefix.slice(0, tailSplit.index)}`),
+          learningActivities: compactText(`${cleaned.match(/^to (?:facilitate|guide) pupils? to/i)?.[0] || 'To guide pupil to'} ${withoutPrefix.slice(0, tailSplit.index)}`),
           specificActivities: compactText(withoutPrefix.slice(tailSplit.index))
         };
       }
@@ -306,9 +314,19 @@
     if (!referenceMatch || referenceMatch.index === undefined) {
       return { reference: '', remaining: cleaned };
     }
+    const referenceTail = compactText(referenceMatch[0]);
+    const lowerTail = referenceTail.toLowerCase();
+    const boundaryHints = TOOL_HINTS.concat(ASSESSMENT_HINTS, [
+      'list of', 'model of', 'diagram of', 'first aid box', 'lens', 'source of light', 'garments', 'apparatus'
+    ]);
+    let boundary = -1;
+    boundaryHints.forEach((hint) => {
+      const index = lowerTail.indexOf(hint);
+      if (index > 10 && (boundary === -1 || index < boundary)) boundary = index;
+    });
     return {
-      reference: compactText(referenceMatch[0]),
-      remaining: compactText(cleaned.slice(0, referenceMatch.index))
+      reference: compactText(boundary === -1 ? referenceTail : referenceTail.slice(0, boundary)),
+      remaining: compactText(`${cleaned.slice(0, referenceMatch.index)} ${boundary === -1 ? '' : referenceTail.slice(boundary)}`)
     };
   }
 
@@ -354,7 +372,7 @@
     if (!cleaned) return -1;
 
     const candidates = [
-      /\bTo facilitate pupil to\b/gi,
+      /\bTo (?:facilitate|guide) pupils? to\b/gi,
       /\bDemonstrate\b/gi,
       /\bDevelop\b/gi,
       /\bApply\b/gi,
@@ -395,7 +413,7 @@
     const before = compactText(beforeText);
     const after = compactText(afterText);
 
-    const learningIndex = before.search(/to facilitate pupil to/i);
+    const learningIndex = before.search(/to (?:facilitate|guide) pupils? to/i);
     const competenceHead = learningIndex === -1 ? before : before.slice(0, learningIndex);
     const activityBody = learningIndex === -1 ? '' : before.slice(learningIndex);
 
@@ -421,7 +439,7 @@
     };
 
     if (!row.learningActivities && row.specificActivities) {
-      row.learningActivities = `To facilitate pupil to ${row.specificActivities}`;
+      row.learningActivities = `To guide pupil to ${row.specificActivities}`;
     }
 
     return row;
@@ -448,7 +466,7 @@
         const start = Math.max(0, (match.index || 0) - 180);
         const end = Math.min(tableText.length, (match.index || 0) + 260);
         const context = tableText.slice(start, end).toLowerCase();
-        return context.includes('facilitate') || containsAny(context, TOOL_HINTS) || containsAny(context, ASSESSMENT_HINTS);
+        return context.includes('facilitate') || context.includes('guide pupil') || containsAny(context, TOOL_HINTS) || containsAny(context, ASSESSMENT_HINTS);
       })
       .map((match) => ({
         index: match.index,

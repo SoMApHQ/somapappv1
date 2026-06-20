@@ -2459,6 +2459,8 @@
 
     function deriveSchemeTopic(row) {
       return (
+        toTitleTopic(row?.bookSubtopic) ||
+        toTitleTopic(row?.bookTopic) ||
         toTitleTopic(row?.learningActivities) ||
         toTitleTopic(row?.specificActivities) ||
         sentenceCase(row?.specificCompetence) ||
@@ -2698,10 +2700,16 @@
           subTopics: [],
           sources: new Set(),
           sourceLabels: new Set(),
-          searchTexts: new Set()
+          searchTexts: new Set(),
+          bookId: payload.bookId || '',
+          bookTitle: payload.bookTitle || '',
+          bookPage: payload.bookPage || ''
         };
       }
       const bundle = map[key];
+      if (!bundle.bookId && payload.bookId) bundle.bookId = payload.bookId;
+      if (!bundle.bookTitle && payload.bookTitle) bundle.bookTitle = payload.bookTitle;
+      if (!bundle.bookPage && payload.bookPage) bundle.bookPage = payload.bookPage;
       if (payload.sourceType) bundle.sources.add(payload.sourceType);
       if (payload.sourceLabel) bundle.sourceLabels.add(payload.sourceLabel);
       [topic, payload.subTopic, ...(payload.subTopics || []), ...(payload.searchTexts || [])]
@@ -2798,10 +2806,15 @@
             const topic = deriveSchemeTopic(row);
             addTopicBundleEntry(bundlesByKey, {
               topic,
-              subTopics: extractCandidateSubtopics(topic, stripTeacherLead(row?.specificActivities) || row?.specificCompetence || ''),
+              subTopics: row?.bookSubtopic
+                ? [compactTextBlock(row.bookSubtopic)]
+                : extractCandidateSubtopics(topic, stripTeacherLead(row?.specificActivities) || row?.specificCompetence || ''),
               sourceType: schemeType,
               sourceLabel: schemeType === 'teacher_scheme' ? 'Teacher scheme' : 'Academic scheme',
-              searchTexts: [row?.learningActivities, row?.specificActivities, row?.specificCompetence, row?.mainCompetence, row?.reference]
+              bookId: row?.bookId || '',
+              bookTitle: row?.bookTitle || '',
+              bookPage: row?.bookPage || '',
+              searchTexts: [row?.bookChapter, row?.bookTopic, row?.bookSubtopic, row?.learningActivities, row?.specificActivities, row?.specificCompetence, row?.mainCompetence, row?.reference]
             });
           });
         }
@@ -3304,9 +3317,51 @@
       const yearKey = String(getYear());
       const classKey = sanitizeKey(className).toLowerCase();
       const subjectKey = sanitizeKey(subjectName).toLowerCase();
-      const cacheKey = `${yearKey}::${classKey}::${subjectKey}`;
+      const schemeBook = lessonState.currentTopicBundle || null;
+      const cacheKey = `${yearKey}::${classKey}::${subjectKey}::${schemeBook?.bookId || 'auto'}`;
 
       let bookEntry = lessonState.classbooksCache[cacheKey] || null;
+
+      if (!bookEntry && schemeBook?.bookId) {
+        try {
+          const exactBookSnap = await db.ref(`books/${schemeBook.bookId}`).once('value');
+          if (exactBookSnap.exists() && isActiveClassbookEntry(exactBookSnap.val())) {
+            const exactBook = exactBookSnap.val();
+            bookEntry = {
+              ...exactBook,
+              title: exactBook.title || schemeBook.bookTitle || 'Classbook',
+              cloudinaryUrl: exactBook.url || exactBook.cloudinaryUrl || '',
+              bookId: schemeBook.bookId,
+              topics: Array.isArray(exactBook.topics) ? exactBook.topics : []
+            };
+          }
+        } catch (error) {
+          console.warn('Exact scheme book lookup failed:', error?.message || error);
+        }
+      }
+
+      if (!bookEntry && schemeBook?.bookId) {
+        const encodedClass = encodeURIComponent(className);
+        const exactIndexPaths = [
+          `class_books/${yearKey}/${encodedClass}/${schemeBook.bookId}`,
+          `class_books/${encodedClass}/${schemeBook.bookId}`
+        ];
+        for (const path of exactIndexPaths) {
+          try {
+            const exactIndexSnap = await db.ref(path).once('value');
+            if (!exactIndexSnap.exists() || !isActiveClassbookEntry(exactIndexSnap.val())) continue;
+            const exactBook = exactIndexSnap.val();
+            bookEntry = {
+              ...exactBook,
+              title: exactBook.title || schemeBook.bookTitle || 'Classbook',
+              cloudinaryUrl: exactBook.url || exactBook.cloudinaryUrl || '',
+              bookId: schemeBook.bookId,
+              topics: Array.isArray(exactBook.topics) ? exactBook.topics : []
+            };
+            break;
+          } catch (_error) {}
+        }
+      }
 
       if (!bookEntry) {
         try {
@@ -3384,6 +3439,18 @@
       }
 
       let matchedTopic = bestMatch && bestMatch.score >= 0.35 ? bestMatch.topic : null;
+      if (schemeBook?.bookPage) {
+        const page = Number(schemeBook.bookPage);
+        if (page > 0) {
+          matchedTopic = {
+            name: subTopicName || topicName,
+            pageStart: page,
+            pageEnd: page,
+            keywords: tokenize(`${topicName} ${subTopicName}`).slice(0, 12),
+            matchType: 'scheme_table_of_contents'
+          };
+        }
+      }
       const hasUrl = Boolean(bookEntry.cloudinaryUrl || bookEntry.url);
       const textSource = await loadBookTextSource(bookEntry);
       const hasImportSource = Boolean(hasUrl || textSource);
