@@ -112,12 +112,12 @@
 
         <hr class="my-4" />
 
-        <h2 class="text-lg font-semibold mb-3">2. Choose PDF file</h2>
+        <h2 class="text-lg font-semibold mb-3">2. Choose book file</h2>
 
-        <div id="fileDrop" class="file-drop" title="Click or drag and drop a PDF">
-          <div style="font-weight:700;color:var(--accent-1)">Drag & Drop PDF here</div>
+        <div id="fileDrop" class="file-drop" title="Click or drag and drop a PDF or Word document">
+          <div style="font-weight:700;color:var(--accent-1)">Drag & Drop PDF or Word file here</div>
           <div class="small">or click to browse — PDF only, max 9.5MB recommended</div>
-          <input id="fileInput" type="file" accept="application/pdf" style="display:none" />
+          <input id="fileInput" type="file" accept="application/pdf,.pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none" />
         </div>
 
         <div id="selectedMeta" class="mt-3" style="display:none">
@@ -126,13 +126,13 @@
           <span class="chip" id="fileType">PDF</span>
         </div>
 
-        <div class="mt-2 small muted">If your PDF is too large, SoMAp can try to compress it before upload.</div>
+        <div class="mt-2 small muted">If a PDF is too large, SoMAp will try to make it smaller before upload. Word files are saved for easier lesson-note text import.</div>
         <div id="compressionResult" class="mt-3" style="display:none"></div>
 
         <div class="mt-4">
-          <label class="small">Optional Word source for lesson notes (.docx)</label>
+          <label class="small">Optional second file for lesson notes (.docx)</label>
           <input id="wordFileInput" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="w-full px-3 py-2 rounded-md border mt-1" />
-          <div class="small muted-italic mt-1">Add the Word version when available. Lesson notes will use its text before trying PDF page extraction.</div>
+          <div class="small muted-italic mt-1">Use this only when your main file is PDF and you also have the Word version.</div>
           <div id="wordFileMeta" class="mt-2" style="display:none">
             <span class="chip" id="wordFileName">Book.docx</span>
             <span class="chip" id="wordFileSize">0 MB</span>
@@ -166,7 +166,7 @@
         <p class="small muted mb-3">Configure Cloudinary unsigned preset and optional parser webhook (saved locally).</p>
 
         <div class="space-y-3">
-          <div>
+          <div style="display:none">
             <label class="small">Cloudinary cloud name</label>
             <input id="cloudName" placeholder="dg7vnrkgd" class="w-full px-3 py-2 rounded-md border mt-1" />
             <div class="small muted-italic mt-1">Your Cloudinary cloud name (pre-filled). No secrets here.</div>
@@ -190,19 +190,19 @@
             <div class="small muted-italic mt-1">Optional header x-api-key for your parser.</div>
           </div>
 
-          <div>
+          <div style="display:none">
             <label class="small">Permanent delete endpoint (server only)</label>
             <input id="deleteEndpoint" placeholder="https://REGION-PROJECT.cloudfunctions.net/deleteCloudinaryBookAsset" class="w-full px-3 py-2 rounded-md border mt-1" />
             <div class="small muted-italic mt-1">Uses a signed backend function. Never put Cloudinary API secrets in this page.</div>
           </div>
 
-          <div>
+          <div style="display:none">
             <label class="small">PDF compression endpoint (server only)</label>
             <input id="compressionEndpoint" placeholder="https://REGION-PROJECT.cloudfunctions.net/compressPdfForUpload" class="w-full px-3 py-2 rounded-md border mt-1" />
             <div class="small muted-italic mt-1">Compresses oversized PDFs before Cloudinary upload.</div>
           </div>
 
-          <div>
+          <div style="display:none">
             <label class="small">Upload safe limit (MB)</label>
             <input id="uploadLimitMb" type="number" min="1" step="0.1" placeholder="9.5" class="w-full px-3 py-2 rounded-md border mt-1" />
             <div class="small muted-italic mt-1">Default is 9.5 MB, safely below the current Cloudinary 10 MB limit.</div>
@@ -337,12 +337,15 @@
     const editionInput = document.getElementById('edition');
     const descriptionInput = document.getElementById('description');
     const loggedEmail = document.getElementById('loggedEmail');
+    const fileDropHint = fileDrop ? fileDrop.querySelector('.small') : null;
+    if (fileDropHint) fileDropHint.textContent = 'or click to browse - PDF or DOCX accepted';
 
     let selectedFile = null;
     let originalSelectedFile = null;
     let selectedFileNeedsCompression = false;
     let selectedWordFile = null;
     let selectedWordText = '';
+    let wordExtractionPromise = Promise.resolve();
     let currentUser = null;
     let allManagedBooks = [];
     let replaceTarget = null;
@@ -487,21 +490,22 @@
     function handleFiles(files){
       if(!files || files.length===0) return;
       const f = files[0];
-      if(!f.name.toLowerCase().endsWith('.pdf') && f.type !== 'application/pdf'){ showError('Please upload a PDF file.'); return; }
+      if(!isPdfFile(f) && !isDocxFile(f)){ showError('Please choose a PDF or DOCX Word file.'); return; }
       if(f.size > MAX_FILE_SIZE){ showError('File too large. Keep file under ' + readableSize(MAX_FILE_SIZE)); return; }
       selectedFile = f;
       originalSelectedFile = f;
       fileNameEl.textContent = f.name;
       fileSizeEl.textContent = readableSize(f.size);
-      fileTypeEl.textContent = 'PDF';
+      fileTypeEl.textContent = primaryFileType(f);
       selectedMeta.style.display = 'flex';
+      if (isDocxFile(f)) handleWordFile(files);
       evaluateSelectedFileSize(f);
     }
 
     async function handleWordFile(files){
       if(!files || files.length===0) return;
       const f = files[0];
-      if(!f.name.toLowerCase().endsWith('.docx')){
+      if(!isDocxFile(f)){
         showError('Please choose a .docx Word file. Older .doc files should be saved as .docx first.');
         return;
       }
@@ -516,6 +520,7 @@
       if (wordTextStatus) wordTextStatus.textContent = 'Extracting text...';
       if (wordFileMeta) wordFileMeta.style.display = 'flex';
 
+      wordExtractionPromise = (async () => {
       try {
         if (!window.mammoth) throw new Error('Word text extractor failed to load. Check your internet connection and refresh.');
         const buffer = await f.arrayBuffer();
@@ -532,6 +537,8 @@
         if (wordTextStatus) wordTextStatus.textContent = 'Text extraction failed';
         showError('Word source selected, but text extraction failed: ' + (error.message || error));
       }
+      })();
+      await wordExtractionPromise;
     }
 
     function compactPlainText(value){
@@ -545,6 +552,13 @@
 
     function isPlaceholderEndpoint(endpoint){
       return !endpoint || /REGION-PROJECT|your-|example\.com/i.test(endpoint);
+    }
+    function isPdfFile(file){ return !!file && (file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')); }
+    function isDocxFile(file){ return !!file && (/\.docx$/i.test(file.name || '') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'); }
+    function primaryFileType(file){
+      if (isPdfFile(file)) return 'PDF';
+      if (isDocxFile(file)) return 'Word';
+      return 'File';
     }
 
     async function uploadRawFileToCloudinary(file, cloudName, uploadPreset, onProgress){
@@ -577,7 +591,7 @@
       if (!file) return;
       fileNameEl.textContent = file.name;
       fileSizeEl.textContent = readableSize(file.size);
-      if (file.size <= limit) {
+      if (!isPdfFile(file) || file.size <= limit) {
         selectedFileNeedsCompression = false;
         if (compressionResult) compressionResult.style.display = compressionResult.innerHTML ? 'block' : 'none';
         showMessage(el('<div class="small">Ready to upload. Fill book details then click <strong>Upload & Register Book</strong>.</div>'));
@@ -585,7 +599,7 @@
         return;
       }
       selectedFileNeedsCompression = true;
-      uploadBtn.disabled = true;
+      if (currentUser) uploadBtn.disabled = false;
       showOversizedPdfOptions(file, limit);
     }
 
@@ -594,18 +608,15 @@
         <div class="warn-box">
           <strong>This PDF is too large for the current upload limit.</strong>
           <div class="small mt-1">Selected: ${escapeHtml(file.name)} (${readableSize(file.size)}). Safe limit: ${readableSize(limit)}.</div>
-          <div class="small mt-1">Would you like SoMAp to compress it automatically?</div>
+          <div class="small mt-1">Click Upload. SoMAp will try to compress it automatically before saving.</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-            <button class="chip" id="compressPdfBtn" type="button">Compress Automatically</button>
             <button class="chip" id="chooseAnotherPdfBtn" type="button">Choose Another File</button>
             <button class="chip" id="cancelOversizedPdfBtn" type="button">Cancel</button>
           </div>
         </div>
       `));
-      const compressBtn = document.getElementById('compressPdfBtn');
       const chooseBtn = document.getElementById('chooseAnotherPdfBtn');
       const cancelBtn = document.getElementById('cancelOversizedPdfBtn');
-      if (compressBtn) compressBtn.addEventListener('click', compressSelectedPdf);
       if (chooseBtn) chooseBtn.addEventListener('click', ()=> fileInput.click());
       if (cancelBtn) cancelBtn.addEventListener('click', clearSelectedFile);
     }
@@ -616,6 +627,7 @@
       selectedFileNeedsCompression=false;
       selectedWordFile=null;
       selectedWordText='';
+      wordExtractionPromise = Promise.resolve();
       selectedMeta.style.display='none';
       if (wordFileMeta) wordFileMeta.style.display='none';
       fileInput.value='';
@@ -629,15 +641,25 @@
     }
 
     async function compressSelectedPdf(){
-      if (!selectedFile) { showError('Choose a PDF file first.'); return; }
+      if (!selectedFile) { showError('Choose a PDF or Word file first.'); return false; }
       const endpoint = (compressionEndpointInput.value || '').trim();
       if (isPlaceholderEndpoint(endpoint)) {
-        showError('PDF compression endpoint is not deployed/configured yet. Compress the PDF manually, or attach the .docx Word source so lesson notes can use the book text.');
-        return;
+        if (selectedWordFile && selectedWordFile !== selectedFile) {
+          selectedFile = selectedWordFile;
+          originalSelectedFile = selectedWordFile;
+          selectedFileNeedsCompression = false;
+          fileNameEl.textContent = selectedWordFile.name;
+          fileSizeEl.textContent = readableSize(selectedWordFile.size);
+          fileTypeEl.textContent = 'Word';
+          showMessage(el('<div class="warn-box">The PDF is too large, so SoMAp will save the Word version for this book and lesson notes.</div>'));
+          return true;
+        }
+        showError('This PDF is too large. Please choose a smaller PDF or choose the Word version of the book.');
+        return false;
       }
       if (!currentUser) {
         showError('Sign in as admin before compressing.');
-        return;
+        return false;
       }
 
       const sourceFile = originalSelectedFile || selectedFile;
@@ -691,8 +713,8 @@
           fileNameEl.textContent = sourceFile.name;
           fileSizeEl.textContent = readableSize(sourceFile.size);
           showError('Compression completed, but the file is still above the upload limit. Please compress further manually or upgrade the Cloudinary plan.');
-          uploadBtn.disabled = true;
-          return;
+          uploadBtn.disabled = false;
+          return false;
         }
 
         selectedFile = compressedFile;
@@ -703,11 +725,13 @@
         selectedMeta.style.display = 'flex';
         showSuccess(`Compression completed. ${escapeHtml(compressedFile.name)} is ready to upload.`);
         uploadBtn.disabled = false;
+        return true;
       } catch (error) {
         console.error(error);
         selectedFile = sourceFile;
         selectedFileNeedsCompression = true;
-        showError('Compression failed: ' + (error.message || error));
+        showError('Compression did not finish. Please choose a smaller PDF or choose the Word version of the book.');
+        return false;
       } finally {
         clearBtn.disabled = false;
         setProgress(0);
@@ -792,11 +816,12 @@
     /* ---------- Upload flow ---------- */
     uploadBtn.addEventListener('click', async ()=>{
       if(!currentUser){ showError('Not signed in. Sign in from main app then return to upload page.'); return; }
-      if(!selectedFile){ showError('Choose a PDF file first.'); return; }
-      if(selectedFileNeedsCompression || selectedFile.size > uploadLimitBytes()){
+      if(!selectedFile){ showError('Choose a PDF or Word file first.'); return; }
+      await wordExtractionPromise;
+      if(isPdfFile(selectedFile) && (selectedFileNeedsCompression || selectedFile.size > uploadLimitBytes())){
         selectedFileNeedsCompression = true;
-        showOversizedPdfOptions(selectedFile, uploadLimitBytes());
-        return;
+        const ready = await compressSelectedPdf();
+        if (!ready) return;
       }
 
       const title = titleInput.value.trim();
@@ -863,7 +888,9 @@
 
         if(!secureUrl) throw new Error('Cloudinary did not return a secure URL.');
 
-        if (selectedWordFile) {
+        if (selectedWordFile && selectedWordFile === selectedFile) {
+          wordUploadData = cloudData;
+        } else if (selectedWordFile) {
           try {
             showMessage(el('<div class="small">Uploading Word source for lesson notes...</div>'));
             wordUploadData = await uploadRawFileToCloudinary(selectedWordFile, cloudName, uploadPreset, (percent)=>{
@@ -891,6 +918,7 @@
           description: description || '',
           url: secureUrl,
           cloudinaryUrl: secureUrl,
+          primary_file_type: isDocxFile(selectedFile) ? 'docx' : 'pdf',
           public_id: publicId,
           asset_id: assetId,
           resource_type: resourceType,
@@ -1086,7 +1114,7 @@
         replaceTarget = null;
         updateReplaceBanner();
         selectedFile=null; originalSelectedFile=null; selectedFileNeedsCompression=false; selectedMeta.style.display='none';
-        selectedWordFile=null; selectedWordText=''; if (wordFileMeta) wordFileMeta.style.display='none'; if (wordFileInput) wordFileInput.value='';
+        selectedWordFile=null; selectedWordText=''; wordExtractionPromise = Promise.resolve(); if (wordFileMeta) wordFileMeta.style.display='none'; if (wordFileInput) wordFileInput.value='';
         if (compressionResult) { compressionResult.style.display='none'; compressionResult.innerHTML=''; }
         titleInput.value = ''; editionInput.value = ''; descriptionInput.value = ''; fileInput.value = '';
 
