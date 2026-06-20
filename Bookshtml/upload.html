@@ -40,6 +40,7 @@
     .muted{color:var(--muted);font-size:13px}
     .small{font-size:12px;color:var(--muted)}
     .chip{background:#f3f4f6;padding:6px 8px;border-radius:999px;font-size:12px;color:#111827;display:inline-block}
+    .chip[disabled]{opacity:.45;cursor:not-allowed}
     .progress{height:12px;background:#eef6fb;border-radius:999px;overflow:hidden}
     .progress>i{display:block;height:100%;background:linear-gradient(90deg,#ffd166,#f95d9b,#7c3aed);width:0%;transition:width 250ms ease}
     .success-box{border-left:4px solid #10b981;padding:10px;border-radius:8px;background:#f0fdf4;color:#064e3b}
@@ -367,6 +368,24 @@
     function savedPercent(originalSize, newSize){
       if (!originalSize || !newSize) return 0;
       return Math.max(0, Math.round(((originalSize - newSize) / originalSize) * 100));
+    }
+    function formatDateTime(ts){
+      const n = Number(ts || 0);
+      if (!n) return '';
+      return new Date(n).toLocaleString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    }
+    function bookFileTypeLabel(book){
+      const type = String(book && book.primary_file_type || '').toLowerCase();
+      const url = bookUrl(book).toLowerCase();
+      if (type === 'docx' || url.includes('.docx')) return 'Word book';
+      if (type === 'pdf' || url.includes('.pdf')) return 'PDF book';
+      return 'Book file';
     }
     function normalizeEmailKey(email){ if(!email) return ''; return email.replace(/\./g,'_'); } // matches your DB keys
     function activeStatus(book){ return String(book && book.status ? book.status : 'active').toLowerCase(); }
@@ -1190,20 +1209,28 @@
         row.className = 'manager-row';
         const status = activeStatus(book);
         const previousAssets = previousAssetEntries(book);
+        const replacedText = book.replacedAt ? `Replaced on ${escapeHtml(formatDateTime(book.replacedAt))}` : '';
+        const uploadedText = book.uploadedAt ? `Uploaded on ${escapeHtml(formatDateTime(book.uploadedAt))}` : '';
+        const fileType = bookFileTypeLabel(book);
+        const isArchived = status === 'archived';
+        const deleteHelp = isArchived ? 'Delete permanently' : 'Archive first';
         row.innerHTML = `
           <div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <strong>${escapeHtml(book.title || '(untitled)')}</strong>
               ${statusPill(status)}
+              <span class="chip">${escapeHtml(fileType)}</span>
+              ${replacedText ? `<span class="chip">${replacedText}</span>` : ''}
             </div>
             <div class="small muted">${escapeHtml(book.class || '')} &bull; ${escapeHtml(book.subject || '')} &bull; ${escapeHtml(getBookYear(book))}</div>
+            <div class="small muted">${uploadedText}${book.word_text_available ? ' &bull; Word text ready for lesson notes' : ''}</div>
             <div class="small muted">Book ID: <code>${escapeHtml(id)}</code>${previousAssets.length ? ` &bull; Previous assets: ${previousAssets.length}` : ''}</div>
           </div>
           <div class="manager-actions">
             <a class="chip" href="${escapeHtml(bookUrl(book))}" target="_blank">Open</a>
             <button class="chip" data-action="replace" data-id="${escapeHtml(id)}">Replace</button>
-            <button class="chip" data-action="archive" data-id="${escapeHtml(id)}">Archive</button>
-            <button class="chip danger-btn" data-action="delete" data-id="${escapeHtml(id)}">Delete Permanently</button>
+            ${isArchived ? `<span class="chip">Hidden from SoMAp</span>` : `<button class="chip" data-action="archive" data-id="${escapeHtml(id)}">Archive / Hide</button>`}
+            <button class="chip danger-btn" data-action="delete" data-id="${escapeHtml(id)}" ${isArchived ? '' : 'disabled'} title="${escapeHtml(deleteHelp)}">${escapeHtml(deleteHelp)}</button>
             ${previousAssets.length ? `<button class="chip" data-action="deletePrevious" data-id="${escapeHtml(id)}">Delete Previous Asset</button>` : ''}
           </div>`;
         bookManagerList.appendChild(row);
@@ -1214,6 +1241,10 @@
       bookManagerList.addEventListener('click', async (event) => {
         const btn = event.target.closest('button[data-action]');
         if (!btn) return;
+        if (btn.disabled) {
+          showError('Archive / Hide this book first. After it is hidden from SoMAp, permanent delete becomes available.');
+          return;
+        }
         const id = btn.dataset.id;
         const entry = allManagedBooks.find(item => item.id === id);
         if (!entry) return;
@@ -1249,10 +1280,10 @@
     async function archiveBook(entry){
       const b = entry.book || {};
       const ok = await confirmDanger({
-        title: 'Archive book',
-        body: `Archive <strong>${escapeHtml(b.title || entry.id)}</strong>?<br>Class: ${escapeHtml(b.class || '')}<br>Subject: ${escapeHtml(b.subject || '')}<br>Year: ${escapeHtml(getBookYear(b))}<br><br>This hides the book from lesson notes but keeps the Cloudinary file.`,
-        requiredText: 'ARCHIVE',
-        buttonText: 'Archive'
+        title: 'Archive / hide book',
+        body: `Hide <strong>${escapeHtml(b.title || entry.id)}</strong> from SoMAp?<br>Class: ${escapeHtml(b.class || '')}<br>Subject: ${escapeHtml(b.subject || '')}<br>Year: ${escapeHtml(getBookYear(b))}<br><br>Teachers and learners will stop seeing this book. The Cloudinary file is kept until permanent delete is available.`,
+        requiredText: '',
+        buttonText: 'Archive / Hide'
       });
       if (!ok) return;
       const archivedBook = {
@@ -1275,12 +1306,12 @@
     async function deleteWholeBook(entry){
       const b = entry.book || {};
       if (activeStatus(b) !== 'archived') {
-        showError('Archive the book first before permanent deletion. This prevents accidental loss from lesson notes.');
+        showError('Archive / Hide this book first. Then permanent delete becomes available.');
         return;
       }
       const endpoint = (deleteEndpointInput.value || '').trim();
-      if (!endpoint) {
-        showError('Set the Permanent delete endpoint first. Browser-only Cloudinary deletion is intentionally blocked.');
+      if (isPlaceholderEndpoint(endpoint)) {
+        showError('Permanent Cloudinary delete is not connected yet. This book is already hidden from SoMAp after archive.');
         return;
       }
       const asset = assetFromBook(b);
@@ -1342,13 +1373,16 @@
       confirmBody.innerHTML = body;
       confirmTypeInput.value = '';
       confirmOkBtn.textContent = buttonText || 'Confirm';
-      confirmOkBtn.disabled = true;
+      const required = String(requiredText || '');
+      confirmOkBtn.disabled = Boolean(required);
+      const label = document.getElementById('confirmTypeLabel');
+      if (label) label.style.display = required ? 'block' : 'none';
+      confirmTypeInput.style.display = required ? 'block' : 'none';
       confirmModal.classList.add('open');
-      setTimeout(()=>confirmTypeInput.focus(), 0);
-      const required = String(requiredText || 'DELETE');
+      setTimeout(()=> required ? confirmTypeInput.focus() : confirmOkBtn.focus(), 0);
       return new Promise(resolve => {
         confirmResolver = resolve;
-        confirmTypeInput.oninput = () => { confirmOkBtn.disabled = confirmTypeInput.value.trim() !== required; };
+        confirmTypeInput.oninput = () => { confirmOkBtn.disabled = required && confirmTypeInput.value.trim() !== required; };
       });
     }
     if (confirmCancelBtn) confirmCancelBtn.addEventListener('click', ()=> closeConfirm(false));
