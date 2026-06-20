@@ -43,8 +43,20 @@
     .progress>i{display:block;height:100%;background:linear-gradient(90deg,#ffd166,#f95d9b,#7c3aed);width:0%;transition:width 250ms ease}
     .success-box{border-left:4px solid #10b981;padding:10px;border-radius:8px;background:#f0fdf4;color:#064e3b}
     .error-box{border-left:4px solid #ef4444;padding:10px;border-radius:8px;background:#fff1f2;color:#7f1d1d}
+    .warn-box{border-left:4px solid #f59e0b;padding:10px;border-radius:8px;background:#fffbeb;color:#78350f}
     .muted-italic{color:var(--muted);font-style:italic}
+    .danger-btn{background:#dc2626;color:#fff}
+    .status-pill{font-size:11px;font-weight:800;border-radius:999px;padding:4px 8px;text-transform:uppercase}
+    .status-active{background:#dcfce7;color:#166534}
+    .status-archived{background:#fef3c7;color:#92400e}
+    .status-deleted{background:#fee2e2;color:#991b1b}
+    .manager-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;padding:10px;border:1px solid #e5e7eb;border-radius:10px;background:#fff}
+    .manager-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+    .modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.55);display:none;align-items:center;justify-content:center;padding:18px;z-index:50}
+    .modal-backdrop.open{display:flex}
+    .modal-panel{width:min(620px,100%);background:#fff;border-radius:12px;padding:18px;box-shadow:0 24px 70px rgba(15,23,42,.28)}
     @media(max-width:1000px){.layout-grid{grid-template-columns:1fr!important}}
+    @media(max-width:720px){.manager-row{grid-template-columns:1fr}.manager-actions{justify-content:flex-start}}
   </style>
 </head>
 <body>
@@ -162,6 +174,12 @@
             <input id="parserApiKey" placeholder="secret-api-key (server-side only)" class="w-full px-3 py-2 rounded-md border mt-1" />
             <div class="small muted-italic mt-1">Optional header x-api-key for your parser.</div>
           </div>
+
+          <div>
+            <label class="small">Permanent delete endpoint (server only)</label>
+            <input id="deleteEndpoint" placeholder="https://REGION-PROJECT.cloudfunctions.net/deleteCloudinaryBookAsset" class="w-full px-3 py-2 rounded-md border mt-1" />
+            <div class="small muted-italic mt-1">Uses a signed backend function. Never put Cloudinary API secrets in this page.</div>
+          </div>
         </div>
 
         <hr class="my-4" />
@@ -183,6 +201,44 @@
     </div>
 
     <footer class="mt-6 muted">SoMAp — MnyoreBooks • somapv2i.com</footer>
+    <section class="card mt-5">
+      <div class="flex items-center gap-3 mb-3" style="justify-content:space-between;flex-wrap:wrap">
+        <div>
+          <h2 class="text-lg font-semibold">Book Manager</h2>
+          <p class="small muted">Replace, archive, or permanently delete books without breaking lesson notes. Replacement keeps the same Firebase book ID.</p>
+        </div>
+        <button id="refreshManagerBtn" class="px-3 py-2 rounded-md border"><i class="fas fa-rotate mr-2"></i>Refresh</button>
+      </div>
+
+      <div class="grid" style="grid-template-columns:1fr 180px;gap:12px">
+        <input id="bookSearchInput" type="search" placeholder="Search by title, class, subject, year, or status" class="w-full px-3 py-2 rounded-md border" />
+        <select id="bookStatusFilter" class="w-full px-3 py-2 rounded-md border">
+          <option value="all">All statuses</option>
+          <option value="active">Active</option>
+          <option value="archived">Archived</option>
+          <option value="deleted">Deleted</option>
+        </select>
+      </div>
+
+      <div id="replaceModeBanner" class="warn-box mt-3" style="display:none"></div>
+      <div id="bookManagerList" class="mt-4" style="display:flex;flex-direction:column;gap:10px">
+        <div class="small muted">Loading books...</div>
+      </div>
+    </section>
+
+  </div>
+
+  <div id="confirmModal" class="modal-backdrop" role="dialog" aria-modal="true">
+    <div class="modal-panel">
+      <h3 id="confirmTitle" class="text-lg font-semibold mb-2">Confirm</h3>
+      <div id="confirmBody" class="small" style="line-height:1.6"></div>
+      <label id="confirmTypeLabel" class="small mt-4 block">Type DELETE to continue</label>
+      <input id="confirmTypeInput" class="w-full px-3 py-2 rounded-md border mt-1" />
+      <div class="flex gap-2 mt-4" style="justify-content:flex-end;flex-wrap:wrap">
+        <button id="confirmCancelBtn" class="px-3 py-2 rounded-md border">Cancel</button>
+        <button id="confirmOkBtn" class="px-3 py-2 rounded-md danger-btn" disabled>Confirm</button>
+      </div>
+    </div>
   </div>
 
   <!-- SCRIPT: logic & interactions -->
@@ -226,7 +282,19 @@
     const uploadPresetInput = document.getElementById('uploadPreset');
     const parserWebhookInput = document.getElementById('parserWebhook');
     const parserApiKeyInput = document.getElementById('parserApiKey');
+    const deleteEndpointInput = document.getElementById('deleteEndpoint');
     const recentList = document.getElementById('recentList');
+    const bookManagerList = document.getElementById('bookManagerList');
+    const bookSearchInput = document.getElementById('bookSearchInput');
+    const bookStatusFilter = document.getElementById('bookStatusFilter');
+    const refreshManagerBtn = document.getElementById('refreshManagerBtn');
+    const replaceModeBanner = document.getElementById('replaceModeBanner');
+    const confirmModal = document.getElementById('confirmModal');
+    const confirmTitle = document.getElementById('confirmTitle');
+    const confirmBody = document.getElementById('confirmBody');
+    const confirmTypeInput = document.getElementById('confirmTypeInput');
+    const confirmOkBtn = document.getElementById('confirmOkBtn');
+    const confirmCancelBtn = document.getElementById('confirmCancelBtn');
 
     const classSelect = document.getElementById('classSelect');
     const subjectSelect = document.getElementById('subjectSelect');
@@ -237,6 +305,9 @@
 
     let selectedFile = null;
     let currentUser = null;
+    let allManagedBooks = [];
+    let replaceTarget = null;
+    let confirmResolver = null;
 
     /* ---------- helpers ---------- */
     function el(html){ const d=document.createElement('div'); d.innerHTML=html; return d.firstElementChild; }
@@ -246,6 +317,81 @@
     function setProgress(p){ progressBar.style.width = Math.max(0,Math.min(100,p)) + '%'; }
     function readableSize(bytes){ return (bytes/1024/1024).toFixed(2) + ' MB'; }
     function normalizeEmailKey(email){ if(!email) return ''; return email.replace(/\./g,'_'); } // matches your DB keys
+    function activeStatus(book){ return String(book && book.status ? book.status : 'active').toLowerCase(); }
+    function isHiddenBook(book){ const s = activeStatus(book); return s === 'archived' || s === 'deleted'; }
+    function bookUrl(book){ return (book && (book.url || book.cloudinaryUrl || book.secure_url)) || ''; }
+    function getBookYear(book){ return String((book && (book.year || book.academicYear)) || new Date().getFullYear()); }
+    function encodedClassKey(cls){ return encodeURIComponent(cls || ''); }
+    function firebaseSafeKey(value){ return String(value || '').replace(/[.#$\[\]]/g, '_'); }
+    function statusPill(status){
+      const safe = String(status || 'active').toLowerCase();
+      const cls = safe === 'archived' ? 'status-archived' : safe === 'deleted' ? 'status-deleted' : 'status-active';
+      return `<span class="status-pill ${cls}">${escapeHtml(safe)}</span>`;
+    }
+    function currentUserKey(){ return normalizeEmailKey(currentUser && currentUser.email); }
+    function currentUserEmail(){ return (currentUser && currentUser.email) || ''; }
+    function assetFromBook(book){
+      return {
+        asset_id: book && (book.asset_id || book.cloudinary_asset_id || ''),
+        public_id: book && (book.public_id || book.cloudinary_public_id || ''),
+        resource_type: book && (book.resource_type || 'raw'),
+        secure_url: bookUrl(book),
+        version: book && (book.version || '')
+      };
+    }
+    function classBookIndexPayload(book){
+      return {
+        title: book.title || '',
+        subject: book.subject || '',
+        url: bookUrl(book),
+        cloudinaryUrl: bookUrl(book),
+        uploadedAt: book.uploadedAt || Date.now(),
+        updatedAt: book.updatedAt || Date.now(),
+        year: getBookYear(book),
+        edition: book.edition || '',
+        status: activeStatus(book),
+        cloudinary_public_id: book.public_id || book.cloudinary_public_id || '',
+        asset_id: book.asset_id || book.cloudinary_asset_id || ''
+      };
+    }
+    async function writeClassBookIndexes(bookId, book, previousBook){
+      const updates = {};
+      const cls = book.class || '';
+      const year = getBookYear(book);
+      if (cls) {
+        updates[`class_books/${year}/${encodedClassKey(cls)}/${bookId}`] = classBookIndexPayload(book);
+        updates[`class_books/${encodedClassKey(cls)}/${bookId}`] = classBookIndexPayload(book);
+      }
+      const classIndexKey = firebaseSafeKey(cls).toLowerCase();
+      const subjectIndexKey = firebaseSafeKey(book.subject || '').toLowerCase();
+      if (classIndexKey && subjectIndexKey) {
+        updates[`classbooksIndex/${year}/${classIndexKey}/${subjectIndexKey}`] = {
+          ...classBookIndexPayload(book),
+          bookId: bookId,
+          class: cls
+        };
+      }
+      if (previousBook && previousBook.class && previousBook.class !== cls) {
+        const oldYear = getBookYear(previousBook);
+        updates[`class_books/${oldYear}/${encodedClassKey(previousBook.class)}/${bookId}`] = null;
+        updates[`class_books/${encodedClassKey(previousBook.class)}/${bookId}`] = null;
+      }
+      if (previousBook && (previousBook.class !== cls || previousBook.subject !== book.subject || getBookYear(previousBook) !== year)) {
+        const oldClassIndexKey = firebaseSafeKey(previousBook.class || '').toLowerCase();
+        const oldSubjectIndexKey = firebaseSafeKey(previousBook.subject || '').toLowerCase();
+        const oldYear = getBookYear(previousBook);
+        if (oldClassIndexKey && oldSubjectIndexKey) {
+          updates[`classbooksIndex/${oldYear}/${oldClassIndexKey}/${oldSubjectIndexKey}`] = null;
+        }
+      }
+      await firebase.database().ref().update(updates);
+    }
+    function previousAssetEntries(book){
+      const raw = book && book.previousAssets;
+      if (!raw) return [];
+      if (Array.isArray(raw)) return raw.map((asset, index)=>[String(index), asset]).filter(([,asset])=>asset);
+      return Object.entries(raw);
+    }
 
     /* ---------- UI init ---------- */
     function populateClasses(){
@@ -321,8 +467,10 @@
       const up = localStorage.getItem('uploadPreset') || DEFAULT_UPLOAD_PRESET;
       const ph = localStorage.getItem('parserWebhook') || '';
       const pak = localStorage.getItem('parserApiKey') || '';
+      const delEndpoint = localStorage.getItem('deleteEndpoint') || '';
       cloudNameInput.value = cN; uploadPresetInput.value = up;
       parserWebhookInput.value = ph; parserApiKeyInput.value = pak;
+      deleteEndpointInput.value = delEndpoint;
       PARSER_WEBHOOK = ph; PARSER_API_KEY = pak;
 
       // auth state
@@ -349,9 +497,14 @@
       uploadPresetInput.addEventListener('change', ()=> localStorage.setItem('uploadPreset', uploadPresetInput.value.trim()));
       parserWebhookInput.addEventListener('change', ()=> { localStorage.setItem('parserWebhook', parserWebhookInput.value.trim()); PARSER_WEBHOOK = parserWebhookInput.value.trim(); });
       parserApiKeyInput.addEventListener('change', ()=> { localStorage.setItem('parserApiKey', parserApiKeyInput.value.trim()); PARSER_API_KEY = parserApiKeyInput.value.trim(); });
+      deleteEndpointInput.addEventListener('change', ()=> localStorage.setItem('deleteEndpoint', deleteEndpointInput.value.trim()));
+      if (bookSearchInput) bookSearchInput.addEventListener('input', renderBookManager);
+      if (bookStatusFilter) bookStatusFilter.addEventListener('change', renderBookManager);
+      if (refreshManagerBtn) refreshManagerBtn.addEventListener('click', loadBookManager);
 
       // initial load recent uploads
       renderRecentUploads();
+      loadBookManager();
     });
 
     function disableAll(){ uploadBtn.disabled = true; clearBtn.disabled = false; }
@@ -418,6 +571,9 @@
         const cloudData = uploadResult;
         const secureUrl = cloudData.secure_url || cloudData.url;
         const publicId = cloudData.public_id || '';
+        const assetId = cloudData.asset_id || '';
+        const resourceType = cloudData.resource_type || 'raw';
+        const version = cloudData.version || '';
 
         if(!secureUrl) throw new Error('Cloudinary did not return a secure URL.');
 
@@ -436,28 +592,57 @@
           year: yearToUse,
           description: description || '',
           url: secureUrl,
+          cloudinaryUrl: secureUrl,
+          public_id: publicId,
+          asset_id: assetId,
+          resource_type: resourceType,
+          version: version,
           cloudinary_public_id: publicId,
           uploadedBy: normalizeEmailKey(currentUser.email),
           uploadedByEmail: currentUser.email,
           uploadedAt: Date.now(),
+          updatedAt: Date.now(),
+          updatedBy: normalizeEmailKey(currentUser.email),
+          updatedByEmail: currentUser.email,
+          status: 'active',
           paid: 0,
           required: 0
         };
 
-        // Write to /books
-        const newBookRef = await firebase.database().ref('books').push(bookMeta);
-        const bookId = newBookRef.key;
+        let bookId = '';
+        let previousBook = null;
+        if (replaceTarget && replaceTarget.id) {
+          bookId = replaceTarget.id;
+          previousBook = replaceTarget.book || {};
+          const previousAsset = {
+            ...assetFromBook(previousBook),
+            title: previousBook.title || '',
+            class: previousBook.class || '',
+            subject: previousBook.subject || '',
+            year: getBookYear(previousBook),
+            replacedAt: Date.now(),
+            replacedBy: currentUserKey(),
+            replacedByEmail: currentUserEmail()
+          };
+          await firebase.database().ref(`books/${bookId}`).update({
+            ...bookMeta,
+            uploadedAt: previousBook.uploadedAt || bookMeta.uploadedAt,
+            uploadedBy: previousBook.uploadedBy || bookMeta.uploadedBy,
+            uploadedByEmail: previousBook.uploadedByEmail || bookMeta.uploadedByEmail,
+            replacedAt: Date.now(),
+            replacedBy: currentUserKey(),
+            replacedByEmail: currentUserEmail()
+          });
+          if (previousAsset.asset_id || previousAsset.public_id || previousAsset.secure_url) {
+            await firebase.database().ref(`books/${bookId}/previousAssets`).push(previousAsset);
+          }
+        } else {
+          const newBookRef = await firebase.database().ref('books').push(bookMeta);
+          bookId = newBookRef.key;
+        }
 
-        // Index by class for quick retrieval (with year and without year for backward compatibility)
         try {
-          // Store with year for year-based access (primary storage)
-          await firebase.database().ref(`class_books/${yearToUse}/${encodeURIComponent(cls)}/${bookId}`).set({
-            title, subject, url: secureUrl, uploadedAt: Date.now(), year: yearToUse, edition: edition || ''
-          });
-          // Also store without year for legacy/fallback access
-          await firebase.database().ref(`class_books/${encodeURIComponent(cls)}/${bookId}`).set({
-            title, subject, url: secureUrl, uploadedAt: Date.now(), year: yearToUse, edition: edition || ''
-          });
+          await writeClassBookIndexes(bookId, bookMeta, previousBook);
         } catch(err){
           console.warn('Failed to index class_books', err);
         }
@@ -545,7 +730,8 @@
         }
 
         setProgress(100);
-        showSuccess(`Uploaded & registered book: <strong>${title}</strong>. Available to <strong>${cls}</strong>. Book ID: <code>${bookId}</code>`);
+        const actionLabel = previousBook ? 'Replaced and kept same book record' : 'Uploaded & registered book';
+        showSuccess(`${actionLabel}: <strong>${title}</strong>. Available to <strong>${cls}</strong>. Book ID: <code>${bookId}</code>`);
 
         // Quick actions UI
         const actions = document.createElement('div');
@@ -577,11 +763,14 @@
         }
 
         // Reset form (keep cloud settings)
+        replaceTarget = null;
+        updateReplaceBanner();
         selectedFile=null; selectedMeta.style.display='none';
         titleInput.value = ''; editionInput.value = ''; descriptionInput.value = ''; fileInput.value = '';
 
         // refresh list
         renderRecentUploads();
+        loadBookManager();
 
       } catch(err){
         console.error(err);
@@ -595,7 +784,230 @@
     // Clear button
     clearBtn.addEventListener('click', ()=> {
       selectedFile=null; selectedMeta.style.display='none'; fileInput.value=''; messages.innerHTML=''; setProgress(0);
+      replaceTarget=null; updateReplaceBanner();
     });
+
+    function updateReplaceBanner(){
+      if (!replaceModeBanner) return;
+      if (!replaceTarget) {
+        replaceModeBanner.style.display = 'none';
+        replaceModeBanner.innerHTML = '';
+        uploadBtn.innerHTML = '<i class="fas fa-cloud-upload-alt mr-2"></i> Upload & Register Book';
+        return;
+      }
+      const b = replaceTarget.book || {};
+      replaceModeBanner.style.display = 'block';
+      replaceModeBanner.innerHTML = `Replace mode: uploading will update <strong>${escapeHtml(b.title || replaceTarget.id)}</strong> and keep book ID <code>${escapeHtml(replaceTarget.id)}</code>. <button id="cancelReplaceBtn" class="chip" type="button">Cancel replace</button>`;
+      uploadBtn.innerHTML = '<i class="fas fa-arrows-rotate mr-2"></i> Upload & Replace Book';
+      const cancelBtn = document.getElementById('cancelReplaceBtn');
+      if (cancelBtn) cancelBtn.addEventListener('click', ()=>{ replaceTarget=null; updateReplaceBanner(); });
+    }
+
+    async function loadBookManager(){
+      if (!bookManagerList) return;
+      bookManagerList.innerHTML = '<div class="small muted">Loading books...</div>';
+      try {
+        const snap = await firebase.database().ref('books').orderByChild('uploadedAt').once('value');
+        const books = snap.val() || {};
+        allManagedBooks = Object.entries(books)
+          .map(([id, book]) => ({ id, book: book || {} }))
+          .sort((a,b)=> (b.book.updatedAt || b.book.uploadedAt || 0) - (a.book.updatedAt || a.book.uploadedAt || 0));
+        renderBookManager();
+      } catch (e) {
+        console.error(e);
+        bookManagerList.innerHTML = '<div class="small muted">Failed to load books.</div>';
+      }
+    }
+
+    function renderBookManager(){
+      if (!bookManagerList) return;
+      const query = (bookSearchInput && bookSearchInput.value || '').toLowerCase().trim();
+      const statusFilter = (bookStatusFilter && bookStatusFilter.value) || 'all';
+      const filtered = allManagedBooks.filter(({book}) => {
+        const status = activeStatus(book);
+        if (statusFilter !== 'all' && status !== statusFilter) return false;
+        if (!query) return true;
+        const haystack = [book.title, book.class, book.subject, getBookYear(book), status].join(' ').toLowerCase();
+        return haystack.includes(query);
+      });
+      if (!filtered.length) {
+        bookManagerList.innerHTML = '<div class="small muted">No books match this filter.</div>';
+        return;
+      }
+      bookManagerList.innerHTML = '';
+      filtered.forEach(({id, book}) => {
+        const row = document.createElement('div');
+        row.className = 'manager-row';
+        const status = activeStatus(book);
+        const previousAssets = previousAssetEntries(book);
+        row.innerHTML = `
+          <div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <strong>${escapeHtml(book.title || '(untitled)')}</strong>
+              ${statusPill(status)}
+            </div>
+            <div class="small muted">${escapeHtml(book.class || '')} &bull; ${escapeHtml(book.subject || '')} &bull; ${escapeHtml(getBookYear(book))}</div>
+            <div class="small muted">Book ID: <code>${escapeHtml(id)}</code>${previousAssets.length ? ` &bull; Previous assets: ${previousAssets.length}` : ''}</div>
+          </div>
+          <div class="manager-actions">
+            <a class="chip" href="${escapeHtml(bookUrl(book))}" target="_blank">Open</a>
+            <button class="chip" data-action="replace" data-id="${escapeHtml(id)}">Replace</button>
+            <button class="chip" data-action="archive" data-id="${escapeHtml(id)}">Archive</button>
+            <button class="chip danger-btn" data-action="delete" data-id="${escapeHtml(id)}">Delete Permanently</button>
+            ${previousAssets.length ? `<button class="chip" data-action="deletePrevious" data-id="${escapeHtml(id)}">Delete Previous Asset</button>` : ''}
+          </div>`;
+        bookManagerList.appendChild(row);
+      });
+    }
+
+    if (bookManagerList) {
+      bookManagerList.addEventListener('click', async (event) => {
+        const btn = event.target.closest('button[data-action]');
+        if (!btn) return;
+        const id = btn.dataset.id;
+        const entry = allManagedBooks.find(item => item.id === id);
+        if (!entry) return;
+        const action = btn.dataset.action;
+        try {
+          if (action === 'replace') startReplaceFlow(entry);
+          if (action === 'archive') await archiveBook(entry);
+          if (action === 'delete') await deleteWholeBook(entry);
+          if (action === 'deletePrevious') await chooseAndDeletePreviousAsset(entry);
+        } catch (error) {
+          console.error(error);
+          showError(error.message || String(error));
+        }
+      });
+    }
+
+    function startReplaceFlow(entry){
+      replaceTarget = entry;
+      const b = entry.book || {};
+      titleInput.value = b.title || '';
+      classSelect.value = b.class || classSelect.value;
+      populateSubjects();
+      subjectSelect.value = b.subject || subjectSelect.value;
+      const academicYearSelect = document.getElementById('academicYear');
+      if (academicYearSelect) academicYearSelect.value = getBookYear(b);
+      editionInput.value = b.edition || '';
+      descriptionInput.value = b.description || '';
+      updateReplaceBanner();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      showMessage(el('<div class="warn-box">Choose the new clean PDF, then click <strong>Upload & Replace Book</strong>. The same Firebase book ID will be kept.</div>'));
+    }
+
+    async function archiveBook(entry){
+      const b = entry.book || {};
+      const ok = await confirmDanger({
+        title: 'Archive book',
+        body: `Archive <strong>${escapeHtml(b.title || entry.id)}</strong>?<br>Class: ${escapeHtml(b.class || '')}<br>Subject: ${escapeHtml(b.subject || '')}<br>Year: ${escapeHtml(getBookYear(b))}<br><br>This hides the book from lesson notes but keeps the Cloudinary file.`,
+        requiredText: 'ARCHIVE',
+        buttonText: 'Archive'
+      });
+      if (!ok) return;
+      const archivedBook = {
+        ...b,
+        status: 'archived',
+        archivedAt: Date.now(),
+        archivedBy: currentUserKey(),
+        archivedByEmail: currentUserEmail(),
+        updatedAt: Date.now(),
+        updatedBy: currentUserKey(),
+        updatedByEmail: currentUserEmail()
+      };
+      await firebase.database().ref(`books/${entry.id}`).update(archivedBook);
+      await writeClassBookIndexes(entry.id, archivedBook, b);
+      showSuccess(`Archived <strong>${escapeHtml(b.title || entry.id)}</strong>. Lesson notes will ignore it.`);
+      await loadBookManager();
+      await renderRecentUploads();
+    }
+
+    async function deleteWholeBook(entry){
+      const b = entry.book || {};
+      if (activeStatus(b) !== 'archived') {
+        showError('Archive the book first before permanent deletion. This prevents accidental loss from lesson notes.');
+        return;
+      }
+      const endpoint = (deleteEndpointInput.value || '').trim();
+      if (!endpoint) {
+        showError('Set the Permanent delete endpoint first. Browser-only Cloudinary deletion is intentionally blocked.');
+        return;
+      }
+      const asset = assetFromBook(b);
+      const ok = await confirmDanger({
+        title: 'Delete book permanently',
+        body: `This permanently deletes from Cloudinary and removes Firebase indexes.<br><br><strong>${escapeHtml(b.title || entry.id)}</strong><br>Class: ${escapeHtml(b.class || '')}<br>Subject: ${escapeHtml(b.subject || '')}<br>Year: ${escapeHtml(getBookYear(b))}<br>Asset ID: <code>${escapeHtml(asset.asset_id || 'none')}</code><br>Public ID: <code>${escapeHtml(asset.public_id || 'none')}</code><br><br>This cannot be undone.`,
+        requiredText: 'DELETE',
+        buttonText: 'Delete Permanently'
+      });
+      if (!ok) return;
+      await callDeleteEndpoint(endpoint, { action: 'deleteBook', bookId: entry.id, asset, reason: 'admin permanent book delete' });
+      showSuccess(`Permanent deletion requested for <strong>${escapeHtml(b.title || entry.id)}</strong>.`);
+      await loadBookManager();
+      await renderRecentUploads();
+    }
+
+    async function chooseAndDeletePreviousAsset(entry){
+      const previousAssets = previousAssetEntries(entry.book);
+      if (!previousAssets.length) {
+        showError('No previous asset is stored for this book.');
+        return;
+      }
+      const [assetKey, asset] = previousAssets[previousAssets.length - 1];
+      const endpoint = (deleteEndpointInput.value || '').trim();
+      if (!endpoint) {
+        showError('Set the Permanent delete endpoint first. Browser-only Cloudinary deletion is intentionally blocked.');
+        return;
+      }
+      const ok = await confirmDanger({
+        title: 'Delete previous asset permanently',
+        body: `This deletes the previous replaced Cloudinary file only. The current book stays active.<br><br>Book: <strong>${escapeHtml(entry.book.title || entry.id)}</strong><br>Previous asset ID: <code>${escapeHtml(asset.asset_id || 'none')}</code><br>Previous public ID: <code>${escapeHtml(asset.public_id || 'none')}</code><br><br>This cannot be undone.`,
+        requiredText: 'DELETE',
+        buttonText: 'Delete Previous Asset'
+      });
+      if (!ok) return;
+      await callDeleteEndpoint(endpoint, { action: 'deletePreviousAsset', bookId: entry.id, previousAssetKey: assetKey, asset, reason: 'admin previous asset cleanup' });
+      showSuccess('Previous Cloudinary asset deleted and removed from previousAssets.');
+      await loadBookManager();
+    }
+
+    async function callDeleteEndpoint(endpoint, payload){
+      if (!currentUser) throw new Error('Not signed in.');
+      const token = await currentUser.getIdToken();
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json().catch(()=>({}));
+      if (!res.ok || data.ok === false) {
+        throw new Error(data.error || `Delete endpoint failed with HTTP ${res.status}`);
+      }
+      return data;
+    }
+
+    function confirmDanger({ title, body, requiredText, buttonText }){
+      if (!confirmModal) return Promise.resolve(false);
+      confirmTitle.textContent = title;
+      confirmBody.innerHTML = body;
+      confirmTypeInput.value = '';
+      confirmOkBtn.textContent = buttonText || 'Confirm';
+      confirmOkBtn.disabled = true;
+      confirmModal.classList.add('open');
+      setTimeout(()=>confirmTypeInput.focus(), 0);
+      const required = String(requiredText || 'DELETE');
+      return new Promise(resolve => {
+        confirmResolver = resolve;
+        confirmTypeInput.oninput = () => { confirmOkBtn.disabled = confirmTypeInput.value.trim() !== required; };
+      });
+    }
+    if (confirmCancelBtn) confirmCancelBtn.addEventListener('click', ()=> closeConfirm(false));
+    if (confirmOkBtn) confirmOkBtn.addEventListener('click', ()=> closeConfirm(true));
+    function closeConfirm(value){
+      if (confirmModal) confirmModal.classList.remove('open');
+      if (confirmResolver) confirmResolver(value);
+      confirmResolver = null;
+    }
 
     /* ---------- Recent uploads ---------- */
     async function renderRecentUploads(){
