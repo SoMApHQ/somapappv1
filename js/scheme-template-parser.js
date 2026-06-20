@@ -514,6 +514,76 @@
     }, {});
   }
 
+  function normalizedMonth(value) {
+    const text = String(value || '').toUpperCase().replace(/[^A-Z0-9/&-]+/g, ' ').trim();
+    const compact = text.replace(/[^A-Z]/g, '');
+    const aliases = [
+      ['JANUARY', 'JAN'], ['FEBRUARY', 'FEB'], ['MARCH', 'MAR'], ['APRIL', 'APR'],
+      ['MAY', 'MAY'], ['JUNE', 'JUN'], ['JULY', 'JUL'], ['AUGUST', 'AUG'],
+      ['SEPTEMBER', 'SEPT'], ['OCTOBER', 'OCT'], ['NOVEMBER', 'NOV'], ['DECEMBER', 'DEC']
+    ];
+    const match = aliases.find(([month, short]) => compact.includes(month) || compact === short || compact.startsWith(short));
+    if (match) return titleCaseMonth(match[0]);
+    const numericDate = String(value || '').match(/\b\d{1,2}\s*\/\s*(\d{1,2})\s*\/\s*\d{2,4}\b/);
+    if (numericDate) return titleCaseMonth(MONTHS[Number(numericDate[1]) - 1] || '');
+    return '';
+  }
+
+  function isSchemeTableHeader(cells) {
+    const normalized = (cells || []).map((cell) => compactText(cell).toLowerCase());
+    return normalized.some((cell) => cell.includes('main competence'))
+      && normalized.some((cell) => cell === 'month')
+      && normalized.some((cell) => cell === 'week');
+  }
+
+  function parseDocxTableRows(tables) {
+    const rows = [];
+    let previousRow = null;
+    (tables || []).forEach((table) => {
+      if (!(table || []).some(isSchemeTableHeader)) return;
+      (table || []).forEach((rawCells) => {
+        const cells = (rawCells || []).map(compactText);
+        if (!cells.some(Boolean) || isSchemeTableHeader(cells)) return;
+
+        const isCalendarRow = cells.length < 10;
+        let row;
+        if (isCalendarRow) {
+          const event = compactText(cells.filter(Boolean).join(' '));
+          if (!event) return;
+          row = {
+            sn: rows.length + 1,
+            mainCompetence: event,
+            specificCompetence: '',
+            learningActivities: '',
+            specificActivities: '',
+            month: normalizedMonth(event) || previousRow?.month || '',
+            week: cells.length > 3 ? compactText(cells[3]) : '',
+            periods: '', methods: '', tools: '', assessment: '', reference: '', remarks: ''
+          };
+        } else {
+          row = {
+            sn: rows.length + 1,
+            mainCompetence: cells[0] || previousRow?.mainCompetence || '',
+            specificCompetence: cells[1] || previousRow?.specificCompetence || '',
+            learningActivities: cells[2] || '',
+            specificActivities: '',
+            month: normalizedMonth(cells[3]) || previousRow?.month || '',
+            week: cells[4] || '',
+            periods: firstNumeric(cells[5]),
+            methods: '',
+            tools: cells[7] || '',
+            assessment: cells[8] || '',
+            reference: cells[6] || previousRow?.reference || '',
+            remarks: cells[9] || ''
+          };
+        }
+        rows.push(row);
+        if (!isCalendarRow) previousRow = row;
+      });
+    });
+    return rows;
+  }
+
   function parseStructuredText(text) {
     const cleanedText = normalizeSpacedMonths(cleanWhitespace(text));
     const rows = parseRows(cleanedText);
@@ -605,6 +675,7 @@
 
     const parser = new DOMParser();
     const texts = [];
+    let tables = [];
     for (const name of files) {
       const xml = await zip.files[name].async('string');
       const doc = parser.parseFromString(xml, 'application/xml');
@@ -617,12 +688,29 @@
           .trim();
         if (values) texts.push(values);
       });
+      if (/word\/document\.xml$/i.test(name)) {
+        const elementChildren = (node, localName) => Array.from(node.childNodes || []).filter((child) =>
+          child.nodeType === 1 && String(child.localName || child.nodeName || '').split(':').pop() === localName
+        );
+        tables = Array.from(doc.getElementsByTagName('w:tbl')).map((table) =>
+          elementChildren(table, 'tr').map((row) =>
+            elementChildren(row, 'tc').map((cell) =>
+              Array.from(cell.getElementsByTagName('w:t'))
+                .map((node) => node.textContent || '')
+                .join(' ')
+                .replace(/\s{2,}/g, ' ')
+                .trim()
+            )
+          )
+        );
+      }
     }
 
     return {
       type: 'docx',
       text: texts.join('\n'),
-      pageCount: null
+      pageCount: null,
+      tables
     };
   }
 
@@ -641,12 +729,22 @@
     const extension = inferExtension(meta);
     const extracted = extension === 'docx' ? await extractDocxText(buffer) : await extractPdfText(buffer);
     const parsed = parseStructuredText(extracted.text);
+    const structuredRows = extension === 'docx' ? parseDocxTableRows(extracted.tables) : [];
+    if (structuredRows.length) {
+      parsed.rows = structuredRows;
+      parsed.rowsMap = rowsToMap(structuredRows);
+      parsed.totalWeeks = structuredRows.length;
+      parsed.hoursPerWeek = structuredRows.find((row) => row.periods)?.periods || parsed.hoursPerWeek;
+      parsed.assessmentMethods = parsed.assessmentMethods || uniqueNonEmpty(structuredRows.map((row) => row.assessment)).join('\n');
+      parsed.teachingResources = parsed.teachingResources || uniqueNonEmpty(structuredRows.map((row) => row.tools)).join('\n');
+    }
     return {
       ...parsed,
       extractionMeta: {
         sourceType: extracted.type,
         pageCount: extracted.pageCount,
-        fileName: meta?.name || ''
+        fileName: meta?.name || '',
+        structuredTableRows: structuredRows.length
       }
     };
   }
@@ -702,6 +800,7 @@
     parseUrl,
     parseArrayBuffer,
     parseStructuredText,
+    parseDocxTableRows,
     mergeTemplateData
   };
 })(window);
