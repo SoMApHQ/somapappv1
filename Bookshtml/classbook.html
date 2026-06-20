@@ -50,6 +50,9 @@
     .book-card:hover { transform: translateY(-2px); box-shadow:0 6px 18px rgba(2,6,23,.08); }
     .book-thumb-wrap { position:relative; background:#0b1220; }
     .book-thumb { width:100%; height:180px; object-fit:cover; display:block; }
+    .book-cover-placeholder { height:180px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:#e0f2fe; background:linear-gradient(135deg,#0f766e,#4338ca); }
+    .book-cover-placeholder i { font-size:2.4rem; }
+    .book-cover-placeholder span { font-weight:900; font-size:.9rem; max-width:80%; text-align:center; line-height:1.25; }
     .thumb-veil { position:absolute; inset:0; background:linear-gradient(180deg, rgba(2,6,23,.0), rgba(2,6,23,.15)); }
     .book-body { padding:14px 14px 16px; }
     .book-title { font-weight:800; line-height:1.2; font-size:1rem; color:#111827; margin-bottom:6px; }
@@ -391,7 +394,6 @@
 
   // ================== Data / Grid ==================
   const cache = new Map();
-  const thumbCache = new Map(); // url -> dataURL
   const loadingEl = document.getElementById('loading');
   const noBooksEl = document.getElementById('noBooks');
   const grid = document.getElementById('booksGrid');
@@ -399,7 +401,7 @@
 
   function isPdf(url){ return /\.pdf(\?|#|$)/i.test(url||''); }
   function thumbFrom(url){
-    if (isPdf(url)) return null; // handled by PDF cover generator below
+    if (isPdf(url)) return null;
     return /res\.cloudinary\.com/.test(url)
       ? url.replace('/upload/','/upload/fl_sanitize,pg_1,f_jpg,q_auto,w_360/')
       : url;
@@ -552,34 +554,6 @@ async function fetchBooks(cls){
     return '';
   }
 
-  async function generatePdfCoverThumb(url){
-    if (thumbCache.has(url)) return thumbCache.get(url);
-    try{
-      const cacheKey = 'somap_thumb_' + btoa(url).replace(/=/g,'');
-      const existing = sessionStorage.getItem(cacheKey);
-      if (existing){ thumbCache.set(url, existing); return existing; }
-
-      const buf = await fetch(url, { credentials:'omit' }).then(r=>r.arrayBuffer());
-      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-      const page = await pdf.getPage(1);
-      const desired = 360; // px width for card
-      const vp = page.getViewport({ scale: 1 });
-      const scale = desired / vp.width;
-      const viewport = page.getViewport({ scale });
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      canvas.width = Math.floor(viewport.width);
-      canvas.height = Math.floor(viewport.height);
-      await page.render({ canvasContext: ctx, viewport }).promise;
-      const dataURL = canvas.toDataURL('image/jpeg', 0.86);
-      thumbCache.set(url, dataURL);
-      sessionStorage.setItem(cacheKey, dataURL);
-      return dataURL;
-    }catch(e){
-      console.warn('thumb gen failed', e); return null;
-    }
-  }
-
   async function renderBooks(entries){
     loadingEl.classList.add('hidden');
     grid.innerHTML = '';
@@ -594,21 +568,15 @@ async function fetchBooks(cls){
       const s = (b.subject||'');
       const subClass = subjectClass(s);
 
-      let cover = thumbFrom(b.url||'');
-      if (!cover && isPdf(b.url)){
-        // placeholder while generating
-        cover = 'https://dummyimage.com/640x360/0b1220/ffffff.png&text=Loading…';
-        // async improve once ready
-        generatePdfCoverThumb(b.url).then(dataURL=>{
-          if (!dataURL) return;
-          const imgEl = card.querySelector('img[data-id="'+id+'"]');
-          if (imgEl) imgEl.src = dataURL;
-        });
-      }
+      const url = b.url || b.cloudinaryUrl || '';
+      const cover = thumbFrom(url);
+      const coverMarkup = cover
+        ? `<img class="book-thumb" data-id="${id}" loading="lazy" src="${cover}" alt="${escapeHtml(t)} cover" onerror="this.style.display='none'">`
+        : `<div class="book-cover-placeholder"><i class="fa fa-file-pdf"></i><span>${escapeHtml(s || 'Class Book')}</span></div>`;
 
     card.innerHTML = `
   <div class="book-thumb-wrap">
-    <img class="book-thumb" data-id="${id}" loading="lazy" src="${cover||''}" alt="${escapeHtml(t)} cover" onerror="this.style.display='none'">
+    ${coverMarkup}
     <div class="thumb-veil"></div>
   </div>
   <div class="book-body">
@@ -618,11 +586,11 @@ async function fetchBooks(cls){
     </div>
 
     <div style="display:flex; gap:8px; margin-top:12px;">
-      <button class="read-btn" style="flex:1" data-url="${b.url||''}" data-title="${escapeHtml(t)}">
+      <button class="read-btn" style="flex:1" data-url="${url}" data-title="${escapeHtml(t)}">
         <i class="fa fa-book-open mr-1"></i>Read
       </button>
 
-      <a href="${b.url||''}" download class="read-btn"
+      <a href="${url}" download class="read-btn"
          style="flex:1; text-align:center; background:#16a34a;">
         <i class="fa fa-download mr-1"></i>Download
       </a>
@@ -721,9 +689,13 @@ async function fetchBooks(cls){
     if (/\.pdf(\?|#|$)/i.test(url)){
       activeDoc = { type:'pdf' };
       try{
-        // Fetch into memory buffer to avoid exposing URL in any DOM attribute
-        const buf = await fetch(url, { credentials:'omit' }).then(r=>r.arrayBuffer());
-        const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+        const pdf = await pdfjsLib.getDocument({
+          url,
+          withCredentials: false,
+          disableAutoFetch: false,
+          disableRange: false,
+          disableStream: false
+        }).promise;
         activeDoc.pdf = pdf; activeDoc.numPages = pdf.numPages;
         buildPagesSkeleton(pdf.numPages);
         setupLazyRender();
