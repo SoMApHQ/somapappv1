@@ -10,6 +10,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
   <script src="../../shared/academic-class-utils.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="../../js/scheme-template-parser.js" defer></script>
   <script src="../../js/book-content-index.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer integrity="sha512-4w2d+Sxgpo1Jpj9V3dJbvt0mv47neVQcYcJJ2ULFuIkt6xl7V2bW77hlUjMt8uokG2ysL0ePkB2USK0lr7qC1A==" crossorigin="anonymous"></script>
@@ -2883,7 +2884,7 @@
         const indexedSnap = await db.ref(`classbooksIndex/${yearKey}/${classKey}/${subjectKey}`).once('value');
         if (indexedSnap.exists()) {
           const indexedBook = indexedSnap.val();
-          if (isActiveClassbookEntry(indexedBook)) {
+          if (isActiveClassbookEntry(indexedBook) && normalizeText(indexedBook.subject || '') === normalizeText(subjectName)) {
             const entry = {
               ...indexedBook,
               bookId: indexedBook.bookId || indexedBook.id || indexedBook.key || '',
@@ -2915,7 +2916,7 @@
             );
             return { bookId, book, score };
           })
-          .filter((item) => item.score > 0.3 || normalizeText(item.book.subject || '') === normalizedSubject)
+          .filter((item) => normalizeText(item.book.subject || '') === normalizedSubject)
           .sort((a, b) => b.score - a.score);
 
         if (!matchingBooks.length) return null;
@@ -3058,9 +3059,9 @@
             sourceLabel: `Book: ${bookEntry.title || 'Classbook'}`,
             bookId: bookEntry.bookId || '',
             bookTitle: bookEntry.title || 'Classbook',
-            bookPage: chapter.tocPage || '',
-            bookPageStart: chapter.tocPage || '',
-            bookPageEnd: '',
+            bookPage: chapter.pageStart || chapter.tocPage || '',
+            bookPageStart: chapter.pageStart || chapter.tocPage || '',
+            bookPageEnd: chapter.pageEnd || chapter.pageStart || chapter.tocPage || '',
             bookSectionStart: chapter.sectionStart || '',
             bookSectionEnd: chapter.sectionEnd || ''
           }))
@@ -3308,24 +3309,41 @@
       const bookId = bookEntry?.bookId || '';
       if (!bookId) return null;
       if (lessonState.bookTextCache[bookId]) return lessonState.bookTextCache[bookId];
+      let storedSource = null;
       try {
         const snap = await db.ref(`book_texts/${bookId}`).once('value');
         const value = snap.val();
         const text = compactTextBlock(value?.text || '');
-        if (!text) return null;
-        const source = {
-          bookId,
-          text,
-          source: value.source || 'text',
-          sourceFileName: value.sourceFileName || '',
-          updatedAt: value.updatedAt || null
-        };
-        lessonState.bookTextCache[bookId] = source;
-        return source;
+        if (text) {
+          storedSource = {
+            bookId,
+            text,
+            source: value.source || 'text',
+            sourceFileName: value.sourceFileName || '',
+            updatedAt: value.updatedAt || null
+          };
+        }
       } catch (error) {
         console.warn('Book text lookup failed:', error?.message || error);
-        return null;
       }
+
+      const wordUrl = bookEntry.word_url || bookEntry.wordUrl
+        || (/\.docx(?:$|\?)/i.test(bookEntry.url || bookEntry.cloudinaryUrl || '') ? (bookEntry.url || bookEntry.cloudinaryUrl) : '');
+      if (wordUrl && window.SomapBookContentIndex?.extractDocxText) {
+        try {
+          const response = await fetch(wordUrl, { credentials: 'omit' });
+          if (response.ok) {
+            const text = await window.SomapBookContentIndex.extractDocxText(await response.arrayBuffer());
+            const source = { bookId, text, source: 'docx', sourceFileName: bookEntry.word_file_name || '', updatedAt: null };
+            lessonState.bookTextCache[bookId] = source;
+            return source;
+          }
+        } catch (error) {
+          console.warn('Word book page indexing failed; using saved text', error?.message || error);
+        }
+      }
+      if (storedSource) lessonState.bookTextCache[bookId] = storedSource;
+      return storedSource;
     }
 
     function findTopicRangeFromBookText(textSource, topicName, subTopicName) {

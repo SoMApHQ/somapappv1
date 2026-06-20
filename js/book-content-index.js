@@ -73,10 +73,10 @@
 
       if (!remainder) {
         let cursor = index + 1;
-        while (cursor < Math.min(lines.length, index + 5) && !remainder) {
+        while (cursor < Math.min(lines.length, index + 5) && (!remainder || !page)) {
           if (/^(?:chapter|topic|unit)\s+/i.test(lines[cursor]) || /teacher'?s note/i.test(lines[cursor])) break;
           if (/^\d{1,4}$/.test(lines[cursor])) page = lines[cursor];
-          else remainder = usefulTopic(lines[cursor]);
+          else if (!remainder) remainder = usefulTopic(lines[cursor]);
           cursor += 1;
         }
       }
@@ -151,7 +151,7 @@
       .trim();
   }
 
-  function buildChapterRanges(lines, toc) {
+  function buildChapterRanges(lines, toc, linePages = []) {
     const chapters = toc.entries.map((entry) => ({
       ...entry,
       bodyStart: Number.isInteger(entry.bodyStart) ? entry.bodyStart : -1
@@ -194,27 +194,84 @@
         subtopics
       };
     });
+    const pageAnchor = ranged.find((entry) => Number(entry.tocPage) && entry.bodyStart >= 0 && linePages[entry.bodyStart]);
+    const printedPageOffset = pageAnchor
+      ? Number(pageAnchor.tocPage) - Number(linePages[pageAnchor.bodyStart])
+      : 0;
+    const resolvedPageStart = (entry) => {
+      const tocPage = Number(entry?.tocPage) || 0;
+      const renderedPage = Number(linePages[entry?.bodyStart]) || 0;
+      return tocPage || (renderedPage ? renderedPage + printedPageOffset : 0);
+    };
+
     return ranged.map((entry, index) => {
-      const pageStart = Number(entry.tocPage) || entry.sectionStart;
-      const nextTocPage = Number(ranged[index + 1]?.tocPage) || 0;
-      const pageEnd = nextTocPage > pageStart
-        ? nextTocPage - 1
-        : (entry.tocPage ? pageStart : entry.sectionEnd);
+      const pageStart = resolvedPageStart(entry) || entry.sectionStart;
+      const nextPageStart = resolvedPageStart(ranged[index + 1]);
+      const lastRenderedPage = Number(linePages[lines.length - 1]) || 0;
+      const pageEnd = nextPageStart > pageStart
+        ? nextPageStart - 1
+        : Math.max(pageStart, lastRenderedPage ? lastRenderedPage + printedPageOffset : entry.sectionEnd);
       return { ...entry, pageStart, pageEnd };
     });
   }
 
   function parse(text) {
-    const lines = String(text || '').replace(/\r/g, '').split('\n').map(cleanLine).filter(Boolean);
+    const sourceLines = String(text || '').replace(/\r/g, '').split('\n').map(cleanLine).filter(Boolean);
+    const lines = [];
+    const linePages = [];
+    let renderedPage = 1;
+    sourceLines.forEach((line) => {
+      if (line === '[[PAGE_BREAK]]') {
+        renderedPage += 1;
+        return;
+      }
+      lines.push(line);
+      linePages.push(renderedPage);
+    });
     let toc = parseToc(lines);
     if (!toc.entries.length) toc = parseHeadingFallback(lines);
     return {
       lines,
-      chapters: buildChapterRanges(lines, toc),
+      linePages,
+      chapters: buildChapterRanges(lines, toc, linePages),
       hasTableOfContents: toc.start >= 0,
       usedHeadingFallback: toc.start < 0 && toc.entries.length > 0
     };
   }
 
-  global.SomapBookContentIndex = { parse, parseToc, parseHeadingFallback, cleanLine, normalize };
+  async function extractDocxText(arrayBuffer) {
+    if (!global.JSZip) throw new Error('DOCX library is not available');
+    const zip = await global.JSZip.loadAsync(arrayBuffer);
+    const xmlFile = zip.file('word/document.xml');
+    if (!xmlFile) throw new Error('The Word document has no readable document body');
+    const xml = await xmlFile.async('string');
+    const documentXml = new DOMParser().parseFromString(xml, 'application/xml');
+    return Array.from(documentXml.getElementsByTagName('w:p'))
+      .map((paragraph) => {
+        const text = Array.from(paragraph.getElementsByTagName('w:t'))
+          .map((node) => node.textContent || '')
+          .join(' ')
+          .replace(/\s{2,}/g, ' ')
+          .trim();
+        const renderedBreaks = paragraph.getElementsByTagName('w:lastRenderedPageBreak').length;
+        const manualBreaks = Array.from(paragraph.getElementsByTagName('w:br')).filter((node) =>
+          (node.getAttribute('w:type') || node.getAttribute('type') || '').toLowerCase() === 'page'
+        ).length;
+        const pageMarkers = '[[PAGE_BREAK]]\n'.repeat(renderedBreaks + manualBreaks);
+        if (!text) return pageMarkers.trim();
+        const styleNode = paragraph.getElementsByTagName('w:pStyle')[0];
+        const styleName = styleNode?.getAttribute('w:val') || styleNode?.getAttribute('val') || '';
+        const emphasized = /heading|title/i.test(styleName)
+          || paragraph.getElementsByTagName('w:b').length > 0
+          || paragraph.getElementsByTagName('w:u').length > 0;
+        const markedText = emphasized && !/^(?:chapter|topic|unit)\b/i.test(text)
+          ? `[[HEADING]] ${text}`
+          : text;
+        return `${pageMarkers}${markedText}`;
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  global.SomapBookContentIndex = { parse, parseToc, parseHeadingFallback, extractDocxText, cleanLine, normalize };
 })(window);
