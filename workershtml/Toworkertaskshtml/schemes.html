@@ -15,6 +15,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="../../js/scheme-template-parser.js"></script>
+  <script src="../../js/book-content-index.js"></script>
   <style>
     :root {
       --glass-bg: rgba(255, 255, 255, 0.08);
@@ -695,6 +696,42 @@
       ];
     }
 
+    async function loadBookTextForIndex(book) {
+      let storedText = '';
+      try {
+        const textSnapshot = await db.ref(`book_texts/${book.bookId}`).once('value');
+        storedText = String(textSnapshot.val()?.text || '').trim();
+      } catch (_error) {}
+
+      const wordUrl = book.word_url || book.wordUrl || (/\.docx(?:$|\?)/i.test(book.url || book.cloudinaryUrl || '') ? (book.url || book.cloudinaryUrl) : '');
+      if (!wordUrl || !window.JSZip) return storedText;
+      try {
+        const response = await fetch(wordUrl, { credentials: 'omit' });
+        if (!response.ok) return storedText;
+        const zip = await window.JSZip.loadAsync(await response.arrayBuffer());
+        const xmlFile = zip.file('word/document.xml');
+        if (!xmlFile) return storedText;
+        const xml = await xmlFile.async('string');
+        const documentXml = new DOMParser().parseFromString(xml, 'application/xml');
+        return Array.from(documentXml.getElementsByTagName('w:p'))
+          .map((paragraph) => {
+            const text = Array.from(paragraph.getElementsByTagName('w:t')).map((node) => node.textContent || '').join(' ').trim();
+            if (!text) return '';
+            const styleNode = paragraph.getElementsByTagName('w:pStyle')[0];
+            const styleName = styleNode?.getAttribute('w:val') || styleNode?.getAttribute('val') || '';
+            const emphasized = /heading|title/i.test(styleName)
+              || paragraph.getElementsByTagName('w:b').length > 0
+              || paragraph.getElementsByTagName('w:u').length > 0;
+            return emphasized && !/^chapter\b/i.test(text) ? `[[HEADING]] ${text}` : text;
+          })
+          .filter(Boolean)
+          .join('\n');
+      } catch (error) {
+        console.warn('Active Word book could not be indexed', error);
+        return storedText;
+      }
+    }
+
     async function loadBookTopicCatalog() {
       const requestId = ++bookCatalogRequest;
       const className = schemeClass.value;
@@ -707,9 +744,13 @@
         return;
       }
       bookTopicsInfo.textContent = 'Loading topics from class books...';
-      const snapshots = await Promise.all(bookIndexPaths(className, year).map(async (path) => {
-        try { return await db.ref(path).once('value'); } catch (_error) { return null; }
-      }));
+      const indexPath = `classbooksIndex/${year}/${safeKey(className).toLowerCase()}/${safeKey(subjectName).toLowerCase()}`;
+      const [snapshots, indexedSnapshot] = await Promise.all([
+        Promise.all(bookIndexPaths(className, year).map(async (path) => {
+          try { return await db.ref(path).once('value'); } catch (_error) { return null; }
+        })),
+        db.ref(indexPath).once('value').catch(() => null)
+      ]);
       if (requestId !== bookCatalogRequest) return;
       const books = new Map();
       snapshots.forEach((snapshot) => {
@@ -719,10 +760,26 @@
           books.set(bookId, { ...book, bookId });
         });
       });
+      if (indexedSnapshot?.exists?.()) {
+        const indexedBook = indexedSnapshot.val() || {};
+        const indexedBookId = indexedBook.bookId || indexedBook.id || indexedBook.key || '';
+        if (indexedBookId && !['archived', 'deleted'].includes(String(indexedBook.status || 'active').toLowerCase())) {
+          books.set(indexedBookId, { ...indexedBook, bookId: indexedBookId });
+        }
+      }
       const topicGroups = await Promise.all([...books.values()].map(async (book) => {
         try {
-          const textSnapshot = await db.ref(`book_texts/${book.bookId}`).once('value');
-          const toc = extractBookTableOfContents(textSnapshot.val()?.text || '');
+          const contentIndex = window.SomapBookContentIndex?.parse(await loadBookTextForIndex(book));
+          const toc = (contentIndex?.chapters || []).map((chapter) => ({
+            chapter: chapter.chapter,
+            topic: chapter.topic,
+            page: chapter.tocPage || '',
+            pageStart: chapter.tocPage || '',
+            pageEnd: '',
+            sectionStart: chapter.sectionStart || '',
+            sectionEnd: chapter.sectionEnd || '',
+            subtopics: chapter.subtopics || []
+          }));
           return { book, toc };
         } catch (_error) {
           return { book, toc: [] };
@@ -737,19 +794,27 @@
             chapter: entry.chapter,
             topic: entry.topic,
             page: entry.page || '',
+            pageStart: entry.pageStart || entry.page || '',
+            pageEnd: entry.pageEnd || entry.page || '',
+            sectionStart: entry.sectionStart || '',
+            sectionEnd: entry.sectionEnd || '',
             kind: 'book'
           };
           bookTopicCatalog.push({
             ...base,
             key: `book:${book.bookId}:${entryIndex}:topic`,
             subtopic: '',
-            label: `${entry.chapter} — ${entry.topic}${entry.page ? ` (p. ${entry.page})` : ''}`
+            label: `${entry.chapter} — ${entry.topic} (§ ${entry.sectionStart}-${entry.sectionEnd})`
           });
-          entry.subtopics.forEach((subtopic, subtopicIndex) => bookTopicCatalog.push({
+          entry.subtopics.forEach((subtopicEntry, subtopicIndex) => bookTopicCatalog.push({
             ...base,
             key: `book:${book.bookId}:${entryIndex}:subtopic:${subtopicIndex}`,
-            subtopic,
-            label: `↳ ${subtopic}${entry.page ? ` (p. ${entry.page})` : ''}`
+            subtopic: subtopicEntry.title || subtopicEntry,
+            pageStart: base.pageStart,
+            pageEnd: base.pageEnd,
+            sectionStart: subtopicEntry.sectionStart || base.sectionStart,
+            sectionEnd: subtopicEntry.sectionEnd || base.sectionEnd,
+            label: `↳ ${subtopicEntry.title || subtopicEntry} (§ ${subtopicEntry.sectionStart || base.pageStart}-${subtopicEntry.sectionEnd || base.pageEnd})`
           }));
         });
       });
@@ -1552,6 +1617,10 @@
         topic: data.bookTopic,
         subtopic: data.bookSubtopic || '',
         page: data.bookPage || '',
+        pageStart: data.bookPageStart || data.bookPage || '',
+        pageEnd: data.bookPageEnd || data.bookPage || '',
+        sectionStart: data.bookSectionStart || '',
+        sectionEnd: data.bookSectionEnd || '',
         bookId: data.bookId || '',
         bookTitle: data.bookTitle || '',
         label: data.bookSubtopic || data.bookTopic
@@ -1562,7 +1631,14 @@
         <td><textarea data-field="specificCompetence" placeholder="Specific competence">${escapeHtml(data.specificCompetence)}</textarea></td>
         <td><textarea data-field="learningActivities" placeholder="Learning activities">${escapeHtml(data.learningActivities)}</textarea></td>
         <td><textarea data-field="specificActivities" placeholder="Specific activities / content">${escapeHtml(data.specificActivities)}</textarea></td>
-        <td><select data-field="bookLinkKey" aria-label="Book topic or subtopic"></select></td>
+        <td>
+          <select data-field="bookLinkKey" aria-label="Book topic or subtopic"></select>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px;">
+            <input data-field="bookPageStart" type="number" min="1" value="${escapeHtml(data.bookPageStart || data.bookMapping?.pageStart || data.bookPage)}" placeholder="From">
+            <input data-field="bookPageEnd" type="number" min="1" value="${escapeHtml(data.bookPageEnd || data.bookMapping?.pageEnd || data.bookPage)}" placeholder="To">
+          </div>
+          <small style="display:block;margin-top:5px;color:var(--muted);">Book page/section range — teacher may adjust</small>
+        </td>
         <td><input data-field="month" value="${escapeHtml(data.month)}" placeholder="Month"></td>
         <td><input data-field="week" value="${escapeHtml(data.week)}" placeholder="Week"></td>
         <td><input data-field="periods" type="number" min="1" max="20" value="${escapeHtml(data.periods)}" placeholder="Periods"></td>
@@ -1578,6 +1654,10 @@
       bookSelect.addEventListener('change', () => {
         tr._bookMapping = bookTopicCatalog.find((item) => item.key === bookSelect.value)
           || (bookSelect.value ? { key: bookSelect.value, topic: bookSelect.options[bookSelect.selectedIndex]?.text || '' } : null);
+        const startInput = tr.querySelector('[data-field="bookPageStart"]');
+        const endInput = tr.querySelector('[data-field="bookPageEnd"]');
+        if (startInput) startInput.value = tr._bookMapping?.pageStart || tr._bookMapping?.page || '';
+        if (endInput) endInput.value = tr._bookMapping?.pageEnd || tr._bookMapping?.page || '';
       });
       tr.querySelector('.remove-row').addEventListener('click', () => {
         tr.remove();
@@ -1633,7 +1713,15 @@
           bookTopic: selectedBook?.topic || '',
           bookSubtopic: selectedBook?.subtopic || '',
           bookPage: selectedBook?.page || '',
-          bookMapping: selectedBook,
+          bookPageStart: Number(get('bookPageStart')) || selectedBook?.pageStart || selectedBook?.page || '',
+          bookPageEnd: Number(get('bookPageEnd')) || selectedBook?.pageEnd || selectedBook?.page || '',
+          bookSectionStart: selectedBook?.sectionStart || '',
+          bookSectionEnd: selectedBook?.sectionEnd || '',
+          bookMapping: selectedBook ? {
+            ...selectedBook,
+            pageStart: Number(get('bookPageStart')) || selectedBook.pageStart || selectedBook.page || '',
+            pageEnd: Number(get('bookPageEnd')) || selectedBook.pageEnd || selectedBook.page || ''
+          } : null,
           month: get('month'),
           week: get('week'),
           periods: Number(get('periods')) || '',
@@ -1995,7 +2083,9 @@
         r.specificCompetence || '',
         r.learningActivities || '',
         r.specificActivities || '',
-        r.bookSubtopic ? `${r.bookChapter ? `${r.bookChapter}: ` : ''}${r.bookTopic} — ${r.bookSubtopic}${r.bookPage ? ` (p. ${r.bookPage})` : ''}` : (r.bookTopic ? `${r.bookChapter ? `${r.bookChapter}: ` : ''}${r.bookTopic}${r.bookPage ? ` (p. ${r.bookPage})` : ''}` : ''),
+        r.bookSubtopic
+          ? `${r.bookChapter ? `${r.bookChapter}: ` : ''}${r.bookTopic} — ${r.bookSubtopic}${r.bookPageStart ? ` (pp./§ ${r.bookPageStart}-${r.bookPageEnd || r.bookPageStart})` : ''}`
+          : (r.bookTopic ? `${r.bookChapter ? `${r.bookChapter}: ` : ''}${r.bookTopic}${r.bookPageStart ? ` (pp./§ ${r.bookPageStart}-${r.bookPageEnd || r.bookPageStart})` : ''}` : ''),
         r.month || '',
         r.week || '',
         r.periods || '',

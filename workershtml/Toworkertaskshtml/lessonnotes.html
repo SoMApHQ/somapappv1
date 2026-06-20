@@ -11,6 +11,7 @@
   <script src="../../firebase.js"></script>
   <script src="../../shared/academic-class-utils.js"></script>
   <script src="../../js/scheme-template-parser.js" defer></script>
+  <script src="../../js/book-content-index.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer integrity="sha512-4w2d+Sxgpo1Jpj9V3dJbvt0mv47neVQcYcJJ2ULFuIkt6xl7V2bW77hlUjMt8uokG2ysL0ePkB2USK0lr7qC1A==" crossorigin="anonymous"></script>
   <!-- jsPDF (~600 KB) and Tesseract (~3.5 MB) loaded on-demand only -->
 
@@ -1374,7 +1375,9 @@
       revisionCandidate: null,
       topicCatalog: [],
       topicIndex: {},
-      topicSourceSummary: ''
+      topicSourceSummary: '',
+      recommendedTopic: '',
+      recommendedSubTopic: ''
     };
 
     const teacherName = document.getElementById('teacherName');
@@ -1523,11 +1526,14 @@
       if (noteDayOfWeekField) {
         noteDayOfWeekField.value = today.toLocaleDateString('en-US', { weekday: 'long' });
       }
-      noteLessonDateField.addEventListener('change', () => {
+      noteLessonDateField.addEventListener('change', async () => {
         if (noteDayOfWeekField && noteLessonDateField.value) {
           const selected = new Date(noteLessonDateField.value + 'T00:00:00');
           noteDayOfWeekField.value = selected.toLocaleDateString('en-US', { weekday: 'long' });
         }
+        resetClassbookUi(true);
+        await refreshTopicChoices({ preferredTopic: '', preferredSubTopic: '' });
+        checkRevisionFlag();
       });
     }
 
@@ -2459,8 +2465,8 @@
 
     function deriveSchemeTopic(row) {
       return (
-        toTitleTopic(row?.bookSubtopic) ||
         toTitleTopic(row?.bookTopic) ||
+        toTitleTopic(row?.bookSubtopic) ||
         toTitleTopic(row?.learningActivities) ||
         toTitleTopic(row?.specificActivities) ||
         sentenceCase(row?.specificCompetence) ||
@@ -2703,13 +2709,21 @@
           searchTexts: new Set(),
           bookId: payload.bookId || '',
           bookTitle: payload.bookTitle || '',
-          bookPage: payload.bookPage || ''
+          bookPage: payload.bookPage || '',
+          bookPageStart: payload.bookPageStart || payload.bookPage || '',
+          bookPageEnd: payload.bookPageEnd || payload.bookPage || '',
+          bookSectionStart: payload.bookSectionStart || '',
+          bookSectionEnd: payload.bookSectionEnd || ''
         };
       }
       const bundle = map[key];
       if (!bundle.bookId && payload.bookId) bundle.bookId = payload.bookId;
       if (!bundle.bookTitle && payload.bookTitle) bundle.bookTitle = payload.bookTitle;
       if (!bundle.bookPage && payload.bookPage) bundle.bookPage = payload.bookPage;
+      if (!bundle.bookPageStart && (payload.bookPageStart || payload.bookPage)) bundle.bookPageStart = payload.bookPageStart || payload.bookPage;
+      if (!bundle.bookPageEnd && (payload.bookPageEnd || payload.bookPage)) bundle.bookPageEnd = payload.bookPageEnd || payload.bookPage;
+      if (!bundle.bookSectionStart && payload.bookSectionStart) bundle.bookSectionStart = payload.bookSectionStart;
+      if (!bundle.bookSectionEnd && payload.bookSectionEnd) bundle.bookSectionEnd = payload.bookSectionEnd;
       if (payload.sourceType) bundle.sources.add(payload.sourceType);
       if (payload.sourceLabel) bundle.sourceLabels.add(payload.sourceLabel);
       [topic, payload.subTopic, ...(payload.subTopics || []), ...(payload.searchTexts || [])]
@@ -2734,6 +2748,8 @@
       const lessonDate = (noteLessonDateField && noteLessonDateField.value) ? noteLessonDateField.value : getLessonContextDate();
       const bundlesByKey = {};
       const summaryParts = [];
+      let recommendedTopic = '';
+      let recommendedSubTopic = '';
 
       if (!className || !subjectName) {
         return { bundles: [], summary: 'Choose class and subject to load topics for the current lesson day.' };
@@ -2755,6 +2771,10 @@
         matchingPlans.forEach((plan) => {
           const row = plan?.schemeTracking?.rowSnapshot || {};
           const planTopic = compactTextBlock(plan.topic || deriveSchemeTopic(row));
+          if (!recommendedTopic && planTopic) {
+            recommendedTopic = planTopic;
+            recommendedSubTopic = compactTextBlock(plan.subTopic || row?.bookSubtopic || '');
+          }
           const rowSubtopics = extractCandidateSubtopics(planTopic, stripTeacherLead(row?.specificActivities) || row?.specificCompetence || '');
           addTopicBundleEntry(bundlesByKey, {
             topic: planTopic,
@@ -2804,6 +2824,10 @@
           rows.forEach((entry) => {
             const row = entry.row || {};
             const topic = deriveSchemeTopic(row);
+            if (!recommendedTopic && topic) {
+              recommendedTopic = topic;
+              recommendedSubTopic = compactTextBlock(row?.bookSubtopic || '');
+            }
             addTopicBundleEntry(bundlesByKey, {
               topic,
               subTopics: row?.bookSubtopic
@@ -2814,6 +2838,10 @@
               bookId: row?.bookId || '',
               bookTitle: row?.bookTitle || '',
               bookPage: row?.bookPage || '',
+              bookPageStart: row?.bookPageStart || row?.bookPage || '',
+              bookPageEnd: row?.bookPageEnd || row?.bookPage || '',
+              bookSectionStart: row?.bookSectionStart || '',
+              bookSectionEnd: row?.bookSectionEnd || '',
               searchTexts: [row?.bookChapter, row?.bookTopic, row?.bookSubtopic, row?.learningActivities, row?.specificActivities, row?.specificCompetence, row?.mainCompetence, row?.reference]
             });
           });
@@ -2842,7 +2870,7 @@
         ? `Lesson context: ${formattedDate}. Loaded ${summaryParts.join(' and ')}.`
         : `Lesson context: ${formattedDate}. No topic was found from today's lesson plan or the current scheme week yet.`;
 
-      return { bundles, summary };
+      return { bundles, summary, recommendedTopic, recommendedSubTopic };
     }
 
     async function resolveActiveClassbookEntryForSelection(className, subjectName, yearKey) {
@@ -3018,7 +3046,25 @@
       const textSource = await loadBookTextSource(bookEntry);
       if (!textSource?.text) return { bundles: [], summaryPart: '' };
 
-      const bundles = extractBookTopicBundlesFromText(textSource, bookEntry.title || 'Classbook');
+      const contentIndex = window.SomapBookContentIndex?.parse(textSource.text);
+      const bundles = contentIndex?.chapters?.length
+        ? contentIndex.chapters.map((chapter) => ({
+            key: normalizeLookupToken(chapter.topic),
+            topic: chapter.topic,
+            subTopics: (chapter.subtopics || []).map((item) => item.title).filter(Boolean),
+            sourceList: [`Book: ${bookEntry.title || 'Classbook'}`],
+            searchTexts: contentIndex.lines.slice(Math.max(0, chapter.sectionStart - 1), chapter.sectionEnd),
+            sourceType: 'book_table_of_contents',
+            sourceLabel: `Book: ${bookEntry.title || 'Classbook'}`,
+            bookId: bookEntry.bookId || '',
+            bookTitle: bookEntry.title || 'Classbook',
+            bookPage: chapter.tocPage || '',
+            bookPageStart: chapter.tocPage || '',
+            bookPageEnd: '',
+            bookSectionStart: chapter.sectionStart || '',
+            bookSectionEnd: chapter.sectionEnd || ''
+          }))
+        : extractBookTopicBundlesFromText(textSource, bookEntry.title || 'Classbook');
       return {
         bundles,
         summaryPart: bundles.length ? `${bundles.length} topic${bundles.length === 1 ? '' : 's'} from ${bookEntry.title || 'the class book'}` : ''
@@ -3065,6 +3111,8 @@
       lessonState.topicCatalog = [];
       lessonState.topicIndex = {};
       lessonState.currentTopicBundle = null;
+      lessonState.recommendedTopic = '';
+      lessonState.recommendedSubTopic = '';
 
       const result = await fetchTopicBundlesForSelection();
       const bookResult = await fetchBookTopicBundlesForSelection();
@@ -3086,10 +3134,15 @@
         existing.subTopics = Array.from(new Set([...(existing.subTopics || []), ...(bundle.subTopics || [])]));
         existing.sourceList = Array.from(new Set([...(existing.sourceList || []), ...(bundle.sourceList || [])]));
         existing.searchTexts = Array.from(new Set([...(existing.searchTexts || []), ...(bundle.searchTexts || [])]));
+        ['bookId', 'bookTitle', 'bookPage', 'bookPageStart', 'bookPageEnd', 'bookSectionStart', 'bookSectionEnd'].forEach((field) => {
+          if (!existing[field] && bundle[field]) existing[field] = bundle[field];
+        });
       });
 
       const mergedBundles = Object.values(mergedMap).sort((a, b) => a.topic.localeCompare(b.topic));
       lessonState.topicCatalog = mergedBundles;
+      lessonState.recommendedTopic = compactTextBlock(result.recommendedTopic || '');
+      lessonState.recommendedSubTopic = compactTextBlock(result.recommendedSubTopic || '');
       lessonState.topicSourceSummary = [result.summary, bookResult.summaryPart ? `Also loaded ${bookResult.summaryPart}.` : '']
         .filter(Boolean)
         .join(' ');
@@ -3098,23 +3151,25 @@
         noteTopicField.add(new Option(bundle.topic, bundle.topic));
       });
 
-      if (preferredTopic) {
-        ensureSelectHasOption(noteTopicField, preferredTopic, preferredTopic, { prepend: true });
+      const selectedTopic = preferredTopic || lessonState.recommendedTopic;
+      const selectedSubTopic = preferredSubTopic || (selectedTopic === lessonState.recommendedTopic ? lessonState.recommendedSubTopic : '');
+      if (selectedTopic) {
+        ensureSelectHasOption(noteTopicField, selectedTopic, selectedTopic, { prepend: true });
       }
 
       if (noteTopicHint) {
         noteTopicHint.textContent = lessonState.topicSourceSummary;
       }
 
-      if (preferredTopic) {
-        noteTopicField.value = preferredTopic;
+      if (selectedTopic) {
+        noteTopicField.value = selectedTopic;
       } else if (mergedBundles.length === 1) {
         noteTopicField.value = mergedBundles[0].topic;
       } else {
         noteTopicField.value = '';
       }
 
-      refreshSubTopicChoices(preferredSubTopic);
+      refreshSubTopicChoices(selectedSubTopic);
       syncManualTopicVisibility();
     }
 
@@ -3439,15 +3494,18 @@
       }
 
       let matchedTopic = bestMatch && bestMatch.score >= 0.35 ? bestMatch.topic : null;
-      if (schemeBook?.bookPage) {
-        const page = Number(schemeBook.bookPage);
+      if (schemeBook?.bookSectionStart || schemeBook?.bookPageStart || schemeBook?.bookPage) {
+        const useSectionRange = Boolean(schemeBook.bookSectionStart);
+        const page = Number(schemeBook.bookSectionStart || schemeBook.bookPageStart || schemeBook.bookPage);
+        const endPage = Number(schemeBook.bookSectionEnd || schemeBook.bookPageEnd || schemeBook.bookPage || page);
         if (page > 0) {
           matchedTopic = {
             name: subTopicName || topicName,
             pageStart: page,
-            pageEnd: page,
+            pageEnd: endPage >= page ? endPage : page,
             keywords: tokenize(`${topicName} ${subTopicName}`).slice(0, 12),
-            matchType: 'scheme_table_of_contents'
+            matchType: 'scheme_table_of_contents',
+            contentIndexRange: useSectionRange
           };
         }
       }
@@ -3522,7 +3580,8 @@
       } else if (matchedTopic && matchedTopic.matchType === 'pdf_search') {
         updateTopicStatus('ok', `Found the topic inside "${bookEntry.title}" around pages ${startPage}-${endPage}. Review and adjust if needed.`);
       } else if (matchedTopic) {
-        updateTopicStatus('ok', `Matched "${matchedTopic.name}" on pages ${startPage}-${endPage}. Adjust if needed.`);
+        const rangeLabel = matchedTopic.contentIndexRange ? 'book sections' : 'pages';
+        updateTopicStatus('ok', `Matched "${matchedTopic.name}" in ${rangeLabel} ${startPage}-${endPage}. Adjust if needed.`);
       } else if (hasImportSource) {
         updateTopicStatus('ok', `Found "${bookEntry.title}". Topic pages were not auto-matched, so open the full book here, select the exact passage, and let the page analyse it.`);
         openFullBookReader();
@@ -3554,7 +3613,8 @@
       }
       if (pdfModalSummary) {
         const bookLabel = lessonState.currentBook.book.title || 'Classbook';
-        pdfModalSummary.textContent = bookLabel + ' • Pages ' + start + '-' + end;
+        const rangeLabel = lessonState.currentBook.topic?.contentIndexRange ? 'Sections ' : 'Pages ';
+        pdfModalSummary.textContent = bookLabel + ' • ' + rangeLabel + start + '-' + end;
       }
       if (pdfPageContainer) pdfPageContainer.innerHTML = '';
       if (pdfLoadingState && pdfPageContainer) {
@@ -3715,6 +3775,16 @@ function splitIntoParagraphs(text) {
       }
 
       if (lessonState.currentBook.textSource?.text) {
+        if (lessonState.currentBook.topic?.contentIndexRange && window.SomapBookContentIndex) {
+          const indexed = window.SomapBookContentIndex.parse(lessonState.currentBook.textSource.text);
+          const from = Math.max(0, (Number(start) || 1) - 1);
+          const to = Math.min(indexed.lines.length, Number(end) || from + 1);
+          return indexed.lines.slice(from, to).map((text, idx) => ({
+            id: `docx_index_${from + idx + 1}`,
+            page: from + idx + 1,
+            text
+          }));
+        }
         const allParagraphs = splitIntoParagraphs(lessonState.currentBook.textSource.text)
           .filter((para) => para && para.length > 30);
         const from = Math.max(0, (Number(start) || 1) - 1);
@@ -5103,6 +5173,11 @@ function splitIntoParagraphs(text) {
             el.value = '';
           }
         });
+        if (noteLessonDateField) {
+          const today = new Date();
+          noteLessonDateField.value = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+          if (noteDayOfWeekField) noteDayOfWeekField.value = today.toLocaleDateString('en-US', { weekday: 'long' });
+        }
         if (homeworkSummary) homeworkSummary.textContent = '';
         refreshTopicChoices({ preferredTopic: '', preferredSubTopic: '' });
         if (notesForm) {
@@ -5223,7 +5298,12 @@ function splitIntoParagraphs(text) {
         practiceQuestions: practiceQuestionsValue,
         references: referencesField ? referencesField.value : '',
         teachingTips: teachingTipsField ? teachingTipsField.value : '',
-        isRevision: lessonState.isRevision
+        isRevision: lessonState.isRevision,
+        schemeTopicRecommendation: lessonState.recommendedTopic || '',
+        changedFromSchemeTopic: Boolean(
+          lessonState.recommendedTopic
+          && normalizeLookupToken(topicValue) !== normalizeLookupToken(lessonState.recommendedTopic)
+        )
       };
 
       const startValue = parseInt(pageStartInput && pageStartInput.value ? pageStartInput.value : '', 10);
@@ -5502,6 +5582,10 @@ function splitIntoParagraphs(text) {
       syncManualTopicVisibility();
       refreshSubTopicChoices('');
       resetClassbookUi(true);
+      const selectedTopic = getResolvedTopicValue();
+      if (lessonState.recommendedTopic && selectedTopic && normalizeLookupToken(selectedTopic) !== normalizeLookupToken(lessonState.recommendedTopic)) {
+        toast(`The scheme recommends "${lessonState.recommendedTopic}" for this date. Your different topic will be recorded.`, 'warning');
+      }
       checkRevisionFlag();
     });
     if (noteSubTopicField) noteSubTopicField.addEventListener('change', () => {
