@@ -1336,6 +1336,7 @@
       autoTextSnippet: '',
       pdfDoc: null,
       pageTextCache: {},
+      bookTextCache: {},
       lastHomeworkMeta: null,
       isRevision: false,
       revisionCandidate: null,
@@ -2990,6 +2991,57 @@
       return status !== 'archived' && status !== 'deleted';
     }
 
+    async function loadBookTextSource(bookEntry) {
+      const bookId = bookEntry?.bookId || '';
+      if (!bookId) return null;
+      if (lessonState.bookTextCache[bookId]) return lessonState.bookTextCache[bookId];
+      try {
+        const snap = await db.ref(`book_texts/${bookId}`).once('value');
+        const value = snap.val();
+        const text = compactTextBlock(value?.text || '');
+        if (!text) return null;
+        const source = {
+          bookId,
+          text,
+          source: value.source || 'text',
+          sourceFileName: value.sourceFileName || '',
+          updatedAt: value.updatedAt || null
+        };
+        lessonState.bookTextCache[bookId] = source;
+        return source;
+      } catch (error) {
+        console.warn('Book text lookup failed:', error?.message || error);
+        return null;
+      }
+    }
+
+    function findTopicRangeFromBookText(textSource, topicName, subTopicName) {
+      const text = compactTextBlock(textSource?.text || '');
+      if (!text) return null;
+      const profile = buildBookSearchProfile(topicName, subTopicName);
+      if (!profile.phrases.length && !profile.tokens.length) return null;
+
+      const paragraphs = splitIntoParagraphs(text)
+        .map((paragraph, index) => ({ paragraph, index, score: scorePageAgainstProfile(paragraph, profile) }))
+        .filter((entry) => entry.score > 0)
+        .sort((a, b) => b.score - a.score);
+      if (!paragraphs.length || paragraphs[0].score < 2) return null;
+
+      const best = paragraphs[0];
+      const contextStart = Math.max(0, best.index - 2);
+      const contextEnd = Math.min(splitIntoParagraphs(text).length - 1, best.index + 5);
+      return {
+        name: subTopicName || topicName,
+        pageStart: contextStart + 1,
+        pageEnd: contextEnd + 1,
+        keywords: profile.tokens.slice(0, 12),
+        matchScore: best.score,
+        matchType: 'docx_text_search',
+        textStart: contextStart,
+        textEnd: contextEnd
+      };
+    }
+
     async function findTopicInClassbooks() {
       const className = compactTextBlock(noteClassField?.value || '');
       const subjectName = compactTextBlock(noteSubjectField?.value || '');
@@ -3088,6 +3140,12 @@
 
       let matchedTopic = bestMatch && bestMatch.score >= 0.35 ? bestMatch.topic : null;
       const hasUrl = Boolean(bookEntry.cloudinaryUrl || bookEntry.url);
+      const textSource = await loadBookTextSource(bookEntry);
+      const hasImportSource = Boolean(hasUrl || textSource);
+
+      if (!matchedTopic && textSource) {
+        matchedTopic = findTopicRangeFromBookText(textSource, topicName, subTopicName);
+      }
 
       if (!matchedTopic && hasUrl) {
         try {
@@ -3100,6 +3158,7 @@
       lessonState.currentBook = {
         yearKey,
         book: bookEntry,
+        textSource,
         topic: matchedTopic ? {
           ...matchedTopic,
           name: matchedTopic.name || topicName
@@ -3130,9 +3189,9 @@
       }
 
       if (openPagesBtn) openPagesBtn.disabled = !hasUrl;
-      if (autoImportBtn) autoImportBtn.disabled = !hasUrl;
-      if (importToNotesBtn) importToNotesBtn.disabled = !hasUrl;
-      if (previewExtractBtn) previewExtractBtn.disabled = !hasUrl;
+      if (autoImportBtn) autoImportBtn.disabled = !hasImportSource;
+      if (importToNotesBtn) importToNotesBtn.disabled = !hasImportSource;
+      if (previewExtractBtn) previewExtractBtn.disabled = !hasImportSource;
       if (clearExtractBtn) clearExtractBtn.disabled = false;
       if (clearImportBtn) clearImportBtn.disabled = false;
 
@@ -3146,7 +3205,9 @@
         }
       }
 
-      if (matchedTopic && matchedTopic.matchType === 'pdf_search') {
+      if (matchedTopic && matchedTopic.matchType === 'docx_text_search') {
+        updateTopicStatus('ok', `Found the topic in the Word source for "${bookEntry.title}". Import the matched text into Lesson Development.`);
+      } else if (matchedTopic && matchedTopic.matchType === 'pdf_search') {
         updateTopicStatus('ok', `Found the topic inside "${bookEntry.title}" around pages ${startPage}-${endPage}. Review and adjust if needed.`);
       } else if (matchedTopic) {
         updateTopicStatus('ok', `Matched "${matchedTopic.name}" on pages ${startPage}-${endPage}. Adjust if needed.`);
@@ -3294,6 +3355,19 @@ function splitIntoParagraphs(text) {
       if (!lessonState.currentBook || !lessonState.currentBook.book) {
         return [];
       }
+
+      if (lessonState.currentBook.textSource?.text) {
+        const allParagraphs = splitIntoParagraphs(lessonState.currentBook.textSource.text)
+          .filter((para) => para && para.length > 30);
+        const from = Math.max(0, (Number(start) || 1) - 1);
+        const to = Math.min(allParagraphs.length, Number(end) || from + 5);
+        return allParagraphs.slice(from, to).map((text, idx) => ({
+          id: `docx_${from + idx + 1}`,
+          page: from + idx + 1,
+          text
+        }));
+      }
+
       const bookUrl = lessonState.currentBook.book.cloudinaryUrl || lessonState.currentBook.book.url;
       if (!bookUrl) {
         return [];
@@ -4167,12 +4241,13 @@ function splitIntoParagraphs(text) {
 
       try {
         const bookUrl = lessonState.currentBook.book.cloudinaryUrl || lessonState.currentBook.book.url;
-        if (!bookUrl) {
+        const hasTextSource = Boolean(lessonState.currentBook.textSource?.text);
+        if (!bookUrl && !hasTextSource) {
           toast('No book URL available.', 'error');
           return;
         }
         
-        if (!lessonState.pdfDoc || lessonState.pdfDoc.__bookUrl !== bookUrl) {
+        if (!hasTextSource && (!lessonState.pdfDoc || lessonState.pdfDoc.__bookUrl !== bookUrl)) {
           const pdfjs = window.pdfjsLib;
           if (!pdfjs) {
             toast('PDF reader not available.', 'error');
