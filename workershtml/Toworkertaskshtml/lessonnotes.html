@@ -3803,6 +3803,62 @@
       return selected.map((sentence, index) => `${index + 1}. ${sentence}`).join('\n');
     }
 
+    function buildRequiredLessonSections(text, range) {
+      const topicLabel = String(range?.label || getResolvedTopicValue() || 'the lesson topic').trim();
+      const cleanText = normalizeMultilineText(text);
+      const sentences = uniqueNormalizedBlocks(extractSentences(cleanText))
+        .map((sentence) => sentence.replace(/^\s*(?:\d+(?:\.\d+)*[.)]?|[-•])\s*/, '').trim())
+        .filter((sentence) => sentence.length >= 20)
+        .filter((sentence) => !/^(?:homework|exercise|activity|questions?|learning objectives?|by the end)/i.test(sentence));
+      const teachingSentences = sentences.filter((sentence) => !/\?\s*$/.test(sentence));
+      const exampleMatches = teachingSentences.filter((sentence) =>
+        /\bfor example\b|\bfor instance\b|\bsuch as\b|\be\.g\.|\binclude(?:s|d)?\b|\bexample(?:s)?\b/i.test(sentence)
+      );
+      const examplePool = uniqueNormalizedBlocks([
+        ...exampleMatches,
+        ...teachingSentences.filter((sentence) => /\bused\s+to\b|\bfunction\b|\bproduces?\b|\boccurs?\b|\bwhen\b|\bwhere\b/i.test(sentence)),
+        ...teachingSentences
+      ]).slice(0, 4);
+      const examples = examplePool.length
+        ? examplePool.map((sentence, index) => `${index + 1}. ${sentence}`).join('\n')
+        : `1. Use a familiar classroom or community example to demonstrate ${topicLabel}.\n2. Ask learners to identify one practical example of ${topicLabel} from their daily lives.`;
+
+      const takeawayPool = uniqueNormalizedBlocks([
+        ...teachingSentences.filter((sentence) => /\bmeans?\b|\brefers?\s+to\b|\bis\s+(?:a|an|the)\b|\bare\s+(?:a|the)\b|\bconsists?\s+of\b|\bmade\s+of\b/i.test(sentence)),
+        ...teachingSentences.filter((sentence) => /\bimportant\b|\bfunction\b|\bmust\b|\bcauses?\b|\bhelps?\b|\bproduces?\b/i.test(sentence)),
+        ...teachingSentences
+      ]).slice(0, 6);
+      const keyTakeaways = takeawayPool.length
+        ? takeawayPool.map((sentence) => `- ${sentence}`).join('\n')
+        : `- Define ${topicLabel} correctly.\n- Identify its main parts, features or stages.\n- Explain its importance and practical application.`;
+
+      const imageCount = Array.isArray(range?.images) ? range.images.length : 0;
+      const bookTitle = lessonState.currentBook?.book?.title || 'the classbook';
+      const pageLabel = range?.pageStart && range?.pageEnd ? `pages ${range.pageStart}-${range.pageEnd}` : 'the selected pages';
+      const diagrams = imageCount
+        ? `Use the ${imageCount} textbook visual${imageCount === 1 ? '' : 's'} provided in ${bookTitle}, ${pageLabel}. Display each visual, identify and label its main parts, then guide learners to explain how the labelled parts relate to ${topicLabel}.`
+        : `Draw or display a clear labelled diagram, chart, timeline or concept map of ${topicLabel}. Use arrows and short labels to show the main parts, stages, relationships or sequence described in ${bookTitle}, ${pageLabel}.`;
+
+      const cautionSentences = teachingSentences.filter((sentence) =>
+        /\bnot\b|\bdiffer(?:s|ent|ence)\b|\bwhereas\b|\bhowever\b|\bbut\b|\bavoid\b|\bincorrect\b|\bdo not\b/i.test(sentence)
+      ).slice(0, 2);
+      const misconceptions = [
+        ...cautionSentences.map((sentence) => `- Correct this possible confusion: ${sentence}`),
+        `- Learners may know the name "${topicLabel}" but confuse its parts, stages or functions. Require them to match each term with its correct meaning or role.`,
+        `- Do not accept memorised statements without explanation; ask learners to use an example or the labelled visual to show understanding.`
+      ].slice(0, 4).join('\n');
+
+      return { examples, keyTakeaways, diagrams, misconceptions };
+    }
+
+    function fillRequiredLessonFields(text, range) {
+      const sections = buildRequiredLessonSections(text, range);
+      if (examplesField && !examplesField.value.trim()) examplesField.value = sections.examples;
+      if (keyTakeawaysField && !keyTakeawaysField.value.trim()) keyTakeawaysField.value = sections.keyTakeaways;
+      if (diagramsField && !diagramsField.value.trim()) diagramsField.value = sections.diagrams;
+      if (misconceptionsField && !misconceptionsField.value.trim()) misconceptionsField.value = sections.misconceptions;
+    }
+
     function importEditableTopicContent(kind) {
       const workspace = lessonState.currentBook?.topicWorkspace;
       const range = kind === 'whole' ? workspace?.wholeTopic : workspace?.subTopic;
@@ -3822,6 +3878,7 @@
         const existing = keyConceptsField.value.trim();
         keyConceptsField.value = [existing, conceptLines].filter(Boolean).join('\n\n');
       }
+      fillRequiredLessonFields(text, range);
       const bookTitle = lessonState.currentBook?.book?.title || 'Classbook';
       if (referencesField) {
         const reference = `${bookTitle}, pages ${range.pageStart}-${range.pageEnd}`;
@@ -3830,7 +3887,7 @@
         }
       }
       lessonState.autoTextSnippet = text;
-      toast(`Imported the edited ${kind === 'whole' ? 'whole topic' : 'sub-topic'} into Detailed Content and Key Concepts.`, 'success');
+      toast(`Imported the edited ${kind === 'whole' ? 'whole topic' : 'sub-topic'} and completed all teaching-content fields.`, 'success');
     }
 
     function renderTopicWorkspaceModal(workspace) {
@@ -5008,8 +5065,9 @@ function splitIntoParagraphs(text) {
           }
           const concepts = buildEditableConceptLines(text, range.label);
           if (keyConceptsField && concepts) keyConceptsField.value = [keyConceptsField.value.trim(), concepts].filter(Boolean).join('\n\n');
+          fillRequiredLessonFields(text, range);
           lessonState.autoTextSnippet = text;
-          toast(`Imported ${range.label} into Lesson Development.`, 'success');
+          toast(`Imported ${range.label} and completed all teaching-content fields.`, 'success');
         }
         return;
       }
@@ -5527,7 +5585,27 @@ function splitIntoParagraphs(text) {
       saveNoteBtn.addEventListener('click', async () => {
       const topicValue = getResolvedTopicValue();
       const subTopicValue = getResolvedSubTopicValue();
-      const requiredFields = [noteClassField, noteSubjectField, keyConceptsField, detailedContentField];
+      const saveText = detailedContentField?.value || '';
+      if (saveText.trim()) {
+        const workspace = lessonState.currentBook?.topicWorkspace;
+        const saveRange = workspace?.subTopic || workspace?.wholeTopic || {
+          label: subTopicValue || topicValue,
+          pageStart: parseInt(pageStartInput?.value || '', 10) || null,
+          pageEnd: parseInt(pageEndInput?.value || '', 10) || null,
+          images: []
+        };
+        fillRequiredLessonFields(saveText, saveRange);
+      }
+      const requiredFields = [
+        noteClassField,
+        noteSubjectField,
+        keyConceptsField,
+        detailedContentField,
+        examplesField,
+        keyTakeawaysField,
+        diagramsField,
+        misconceptionsField
+      ];
       for (const field of requiredFields) {
         if (!field || !field.value || !field.value.trim()) {
           const label = field && field.previousElementSibling ? field.previousElementSibling.textContent : 'this field';
