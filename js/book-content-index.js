@@ -18,6 +18,16 @@
 
   const SECTION_LABEL = '(chapter|topic|unit)';
   const SECTION_NUMBER = '([a-z]+(?:-[a-z]+)?|[ivxlcdm]+|\\d+)';
+  const HEADING_MARKER_SOURCE = '\\[\\[HEADING(?::(\\d+))?\\]\\]';
+
+  function stripHeadingMarker(value) {
+    return String(value || '').replace(/^\[\[HEADING(?::\d+)?\]\]\s*/, '');
+  }
+
+  function headingLevel(value) {
+    const match = String(value || '').match(/^\[\[HEADING:(\d+)\]\]/);
+    return match ? Number(match[1]) : 0;
+  }
 
   function cleanLine(value) {
     return String(value || '')
@@ -37,13 +47,13 @@
   }
 
   function usefulTopic(value) {
-    const text = cleanLine(value).replace(/^\[\[HEADING\]\]\s*/, '').replace(/\s+\d{1,4}$/, '').trim();
+    const text = stripHeadingMarker(cleanLine(value)).replace(/\s+\d{1,4}$/, '').trim();
     if (!text || /^(main topic|topic|page)$/i.test(text)) return '';
     return text;
   }
 
   function parseToc(lines) {
-    const tocStart = lines.findIndex((line) => /^(?:table of contents|contents)\s*[:.-]?$/i.test(line.replace(/^\[\[HEADING\]\]\s*/, '')));
+    const tocStart = lines.findIndex((line) => /^(?:table of contents|contents)\s*[:.-]?$/i.test(stripHeadingMarker(line)));
     if (tocStart === -1) return { entries: [], start: -1, end: -1 };
     const entries = [];
     let tocEnd = Math.min(lines.length, tocStart + 120);
@@ -56,14 +66,14 @@
       }
       if (/^(?:chapter|topic|unit)\s+(?:main topic|title|topic)\s+page$/i.test(line) || /^(?:chapter|unit|main topic|topic|title|page)$/i.test(line)) continue;
 
-      const chapterMatch = line.match(new RegExp(`^(?:\\[\\[HEADING\\]\\]\\s*)?${SECTION_LABEL}\\s+${SECTION_NUMBER}\\s*(?:[:.\\-]\\s*)?(.*)$`, 'i'));
+      const chapterMatch = line.match(new RegExp(`^(?:${HEADING_MARKER_SOURCE}\\s*)?${SECTION_LABEL}\\s+${SECTION_NUMBER}\\s*(?:[:.\\-]\\s*)?(.*)$`, 'i'));
       if (!chapterMatch) continue;
-      const sectionType = chapterMatch[1];
-      const sectionToken = chapterMatch[2];
+      const sectionType = chapterMatch[2];
+      const sectionToken = chapterMatch[3];
       const number = chapterNumber(sectionToken);
       if (!number) continue;
 
-      let remainder = cleanLine(chapterMatch[3]);
+      let remainder = cleanLine(chapterMatch[4]);
       let page = '';
       const pageMatch = remainder.match(/\s+(\d{1,4})$/);
       if (pageMatch) {
@@ -95,20 +105,45 @@
         tocLine: index
       });
     }
-    return { entries, start: tocStart, end: tocEnd };
+    // Some authored books contain a "Table of Contents" title but no actual
+    // table: the first chapter starts immediately below it. A single chapter
+    // without a printed page is chapter content, not a usable TOC. Treating it
+    // as a TOC makes that chapter consume the rest of the book and hides every
+    // later chapter/subtopic from lesson notes.
+    const firstEntryLine = entries[0]?.tocLine ?? -1;
+    const secondEntryLine = entries[1]?.tocLine ?? tocEnd;
+    const containsChapterBody = firstEntryLine >= 0 && lines
+      .slice(firstEntryLine + 1, secondEntryLine)
+      .some((line) => /^(?:learning objectives?|homework|activity|chapter summary|end of chapter)\b/i.test(stripHeadingMarker(line)) || stripHeadingMarker(line).length > 180);
+    const hasTocEvidence = entries.some((entry) => Number(entry.tocPage))
+      || (entries.length >= 2 && !containsChapterBody);
+    return hasTocEvidence
+      ? { entries, start: tocStart, end: tocEnd }
+      : { entries: [], start: -1, end: -1 };
   }
 
   function parseHeadingFallback(lines) {
     const entries = [];
     lines.forEach((line, index) => {
-      const match = line.match(new RegExp(`^(?:\\[\\[HEADING\\]\\]\\s*)?${SECTION_LABEL}\\s+${SECTION_NUMBER}\\s*(?:[:.\\-]\\s*)?(.+)$`, 'i'));
+      const match = line.match(new RegExp(`^(?:${HEADING_MARKER_SOURCE}\\s*)?${SECTION_LABEL}\\s+${SECTION_NUMBER}\\s*(?:[:.\\-]\\s*)?(.*)$`, 'i'));
       if (!match) return;
-      const number = chapterNumber(match[2]);
-      const topic = usefulTopic(match[3]);
+      const number = chapterNumber(match[3]);
+      let topic = usefulTopic(match[4]);
+      // Word authors commonly put "CHAPTER ONE" and its title in consecutive
+      // paragraphs. Recover the title without depending on one specific style.
+      if (!topic) {
+        for (let cursor = index + 1; cursor < Math.min(lines.length, index + 5); cursor += 1) {
+          const candidate = usefulTopic(lines[cursor]);
+          if (!candidate || /^\[\[PAGE_BREAK\]\]$/i.test(candidate)) continue;
+          if (/^(?:chapter|topic|unit)\s+/i.test(candidate)) break;
+          topic = candidate;
+          break;
+        }
+      }
       if (!number || !topic || entries.some((entry) => entry.number === number)) return;
       entries.push({
         number,
-        chapter: `${match[1][0].toUpperCase()}${match[1].slice(1).toLowerCase()} ${match[2]}`,
+        chapter: `${match[2][0].toUpperCase()}${match[2].slice(1).toLowerCase()} ${match[3]}`,
         topic,
         tocSubtopics: [],
         tocPage: '',
@@ -134,10 +169,10 @@
 
   function isSubtopicHeading(line) {
     const raw = cleanLine(line);
-    const markedHeading = /^\[\[HEADING\]\]\s*/.test(raw);
-    const text = raw.replace(/^\[\[HEADING\]\]\s*/, '').trim();
+    const markedHeading = /^\[\[HEADING(?::\d+)?\]\]\s*/.test(raw);
+    const text = stripHeadingMarker(raw).trim();
     if (!text || text.length < 3 || text.length > 110) return false;
-    if (/^(?:learning objectives?|by the end|activity|exercise|homework|questions?|summary|vocabulary|key words?|word|simple meaning|introduction|teacher(?:'s)? (?:note|point)|what to do|questions to discuss|story questions|end of chapter|section [a-z]|annex)\b/i.test(text)) return false;
+    if (/^(?:learning objectives?|by the end|activity|exercise|homework|questions?|summary|vocabulary|key words?|word|simple meaning|introduction|(?:socrates\s+)?(?:life\s+)?story|case study|teacher(?:'s)? (?:note|point)|what to do|questions to discuss|story questions|end of chapter|section [a-z]|annex)\b/i.test(text)) return false;
     if (/^(?:what|why|how|where|when|who|which|name|state|mention|list|explain|describe|differentiate|draw|write|give|identify|observe|discuss)\b/i.test(text) || /\?$/.test(text)) return false;
     if (/^[•-]\s*/.test(text)) return false;
     const numbered = /^\d+(?:\.\d+)*[.)]\s+([A-Z].*)/.exec(text);
@@ -160,14 +195,13 @@
 
   function subtopicTitle(line) {
     return cleanLine(line)
-      .replace(/^\[\[HEADING\]\]\s*/, '')
-      .replace(/^\d+(?:\.\d+)*[.)]\s*/, '')
+      .replace(/^\[\[HEADING(?::\d+)?\]\]\s*/, '')
       .replace(/[:.\-]+$/, '')
       .trim();
   }
 
   function numberedSubtopicCandidate(line) {
-    const text = cleanLine(line).replace(/^\[\[HEADING\]\]\s*/, '').trim();
+    const text = stripHeadingMarker(cleanLine(line)).trim();
     const match = /^(\d+)(?:\.\d+)*[.)]\s+([A-Z].*)$/.exec(text);
     if (!match) return null;
     const title = match[2].replace(/[:.\-]+$/, '').trim();
@@ -199,7 +233,11 @@
       const bodyEnd = nextStart !== undefined ? nextStart - 1 : lines.length - 1;
       const headings = [];
       for (let index = bodyStart + 1; index <= bodyEnd; index += 1) {
-        if (isSubtopicHeading(lines[index])) headings.push({ title: subtopicTitle(lines[index]), line: index });
+        if (isSubtopicHeading(lines[index])) headings.push({
+          title: subtopicTitle(lines[index]),
+          line: index,
+          level: headingLevel(lines[index])
+        });
       }
       // Older saved book text may not contain the DOCX style markers. Recover
       // the same structure from the author's numbering convention: 1, 2, 3...
@@ -207,7 +245,7 @@
       const structuralHeadings = [];
       let expectedNumber = 1;
       for (let index = bodyStart + 1; index <= bodyEnd; index += 1) {
-        const clean = cleanLine(lines[index]).replace(/^\[\[HEADING\]\]\s*/, '');
+        const clean = stripHeadingMarker(cleanLine(lines[index]));
         if (/^(?:chapter summary|end of (?:the )?chapter|end-of-chapter|chapter exercise)\b/i.test(clean)) break;
         if (/^homework\b/i.test(clean)) continue;
         const candidate = numberedSubtopicCandidate(lines[index]);
@@ -215,16 +253,23 @@
         structuralHeadings.push({ title: candidate.title, line: index });
         expectedNumber += 1;
       }
-      const explicitlyStyledHeadings = headings.filter((heading) => /^\[\[HEADING\]\]/.test(lines[heading.line]));
+      const explicitlyStyledHeadings = headings.filter((heading) => /^\[\[HEADING(?::\d+)?\]\]/.test(lines[heading.line]));
+      const styledLevels = explicitlyStyledHeadings.map((heading) => heading.level).filter(Boolean);
+      const topStyledLevel = styledLevels.length ? Math.min(...styledLevels) : 0;
+      const topLevelStyledHeadings = topStyledLevel
+        ? explicitlyStyledHeadings.filter((heading) => heading.level === topStyledLevel)
+        : [];
       const numberedStyledHeadings = explicitlyStyledHeadings.filter((heading) =>
-        /^\[\[HEADING\]\]\s*\d+[.)]\s+\S/.test(lines[heading.line])
+        /^\[\[HEADING(?::\d+)?\]\]\s*\d+[.)]\s+\S/.test(lines[heading.line])
       );
       // Word's explicit heading/color styling is authoritative and may contain
       // consecutive subtopics that share one Homework block. The numbering +
       // Homework inference is only a fallback for old text with styles removed.
       // When a chapter has top-level numbered styled headings, they define the
       // dropdown level; nested 2.1/2.2 headings and styled stories are excluded.
-      const resolvedHeadings = numberedStyledHeadings.length
+      const resolvedHeadings = topLevelStyledHeadings.length
+        ? topLevelStyledHeadings
+        : numberedStyledHeadings.length
         ? numberedStyledHeadings
         : explicitlyStyledHeadings.length
           ? explicitlyStyledHeadings
@@ -445,6 +490,7 @@
         const shortTitle = text.length <= 110
           && text.split(/\s+/).filter(Boolean).length <= 14
           && !/[?!]$/.test(text);
+        const styleLevel = Number(styleName.match(/heading\s*(\d+)/i)?.[1] || 0);
         const emphasized = /heading|title/i.test(styleName)
           || (bold && underlined)
           || (bold && nonBlackColor && (numberedTitle || shortTitle));
@@ -453,7 +499,7 @@
             ? `• ${text}`
             : text;
           const markedText = emphasized && !/^(?:chapter|topic|unit)\b/i.test(listText)
-            ? `[[HEADING]] ${listText}`
+            ? `[[HEADING${styleLevel ? `:${styleLevel}` : ''}]] ${listText}`
             : listText;
           textLines.push(markedText);
           blocks.push({ type: 'text', text: markedText, lineIndex, heading: emphasized });
