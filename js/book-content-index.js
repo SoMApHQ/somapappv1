@@ -206,19 +206,14 @@
       // with each later subtopic appearing after the previous Homework block.
       const structuralHeadings = [];
       let expectedNumber = 1;
-      let homeworkAfterHeading = false;
       for (let index = bodyStart + 1; index <= bodyEnd; index += 1) {
         const clean = cleanLine(lines[index]).replace(/^\[\[HEADING\]\]\s*/, '');
-        if (/^homework\b/i.test(clean)) {
-          if (structuralHeadings.length) homeworkAfterHeading = true;
-          continue;
-        }
+        if (/^(?:chapter summary|end of (?:the )?chapter|end-of-chapter|chapter exercise)\b/i.test(clean)) break;
+        if (/^homework\b/i.test(clean)) continue;
         const candidate = numberedSubtopicCandidate(lines[index]);
         if (!candidate || candidate.number !== expectedNumber) continue;
-        if (expectedNumber > 1 && !homeworkAfterHeading) continue;
         structuralHeadings.push({ title: candidate.title, line: index });
         expectedNumber += 1;
-        homeworkAfterHeading = false;
       }
       const explicitlyStyledHeadings = headings.filter((heading) => /^\[\[HEADING\]\]/.test(lines[heading.line]));
       const numberedStyledHeadings = explicitlyStyledHeadings.filter((heading) =>
