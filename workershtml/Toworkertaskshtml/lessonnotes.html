@@ -3482,7 +3482,7 @@
       noteSubTopicField.value = desired || '';
       if (noteSubTopicHint) {
         noteSubTopicHint.textContent = bundle?.subTopics?.length
-          ? `Sub-topics for this topic came from ${bundle.sourceList.join(' and ')}.`
+          ? `Sub-topics for this topic came from ${(bundle.subTopicSourceList || bundle.sourceList).join(' and ')}.`
           : 'No saved sub-topic was found for this topic. You can type one manually if needed.';
       }
       syncManualTopicVisibility();
@@ -3524,13 +3524,22 @@
             ...bundle,
             key,
             subTopics: [...(bundle.subTopics || [])],
+            subTopicSourceList: [...(bundle.sourceList || [])],
             sourceList: [...(bundle.sourceList || [])],
             searchTexts: [...(bundle.searchTexts || [])]
           };
           return;
         }
         const existing = mergedMap[key];
-        existing.subTopics = Array.from(new Set([...(existing.subTopics || []), ...(bundle.subTopics || [])]));
+        const bookHasSubTopics = /^book_/.test(bundle.sourceType || '') && (bundle.subTopics || []).length;
+        if (bookHasSubTopics) {
+          // A chapter's styled headings are authoritative. Do not mix inferred
+          // scheme activity phrases into the lesson-note subtopic dropdown.
+          existing.subTopics = Array.from(new Set(bundle.subTopics));
+          existing.subTopicSourceList = [...(bundle.sourceList || [])];
+        } else {
+          existing.subTopics = Array.from(new Set([...(existing.subTopics || []), ...(bundle.subTopics || [])]));
+        }
         existing.sourceList = Array.from(new Set([...(existing.sourceList || []), ...(bundle.sourceList || [])]));
         existing.searchTexts = Array.from(new Set([...(existing.searchTexts || []), ...(bundle.searchTexts || [])]));
         ['bookId', 'bookTitle', 'bookPage', 'bookPageStart', 'bookPageEnd', 'bookSectionStart', 'bookSectionEnd'].forEach((field) => {
@@ -3714,7 +3723,9 @@
         try {
           const snap = await db.ref(`book_texts/${bookId}`).once('value');
           const value = snap.val();
-          const text = compactTextBlock(value?.text || '');
+          // Chapter and heading detection depends on paragraph boundaries.
+          // Never flatten saved classbook text into a single line.
+          const text = normalizeMultilineText(value?.text || '');
           if (text) {
             storedSource = {
               bookId,
@@ -3756,7 +3767,7 @@
     }
 
     function findTopicRangeFromBookText(textSource, topicName, subTopicName) {
-      const text = compactTextBlock(textSource?.text || '');
+      const text = normalizeMultilineText(textSource?.text || '');
       if (!text) return null;
       const profile = buildBookSearchProfile(topicName, subTopicName);
       if (!profile.phrases.length && !profile.tokens.length) return null;

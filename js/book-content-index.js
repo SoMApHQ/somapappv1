@@ -142,7 +142,10 @@
     if (/^[•-]\s*/.test(text)) return false;
     const numbered = /^\d+(?:\.\d+)*[.)]\s+([A-Z].*)/.exec(text);
     if (numbered) {
-      if (/^(?:what|why|how|where|when|who|which|name|state|mention|list|explain|describe|differentiate|draw|write|give|identify|observe|discuss|the|a|an)\b/i.test(numbered[1]) || /\?$/.test(numbered[1])) return false;
+      // Articles are common at the start of real book headings (for example,
+      // "1. The Concept of ..."). Question verbs and question marks are the
+      // useful distinction here; rejecting The/A/An drops valid subtopics.
+      if (/^(?:what|why|how|where|when|who|which|name|state|mention|list|explain|describe|differentiate|draw|write|give|identify|observe|discuss)\b/i.test(numbered[1]) || /\?$/.test(numbered[1])) return false;
       return markedHeading;
     }
     if (markedHeading) {
@@ -384,9 +387,27 @@
         const text = paragraphText(child);
         const styleNode = descendants(child, 'pStyle')[0];
         const styleName = styleNode?.getAttribute('w:val') || styleNode?.getAttribute('val') || '';
-        const bold = descendants(child, 'b').length > 0;
+        const bold = descendants(child, 'b').some((node) => {
+          const value = String(node.getAttribute('w:val') || node.getAttribute('val') || 'true').toLowerCase();
+          return !['0', 'false', 'off', 'none'].includes(value);
+        });
         const underlined = descendants(child, 'u').length > 0;
-        const emphasized = /heading|title/i.test(styleName) || (bold && underlined);
+        const nonBlackColor = descendants(child, 'color').some((node) => {
+          const value = String(node.getAttribute('w:val') || node.getAttribute('val') || '').replace(/^#/, '').toLowerCase();
+          const theme = String(node.getAttribute('w:themeColor') || node.getAttribute('themeColor') || '').toLowerCase();
+          if (theme && !['text1', 'dark1'].includes(theme)) return true;
+          return Boolean(value) && !['auto', '000', '000000', '00000000'].includes(value);
+        });
+        // The classbooks consistently use bold, coloured text for numbered
+        // subtopic headings. Preserve that visual signal in the plain-text
+        // index alongside normal Word heading styles and bold+underline.
+        const numberedTitle = /^\s*\d+(?:\.\d+)*[.)]\s+\S/.test(text);
+        const shortTitle = text.length <= 110
+          && text.split(/\s+/).filter(Boolean).length <= 14
+          && !/[?!]$/.test(text);
+        const emphasized = /heading|title/i.test(styleName)
+          || (bold && underlined)
+          || (bold && nonBlackColor && (numberedTitle || shortTitle));
         if (text) {
           const listText = descendants(child, 'numPr').length && !/^(?:[-•]|\d+[.)])\s*/.test(text)
             ? `• ${text}`
