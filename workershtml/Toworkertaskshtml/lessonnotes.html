@@ -1270,8 +1270,9 @@
             <button class="hw-preset-btn selected" data-preset="balanced" type="button">Balanced Mix<br><small>Recommended — variety of types</small></button>
             <button class="hw-preset-btn" data-preset="mc_only" type="button">All Multiple Choice<br><small>Every question is MCQ</small></button>
             <button class="hw-preset-btn" data-preset="preset_a" type="button">5 Word Problem + 5 MC + 5 True/False<br><small>Preset A</small></button>
-            <button class="hw-preset-btn" data-preset="preset_b" type="button">5 Passage + 5 True/False + 5 Reflection<br><small>Preset B</small></button>
-            <button class="hw-preset-btn" data-preset="custom" type="button">Custom Counts<br><small>Set each type yourself</small></button>
+             <button class="hw-preset-btn" data-preset="preset_b" type="button">5 Passage + 5 True/False + 5 Reflection<br><small>Preset B</small></button>
+            <button class="hw-preset-btn" data-preset="classbook" id="classbookHomeworkPreset" type="button">Homework from Classbook<br><small id="classbookHomeworkHint">Use the exact homework attached to this sub-topic</small></button>
+             <button class="hw-preset-btn" data-preset="custom" type="button">Custom Counts<br><small>Set each type yourself</small></button>
             <button class="hw-preset-btn" data-preset="manual" type="button">I'll Write My Own<br><small>Clear field, type manually</small></button>
           </div>
         </div>
@@ -1546,6 +1547,8 @@
     const confirmHwGenBtn = document.getElementById('confirmHwGenBtn');
     const hwTotalInput = document.getElementById('hwTotalInput');
     const hwCustomCounts = document.getElementById('hwCustomCounts');
+    const classbookHomeworkPreset = document.getElementById('classbookHomeworkPreset');
+    const classbookHomeworkHint = document.getElementById('classbookHomeworkHint');
 
     const hwPreviewModal = document.getElementById('hwPreviewModal');
     const closeHwPreviewBtn = document.getElementById('closeHwPreviewBtn');
@@ -4921,6 +4924,65 @@ function splitIntoParagraphs(text) {
     // --- Homework config modal ---
     let hwSelectedPreset = 'balanced';
 
+    function getClassbookHomework() {
+      const workspace = lessonState.currentBook?.topicWorkspace;
+      const range = workspace?.subTopic || workspace?.wholeTopic;
+      const source = normalizeMultilineText(range?.text || '');
+      if (!range || !source) return null;
+
+      const lines = source.split('\n').map((line) => line.replace(/^\[\[HEADING\]\]\s*/i, '').trim());
+      const homeworkIndexes = [];
+      lines.forEach((line, index) => {
+        if (/^homework\b/i.test(line)) homeworkIndexes.push(index);
+      });
+      if (!homeworkIndexes.length) return null;
+
+      const startIndex = homeworkIndexes[homeworkIndexes.length - 1];
+      const title = lines[startIndex] || 'Classbook Homework';
+      const questions = [];
+      let current = '';
+      for (let index = startIndex + 1; index < lines.length; index += 1) {
+        const line = lines[index];
+        if (!line) continue;
+        if (/^homework\b/i.test(line) || (/^chapter\b/i.test(line) && questions.length)) break;
+        const numbered = line.match(/^\d+[.)]\s*(.+)$/);
+        if (numbered) {
+          if (current) questions.push(current);
+          current = numbered[1].trim();
+        } else if (current && !/^\[\[PAGE_BREAK\]\]$/i.test(line)) {
+          current += ` ${line}`;
+        }
+      }
+      if (current) questions.push(current);
+      const cleanedQuestions = questions.map((question) => normalizeMultilineText(question)).filter(Boolean);
+      if (!cleanedQuestions.length) return null;
+      return { title, questions: cleanedQuestions, range };
+    }
+
+    function importClassbookHomework() {
+      const homework = getClassbookHomework();
+      if (!homework) {
+        toast('No classbook homework was found at the end of the selected sub-topic.', 'warning');
+        return false;
+      }
+      if (practiceQuestionsField) practiceQuestionsField.value = formatHomeworkBlocks(homework.questions);
+      const bookTitle = lessonState.currentBook?.book?.title || 'Classbook';
+      if (homeworkSummary) {
+        homeworkSummary.textContent = `${homework.questions.length} questions from ${homework.title} in ${bookTitle}, pages ${homework.range.pageStart}-${homework.range.pageEnd}.`;
+      }
+      lessonState.lastHomeworkMeta = {
+        generatedAt: Date.now(),
+        source: 'classbook',
+        bookTitle,
+        homeworkTitle: homework.title,
+        questionCount: homework.questions.length,
+        pageStart: homework.range.pageStart,
+        pageEnd: homework.range.pageEnd
+      };
+      toast(`Imported all ${homework.questions.length} questions from ${homework.title}.`, 'success');
+      return true;
+    }
+
     function openHwConfigModal() {
       if (!noteClassField || !noteSubjectField) return;
       if (!noteClassField.value || !noteSubjectField.value) {
@@ -4938,9 +5000,23 @@ function splitIntoParagraphs(text) {
       }
       hwSelectedPreset = 'balanced';
       if (hwConfigModal) {
+        const classbookHomework = getClassbookHomework();
+        if (classbookHomeworkPreset) {
+          classbookHomeworkPreset.disabled = !classbookHomework;
+          classbookHomeworkPreset.title = classbookHomework
+            ? `${classbookHomework.title}: ${classbookHomework.questions.length} questions`
+            : 'No homework block was found for the selected book sub-topic.';
+        }
+        if (classbookHomeworkHint) {
+          classbookHomeworkHint.textContent = classbookHomework
+            ? `${classbookHomework.title} - ${classbookHomework.questions.length} exact book questions`
+            : 'Unavailable - load a book sub-topic with homework first';
+        }
         document.querySelectorAll('.hw-preset-btn').forEach(b => b.classList.remove('selected'));
         const balanced = hwConfigModal.querySelector('[data-preset="balanced"]');
         if (balanced) balanced.classList.add('selected');
+        if (hwTotalInput) hwTotalInput.disabled = false;
+        if (confirmHwGenBtn) confirmHwGenBtn.textContent = 'Generate Questions';
         if (hwCustomCounts) hwCustomCounts.classList.add('hidden');
         hwConfigModal.classList.remove('hidden');
       }
@@ -5906,6 +5982,14 @@ function splitIntoParagraphs(text) {
           document.querySelectorAll('.hw-preset-btn').forEach(b => b.classList.remove('selected'));
           btn.classList.add('selected');
           hwSelectedPreset = btn.dataset.preset;
+          const classbookHomework = hwSelectedPreset === 'classbook' ? getClassbookHomework() : null;
+          if (hwTotalInput) {
+            hwTotalInput.disabled = hwSelectedPreset === 'classbook';
+            if (classbookHomework) hwTotalInput.value = String(classbookHomework.questions.length);
+          }
+          if (confirmHwGenBtn) {
+            confirmHwGenBtn.textContent = hwSelectedPreset === 'classbook' ? 'Use Book Homework' : 'Generate Questions';
+          }
           if (hwCustomCounts) {
             hwCustomCounts.classList.toggle('hidden', hwSelectedPreset !== 'custom');
           }
@@ -5916,6 +6000,10 @@ function splitIntoParagraphs(text) {
     if (cancelHwConfigBtn) cancelHwConfigBtn.addEventListener('click', closeHwConfigModal);
     if (confirmHwGenBtn) {
       confirmHwGenBtn.addEventListener('click', () => {
+        if (hwSelectedPreset === 'classbook') {
+          if (importClassbookHomework()) closeHwConfigModal();
+          return;
+        }
         if (hwSelectedPreset === 'manual') {
           if (practiceQuestionsField) practiceQuestionsField.value = '';
           if (homeworkSummary) homeworkSummary.textContent = 'Type your own homework questions in the box.';
