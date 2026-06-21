@@ -1410,6 +1410,7 @@
     let editingNoteId = null;
     let schoolLogoDataUrlPromise = null;
     const lessonPlanYearCache = new Map();
+    const registeredClassCache = new Map();
 
     const HOMEWORK_TOTAL = 15;
     const HOMEWORK_BLUEPRINT = [
@@ -2307,6 +2308,50 @@
       return Array.isArray(range?.images) ? range.images : [];
     }
 
+    async function getRegisteredClassCounts(year, className) {
+      const targetYear = String(year || getYear());
+      const canonicalClass = ClassUtils.normalizeClassName
+        ? ClassUtils.normalizeClassName(className || '')
+        : compactTextBlock(className || '');
+      const cacheKey = `${targetYear}|${String(canonicalClass).toLowerCase()}`;
+      if (registeredClassCache.has(cacheKey)) return registeredClassCache.get(cacheKey);
+
+      const defaultYear = '2025';
+      const [studentsSnap, anchorSnap, yearSnap, shiftsSnap] = await Promise.all([
+        schoolRef('students').once('value'),
+        schoolRef(`enrollments/${defaultYear}`).once('value').catch(() => ({ val: () => null })),
+        schoolRef(`enrollments/${targetYear}`).once('value').catch(() => ({ val: () => null })),
+        schoolRef('shiftReports').once('value').catch(() => ({ val: () => null }))
+      ]);
+      const students = studentsSnap?.val?.() || {};
+      const rosterBundle = ClassUtils.buildAcademicRoster
+        ? ClassUtils.buildAcademicRoster(
+          students,
+          anchorSnap?.val?.() || {},
+          yearSnap?.val?.() || {},
+          shiftsSnap?.val?.() || {},
+          { targetYear, defaultYear, includeShifted: false }
+        )
+        : { roster: [] };
+      const classRoster = (rosterBundle.roster || []).filter((student) => {
+        const studentClass = ClassUtils.normalizeClassName
+          ? ClassUtils.normalizeClassName(student.className || '')
+          : compactTextBlock(student.className || '');
+        return String(studentClass).toLowerCase() === String(canonicalClass).toLowerCase();
+      });
+      const counts = classRoster.reduce((summary, student) => {
+        summary.total += 1;
+        const gender = ClassUtils.normalizeGenderBucket
+          ? ClassUtils.normalizeGenderBucket(student.gender || student.rawGender || '')
+          : String(student.gender || student.rawGender || '').toLowerCase();
+        if (gender === 'boys' || gender === 'boy' || gender === 'male') summary.boys += 1;
+        if (gender === 'girls' || gender === 'girl' || gender === 'female') summary.girls += 1;
+        return summary;
+      }, { boys: 0, girls: 0, total: 0 });
+      registeredClassCache.set(cacheKey, counts);
+      return counts;
+    }
+
     async function getPdfContextForNote(note) {
       const year = String(note?.year || getYear());
       const plans = await getLessonPlansForYear(year);
@@ -2317,6 +2362,12 @@
       const homeworkText = noteHomeworkText || planHomeworkText;
       const homeworkGivenMeta = matchedPlan?.homeworkGivenMeta || null;
       const homeworkCount = countHomeworkQuestionsFromText(homeworkText);
+      let registered = { boys: 0, girls: 0, total: 0 };
+      try {
+        registered = await getRegisteredClassCounts(year, note?.class || note?.className || '');
+      } catch (error) {
+        console.warn('Registered class totals could not be loaded:', error?.message || error);
+      }
 
       return {
         note,
@@ -2327,7 +2378,10 @@
           presentBoys: Number(totals.presentBoys || 0) || 0,
           presentGirls: Number(totals.presentGirls || 0) || 0,
           absentBoys: Number(totals.absentBoys || 0) || 0,
-          absentGirls: Number(totals.absentGirls || 0) || 0
+          absentGirls: Number(totals.absentGirls || 0) || 0,
+          registeredBoys: Number(registered.boys || 0) || 0,
+          registeredGirls: Number(registered.girls || 0) || 0,
+          registeredTotal: Number(registered.total || totals.totalStudents || matchedPlan?.totalStudents || 0) || 0
         },
         week: compactTextBlock(matchedPlan?.week || ''),
         date: compactTextBlock(note?.lessonDateContext || matchedPlan?.date || ''),
@@ -2383,7 +2437,7 @@
         body: [
           ['Present', '', '', ''],
           ['Absent', '', '', ''],
-          ['Registered', '', '', attendance.total || '']
+          ['Registered', attendance.registeredBoys || '', attendance.registeredGirls || '', attendance.registeredTotal || attendance.total || '']
         ],
         theme: 'grid',
         headStyles: { font: 'times', fillColor: [22, 163, 74], textColor: 255, fontSize: 9 },
