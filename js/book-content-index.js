@@ -133,11 +133,23 @@
   }
 
   function isSubtopicHeading(line) {
-    const text = cleanLine(line);
+    const raw = cleanLine(line);
+    const markedHeading = /^\[\[HEADING\]\]\s*/.test(raw);
+    const text = raw.replace(/^\[\[HEADING\]\]\s*/, '').trim();
     if (!text || text.length < 3 || text.length > 110) return false;
-    if (/^(?:learning objectives?|by the end|activity|exercise|questions?|summary|vocabulary|chapter)\b/i.test(text)) return false;
-    if (/^\[\[HEADING\]\]\s*/.test(text)) return true;
-    if (/^\d+(?:\.\d+)*[.)]\s+[A-Z]/.test(text)) return true;
+    if (/^(?:learning objectives?|by the end|activity|exercise|homework|questions?|summary|vocabulary|key words?|word|simple meaning|introduction|teacher(?:'s)? (?:note|point)|what to do|questions to discuss|story questions|end of chapter|section [a-z]|annex)\b/i.test(text)) return false;
+    if (/^(?:what|why|how|where|when|who|which|name|state|mention|list|explain|describe|differentiate|draw|write|give|identify|observe|discuss)\b/i.test(text) || /\?$/.test(text)) return false;
+    if (/^[•-]\s*/.test(text)) return false;
+    const numbered = /^\d+(?:\.\d+)*[.)]\s+([A-Z].*)/.exec(text);
+    if (numbered) {
+      if (/^(?:what|why|how|where|when|who|which|name|state|mention|list|explain|describe|differentiate|draw|write|give|identify|observe|discuss|the|a|an)\b/i.test(numbered[1]) || /\?$/.test(numbered[1])) return false;
+      return markedHeading;
+    }
+    if (markedHeading) {
+      if (/^(?:meaning|use|examples?|type of operator|function(?: in digestion)?|part|no|answer|list [ab]|decision block|scratch loop|shape|number of sides|turning angle)\b/i.test(text)) return false;
+      const words = text.split(/\s+/).filter(Boolean);
+      return words.length <= 14;
+    }
     const letters = text.replace(/[^A-Za-z]/g, '');
     const words = text.split(/\s+/).filter(Boolean);
     return letters.length >= 4 && words.length <= 10 && text === text.toUpperCase();
@@ -372,9 +384,9 @@
         const text = paragraphText(child);
         const styleNode = descendants(child, 'pStyle')[0];
         const styleName = styleNode?.getAttribute('w:val') || styleNode?.getAttribute('val') || '';
-        const emphasized = /heading|title/i.test(styleName)
-          || descendants(child, 'b').length > 0
-          || descendants(child, 'u').length > 0;
+        const bold = descendants(child, 'b').length > 0;
+        const underlined = descendants(child, 'u').length > 0;
+        const emphasized = /heading|title/i.test(styleName) || (bold && underlined);
         if (text) {
           const listText = descendants(child, 'numPr').length && !/^(?:[-•]|\d+[.)])\s*/.test(text)
             ? `• ${text}`
