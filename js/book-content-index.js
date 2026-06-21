@@ -239,15 +239,38 @@
     };
   }
 
-  async function extractDocxText(arrayBuffer) {
+  function resolveZipTarget(basePath, target) {
+    const parts = `${basePath}/${target}`.replace(/\\/g, '/').split('/');
+    const resolved = [];
+    parts.forEach((part) => {
+      if (!part || part === '.') return;
+      if (part === '..') resolved.pop();
+      else resolved.push(part);
+    });
+    return resolved.join('/');
+  }
+
+  async function extractDocxContent(arrayBuffer) {
     if (!global.JSZip) throw new Error('DOCX library is not available');
     const zip = await global.JSZip.loadAsync(arrayBuffer);
     const xmlFile = zip.file('word/document.xml');
     if (!xmlFile) throw new Error('The Word document has no readable document body');
     const xml = await xmlFile.async('string');
     const documentXml = new DOMParser().parseFromString(xml, 'application/xml');
-    return Array.from(documentXml.getElementsByTagName('w:p'))
-      .map((paragraph) => {
+    const relationships = new Map();
+    const relationshipFile = zip.file('word/_rels/document.xml.rels');
+    if (relationshipFile) {
+      const relationshipXml = new DOMParser().parseFromString(await relationshipFile.async('string'), 'application/xml');
+      Array.from(relationshipXml.getElementsByTagName('Relationship')).forEach((relationship) => {
+        relationships.set(relationship.getAttribute('Id') || '', relationship.getAttribute('Target') || '');
+      });
+    }
+    const mimeTypes = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp' };
+    const textLines = [];
+    const blocks = [];
+    let lineIndex = 0;
+    const paragraphs = Array.from(documentXml.getElementsByTagName('w:p'));
+    for (const paragraph of paragraphs) {
         const text = Array.from(paragraph.getElementsByTagName('w:t'))
           .map((node) => node.textContent || '')
           .join(' ')
@@ -257,21 +280,51 @@
         const manualBreaks = Array.from(paragraph.getElementsByTagName('w:br')).filter((node) =>
           (node.getAttribute('w:type') || node.getAttribute('type') || '').toLowerCase() === 'page'
         ).length;
-        const pageMarkers = '[[PAGE_BREAK]]\n'.repeat(renderedBreaks + manualBreaks);
-        if (!text) return pageMarkers.trim();
+        for (let index = 0; index < renderedBreaks + manualBreaks; index += 1) {
+          textLines.push('[[PAGE_BREAK]]');
+          blocks.push({ type: 'pageBreak', lineIndex });
+        }
         const styleNode = paragraph.getElementsByTagName('w:pStyle')[0];
         const styleName = styleNode?.getAttribute('w:val') || styleNode?.getAttribute('val') || '';
         const emphasized = /heading|title/i.test(styleName)
           || paragraph.getElementsByTagName('w:b').length > 0
           || paragraph.getElementsByTagName('w:u').length > 0;
-        const markedText = emphasized && !/^(?:chapter|topic|unit)\b/i.test(text)
-          ? `[[HEADING]] ${text}`
-          : text;
-        return `${pageMarkers}${markedText}`;
-      })
-      .filter(Boolean)
-      .join('\n');
+        if (text) {
+          const markedText = emphasized && !/^(?:chapter|topic|unit)\b/i.test(text)
+            ? `[[HEADING]] ${text}`
+            : text;
+          textLines.push(markedText);
+          blocks.push({ type: 'text', text: markedText, lineIndex, heading: emphasized });
+        }
+
+        const relationshipIds = new Set();
+        Array.from(paragraph.getElementsByTagName('a:blip')).forEach((node) => {
+          const id = node.getAttribute('r:embed') || node.getAttribute('embed') || '';
+          if (id) relationshipIds.add(id);
+        });
+        Array.from(paragraph.getElementsByTagName('v:imagedata')).forEach((node) => {
+          const id = node.getAttribute('r:id') || node.getAttribute('id') || '';
+          if (id) relationshipIds.add(id);
+        });
+        for (const relationshipId of relationshipIds) {
+          const target = relationships.get(relationshipId);
+          const mediaPath = target ? resolveZipTarget('word', target) : '';
+          const mediaFile = mediaPath ? zip.file(mediaPath) : null;
+          if (!mediaFile) continue;
+          const extension = mediaPath.split('.').pop().toLowerCase();
+          const mimeType = mimeTypes[extension];
+          if (!mimeType) continue;
+          const dataUrl = `data:${mimeType};base64,${await mediaFile.async('base64')}`;
+          blocks.push({ type: 'image', dataUrl, lineIndex, alt: `Book illustration near section ${lineIndex + 1}` });
+        }
+        if (text) lineIndex += 1;
+    }
+    return { text: textLines.join('\n'), blocks };
   }
 
-  global.SomapBookContentIndex = { parse, parseToc, parseHeadingFallback, extractDocxText, cleanLine, normalize };
+  async function extractDocxText(arrayBuffer) {
+    return (await extractDocxContent(arrayBuffer)).text;
+  }
+
+  global.SomapBookContentIndex = { parse, parseToc, parseHeadingFallback, extractDocxContent, extractDocxText, cleanLine, normalize };
 })(window);

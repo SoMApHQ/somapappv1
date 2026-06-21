@@ -570,6 +570,67 @@
       color: #cbd5f5;
     }
 
+    .topic-workspace-tabs {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .topic-workspace-tabs button {
+      border: 1px solid rgba(96, 165, 250, 0.35);
+      background: rgba(30, 64, 175, 0.16);
+      color: #bfdbfe;
+      padding: 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .topic-workspace-tabs button.active {
+      background: linear-gradient(135deg, #2563eb, #4f46e5);
+      color: white;
+    }
+
+    .topic-edit-panel {
+      display: grid;
+      gap: 14px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(96, 165, 250, 0.25);
+      border-radius: 14px;
+      padding: 16px;
+    }
+
+    .topic-edit-panel.hidden { display: none; }
+
+    .topic-edit-panel textarea {
+      width: 100%;
+      min-height: 52vh;
+      resize: vertical;
+      background: #f8fafc;
+      color: #0f172a;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      padding: 18px;
+      font: 15px/1.65 Arial, sans-serif;
+    }
+
+    .topic-image-gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+
+    .topic-image-gallery:empty { display: none; }
+
+    .topic-image-gallery img {
+      width: 100%;
+      max-height: 360px;
+      object-fit: contain;
+      background: white;
+      border-radius: 10px;
+      padding: 8px;
+    }
+
     .full-book-layout {
       display: grid;
       grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
@@ -1136,7 +1197,8 @@
             <div id="pdfModalSummary" style="font-size: 0.85rem; color: rgba(224, 231, 255, 0.75);"></div>
           </div>
           <div style="display: flex; gap: 10px; align-items: center;">
-            <button class="btn btn-success" type="button" id="appendVisibleBtn">Import These Pages</button>
+            <button class="btn btn-success" type="button" id="appendVisibleBtn">Import Active Content</button>
+            <button class="btn btn-secondary" type="button" id="toggleTopicFullscreenBtn">Full Screen</button>
             <button class="btn btn-secondary" type="button" id="closePdfBtn">Close</button>
           </div>
         </div>
@@ -1378,7 +1440,8 @@
       topicIndex: {},
       topicSourceSummary: '',
       recommendedTopic: '',
-      recommendedSubTopic: ''
+      recommendedSubTopic: '',
+      activeTopicWorkspace: 'subtopic'
     };
 
     const teacherName = document.getElementById('teacherName');
@@ -1451,6 +1514,7 @@
     const pdfPageContainer = document.getElementById('pdfPageContainer');
     const pdfLoadingState = document.getElementById('pdfLoadingState');
     const appendVisibleBtn = document.getElementById('appendVisibleBtn');
+    const toggleTopicFullscreenBtn = document.getElementById('toggleTopicFullscreenBtn');
     const closePdfBtn = document.getElementById('closePdfBtn');
     const fullBookModal = document.getElementById('fullBookModal');
     const fullBookModalTitle = document.getElementById('fullBookModalTitle');
@@ -3329,12 +3393,19 @@
 
       const wordUrl = bookEntry.word_url || bookEntry.wordUrl
         || (/\.docx(?:$|\?)/i.test(bookEntry.url || bookEntry.cloudinaryUrl || '') ? (bookEntry.url || bookEntry.cloudinaryUrl) : '');
-      if (wordUrl && window.SomapBookContentIndex?.extractDocxText) {
+      if (wordUrl && window.SomapBookContentIndex?.extractDocxContent) {
         try {
           const response = await fetch(wordUrl, { credentials: 'omit' });
           if (response.ok) {
-            const text = await window.SomapBookContentIndex.extractDocxText(await response.arrayBuffer());
-            const source = { bookId, text, source: 'docx', sourceFileName: bookEntry.word_file_name || '', updatedAt: null };
+            const content = await window.SomapBookContentIndex.extractDocxContent(await response.arrayBuffer());
+            const source = {
+              bookId,
+              text: content.text,
+              blocks: content.blocks || [],
+              source: 'docx',
+              sourceFileName: bookEntry.word_file_name || '',
+              updatedAt: null
+            };
             lessonState.bookTextCache[bookId] = source;
             return source;
           }
@@ -3371,6 +3442,95 @@
         textStart: contextStart,
         textEnd: contextEnd
       };
+    }
+
+    function cleanBookWorkspaceLine(value) {
+      return String(value || '').replace(/^\[\[HEADING\]\]\s*/, '').trim();
+    }
+
+    function bookLabelScore(left, right) {
+      const leftTokens = new Set(tokenize(left));
+      const rightTokens = new Set(tokenize(right));
+      return similarityFromSets(leftTokens, rightTokens);
+    }
+
+    function buildBookTopicWorkspace(textSource, topicName, subTopicName) {
+      if (!textSource?.text || !window.SomapBookContentIndex) return null;
+      const indexed = window.SomapBookContentIndex.parse(textSource.text);
+      if (!indexed.chapters?.length) return null;
+      const chapter = indexed.chapters
+        .map((entry) => ({ entry, score: bookLabelScore(entry.topic, topicName) }))
+        .sort((left, right) => right.score - left.score)[0];
+      if (!chapter || chapter.score < 0.45) return null;
+
+      const chapterStart = Math.max(0, Number(chapter.entry.sectionStart || 1) - 1);
+      const chapterEnd = Math.min(indexed.lines.length, Number(chapter.entry.sectionEnd || indexed.lines.length));
+      const printedOffset = Number(chapter.entry.pageStart || 1) - Number(indexed.linePages?.[chapter.entry.bodyStart] || 1);
+      const printedPageAt = (lineIndex) => Math.max(1, Number(indexed.linePages?.[lineIndex] || 1) + printedOffset);
+      const sourceImages = (textSource.blocks || []).filter((block) => block.type === 'image');
+      const makeRange = (label, start, end, fallbackStart, fallbackEnd) => ({
+        label,
+        start,
+        end,
+        pageStart: start < end ? printedPageAt(start) : fallbackStart,
+        pageEnd: start < end ? printedPageAt(end - 1) : fallbackEnd,
+        text: indexed.lines.slice(start, end).map(cleanBookWorkspaceLine).filter(Boolean).join('\n\n'),
+        images: sourceImages.filter((image) => image.lineIndex >= start && image.lineIndex < end)
+      });
+
+      const wholeTopic = makeRange(
+        topicName || chapter.entry.topic,
+        chapterStart,
+        chapterEnd,
+        Number(chapter.entry.pageStart || 1),
+        Number(chapter.entry.pageEnd || chapter.entry.pageStart || 1)
+      );
+
+      let subTopic = null;
+      const wantedSubTopic = compactTextBlock(subTopicName || '');
+      if (wantedSubTopic) {
+        const candidates = [];
+        for (let index = chapterStart; index < chapterEnd; index += 1) {
+          const raw = indexed.lines[index];
+          const clean = cleanBookWorkspaceLine(raw).replace(/^\d+(?:\.\d+)*[.)]?\s*/, '');
+          const score = bookLabelScore(clean, wantedSubTopic);
+          if (score >= 0.65) {
+            candidates.push({ index, score: score + (/^\[\[HEADING\]\]/.test(raw) ? 0.3 : 0) });
+          }
+        }
+        candidates.sort((left, right) => right.score - left.score || left.index - right.index);
+        if (candidates.length) {
+          const subStart = candidates[0].index;
+          const startHeading = cleanBookWorkspaceLine(indexed.lines[subStart]);
+          const targetNumber = startHeading.match(/^(\d+(?:\.\d+)*)[.)]?\s+/)?.[1]?.split('.').map(Number) || [];
+          let subEnd = chapterEnd;
+          let homeworkSeen = false;
+          for (let index = subStart + 1; index < chapterEnd; index += 1) {
+            const raw = indexed.lines[index];
+            const clean = cleanBookWorkspaceLine(raw);
+            if (/^homework\b/i.test(clean)) homeworkSeen = true;
+            const nextNumberedHeading = clean.match(/^(\d+(?:\.\d+)*)[.)]?\s+(.+)/);
+            const isHeading = /^\[\[HEADING\]\]/.test(raw);
+            const nextParts = nextNumberedHeading?.[1]?.split('.').map(Number) || [];
+            const nextTitle = nextNumberedHeading?.[2] || '';
+            const looksLikeQuestion = /^(?:what|why|how|where|when|who|which|name|state|mention|list|explain|describe|differentiate|draw|write|give|identify|observe|discuss|the|a|an)\b/i.test(nextTitle)
+              || /[?]$/.test(nextTitle);
+            const comparableNumber = nextParts.length && targetNumber.length && nextParts.length <= targetNumber.length;
+            const isLaterNumber = comparableNumber && nextParts.some((part, partIndex) => part > (targetNumber[partIndex] || 0));
+            if (homeworkSeen && nextNumberedHeading && isHeading && isLaterNumber && !looksLikeQuestion) {
+              subEnd = index;
+              break;
+            }
+            if (homeworkSeen && isHeading && !/^homework\b/i.test(clean) && !/^\d+[.)]\s/.test(clean)) {
+              subEnd = index;
+              break;
+            }
+          }
+          subTopic = makeRange(wantedSubTopic, subStart, subEnd, wholeTopic.pageStart, wholeTopic.pageEnd);
+        }
+      }
+
+      return { indexed, chapter: chapter.entry, wholeTopic, subTopic };
     }
 
     async function findTopicInClassbooks() {
@@ -3553,8 +3713,16 @@
         } : null
       };
 
-      const startPage = matchedTopic && matchedTopic.pageStart ? Number(matchedTopic.pageStart) : 1;
-      const endPage = matchedTopic && matchedTopic.pageEnd ? Number(matchedTopic.pageEnd) : startPage + 4;
+      const topicWorkspace = buildBookTopicWorkspace(textSource, topicName, subTopicName);
+      lessonState.currentBook.topicWorkspace = topicWorkspace;
+      const preferredRange = topicWorkspace?.subTopic || topicWorkspace?.wholeTopic || null;
+      const startPage = preferredRange?.pageStart || (matchedTopic && matchedTopic.pageStart ? Number(matchedTopic.pageStart) : 1);
+      const endPage = preferredRange?.pageEnd || (matchedTopic && matchedTopic.pageEnd ? Number(matchedTopic.pageEnd) : startPage + 4);
+      if (preferredRange && lessonState.currentBook.topic) {
+        lessonState.currentBook.topic.pageStart = startPage;
+        lessonState.currentBook.topic.pageEnd = endPage;
+        lessonState.currentBook.topic.contentIndexRange = false;
+      }
 
       if (pageStartInput) pageStartInput.value = startPage;
       if (pageEndInput) pageEndInput.value = endPage;
@@ -3593,7 +3761,9 @@
         }
       }
 
-      if (matchedTopic && matchedTopic.matchType === 'docx_text_search') {
+      if (preferredRange) {
+        updateTopicStatus('ok', `Matched ${topicWorkspace.wholeTopic.label} on book pages ${topicWorkspace.wholeTopic.pageStart}-${topicWorkspace.wholeTopic.pageEnd}${topicWorkspace.subTopic ? `; ${topicWorkspace.subTopic.label} is on pages ${topicWorkspace.subTopic.pageStart}-${topicWorkspace.subTopic.pageEnd}` : ''}.`);
+      } else if (matchedTopic && matchedTopic.matchType === 'docx_text_search') {
         updateTopicStatus('ok', `Found the topic in the Word source for "${bookEntry.title}". Import the matched text into Lesson Development.`);
       } else if (matchedTopic && matchedTopic.matchType === 'pdf_search') {
         updateTopicStatus('ok', `Found the topic inside "${bookEntry.title}" around pages ${startPage}-${endPage}. Review and adjust if needed.`);
@@ -3614,6 +3784,101 @@
       }
 
       checkRevisionFlag();
+    }
+
+    function buildEditableConceptLines(text, topicLabel) {
+      const conceptSource = normalizeMultilineText(text)
+        .split('\n')
+        .filter((line) => !/^(?:chapter\b|homework\b|\d+(?:\.\d+)*[.)]?\s+[A-Z])/i.test(line.trim()))
+        .join('\n');
+      const sentences = uniqueNormalizedBlocks(extractSentences(conceptSource))
+        .filter((sentence) => sentence.length >= 20)
+        .filter((sentence) => !/^(?:homework|activity|exercise|questions?|\d+[.)])/i.test(sentence))
+        .filter((sentence) => !/by the end of this chapter|learning objectives?/i.test(sentence));
+      const definitions = sentences.filter((sentence) =>
+        /\bmeans?\b|\brefers?\s+to\b|\bis\s+(?:a|an|the)\b|\bare\s+(?:the|a)\b|\bconsists?\s+of\b|\bmade\s+of\b/i.test(sentence)
+      );
+      const selected = (definitions.length ? definitions : sentences).slice(0, 5);
+      if (!selected.length && topicLabel) return `${topicLabel}: Review and define this concept using the selected textbook content.`;
+      return selected.map((sentence, index) => `${index + 1}. ${sentence}`).join('\n');
+    }
+
+    function importEditableTopicContent(kind) {
+      const workspace = lessonState.currentBook?.topicWorkspace;
+      const range = kind === 'whole' ? workspace?.wholeTopic : workspace?.subTopic;
+      const editor = document.getElementById(kind === 'whole' ? 'wholeTopicEditor' : 'subTopicEditor');
+      const text = normalizeMultilineText(editor?.value || '');
+      if (!range || !text) {
+        toast('There is no editable book content to import.', 'warning');
+        return;
+      }
+      if (detailedContentField) {
+        if (lessonState.previousDetailValue === null) lessonState.previousDetailValue = detailedContentField.value;
+        const existing = detailedContentField.value.trim();
+        detailedContentField.value = [existing, text].filter(Boolean).join('\n\n');
+      }
+      const conceptLines = buildEditableConceptLines(text, range.label);
+      if (keyConceptsField && conceptLines) {
+        const existing = keyConceptsField.value.trim();
+        keyConceptsField.value = [existing, conceptLines].filter(Boolean).join('\n\n');
+      }
+      const bookTitle = lessonState.currentBook?.book?.title || 'Classbook';
+      if (referencesField) {
+        const reference = `${bookTitle}, pages ${range.pageStart}-${range.pageEnd}`;
+        if (!referencesField.value.includes(reference)) {
+          referencesField.value = [referencesField.value.trim(), reference].filter(Boolean).join('\n');
+        }
+      }
+      lessonState.autoTextSnippet = text;
+      toast(`Imported the edited ${kind === 'whole' ? 'whole topic' : 'sub-topic'} into Detailed Content and Key Concepts.`, 'success');
+    }
+
+    function renderTopicWorkspaceModal(workspace) {
+      if (!pdfPageContainer || !workspace?.wholeTopic) return;
+      const hasSubTopic = Boolean(workspace.subTopic);
+      lessonState.activeTopicWorkspace = hasSubTopic ? 'subtopic' : 'whole';
+      const panelHtml = (kind, range) => range ? `
+        <section class="topic-edit-panel ${lessonState.activeTopicWorkspace === kind ? '' : 'hidden'}" data-topic-panel="${kind}">
+          <div>
+            <h4>${escapeHtml(range.label)}</h4>
+            <div class="field-hint">Book pages ${range.pageStart}-${range.pageEnd}. Edit the content below before importing.</div>
+          </div>
+          <div class="topic-image-gallery" id="${kind}TopicImages"></div>
+          <textarea id="${kind === 'whole' ? 'wholeTopicEditor' : 'subTopicEditor'}" spellcheck="true"></textarea>
+          <button class="btn btn-success" type="button" data-import-topic="${kind}">Import ${kind === 'whole' ? 'Whole Topic' : 'This Sub-topic'} into Lesson Development</button>
+        </section>` : '';
+      pdfPageContainer.innerHTML = `
+        <div class="topic-workspace-tabs">
+          <button type="button" data-topic-tab="whole" class="${lessonState.activeTopicWorkspace === 'whole' ? 'active' : ''}">Whole Topic (${workspace.wholeTopic.pageStart}-${workspace.wholeTopic.pageEnd})</button>
+          <button type="button" data-topic-tab="subtopic" class="${lessonState.activeTopicWorkspace === 'subtopic' ? 'active' : ''}" ${hasSubTopic ? '' : 'disabled'}>${hasSubTopic ? `${escapeHtml(workspace.subTopic.label)} (${workspace.subTopic.pageStart}-${workspace.subTopic.pageEnd})` : 'Sub-topic not found'}</button>
+        </div>
+        ${panelHtml('whole', workspace.wholeTopic)}
+        ${panelHtml('subtopic', workspace.subTopic)}`;
+
+      const wholeEditor = document.getElementById('wholeTopicEditor');
+      const subEditor = document.getElementById('subTopicEditor');
+      if (wholeEditor) wholeEditor.value = workspace.wholeTopic.text;
+      if (subEditor && workspace.subTopic) subEditor.value = workspace.subTopic.text;
+      [['whole', workspace.wholeTopic], ['subtopic', workspace.subTopic]].forEach(([kind, range]) => {
+        const gallery = document.getElementById(`${kind}TopicImages`);
+        (range?.images || []).forEach((image) => {
+          const img = document.createElement('img');
+          img.src = image.dataUrl;
+          img.alt = image.alt || 'Book illustration';
+          gallery?.appendChild(img);
+        });
+      });
+      pdfPageContainer.querySelectorAll('[data-topic-tab]').forEach((button) => {
+        button.addEventListener('click', () => {
+          if (button.disabled) return;
+          lessonState.activeTopicWorkspace = button.dataset.topicTab;
+          pdfPageContainer.querySelectorAll('[data-topic-tab]').forEach((item) => item.classList.toggle('active', item === button));
+          pdfPageContainer.querySelectorAll('[data-topic-panel]').forEach((panel) => panel.classList.toggle('hidden', panel.dataset.topicPanel !== button.dataset.topicTab));
+        });
+      });
+      pdfPageContainer.querySelectorAll('[data-import-topic]').forEach((button) => {
+        button.addEventListener('click', () => importEditableTopicContent(button.dataset.importTopic));
+      });
     }
 
     async function openPdfModalForRange() {
@@ -3642,6 +3907,15 @@
 
       if (lessonState.currentBook.textSource?.text) {
         try {
+          if (lessonState.currentBook.topicWorkspace?.wholeTopic) {
+            if (pdfLoadingState) pdfLoadingState.classList.add('hidden');
+            renderTopicWorkspaceModal(lessonState.currentBook.topicWorkspace);
+            const activeRange = lessonState.currentBook.topicWorkspace.subTopic || lessonState.currentBook.topicWorkspace.wholeTopic;
+            if (pdfModalTitle) pdfModalTitle.textContent = activeRange.label;
+            if (pdfModalSummary) pdfModalSummary.textContent = `${lessonState.currentBook.book.title || 'Classbook'} • Whole topic pages ${lessonState.currentBook.topicWorkspace.wholeTopic.pageStart}-${lessonState.currentBook.topicWorkspace.wholeTopic.pageEnd}${lessonState.currentBook.topicWorkspace.subTopic ? ` • Sub-topic pages ${lessonState.currentBook.topicWorkspace.subTopic.pageStart}-${lessonState.currentBook.topicWorkspace.subTopic.pageEnd}` : ''}`;
+            updateTopicStatus('ok', 'Editable whole-topic and sub-topic book content is ready. Review it, edit it, then import the part you need.');
+            return;
+          }
           const paragraphs = await fetchParagraphsFromRange(start, end, false);
           lessonState.extractedParagraphs = paragraphs;
           lessonState.paragraphIndex = {};
@@ -3877,7 +4151,15 @@ function splitIntoParagraphs(text) {
     function closePdfModal() {
       if (pdfModal) {
         pdfModal.classList.add('hidden');
+        pdfModal.classList.remove('fs-active');
       }
+      if (toggleTopicFullscreenBtn) toggleTopicFullscreenBtn.textContent = 'Full Screen';
+    }
+
+    function toggleTopicFullscreen() {
+      if (!pdfModal) return;
+      const active = pdfModal.classList.toggle('fs-active');
+      if (toggleTopicFullscreenBtn) toggleTopicFullscreenBtn.textContent = active ? 'Exit Full Screen' : 'Full Screen';
     }
 
 
@@ -4707,6 +4989,31 @@ function splitIntoParagraphs(text) {
         return;
       }
 
+      if (lessonState.currentBook.topicWorkspace?.wholeTopic && !importToField) {
+        await openPdfModalForRange();
+        return;
+      }
+
+      if (importToField && lessonState.currentBook.topicWorkspace?.wholeTopic) {
+        const kind = lessonState.currentBook.topicWorkspace.subTopic ? 'subtopic' : 'whole';
+        const range = kind === 'subtopic' ? lessonState.currentBook.topicWorkspace.subTopic : lessonState.currentBook.topicWorkspace.wholeTopic;
+        const syntheticEditor = document.getElementById(kind === 'subtopic' ? 'subTopicEditor' : 'wholeTopicEditor');
+        if (syntheticEditor) {
+          importEditableTopicContent(kind);
+        } else {
+          const text = range.text;
+          if (detailedContentField) {
+            if (lessonState.previousDetailValue === null) lessonState.previousDetailValue = detailedContentField.value;
+            detailedContentField.value = [detailedContentField.value.trim(), text].filter(Boolean).join('\n\n');
+          }
+          const concepts = buildEditableConceptLines(text, range.label);
+          if (keyConceptsField && concepts) keyConceptsField.value = [keyConceptsField.value.trim(), concepts].filter(Boolean).join('\n\n');
+          lessonState.autoTextSnippet = text;
+          toast(`Imported ${range.label} into Lesson Development.`, 'success');
+        }
+        return;
+      }
+
       const start = parseInt(pageStartInput.value || '1', 10) || 1;
       const end = parseInt(pageEndInput.value || String(start), 10) || start;
       const useOcr = enableOcrToggle && enableOcrToggle.checked;
@@ -5415,7 +5722,9 @@ function splitIntoParagraphs(text) {
     if (openExternalBookLink) openExternalBookLink.addEventListener('click', openFullBookReader);
     if (appendVisibleBtn) {
       appendVisibleBtn.addEventListener('click', () => {
-        if (lessonState.extractedParagraphs.length && importedPreview) {
+        if (lessonState.currentBook?.topicWorkspace?.wholeTopic) {
+          importEditableTopicContent(lessonState.activeTopicWorkspace || (lessonState.currentBook.topicWorkspace.subTopic ? 'subtopic' : 'whole'));
+        } else if (lessonState.extractedParagraphs.length && importedPreview) {
           lessonState.selectedParagraphs = new Set(lessonState.extractedParagraphs.map(p => p.id));
           importedPreview.querySelectorAll('button').forEach(btn => btn.classList.add('active'));
           syncDetailedContent();
@@ -5427,6 +5736,7 @@ function splitIntoParagraphs(text) {
       });
     }
     if (closePdfBtn) closePdfBtn.addEventListener('click', closePdfModal);
+    if (toggleTopicFullscreenBtn) toggleTopicFullscreenBtn.addEventListener('click', toggleTopicFullscreen);
     if (closeFullBookBtn) closeFullBookBtn.addEventListener('click', closeFullBookReader);
     if (pdfModal) {
       pdfModal.addEventListener('click', event => {
