@@ -166,6 +166,17 @@
       .trim();
   }
 
+  function numberedSubtopicCandidate(line) {
+    const text = cleanLine(line).replace(/^\[\[HEADING\]\]\s*/, '').trim();
+    const match = /^(\d+)(?:\.\d+)*[.)]\s+([A-Z].*)$/.exec(text);
+    if (!match) return null;
+    const title = match[2].replace(/[:.\-]+$/, '').trim();
+    const words = title.split(/\s+/).filter(Boolean);
+    if (!title || title.length > 110 || words.length > 14 || /\?$/.test(title)) return null;
+    if (/^(?:what|why|how|where|when|who|which|name|state|mention|list|explain|describe|differentiate|draw|write|give|identify|observe|discuss)\b/i.test(title)) return null;
+    return { number: Number(match[1]), title };
+  }
+
   function buildChapterRanges(lines, toc, linePages = []) {
     const chapters = toc.entries.map((entry) => ({
       ...entry,
@@ -190,10 +201,44 @@
       for (let index = bodyStart + 1; index <= bodyEnd; index += 1) {
         if (isSubtopicHeading(lines[index])) headings.push({ title: subtopicTitle(lines[index]), line: index });
       }
-      let subtopics = headings.map((heading, index) => ({
+      // Older saved book text may not contain the DOCX style markers. Recover
+      // the same structure from the author's numbering convention: 1, 2, 3...
+      // with each later subtopic appearing after the previous Homework block.
+      const structuralHeadings = [];
+      let expectedNumber = 1;
+      let homeworkAfterHeading = false;
+      for (let index = bodyStart + 1; index <= bodyEnd; index += 1) {
+        const clean = cleanLine(lines[index]).replace(/^\[\[HEADING\]\]\s*/, '');
+        if (/^homework\b/i.test(clean)) {
+          if (structuralHeadings.length) homeworkAfterHeading = true;
+          continue;
+        }
+        const candidate = numberedSubtopicCandidate(lines[index]);
+        if (!candidate || candidate.number !== expectedNumber) continue;
+        if (expectedNumber > 1 && !homeworkAfterHeading) continue;
+        structuralHeadings.push({ title: candidate.title, line: index });
+        expectedNumber += 1;
+        homeworkAfterHeading = false;
+      }
+      const explicitlyStyledHeadings = headings.filter((heading) => /^\[\[HEADING\]\]/.test(lines[heading.line]));
+      const numberedStyledHeadings = explicitlyStyledHeadings.filter((heading) =>
+        /^\[\[HEADING\]\]\s*\d+[.)]\s+\S/.test(lines[heading.line])
+      );
+      // Word's explicit heading/color styling is authoritative and may contain
+      // consecutive subtopics that share one Homework block. The numbering +
+      // Homework inference is only a fallback for old text with styles removed.
+      // When a chapter has top-level numbered styled headings, they define the
+      // dropdown level; nested 2.1/2.2 headings and styled stories are excluded.
+      const resolvedHeadings = numberedStyledHeadings.length
+        ? numberedStyledHeadings
+        : explicitlyStyledHeadings.length
+          ? explicitlyStyledHeadings
+        : (structuralHeadings.length ? structuralHeadings : headings);
+      resolvedHeadings.sort((left, right) => left.line - right.line);
+      let subtopics = resolvedHeadings.map((heading, index) => ({
         title: heading.title,
         sectionStart: heading.line + 1,
-        sectionEnd: (headings[index + 1]?.line || bodyEnd + 1)
+        sectionEnd: (resolvedHeadings[index + 1]?.line || bodyEnd + 1)
       }));
       if (!subtopics.length && entry.tocSubtopics?.length) {
         subtopics = entry.tocSubtopics.map((title) => ({
