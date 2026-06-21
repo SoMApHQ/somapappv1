@@ -631,6 +631,36 @@
       padding: 8px;
     }
 
+    .imported-content-images {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .imported-content-images:empty { display: none; }
+
+    .imported-content-image {
+      margin: 0;
+      padding: 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .imported-content-image img {
+      display: block;
+      width: 100%;
+      max-height: 340px;
+      object-fit: contain;
+    }
+
+    .imported-content-image figcaption {
+      margin-top: 7px;
+      color: #475569;
+      font-size: 0.82rem;
+    }
+
     .full-book-layout {
       display: grid;
       grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
@@ -1132,6 +1162,7 @@
       <div class="form-group">
         <label>Detailed Content / Explanation *</label>
         <textarea id="detailedContent" placeholder="Provide detailed explanation of the topic, including examples, processes, formulas, etc." required style="min-height: 200px;"></textarea>
+        <div class="imported-content-images" id="importedContentImages" aria-label="Imported textbook illustrations"></div>
       </div>
 
       <div class="form-group">
@@ -1431,6 +1462,8 @@
       paragraphIndex: {},
       previousDetailValue: null,
       autoTextSnippet: '',
+      importedContentImages: [],
+      importedContentImageMeta: null,
       pdfDoc: null,
       pageTextCache: {},
       bookTextCache: {},
@@ -1532,6 +1565,7 @@
     const previewHomeworkBtn = document.getElementById('previewHomeworkBtn');
     const clearHomeworkBtn = document.getElementById('clearHomeworkBtn');
     const homeworkSummary = document.getElementById('homeworkSummary');
+    const importedContentImages = document.getElementById('importedContentImages');
 
     const selectionTooltip = document.getElementById('selectionTooltip');
     const useSelectionBtn = document.getElementById('useSelectionBtn');
@@ -1931,6 +1965,9 @@
       lessonState.paragraphIndex = {};
       lessonState.previousDetailValue = null;
       lessonState.autoTextSnippet = '';
+      lessonState.importedContentImages = [];
+      lessonState.importedContentImageMeta = null;
+      renderImportedContentImages();
       if (selectedBookTextField) selectedBookTextField.value = '';
       if (selectedBookStatus) {
         selectedBookStatus.textContent = 'When a topic is not auto-matched, use this workspace to inspect the whole book and paste the exact passage you want analysed.';
@@ -2243,6 +2280,33 @@
       return ranked[0]?.plan || null;
     }
 
+    async function resolveNoteContentImages(note) {
+      if (!note?.bookUrl) return [];
+      const source = await loadBookTextSource({
+        bookId: note.bookId || '',
+        title: note.bookTitle || 'Classbook',
+        cloudinaryUrl: note.bookUrl,
+        url: note.bookUrl
+      });
+      const sourceImages = (source?.blocks || []).filter((block) => block.type === 'image' && block.dataUrl);
+      if (!sourceImages.length) return [];
+
+      const refs = Array.isArray(note.contentImageRefs) ? note.contentImageRefs : [];
+      if (refs.length) {
+        const byLine = new Map(sourceImages.map((image) => [Number(image.lineIndex), image]));
+        return refs.map((ref) => {
+          const image = byLine.get(Number(ref.lineIndex));
+          return image ? { ...image, alt: ref.alt || image.alt } : null;
+        }).filter(Boolean);
+      }
+
+      const workspace = buildBookTopicWorkspace(source, note.bookTopic || note.topic || '', note.subTopic || '');
+      const range = note.contentImageMeta?.kind === 'whole'
+        ? workspace?.wholeTopic
+        : (workspace?.subTopic || workspace?.wholeTopic);
+      return Array.isArray(range?.images) ? range.images : [];
+    }
+
     async function getPdfContextForNote(note) {
       const year = String(note?.year || getYear());
       const plans = await getLessonPlansForYear(year);
@@ -2332,38 +2396,108 @@
       const pageHeight = doc.internal.pageSize.getHeight();
       let y = startY;
       const text = formatSectionValueForPdf(title, value);
-      const labelHeight = 6;
-      // Set content font before splitTextToSize so wrapping is calculated correctly
       doc.setFont('times', 'normal');
       doc.setFontSize(11);
-      doc.setLineHeightFactor(1.25);
-      const lineH = doc.getLineHeight();
+      doc.setLineHeightFactor(1.5);
+      const lineH = 5.8;
       const lines = String(text || 'N/A')
         .split('\n')
         .flatMap((line) => doc.splitTextToSize(line || ' ', 176));
-      const estimatedHeight = labelHeight + Math.max(8, lines.length * lineH + 4) + 4;
-      if (y + estimatedHeight > pageHeight - 14) {
-        doc.addPage();
-        y = 18;
+      let offset = 0;
+      let continuation = false;
+
+      while (offset < lines.length) {
+        if (y > pageHeight - 28) {
+          doc.addPage();
+          y = 18;
+        }
+        doc.setFont('times', 'bold');
+        doc.setFontSize(11);
+        doc.text(continuation ? `${title} (continued)` : title, 12, y);
+        y += 5;
+
+        const availableHeight = Math.max(lineH + 4, pageHeight - 14 - y);
+        const lineCapacity = Math.max(1, Math.floor((availableHeight - 4) / lineH));
+        const chunk = lines.slice(offset, offset + lineCapacity);
+        const blockHeight = Math.max(10, chunk.length * lineH + 4);
+        doc.setDrawColor(226, 232, 240);
+        doc.setFillColor(248, 250, 252);
+        doc.roundedRect(12, y - 2.5, 186, blockHeight, 2, 2, 'FD');
+        doc.setFont('times', 'normal');
+        doc.setFontSize(11);
+        doc.text(chunk, 15, y + 1, { lineHeightFactor: 1.5 });
+        y += blockHeight + 4;
+        offset += chunk.length;
+        continuation = true;
+        if (offset < lines.length) {
+          doc.addPage();
+          y = 18;
+        }
       }
-      doc.setFont('times', 'bold');
-      doc.setFontSize(11);
-      doc.text(title, 12, y);
-      y += 5;
-      doc.setDrawColor(226, 232, 240);
-      doc.setFillColor(248, 250, 252);
-      const blockHeight = Math.max(10, lines.length * lineH + 4);
-      doc.roundedRect(12, y - 2.5, 186, blockHeight, 2, 2, 'FD');
-      doc.setFont('times', 'normal');
-      doc.setFontSize(11);
-      doc.text(lines, 15, y + 1);
-      return y + blockHeight + 4;
+      return y;
+    }
+
+    function prepareImageForPdf(dataUrl) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => {
+          const maxPixels = 1600;
+          const scale = Math.min(1, maxPixels / Math.max(image.naturalWidth || 1, image.naturalHeight || 1));
+          const width = Math.max(1, Math.round((image.naturalWidth || 1) * scale));
+          const height = Math.max(1, Math.round((image.naturalHeight || 1) * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext('2d');
+          context.fillStyle = '#ffffff';
+          context.fillRect(0, 0, width, height);
+          context.drawImage(image, 0, 0, width, height);
+          resolve({ dataUrl: canvas.toDataURL('image/png'), width, height });
+        };
+        image.onerror = reject;
+        image.src = dataUrl;
+      });
+    }
+
+    async function addContentImagesToPdf(doc, images, startY) {
+      if (!Array.isArray(images) || !images.length) return startY;
+      const pageHeight = doc.internal.pageSize.getHeight();
+      let y = startY;
+      for (let index = 0; index < images.length; index += 1) {
+        try {
+          const prepared = await prepareImageForPdf(images[index].dataUrl);
+          const maxWidth = 176;
+          const maxHeight = 105;
+          const scale = Math.min(maxWidth / prepared.width, maxHeight / prepared.height);
+          const width = prepared.width * scale;
+          const height = prepared.height * scale;
+          const requiredHeight = height + 15;
+          if (y + requiredHeight > pageHeight - 14) {
+            doc.addPage();
+            y = 18;
+          }
+          doc.setFont('times', 'bold');
+          doc.setFontSize(11);
+          doc.text(index === 0 ? 'Textbook Illustrations' : 'Textbook Illustrations (continued)', 12, y);
+          y += 5;
+          doc.addImage(prepared.dataUrl, 'PNG', 12 + (176 - width) / 2, y, width, height);
+          y += height + 4;
+          doc.setFont('times', 'italic');
+          doc.setFontSize(9);
+          doc.text(doc.splitTextToSize(images[index].alt || `Textbook illustration ${index + 1}`, 176), 12, y);
+          y += 7;
+        } catch (error) {
+          console.warn('A textbook illustration could not be added to the PDF:', error?.message || error);
+        }
+      }
+      return y;
     }
 
     async function renderLessonNotePdfPage(doc, rawNote, index, total) {
       const note = normalizeLessonNoteRecord(rawNote, { year: getYear() });
       const context = await getPdfContextForNote(note);
       const organized = buildOrganizedNoteSections(note.detailedContent || '');
+      const contentImages = await resolveNoteContentImages(note);
       const logoDataUrl = await getSchoolLogoDataUrl();
       if (index > 0) doc.addPage();
 
@@ -2386,7 +2520,8 @@
 
       y = addAttendanceTable(doc, context, y);
       y = addSectionBlock(doc, 'Key Concepts & Definitions', note.keyConcepts || organized.keyConcepts, y);
-      y = addSectionBlock(doc, 'Detailed Content / Explanation', organized.detailedContent || note.detailedContent, y);
+      y = addSectionBlock(doc, 'Detailed Content / Explanation', note.detailedContent || organized.detailedContent, y);
+      y = await addContentImagesToPdf(doc, contentImages, y);
       y = addSectionBlock(doc, 'Examples & Illustrations', note.examples || organized.examples, y);
       y = addSectionBlock(doc, 'Important Points / Key Takeaways', note.keyTakeaways || organized.keyTakeaways, y);
       y = addSectionBlock(doc, 'Diagrams & Visual Aids', note.diagrams, y);
@@ -3374,24 +3509,28 @@
 
     async function loadBookTextSource(bookEntry) {
       const bookId = bookEntry?.bookId || '';
-      if (!bookId) return null;
-      if (lessonState.bookTextCache[bookId]) return lessonState.bookTextCache[bookId];
+      const sourceUrl = bookEntry?.word_url || bookEntry?.wordUrl || bookEntry?.url || bookEntry?.cloudinaryUrl || '';
+      const cacheKey = bookId || sourceUrl;
+      if (!cacheKey) return null;
+      if (lessonState.bookTextCache[cacheKey]) return lessonState.bookTextCache[cacheKey];
       let storedSource = null;
-      try {
-        const snap = await db.ref(`book_texts/${bookId}`).once('value');
-        const value = snap.val();
-        const text = compactTextBlock(value?.text || '');
-        if (text) {
-          storedSource = {
-            bookId,
-            text,
-            source: value.source || 'text',
-            sourceFileName: value.sourceFileName || '',
-            updatedAt: value.updatedAt || null
-          };
+      if (bookId) {
+        try {
+          const snap = await db.ref(`book_texts/${bookId}`).once('value');
+          const value = snap.val();
+          const text = compactTextBlock(value?.text || '');
+          if (text) {
+            storedSource = {
+              bookId,
+              text,
+              source: value.source || 'text',
+              sourceFileName: value.sourceFileName || '',
+              updatedAt: value.updatedAt || null
+            };
+          }
+        } catch (error) {
+          console.warn('Book text lookup failed:', error?.message || error);
         }
-      } catch (error) {
-        console.warn('Book text lookup failed:', error?.message || error);
       }
 
       const wordUrl = bookEntry.word_url || bookEntry.wordUrl
@@ -3409,14 +3548,14 @@
               sourceFileName: bookEntry.word_file_name || '',
               updatedAt: null
             };
-            lessonState.bookTextCache[bookId] = source;
+            lessonState.bookTextCache[cacheKey] = source;
             return source;
           }
         } catch (error) {
           console.warn('Word book page indexing failed; using saved text', error?.message || error);
         }
       }
-      if (storedSource) lessonState.bookTextCache[bookId] = storedSource;
+      if (storedSource) lessonState.bookTextCache[cacheKey] = storedSource;
       return storedSource;
     }
 
@@ -3862,6 +4001,33 @@
       if (misconceptionsField && !misconceptionsField.value.trim()) misconceptionsField.value = sections.misconceptions;
     }
 
+    function renderImportedContentImages() {
+      if (!importedContentImages) return;
+      const images = lessonState.importedContentImages || [];
+      importedContentImages.innerHTML = images.map((image, index) => `
+        <figure class="imported-content-image">
+          <img src="${image.dataUrl}" alt="${escapeHtml(image.alt || `Textbook illustration ${index + 1}`)}">
+          <figcaption>${escapeHtml(image.alt || `Textbook illustration ${index + 1}`)}</figcaption>
+        </figure>
+      `).join('');
+    }
+
+    function setImportedContentImages(range, kind) {
+      const images = Array.isArray(range?.images) ? range.images : [];
+      lessonState.importedContentImages = images.map((image, index) => ({
+        dataUrl: image.dataUrl,
+        lineIndex: Number(image.lineIndex),
+        alt: image.alt || `${range?.label || 'Book'} illustration ${index + 1}`
+      })).filter((image) => image.dataUrl);
+      lessonState.importedContentImageMeta = {
+        kind,
+        label: range?.label || '',
+        pageStart: range?.pageStart || null,
+        pageEnd: range?.pageEnd || null
+      };
+      renderImportedContentImages();
+    }
+
     function importEditableTopicContent(kind) {
       const workspace = lessonState.currentBook?.topicWorkspace;
       const range = kind === 'whole' ? workspace?.wholeTopic : workspace?.subTopic;
@@ -3881,6 +4047,7 @@
         const existing = keyConceptsField.value.trim();
         keyConceptsField.value = [existing, conceptLines].filter(Boolean).join('\n\n');
       }
+      setImportedContentImages(range, kind);
       fillRequiredLessonFields(text, range);
       const bookTitle = lessonState.currentBook?.book?.title || 'Classbook';
       if (referencesField) {
@@ -5106,6 +5273,9 @@ function splitIntoParagraphs(text) {
       lessonState.selectedParagraphs.clear();
       lessonState.paragraphIndex = {};
       lessonState.autoTextSnippet = '';
+      lessonState.importedContentImages = [];
+      lessonState.importedContentImageMeta = null;
+      renderImportedContentImages();
       if (importedPreview) {
         importedPreview.classList.add('hidden');
         importedPreview.innerHTML = '';
@@ -5141,6 +5311,7 @@ function splitIntoParagraphs(text) {
           }
           const concepts = buildEditableConceptLines(text, range.label);
           if (keyConceptsField && concepts) keyConceptsField.value = [keyConceptsField.value.trim(), concepts].filter(Boolean).join('\n\n');
+          setImportedContentImages(range, kind);
           fillRequiredLessonFields(text, range);
           lessonState.autoTextSnippet = text;
           toast(`Imported ${range.label} and completed all teaching-content fields.`, 'success');
@@ -5561,9 +5732,10 @@ function splitIntoParagraphs(text) {
       if (note.bookUrl || note.bookTitle) {
         lessonState.currentBook = {
           yearKey: getAcademicYearKey(),
-          book: {
-            title: note.bookTitle || 'Classbook',
-            cloudinaryUrl: note.bookUrl
+           book: {
+            bookId: note.bookId || '',
+             title: note.bookTitle || 'Classbook',
+             cloudinaryUrl: note.bookUrl
           },
           topic: note.bookTopic ? { name: note.bookTopic } : null
         };
@@ -5584,8 +5756,20 @@ function splitIntoParagraphs(text) {
           openExternalBookLink.classList.remove('hidden');
           openExternalBookLink.dataset.bookUrl = note.bookUrl;
         }
-        updateTopicStatus('ok', 'Using the saved book settings for this note.');
-      }
+         updateTopicStatus('ok', 'Using the saved book settings for this note.');
+        try {
+          lessonState.importedContentImages = await resolveNoteContentImages(note);
+          lessonState.importedContentImageMeta = note.contentImageMeta || (lessonState.importedContentImages.length ? {
+            kind: note.subTopic ? 'subtopic' : 'whole',
+            label: note.subTopic || note.topic || '',
+            pageStart: note.pageStart || null,
+            pageEnd: note.pageEnd || null
+          } : null);
+          renderImportedContentImages();
+        } catch (error) {
+          console.warn('Saved lesson-note illustrations could not be restored:', error?.message || error);
+        }
+       }
 
       notesForm?.classList.remove('hidden');
       notesForm?.scrollIntoView({ behavior: 'smooth' });
@@ -5799,8 +5983,16 @@ function splitIntoParagraphs(text) {
 
       if (lessonState.currentBook && lessonState.currentBook.book) {
         if (lessonState.currentBook.book.title) noteData.bookTitle = lessonState.currentBook.book.title;
+        if (lessonState.currentBook.book.bookId) noteData.bookId = lessonState.currentBook.book.bookId;
         const bookUrl = lessonState.currentBook.book.cloudinaryUrl || lessonState.currentBook.book.url;
         if (bookUrl) noteData.bookUrl = bookUrl;
+      }
+      if (lessonState.importedContentImageMeta) {
+        noteData.contentImageMeta = lessonState.importedContentImageMeta;
+        noteData.contentImageRefs = (lessonState.importedContentImages || []).map((image) => ({
+          lineIndex: image.lineIndex,
+          alt: image.alt || 'Textbook illustration'
+        }));
       }
       if (lessonState.currentBook && lessonState.currentBook.topic) {
         if (lessonState.currentBook.topic.name) noteData.bookTopic = lessonState.currentBook.topic.name;
