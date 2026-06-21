@@ -661,6 +661,41 @@
       font-size: 0.82rem;
     }
 
+    .book-table-wrap {
+      overflow-x: auto;
+      margin: 12px 0;
+      border-radius: 10px;
+      border: 1px solid #cbd5e1;
+      background: #fff;
+    }
+
+    .book-structured-table {
+      width: 100%;
+      border-collapse: collapse;
+      color: #0f172a;
+      font-family: "Times New Roman", Times, serif;
+    }
+
+    .book-structured-table th,
+    .book-structured-table td {
+      border: 1px solid #94a3b8;
+      padding: 9px 11px;
+      text-align: left;
+      vertical-align: top;
+      white-space: pre-wrap;
+    }
+
+    .book-structured-table tr:first-child > * {
+      background: #e2e8f0;
+      font-weight: 700;
+    }
+
+    .book-structured-table [contenteditable="true"]:focus {
+      outline: 2px solid #2563eb;
+      outline-offset: -2px;
+      background: #eff6ff;
+    }
+
     .full-book-layout {
       display: grid;
       grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
@@ -1163,6 +1198,7 @@
         <label>Detailed Content / Explanation *</label>
         <textarea id="detailedContent" placeholder="Provide detailed explanation of the topic, including examples, processes, formulas, etc." required style="min-height: 200px;"></textarea>
         <div class="imported-content-images" id="importedContentImages" aria-label="Imported textbook illustrations"></div>
+        <div id="importedContentTables" aria-label="Imported textbook tables"></div>
       </div>
 
       <div class="form-group">
@@ -1356,6 +1392,40 @@
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.0/jspdf.plugin.autotable.min.js');
       _jsPdfReady = true;
     }
+    const PDF_FONT_URLS = {
+      serif: 'https://cdn.jsdelivr.net/gh/googlefonts/noto-fonts@main/hinted/ttf/NotoSerif/NotoSerif-Regular.ttf',
+      math: 'https://cdn.jsdelivr.net/gh/googlefonts/noto-fonts@main/hinted/ttf/NotoSansMath/NotoSansMath-Regular.ttf'
+    };
+    const pdfFontBase64Cache = {};
+    async function fetchPdfFontBase64(name, url) {
+      if (pdfFontBase64Cache[name]) return pdfFontBase64Cache[name];
+      const response = await fetch(url, { credentials: 'omit' });
+      if (!response.ok) throw new Error(`Unable to load PDF font ${name}`);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+      }
+      pdfFontBase64Cache[name] = btoa(binary);
+      return pdfFontBase64Cache[name];
+    }
+    async function installPdfUnicodeFonts(doc) {
+      try {
+        const [serif, math] = await Promise.all([
+          fetchPdfFontBase64('NotoSerif', PDF_FONT_URLS.serif),
+          fetchPdfFontBase64('NotoSansMath', PDF_FONT_URLS.math)
+        ]);
+        doc.addFileToVFS('NotoSerif-Regular.ttf', serif);
+        doc.addFont('NotoSerif-Regular.ttf', 'NotoSerif', 'normal');
+        doc.addFileToVFS('NotoSansMath-Regular.ttf', math);
+        doc.addFont('NotoSansMath-Regular.ttf', 'NotoSansMath', 'normal');
+        doc.__somapUnicodeFonts = true;
+      } catch (error) {
+        console.warn('Unicode PDF fonts could not be loaded; using built-in Times:', error?.message || error);
+        doc.__somapUnicodeFonts = false;
+      }
+    }
     let _tesseractReady = false;
     async function loadTesseract() {
       if (_tesseractReady || window.Tesseract) { _tesseractReady = true; return; }
@@ -1465,6 +1535,7 @@
       autoTextSnippet: '',
       importedContentImages: [],
       importedContentImageMeta: null,
+      importedContentTables: [],
       pdfDoc: null,
       pageTextCache: {},
       bookTextCache: {},
@@ -1567,6 +1638,7 @@
     const clearHomeworkBtn = document.getElementById('clearHomeworkBtn');
     const homeworkSummary = document.getElementById('homeworkSummary');
     const importedContentImages = document.getElementById('importedContentImages');
+    const importedContentTables = document.getElementById('importedContentTables');
 
     const selectionTooltip = document.getElementById('selectionTooltip');
     const useSelectionBtn = document.getElementById('useSelectionBtn');
@@ -1969,6 +2041,8 @@
       lessonState.importedContentImages = [];
       lessonState.importedContentImageMeta = null;
       renderImportedContentImages();
+      lessonState.importedContentTables = [];
+      renderImportedContentTables();
       if (selectedBookTextField) selectedBookTextField.value = '';
       if (selectedBookStatus) {
         selectedBookStatus.textContent = 'When a topic is not auto-matched, use this workspace to inspect the whole book and paste the exact passage you want analysed.';
@@ -2308,6 +2382,22 @@
       return Array.isArray(range?.images) ? range.images : [];
     }
 
+    async function resolveNoteContentTables(note) {
+      if (Array.isArray(note?.contentTables) && note.contentTables.length) return note.contentTables;
+      if (!note?.bookUrl) return [];
+      const source = await loadBookTextSource({
+        bookId: note.bookId || '',
+        title: note.bookTitle || 'Classbook',
+        cloudinaryUrl: note.bookUrl,
+        url: note.bookUrl
+      });
+      const workspace = buildBookTopicWorkspace(source, note.bookTopic || note.topic || '', note.subTopic || '');
+      const range = note.contentImageMeta?.kind === 'whole'
+        ? workspace?.wholeTopic
+        : (workspace?.subTopic || workspace?.wholeTopic);
+      return Array.isArray(range?.tables) ? range.tables : [];
+    }
+
     async function getRegisteredClassCounts(year, className) {
       const targetYear = String(year || getYear());
       const canonicalClass = ClassUtils.normalizeClassName
@@ -2407,7 +2497,7 @@
       doc.text(schoolName || getCurrentSchoolName(), pageWidth / 2, 18, { align: 'center' });
       doc.setFontSize(11);
       doc.text(title, pageWidth / 2, 24, { align: 'center' });
-      doc.setFont('times', 'normal');
+      doc.setFont(doc.__somapUnicodeFonts ? 'NotoSerif' : 'times', 'normal');
       doc.setFontSize(8.5);
       doc.text(subtitle, pageWidth / 2, 29.5, { align: 'center' });
     }
@@ -2452,7 +2542,7 @@
       const pageHeight = doc.internal.pageSize.getHeight();
       let y = startY;
       const text = formatSectionValueForPdf(title, value);
-      doc.setFont('times', 'normal');
+      doc.setFont(doc.__somapUnicodeFonts ? 'NotoSerif' : 'times', 'normal');
       doc.setFontSize(11);
       doc.setLineHeightFactor(1);
       const lineH = 4.2;
@@ -2479,7 +2569,7 @@
         doc.setDrawColor(226, 232, 240);
         doc.setFillColor(248, 250, 252);
         doc.roundedRect(12, y - 2.5, 186, blockHeight, 2, 2, 'FD');
-        doc.setFont('times', 'normal');
+        doc.setFont(doc.__somapUnicodeFonts ? 'NotoSerif' : 'times', 'normal');
         doc.setFontSize(11);
         doc.text(chunk, 15, y + 1, { lineHeightFactor: 1 });
         y += blockHeight + 4;
@@ -2549,11 +2639,48 @@
       return y;
     }
 
+    function addContentTablesToPdf(doc, tables, startY) {
+      if (!Array.isArray(tables) || !tables.length) return startY;
+      let y = startY;
+      tables.forEach((table, tableIndex) => {
+        const rows = (table.rows || []).map((row) => (row || []).map((cell) => normalizeMultilineText(cell || ''))).filter((row) => row.length);
+        if (!rows.length) return;
+        const pageHeight = doc.internal.pageSize.getHeight();
+        if (y > pageHeight - 35) {
+          doc.addPage();
+          y = 18;
+        }
+        doc.setFont('times', 'bold');
+        doc.setFontSize(11);
+        doc.text(tableIndex === 0 ? 'Textbook Tables' : `Textbook Table ${tableIndex + 1}`, 12, y);
+        doc.autoTable({
+          startY: y + 3,
+          head: rows.length > 1 ? [rows[0]] : [],
+          body: rows.length > 1 ? rows.slice(1) : rows,
+          theme: 'grid',
+          headStyles: { font: doc.__somapUnicodeFonts ? 'NotoSansMath' : 'times', fontStyle: 'normal', fillColor: [226, 232, 240], textColor: [15, 23, 42] },
+          styles: {
+            font: doc.__somapUnicodeFonts ? 'NotoSansMath' : 'times',
+            fontSize: 10,
+            cellPadding: 2.2,
+            valign: 'top',
+            lineColor: [100, 116, 139],
+            lineWidth: 0.2,
+            overflow: 'linebreak'
+          },
+          margin: { left: 12, right: 12, bottom: 14 }
+        });
+        y = doc.lastAutoTable.finalY + 5;
+      });
+      return y;
+    }
+
     async function renderLessonNotePdfPage(doc, rawNote, index, total) {
       const note = normalizeLessonNoteRecord(rawNote, { year: getYear() });
       const context = await getPdfContextForNote(note);
       const organized = buildOrganizedNoteSections(note.detailedContent || '');
       const contentImages = await resolveNoteContentImages(note);
+      const contentTables = await resolveNoteContentTables(note);
       const logoDataUrl = await getSchoolLogoDataUrl();
       if (index > 0) doc.addPage();
 
@@ -2577,6 +2704,7 @@
       y = addAttendanceTable(doc, context, y);
       y = addSectionBlock(doc, 'Key Concepts & Definitions', note.keyConcepts || organized.keyConcepts, y);
       y = addSectionBlock(doc, 'Detailed Content / Explanation', note.detailedContent || organized.detailedContent, y);
+      y = addContentTablesToPdf(doc, contentTables, y);
       y = await addContentImagesToPdf(doc, contentImages, y);
       y = addSectionBlock(doc, 'Examples & Illustrations', note.examples || organized.examples, y);
       y = addSectionBlock(doc, 'Important Points / Key Takeaways', note.keyTakeaways || organized.keyTakeaways, y);
@@ -2589,7 +2717,7 @@
       doc.setFont('times', 'normal');
       doc.setFontSize(8);
       doc.setTextColor(71, 85, 105);
-      doc.text(`Export ${index + 1} of ${total} - Teacher ${context.teacherName || 'N/A'} - Present ${context.attendance.present || 0}/${context.attendance.total || 0}`, 12, doc.internal.pageSize.getHeight() - 8);
+      doc.text(`Export ${index + 1} of ${total} - Teacher ${context.teacherName || 'N/A'} - Registered ${context.attendance.registeredTotal || context.attendance.total || 0}`, 12, doc.internal.pageSize.getHeight() - 8);
       doc.setTextColor(0, 0, 0);
     }
 
@@ -2601,6 +2729,7 @@
       await loadJsPdf();
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      await installPdfUnicodeFonts(doc);
       for (let index = 0; index < noteList.length; index += 1) {
         await renderLessonNotePdfPage(doc, noteList[index], index, noteList.length);
       }
@@ -3666,14 +3795,19 @@
       const printedOffset = Number(chapter.entry.pageStart || 1) - Number(indexed.linePages?.[chapter.entry.bodyStart] || 1);
       const printedPageAt = (lineIndex) => Math.max(1, Number(indexed.linePages?.[lineIndex] || 1) + printedOffset);
       const sourceImages = (textSource.blocks || []).filter((block) => block.type === 'image');
+      const sourceTables = (textSource.blocks || []).filter((block) => block.type === 'table');
       const makeRange = (label, start, end, fallbackStart, fallbackEnd) => ({
         label,
         start,
         end,
         pageStart: start < end ? printedPageAt(start) : fallbackStart,
         pageEnd: start < end ? printedPageAt(end - 1) : fallbackEnd,
-        text: indexed.lines.slice(start, end).map(cleanBookWorkspaceLine).filter(Boolean).join('\n\n'),
-        images: sourceImages.filter((image) => image.lineIndex >= start && image.lineIndex < end)
+        text: indexed.lines.slice(start, end)
+          .map(cleanBookWorkspaceLine)
+          .filter((line) => line && !/^\[\[TABLE:/i.test(line))
+          .join('\n\n'),
+        images: sourceImages.filter((image) => image.lineIndex >= start && image.lineIndex < end),
+        tables: sourceTables.filter((table) => table.lineIndex >= start && table.lineIndex < end)
       });
 
       const wholeTopic = makeRange(
@@ -3715,7 +3849,7 @@
               || /[?]$/.test(nextTitle);
             const comparableNumber = nextParts.length && targetNumber.length && nextParts.length <= targetNumber.length;
             const isLaterNumber = comparableNumber && nextParts.some((part, partIndex) => part > (targetNumber[partIndex] || 0));
-            if (homeworkSeen && nextNumberedHeading && isHeading && isLaterNumber && !looksLikeQuestion) {
+            if (homeworkSeen && nextNumberedHeading && isHeading && (!targetNumber.length || isLaterNumber) && !looksLikeQuestion) {
               subEnd = index;
               break;
             }
@@ -4084,6 +4218,41 @@
       renderImportedContentImages();
     }
 
+    function tableMarkup(table, options = {}) {
+      const rows = Array.isArray(table?.rows) ? table.rows : [];
+      if (!rows.length) return '';
+      const editable = Boolean(options.editable);
+      return `
+        <div class="book-table-wrap">
+          <table class="book-structured-table" ${options.kind ? `data-topic-table-kind="${options.kind}"` : ''}>
+            <tbody>${rows.map((row, rowIndex) => `<tr>${(row || []).map((cell) => {
+              const tag = rowIndex === 0 ? 'th' : 'td';
+              return `<${tag}${editable ? ' contenteditable="true" spellcheck="true"' : ''}>${escapeHtml(cell || '')}</${tag}>`;
+            }).join('')}</tr>`).join('')}</tbody>
+          </table>
+        </div>`;
+    }
+
+    function readTopicTables(kind, fallbackTables) {
+      const tables = Array.from(pdfPageContainer?.querySelectorAll(`[data-topic-table-kind="${kind}"]`) || []);
+      if (!tables.length) return (fallbackTables || []).map((table) => ({ ...table, rows: (table.rows || []).map((row) => [...row]) }));
+      return tables.map((table, index) => ({
+        id: fallbackTables?.[index]?.id || `table_${index + 1}`,
+        lineIndex: Number(fallbackTables?.[index]?.lineIndex || 0),
+        rows: Array.from(table.rows).map((row) => Array.from(row.cells).map((cell) => normalizeMultilineText(cell.innerText || cell.textContent || '')))
+      }));
+    }
+
+    function renderImportedContentTables() {
+      if (!importedContentTables) return;
+      importedContentTables.innerHTML = (lessonState.importedContentTables || []).map((table) => tableMarkup(table)).join('');
+    }
+
+    function setImportedContentTables(range, kind) {
+      lessonState.importedContentTables = readTopicTables(kind, range?.tables || []);
+      renderImportedContentTables();
+    }
+
     function importEditableTopicContent(kind) {
       const workspace = lessonState.currentBook?.topicWorkspace;
       const range = kind === 'whole' ? workspace?.wholeTopic : workspace?.subTopic;
@@ -4104,6 +4273,7 @@
         keyConceptsField.value = [existing, conceptLines].filter(Boolean).join('\n\n');
       }
       setImportedContentImages(range, kind);
+      setImportedContentTables(range, kind);
       fillRequiredLessonFields(text, range);
       const bookTitle = lessonState.currentBook?.book?.title || 'Classbook';
       if (referencesField) {
@@ -4127,6 +4297,7 @@
             <div class="field-hint">Book pages ${range.pageStart}-${range.pageEnd}. Edit the content below before importing.</div>
           </div>
           <div class="topic-image-gallery" id="${kind}TopicImages"></div>
+          <div class="topic-table-gallery">${(range.tables || []).map((table) => tableMarkup(table, { editable: true, kind })).join('')}</div>
           <textarea id="${kind === 'whole' ? 'wholeTopicEditor' : 'subTopicEditor'}" spellcheck="true"></textarea>
           <button class="btn btn-success" type="button" data-import-topic="${kind}">Import ${kind === 'whole' ? 'Whole Topic' : 'This Sub-topic'} into Lesson Development</button>
         </section>` : '';
@@ -5332,6 +5503,8 @@ function splitIntoParagraphs(text) {
       lessonState.importedContentImages = [];
       lessonState.importedContentImageMeta = null;
       renderImportedContentImages();
+      lessonState.importedContentTables = [];
+      renderImportedContentTables();
       if (importedPreview) {
         importedPreview.classList.add('hidden');
         importedPreview.innerHTML = '';
@@ -5368,6 +5541,7 @@ function splitIntoParagraphs(text) {
           const concepts = buildEditableConceptLines(text, range.label);
           if (keyConceptsField && concepts) keyConceptsField.value = [keyConceptsField.value.trim(), concepts].filter(Boolean).join('\n\n');
           setImportedContentImages(range, kind);
+          setImportedContentTables(range, kind);
           fillRequiredLessonFields(text, range);
           lessonState.autoTextSnippet = text;
           toast(`Imported ${range.label} and completed all teaching-content fields.`, 'success');
@@ -5814,6 +5988,9 @@ function splitIntoParagraphs(text) {
         }
          updateTopicStatus('ok', 'Using the saved book settings for this note.');
         try {
+          lessonState.importedContentTables = (await resolveNoteContentTables(note))
+            .map((table) => ({ ...table, rows: (table.rows || []).map((row) => [...row]) }));
+          renderImportedContentTables();
           lessonState.importedContentImages = await resolveNoteContentImages(note);
           lessonState.importedContentImageMeta = note.contentImageMeta || (lessonState.importedContentImages.length ? {
             kind: note.subTopic ? 'subtopic' : 'whole',
@@ -6048,6 +6225,13 @@ function splitIntoParagraphs(text) {
         noteData.contentImageRefs = (lessonState.importedContentImages || []).map((image) => ({
           lineIndex: image.lineIndex,
           alt: image.alt || 'Textbook illustration'
+        }));
+      }
+      if (lessonState.importedContentImageMeta) {
+        noteData.contentTables = lessonState.importedContentTables.map((table) => ({
+          id: table.id || '',
+          lineIndex: Number(table.lineIndex || 0),
+          rows: (table.rows || []).map((row) => (row || []).map((cell) => String(cell || '')))
         }));
       }
       if (lessonState.currentBook && lessonState.currentBook.topic) {

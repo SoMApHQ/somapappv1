@@ -269,55 +269,138 @@
     const textLines = [];
     const blocks = [];
     let lineIndex = 0;
-    const paragraphs = Array.from(documentXml.getElementsByTagName('w:p'));
-    for (const paragraph of paragraphs) {
-        const text = Array.from(paragraph.getElementsByTagName('w:t'))
-          .map((node) => node.textContent || '')
-          .join(' ')
-          .replace(/\s{2,}/g, ' ')
-          .trim();
-        const renderedBreaks = paragraph.getElementsByTagName('w:lastRenderedPageBreak').length;
-        const manualBreaks = Array.from(paragraph.getElementsByTagName('w:br')).filter((node) =>
-          (node.getAttribute('w:type') || node.getAttribute('type') || '').toLowerCase() === 'page'
-        ).length;
-        for (let index = 0; index < renderedBreaks + manualBreaks; index += 1) {
-          textLines.push('[[PAGE_BREAK]]');
-          blocks.push({ type: 'pageBreak', lineIndex });
+    const localName = (node) => String(node?.localName || node?.nodeName || '').split(':').pop();
+    const descendants = (node, name) => Array.from(node?.getElementsByTagName?.('*') || [])
+      .filter((child) => localName(child) === name);
+    const paragraphText = (paragraph) => {
+      let value = '';
+      const superMap = { '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹', '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾', n: 'ⁿ', i: 'ⁱ' };
+      const subMap = { '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉', '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎', a: 'ₐ', e: 'ₑ', h: 'ₕ', i: 'ᵢ', j: 'ⱼ', k: 'ₖ', l: 'ₗ', m: 'ₘ', n: 'ₙ', o: 'ₒ', p: 'ₚ', r: 'ᵣ', s: 'ₛ', t: 'ₜ', u: 'ᵤ', v: 'ᵥ', x: 'ₓ' };
+      const transformScript = (text, map) => Array.from(text).map((character) => map[character] || character).join('');
+      const runText = (run) => {
+        let result = '';
+        const collect = (node) => Array.from(node?.childNodes || []).forEach((child) => {
+          const name = localName(child);
+          if (name === 't') result += child.textContent || '';
+          else if (name === 'tab') result += '\t';
+          else if (name === 'br' && String(child.getAttribute?.('w:type') || child.getAttribute?.('type') || '').toLowerCase() !== 'page') result += '\n';
+          else collect(child);
+        });
+        collect(run);
+        const vertical = descendants(run, 'vertAlign')[0];
+        const verticalValue = String(vertical?.getAttribute('w:val') || vertical?.getAttribute('val') || '').toLowerCase();
+        if (verticalValue === 'superscript') return transformScript(result, superMap);
+        if (verticalValue === 'subscript') return transformScript(result, subMap);
+        return result;
+      };
+      const mathText = (node) => {
+        const name = localName(node);
+        const children = Array.from(node?.childNodes || []).filter((child) => child.nodeType === 1);
+        const childByName = (wanted) => children.find((child) => localName(child) === wanted);
+        if (name === 'r') return runText(node);
+        if (name === 't') return node.textContent || '';
+        if (/Pr$/.test(name)) return '';
+        if (name === 'f') {
+          const numerator = mathText(childByName('num'));
+          const denominator = mathText(childByName('den'));
+          return `(${numerator})/(${denominator})`;
         }
-        const styleNode = paragraph.getElementsByTagName('w:pStyle')[0];
+        if (name === 'rad') return `√(${mathText(childByName('e'))})`;
+        if (name === 'sSup') return `${mathText(childByName('e'))}${transformScript(mathText(childByName('sup')), superMap)}`;
+        if (name === 'sSub') return `${mathText(childByName('e'))}${transformScript(mathText(childByName('sub')), subMap)}`;
+        if (name === 'sSubSup') {
+          return `${mathText(childByName('e'))}${transformScript(mathText(childByName('sub')), subMap)}${transformScript(mathText(childByName('sup')), superMap)}`;
+        }
+        if (name === 'nary') {
+          const character = descendants(node, 'chr')[0]?.getAttribute('m:val') || descendants(node, 'chr')[0]?.getAttribute('val') || '∑';
+          return `${character}${transformScript(mathText(childByName('sub')), subMap)}${transformScript(mathText(childByName('sup')), superMap)}${mathText(childByName('e'))}`;
+        }
+        return children.map(mathText).join('');
+      };
+      const walk = (node) => {
+        Array.from(node?.childNodes || []).forEach((child) => {
+          const name = localName(child);
+          if (name === 'oMath' || name === 'oMathPara') value += mathText(child);
+          else if (name === 'r') value += runText(child);
+          else if (name === 't') value += child.textContent || '';
+          else if (name === 'tab') value += '\t';
+          else if (name === 'br' && String(child.getAttribute?.('w:type') || child.getAttribute?.('type') || '').toLowerCase() !== 'page') value += '\n';
+          else walk(child);
+        });
+      };
+      walk(paragraph);
+      return value.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    };
+    const appendImages = async (container, targetLineIndex) => {
+      const relationshipIds = new Set();
+      descendants(container, 'blip').forEach((node) => {
+        const id = node.getAttribute('r:embed') || node.getAttribute('embed') || '';
+        if (id) relationshipIds.add(id);
+      });
+      descendants(container, 'imagedata').forEach((node) => {
+        const id = node.getAttribute('r:id') || node.getAttribute('id') || '';
+        if (id) relationshipIds.add(id);
+      });
+      for (const relationshipId of relationshipIds) {
+        const target = relationships.get(relationshipId);
+        const mediaPath = target ? resolveZipTarget('word', target) : '';
+        const mediaFile = mediaPath ? zip.file(mediaPath) : null;
+        if (!mediaFile) continue;
+        const extension = mediaPath.split('.').pop().toLowerCase();
+        const mimeType = mimeTypes[extension];
+        if (!mimeType) continue;
+        const dataUrl = `data:${mimeType};base64,${await mediaFile.async('base64')}`;
+        blocks.push({ type: 'image', dataUrl, lineIndex: targetLineIndex, alt: `Book illustration near section ${targetLineIndex + 1}` });
+      }
+    };
+    const appendPageBreaks = (container) => {
+      const renderedBreaks = descendants(container, 'lastRenderedPageBreak').length;
+      const manualBreaks = descendants(container, 'br').filter((node) =>
+        String(node.getAttribute('w:type') || node.getAttribute('type') || '').toLowerCase() === 'page'
+      ).length;
+      for (let index = 0; index < renderedBreaks + manualBreaks; index += 1) {
+        textLines.push('[[PAGE_BREAK]]');
+        blocks.push({ type: 'pageBreak', lineIndex });
+      }
+    };
+    const body = descendants(documentXml, 'body')[0];
+    const bodyChildren = Array.from(body?.childNodes || []).filter((node) => node.nodeType === 1);
+    for (const child of bodyChildren) {
+      const childName = localName(child);
+      if (childName === 'p') {
+        appendPageBreaks(child);
+        const text = paragraphText(child);
+        const styleNode = descendants(child, 'pStyle')[0];
         const styleName = styleNode?.getAttribute('w:val') || styleNode?.getAttribute('val') || '';
         const emphasized = /heading|title/i.test(styleName)
-          || paragraph.getElementsByTagName('w:b').length > 0
-          || paragraph.getElementsByTagName('w:u').length > 0;
+          || descendants(child, 'b').length > 0
+          || descendants(child, 'u').length > 0;
         if (text) {
-          const markedText = emphasized && !/^(?:chapter|topic|unit)\b/i.test(text)
-            ? `[[HEADING]] ${text}`
+          const listText = descendants(child, 'numPr').length && !/^(?:[-•]|\d+[.)])\s*/.test(text)
+            ? `• ${text}`
             : text;
+          const markedText = emphasized && !/^(?:chapter|topic|unit)\b/i.test(listText)
+            ? `[[HEADING]] ${listText}`
+            : listText;
           textLines.push(markedText);
           blocks.push({ type: 'text', text: markedText, lineIndex, heading: emphasized });
         }
-
-        const relationshipIds = new Set();
-        Array.from(paragraph.getElementsByTagName('a:blip')).forEach((node) => {
-          const id = node.getAttribute('r:embed') || node.getAttribute('embed') || '';
-          if (id) relationshipIds.add(id);
-        });
-        Array.from(paragraph.getElementsByTagName('v:imagedata')).forEach((node) => {
-          const id = node.getAttribute('r:id') || node.getAttribute('id') || '';
-          if (id) relationshipIds.add(id);
-        });
-        for (const relationshipId of relationshipIds) {
-          const target = relationships.get(relationshipId);
-          const mediaPath = target ? resolveZipTarget('word', target) : '';
-          const mediaFile = mediaPath ? zip.file(mediaPath) : null;
-          if (!mediaFile) continue;
-          const extension = mediaPath.split('.').pop().toLowerCase();
-          const mimeType = mimeTypes[extension];
-          if (!mimeType) continue;
-          const dataUrl = `data:${mimeType};base64,${await mediaFile.async('base64')}`;
-          blocks.push({ type: 'image', dataUrl, lineIndex, alt: `Book illustration near section ${lineIndex + 1}` });
-        }
+        await appendImages(child, lineIndex);
         if (text) lineIndex += 1;
+      } else if (childName === 'tbl') {
+        appendPageBreaks(child);
+        const rows = descendants(child, 'tr').map((row) => descendants(row, 'tc').map((cell) => {
+          const paragraphs = descendants(cell, 'p').map(paragraphText).filter(Boolean);
+          return paragraphs.join('\n').trim();
+        })).filter((row) => row.some(Boolean));
+        if (rows.length) {
+          const tableId = `table_${blocks.filter((block) => block.type === 'table').length + 1}`;
+          textLines.push(`[[TABLE:${tableId}]]`);
+          blocks.push({ type: 'table', id: tableId, rows, lineIndex });
+          await appendImages(child, lineIndex);
+          lineIndex += 1;
+        }
+      }
     }
     return { text: textLines.join('\n'), blocks };
   }
