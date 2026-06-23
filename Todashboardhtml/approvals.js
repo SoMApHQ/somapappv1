@@ -179,8 +179,11 @@
     return null;
   }
 
+  const normalizeAccessText = (value) => String(value || '').trim().toLowerCase();
+  const normalizeSchoolIdForAccess = (value) => normalizeAccessText(value).replace(/_/g, '-');
+
   const buildEmailKeys = (email) => {
-    const safe = String(email || '').toLowerCase();
+    const safe = normalizeAccessText(email);
     if (!safe) return [];
     return Array.from(new Set([
       safe.replace(/\./g, '_'),
@@ -198,6 +201,71 @@
       }
     }
     return null;
+  }
+
+  function collectProfileSchoolIds(profile) {
+    const ids = new Set();
+    const add = (value) => {
+      const normalized = normalizeSchoolIdForAccess(value);
+      if (normalized) ids.add(normalized);
+    };
+    add(profile.schoolId);
+    add(profile.schoolid);
+    add(profile.school);
+    add(profile.currentSchoolId);
+    add(profile.activeSchoolId);
+
+    ['schoolIds', 'schools', 'schoolMemberships', 'memberships'].forEach((field) => {
+      const value = profile[field];
+      if (Array.isArray(value)) {
+        value.forEach((item) => {
+          if (typeof item === 'string') add(item);
+          else if (item && typeof item === 'object') add(item.id || item.schoolId || item.key);
+        });
+      } else if (value && typeof value === 'object') {
+        Object.entries(value).forEach(([key, item]) => {
+          add(key);
+          if (item && typeof item === 'object') add(item.id || item.schoolId || item.key);
+        });
+      } else {
+        add(value);
+      }
+    });
+
+    return ids;
+  }
+
+  async function fetchRegisteredSchoolMeta(schoolId) {
+    const id = String(schoolId || '').trim();
+    if (!id) return {};
+    const [metaSnap, profileSnap, statusSnap] = await Promise.all([
+      db.ref(`schools/${id}/meta`).once('value').catch(() => ({ val: () => null })),
+      db.ref(`schools/${id}/profile`).once('value').catch(() => ({ val: () => null })),
+      db.ref(`schools/${id}/status`).once('value').catch(() => ({ val: () => null })),
+    ]);
+    return {
+      ...(profileSnap.val() || {}),
+      ...(metaSnap.val() || {}),
+      status: (metaSnap.val() || {}).status || statusSnap.val() || (profileSnap.val() || {}).status || '',
+    };
+  }
+
+  function isSchoolRegistered(meta, schoolId) {
+    if (schoolId === 'socrates-school' || schoolId === 'default') return true;
+    const status = normalizeAccessText(meta.status);
+    return status === 'active' || Boolean(meta.name || meta.schoolName || meta.email || meta.ownerEmail);
+  }
+
+  function isRegisteredSchoolAdminEmail(userEmail, schoolMeta) {
+    const email = normalizeAccessText(userEmail);
+    if (!email) return false;
+    return [
+      schoolMeta.email,
+      schoolMeta.schoolEmail,
+      schoolMeta.ownerEmail,
+      schoolMeta.adminEmail,
+      schoolMeta.contactEmail,
+    ].some((candidate) => normalizeAccessText(candidate) === email);
   }
 
   function resolveSchoolId() {
@@ -430,13 +498,18 @@
     try {
       const profileRes = await fetchUserProfile(user.email);
       const profile = profileRes?.data || {};
-      const role = String(profile.role || '').toLowerCase();
+      const role = String(profile.role || localStorage.getItem('role') || '').toLowerCase();
       const allowed = role === 'admin';
-      const profileSchoolId = profile.schoolId || profile.schoolid || '';
-      const isSocrates = school.id === 'socrates-school';
-      const sameSchool = profileSchoolId
-        ? (profileSchoolId === school.id || (isSocrates && profileSchoolId === 'socrates'))
-        : isSocrates; // allow legacy admins without schoolId for default school
+      const normalizedSchoolId = normalizeSchoolIdForAccess(school.id);
+      const profileSchoolIds = collectProfileSchoolIds(profile);
+      const isSocrates = normalizedSchoolId === 'socrates-school';
+      const schoolMeta = await fetchRegisteredSchoolMeta(school.id);
+      const registeredSchoolAdmin = isSchoolRegistered(schoolMeta, normalizedSchoolId)
+        && isRegisteredSchoolAdminEmail(user.email, schoolMeta);
+      const profileMatchesSchool = profileSchoolIds.has(normalizedSchoolId)
+        || (isSocrates && profileSchoolIds.has('socrates'));
+      const legacyDefaultAdmin = !profileSchoolIds.size && isSocrates;
+      const sameSchool = profileMatchesSchool || registeredSchoolAdmin || legacyDefaultAdmin;
       if (!profile || !allowed || !sameSchool) {
         Swal.fire({
           icon: 'error',
@@ -448,13 +521,16 @@
         });
         return false;
       }
-      state.userProfile = { ...profile, key: profileRes.key, email: user.email };
-      state.school = school;
+      state.userProfile = { ...profile, key: profileRes?.key || '', email: user.email };
+      state.school = {
+        ...school,
+        ...(!school.name && (schoolMeta.name || schoolMeta.schoolName) ? { name: schoolMeta.name || schoolMeta.schoolName } : {}),
+      };
       if (window.SomapFinance && typeof window.SomapFinance._clearFinanceCaches === 'function') {
         window.SomapFinance._clearFinanceCaches();
       }
       if (els.schoolLabel) {
-        const label = school.name || school.code || school.id;
+        const label = state.school.name || state.school.code || state.school.id;
         els.schoolLabel.textContent = `${label} Admin`;
       }
       return true;
