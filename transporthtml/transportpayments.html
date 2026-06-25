@@ -783,6 +783,22 @@
         return await TransportPricing.computeBaseMonthlyFeeOnMonth({ year, month, amStop, pmStop });
       }
 
+      function getTransportBaseMonthlyFee(enrollment) {
+        const fields = [
+          enrollment?.baseMonthlyFee,
+          enrollment?.monthlyFee,
+          enrollment?.transportFee,
+          enrollment?.currentMonthTransportFee,
+          enrollment?.fee,
+          enrollment?.amount,
+        ];
+        for (const value of fields) {
+          const amount = Number(value);
+          if (Number.isFinite(amount) && amount > 0) return amount;
+        }
+        return 0;
+      }
+
       // Calculate transport payment status (now year-scoped with DB multipliers) - OPTIMIZED with parallel month calculations and caching
       async function calculateTransportStatus(enrollment, payments, yearMultipliers, studentId = null) {
         // Check cache first to avoid recalculation
@@ -806,7 +822,7 @@
         const selectedMonth = getFocusedMonth();
         const baseMonthlyFee = (amStop || pmStop)
           ? (await calculateBaseMonthlyFee(amStop, pmStop, year, selectedMonth))
-          : (Number(enrollment?.baseMonthlyFee) || 0);
+          : getTransportBaseMonthlyFee(enrollment);
         const startDateIso = resolveStartDate(enrollment);
         const hasExplicitStart = Boolean(enrollment?.startDate || enrollment?.start_date || enrollment?.startTimestamp || enrollment?.start_time);
 
@@ -1192,7 +1208,7 @@
           const assign = assignSnap.val();
           
           if (assign && assign.status === 'Using') {
-            baseMonthlyFee = Number(assign.baseMonthlyFee || 0) || Number(enrollment.baseMonthlyFee || 0);
+            baseMonthlyFee = getTransportBaseMonthlyFee(assign) || getTransportBaseMonthlyFee(enrollment);
             const startDate = normalizeDateInput(assign.startDate || enrollmentStart, Number(year));
         const hasAssignedStart = Boolean(assign?.startDate || assign?.start_date || assign?.startTimestamp || assign?.start_time);
             
@@ -1650,7 +1666,7 @@
         const pmStop = enrollment?.pmStop || '';
         const baseMonthlyFee = (amStop || pmStop)
           ? (await calculateBaseMonthlyFee(amStop, pmStop, year, getFocusedMonth()))
-          : (Number(enrollment?.baseMonthlyFee) || 0);
+          : getTransportBaseMonthlyFee(enrollment);
         const startDate = resolveStartDate(enrollment);
         const ledger = await TransportPricing.buildLedger({ year, baseMonthlyFee, amStop, pmStop, startDate, payments, multipliers });
         paymentScheduleLedger = ledger;
@@ -2091,6 +2107,72 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
       function filterLegacyPaymentsByYear(data, year) {
         const yearNum = Number(year);
         return normalizePaymentList(data).filter((p) => Number(p?.year) === yearNum);
+      }
+
+      function normalizeTransportPaymentRecord(payment) {
+        if (!payment || typeof payment !== 'object') return payment;
+        const monthNum = typeof payment.month === 'number'
+          ? payment.month
+          : (MONTH_NAMES.indexOf(payment.month) >= 1 ? MONTH_NAMES.indexOf(payment.month) : Number(payment.month) || 0);
+        return {
+          ...payment,
+          month: monthNum,
+          amount: Number(payment.amount || payment.paidAmount || payment.value || 0) || 0,
+        };
+      }
+
+      async function mergeApprovedTransportPaymentsFromHistory(year, payments, matchIds) {
+        const out = normalizePaymentList(payments).map(normalizeTransportPaymentRecord);
+        const normalizedIds = new Set((matchIds || []).map(normalizeIdentifier).filter(Boolean));
+        const hasMatch = (record) => {
+          if (!record || record.sourceModule !== 'transport') return false;
+          const candidates = [
+            record.modulePayload?.studentKey,
+            record.studentAdm,
+            record.admissionNumber,
+            record.modulePayload?.admissionNumber,
+          ];
+          return candidates.some(value => normalizedIds.has(normalizeIdentifier(value)));
+        };
+        try {
+          const history = await fetchApprovalsHistoryForYear(year);
+          Object.values(history).forEach(monthRecords => {
+            Object.values(monthRecords || {}).forEach(record => {
+              if (!record || record.finalStatus !== 'approved' || !hasMatch(record)) return;
+              const pmt = record.modulePayload?.payment;
+              const ref = record.paymentReferenceCode || pmt?.reference || pmt?.ref;
+              if (!ref) return;
+              const existingIndex = out.findIndex(p => (p?.ref || p?.reference) === ref);
+              if (existingIndex >= 0) {
+                out[existingIndex] = {
+                  ...out[existingIndex],
+                  approved: true,
+                  approvedAt: out[existingIndex].approvedAt || record.approvedAt,
+                  approvedBy: out[existingIndex].approvedBy || record.approvedBy,
+                };
+                return;
+              }
+              if (!pmt) return;
+              out.push(normalizeTransportPaymentRecord({
+                amount: record.amountPaidNow ?? pmt.amount,
+                method: record.paymentMethod ?? pmt.method,
+                ref,
+                reference: ref,
+                payerName: record.payerName ?? pmt.payerName,
+                paidAt: record.datePaid ?? pmt.paidAt ?? record.createdAt,
+                timestamp: record.createdAt ?? pmt.timestamp,
+                month: pmt.month,
+                notes: record.notes ?? pmt.notes ?? '',
+                approved: true,
+                approvedAt: record.approvedAt,
+                approvedBy: record.approvedBy,
+              }));
+            });
+          });
+        } catch (err) {
+          console.warn('Merge approved transport payments for single student:', err);
+        }
+        return out;
       }
 
       async function readSupplementalPayments(year, studentId) {
@@ -2555,7 +2637,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               pmStop,
               route,
               period: assignRecord.period || existing.period || period,
-              baseMonthlyFee: assignRecord.baseMonthlyFee || existing.baseMonthlyFee,
+              baseMonthlyFee: assignRecord.baseMonthlyFee || assignRecord.monthlyFee || existing.baseMonthlyFee || existing.monthlyFee,
+              monthlyFee: assignRecord.monthlyFee || assignRecord.baseMonthlyFee || existing.monthlyFee || existing.baseMonthlyFee,
               startDate: assignRecord.startDate || existing.startDate,
               morningVehicle: morningVehicle || existing.morningVehicle,
               eveningVehicle: eveningVehicle || existing.eveningVehicle,
@@ -2971,7 +3054,9 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
       function monthName(num){ return MONTH_NAMES[num] || ''; }
       async function loadTransportContextStrict(year, studentId){
         const requestedId = String(studentId || '').trim();
+        const studentUrlId = String(new URLSearchParams(window.location.search).get('student') || '').trim();
         const reqNorm = normalizeIdentifier(requestedId);
+        const urlStudentNorm = normalizeIdentifier(studentUrlId);
         const y = String(year);
         const isLegacyMerge = isSocratesSchool();
 
@@ -3011,9 +3096,11 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           if (!reg || reg.using !== true) return;
           if (!mergedTransport[id]) {
             mergedTransport[id] = {
-              amStop: reg.routeId || '',
-              pmStop: reg.stopName || '',
-              monthlyFee: reg.monthlyFee || 0
+              amStop: reg.amStop || reg.morningRouteId || reg.morningRoute || reg.routeId || reg.route || '',
+              pmStop: reg.pmStop || reg.eveningRouteId || reg.eveningRoute || reg.stopName || '',
+              monthlyFee: reg.monthlyFee || reg.baseMonthlyFee || reg.transportFee || 0,
+              baseMonthlyFee: reg.baseMonthlyFee || reg.monthlyFee || reg.transportFee || 0,
+              startDate: reg.startDate || reg.start_date || reg.dateRegistered || null,
             };
           }
         });
@@ -3028,8 +3115,9 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             ...assignRecord,
             amStop: assignRecord.morningRouteId || assignRecord.amStop || existing.amStop || '',
             pmStop: assignRecord.eveningRouteId || assignRecord.pmStop || existing.pmStop || '',
-            baseMonthlyFee: assignRecord.baseMonthlyFee || existing.baseMonthlyFee,
-            startDate: assignRecord.startDate || existing.startDate,
+            baseMonthlyFee: assignRecord.baseMonthlyFee || assignRecord.monthlyFee || existing.baseMonthlyFee || existing.monthlyFee,
+            monthlyFee: assignRecord.monthlyFee || assignRecord.baseMonthlyFee || existing.monthlyFee || existing.baseMonthlyFee,
+            startDate: assignRecord.startDate || assignRecord.start_date || existing.startDate || existing.start_date,
           };
         });
 
@@ -3056,7 +3144,10 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         for (const [k, rec] of Object.entries(allStudents)) {
           if (!rec || typeof rec !== 'object') continue;
           const candidates = [k, rec.admissionNumber, rec.admissionNo, rec.studentAdm, rec.admission];
-          if (candidates.some(v => normalizeIdentifier(v) === reqNorm)) {
+          if (candidates.some(v => {
+            const normalized = normalizeIdentifier(v);
+            return normalized === reqNorm || (urlStudentNorm && normalized === urlStudentNorm);
+          })) {
             resolvedStudentKey = k;
             student = rec;
             break;
@@ -3070,7 +3161,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         const admissionNorm = normalizeIdentifier(admissionKey);
 
         let resolvedTransportId = null;
-        const tryTransportIds = [requestedId, resolvedStudentKey, admissionKey].filter(Boolean);
+        const tryTransportIds = [requestedId, studentUrlId, resolvedStudentKey, admissionKey].filter(Boolean);
         for (const idTry of tryTransportIds) {
           if (mergedTransport[idTry]) {
             resolvedTransportId = idTry;
@@ -3079,7 +3170,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         }
         if (!resolvedTransportId) {
           for (const id of Object.keys(mergedTransport)) {
-            if (normalizeIdentifier(id) === reqNorm || normalizeIdentifier(id) === admissionNorm) {
+            const idNorm = normalizeIdentifier(id);
+            if (idNorm === reqNorm || idNorm === admissionNorm || (urlStudentNorm && idNorm === urlStudentNorm)) {
               resolvedTransportId = id;
               break;
             }
@@ -3090,7 +3182,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         const assignment = assignments[resolvedTransportId] || null;
 
         // 4) Payments + finance for resolved ids.
-        const idsForLedger = [resolvedTransportId, admissionKey, resolvedStudentKey, requestedId].filter(Boolean);
+        const idsForLedger = [resolvedTransportId, admissionKey, resolvedStudentKey, requestedId, studentUrlId].filter(Boolean);
         let payments = [];
         for (const idTry of idsForLedger) {
           if (payments.length) break;
@@ -3098,14 +3190,9 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           payments = normalizePaymentList(paySnap.val() || {});
           if (!payments.length) payments = await readSupplementalPayments(y, idTry);
         }
-        const normalizedPayments = (payments || []).map(x => ({
-          month: Number(x.month)||0,
-          amount: Number(x.amount)||0,
-          status: x.status||'pending'
-        }));
 
         let financeMap = {};
-        for (const idTry of [resolvedStudentKey, admissionKey, requestedId].filter(Boolean)) {
+        for (const idTry of [resolvedStudentKey, admissionKey, requestedId, studentUrlId].filter(Boolean)) {
           if (Object.keys(financeMap).length) break;
           const finSnap = await scopedOrSocratesLegacy(`years/${y}/finance/${idTry}/payments`, `finance/${y}/${idTry}/payments`).catch(() => ({ val: () => null }));
           financeMap = finSnap.val() || {};
@@ -3121,15 +3208,18 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         if ((!effectiveAssign || effectiveAssign.status !== 'Using') && enrollment) {
           const amStop = enrollment.amStop || enrollment.morningRouteId || enrollment.route || '';
           const pmStop = enrollment.pmStop || enrollment.eveningRouteId || enrollment.stopName || '';
-          const baseMonthlyFee = Number(enrollment.baseMonthlyFee || 0) || (TransportPricing.priceForStop(amStop) + TransportPricing.priceForStop(pmStop));
+          const baseMonthlyFee = getTransportBaseMonthlyFee(enrollment);
           effectiveAssign = {
             status: 'Using',
             amStop,
             pmStop,
             baseMonthlyFee,
+            monthlyFee: enrollment.monthlyFee || enrollment.baseMonthlyFee || baseMonthlyFee,
             startDate: enrollment.startDate || enrollment.start_date || enrollment.dateRegistered || null,
           };
         }
+
+        const normalizedPayments = await mergeApprovedTransportPaymentsFromHistory(y, payments, idsForLedger);
 
         state.students[safeTransportId] = student;
         state.transportEnrollments[safeTransportId] = enrollment || effectiveAssign || {};
@@ -3190,16 +3280,18 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         const multipliers = cachedMultipliers[Number(year)] || (await TransportPricing.loadYearMultipliers(Number(year)));
         if (!cachedMultipliers[Number(year)]) cachedMultipliers[Number(year)] = multipliers;
         
+        const amStop = assign?.amStop || assign?.morningRouteId || '';
+        const pmStop = assign?.pmStop || assign?.eveningRouteId || '';
         const hasAssignedStart = Boolean(
           assign?.startDate ||
           assign?.start_date ||
           assign?.startTimestamp ||
           assign?.start_time
         );
-        const base = Number(assign?.baseMonthlyFee||0);
+        const base = (amStop || pmStop)
+          ? await calculateBaseMonthlyFee(amStop, pmStop, Number(year), getFocusedMonth())
+          : getTransportBaseMonthlyFee(assign);
         const startDate = normalizeDateInput((assign && (assign.startDate || assign.start_date || assign.startTimestamp || assign.start_time)) || `${year}-01-01`, Number(year));
-        const amStop = assign?.amStop || assign?.morningRouteId || '';
-        const pmStop = assign?.pmStop || assign?.eveningRouteId || '';
         const ledger = await TransportPricing.buildLedger({ 
           year: Number(year), 
           amStop,
