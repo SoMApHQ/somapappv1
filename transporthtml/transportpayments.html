@@ -2123,6 +2123,18 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
 
       async function mergeApprovedTransportPaymentsFromHistory(year, payments, matchIds) {
         const out = normalizePaymentList(payments).map(normalizeTransportPaymentRecord);
+        const hasPositivePayments = out.some(p => Number(p?.amount || p?.paidAmount || p?.value || 0) > 0);
+        const allPositivePaymentsApproved = hasPositivePayments && out
+          .filter(p => Number(p?.amount || p?.paidAmount || p?.value || 0) > 0)
+          .every(p => (
+            p.approved === true ||
+            p.approved === 'true' ||
+            !!p.approvedAt ||
+            String(p.status || '').toLowerCase() === 'approved' ||
+            String(p.status || '').toLowerCase() === 'paid'
+          ));
+        if (allPositivePaymentsApproved) return out;
+
         const normalizedIds = new Set((matchIds || []).map(normalizeIdentifier).filter(Boolean));
         const hasMatch = (record) => {
           if (!record || record.sourceModule !== 'transport') return false;
@@ -3059,6 +3071,137 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         const urlStudentNorm = normalizeIdentifier(studentUrlId);
         const y = String(year);
         const isLegacyMerge = isSocratesSchool();
+
+        const idCandidates = [];
+        const pushCandidate = (value) => {
+          const clean = String(value || '').trim();
+          if (clean && !idCandidates.includes(clean)) idCandidates.push(clean);
+        };
+        pushCandidate(requestedId);
+        pushCandidate(studentUrlId);
+
+        const directStudent = { key: null, record: null };
+        for (const idTry of idCandidates.slice()) {
+          if (directStudent.record) break;
+          const snap = await scopedOrSocratesLegacy(`students/${idTry}`, `students/${idTry}`).catch(() => ({ val: () => null }));
+          const record = snap.val();
+          if (record && typeof record === 'object') {
+            directStudent.key = idTry;
+            directStudent.record = record;
+            pushCandidate(record.admissionNumber);
+            pushCandidate(record.admissionNo);
+            pushCandidate(record.studentAdm);
+            pushCandidate(record.admission);
+          }
+        }
+
+        async function readDirectRecord(scopedPath, legacyPath) {
+          const snap = await scopedOrSocratesLegacy(scopedPath, legacyPath).catch(() => ({ val: () => null }));
+          const value = snap.val();
+          return (value && typeof value === 'object') ? value : null;
+        }
+
+        function normalizeRegistryRecord(reg) {
+          if (!reg || reg.using !== true) return null;
+          return {
+            ...reg,
+            amStop: reg.amStop || reg.morningRouteId || reg.morningRoute || reg.routeId || reg.route || '',
+            pmStop: reg.pmStop || reg.eveningRouteId || reg.eveningRoute || reg.stopName || '',
+            monthlyFee: reg.monthlyFee || reg.baseMonthlyFee || reg.transportFee || 0,
+            baseMonthlyFee: reg.baseMonthlyFee || reg.monthlyFee || reg.transportFee || 0,
+            startDate: reg.startDate || reg.start_date || reg.dateRegistered || null,
+          };
+        }
+
+        async function finishSingleStudentContext({ transportId, studentKey, student, enrollment, assignment }) {
+          const admissionKey = String(student?.admissionNumber || student?.admissionNo || studentUrlId || requestedId).trim();
+          const idsForLedger = [transportId, admissionKey, studentKey, requestedId, studentUrlId].filter(Boolean);
+          let payments = [];
+          for (const idTry of idsForLedger) {
+            if (payments.length) break;
+            const paySnap = await scopedOrSocratesLegacy(`years/${y}/transportLedgers/${idTry}/payments`, `transportLedgers/${y}/${idTry}/payments`).catch(() => ({ val: () => null }));
+            payments = normalizePaymentList(paySnap.val() || {});
+            if (!payments.length) payments = await readSupplementalPayments(y, idTry);
+          }
+
+          let financeMap = {};
+          for (const idTry of [studentKey, admissionKey, requestedId, studentUrlId].filter(Boolean)) {
+            if (Object.keys(financeMap).length) break;
+            const finSnap = await scopedOrSocratesLegacy(`years/${y}/finance/${idTry}/payments`, `finance/${y}/${idTry}/payments`).catch(() => ({ val: () => null }));
+            financeMap = finSnap.val() || {};
+          }
+          const schoolFeePaid = Object.values(financeMap || {}).reduce((a,p)=>a+(Number(p?.amount)||0),0);
+
+          const safeTransportId = transportId || requestedId;
+          if (!student || Object.keys(student || {}).length === 0) {
+            student = buildFallbackStudent(safeTransportId, enrollment || assignment || {});
+          }
+
+          let effectiveAssign = assignment;
+          if ((!effectiveAssign || effectiveAssign.status !== 'Using') && enrollment) {
+            const amStop = enrollment.amStop || enrollment.morningRouteId || enrollment.route || '';
+            const pmStop = enrollment.pmStop || enrollment.eveningRouteId || enrollment.stopName || '';
+            const baseMonthlyFee = getTransportBaseMonthlyFee(enrollment);
+            effectiveAssign = {
+              status: 'Using',
+              ...enrollment,
+              amStop,
+              pmStop,
+              baseMonthlyFee,
+              monthlyFee: enrollment.monthlyFee || enrollment.baseMonthlyFee || baseMonthlyFee,
+              startDate: enrollment.startDate || enrollment.start_date || enrollment.dateRegistered || null,
+            };
+          }
+
+          const normalizedPayments = await mergeApprovedTransportPaymentsFromHistory(y, payments, idsForLedger);
+
+          state.students[safeTransportId] = student;
+          state.transportEnrollments[safeTransportId] = enrollment || effectiveAssign || {};
+          state.transportPayments[safeTransportId] = normalizedPayments;
+          state.studentKeyAliases[safeTransportId] = studentKey || admissionKey || safeTransportId;
+
+          state.students[requestedId] = state.students[requestedId] || student;
+          state.transportEnrollments[requestedId] = state.transportEnrollments[requestedId] || state.transportEnrollments[safeTransportId];
+          state.transportPayments[requestedId] = state.transportPayments[requestedId] || normalizedPayments;
+
+          return {
+            assign: effectiveAssign || (enrollment ? { status: 'Using', ...enrollment } : null),
+            payments: normalizedPayments,
+            schoolFeePaid,
+            student,
+            resolvedTransportId: safeTransportId,
+          };
+        }
+
+        // Fast path for parent links: direct child records avoid loading whole transport/student maps.
+        for (const idTry of idCandidates) {
+          const [assignment, enrollmentRaw, registryRaw] = await Promise.all([
+            readDirectRecord(`years/${y}/transportAssignments/${idTry}`, `transportAssignments/${y}/${idTry}`),
+            readDirectRecord(`years/${y}/transportEnrollments/${idTry}`, `transport_enrollments/${idTry}`),
+            readDirectRecord(`years/${y}/transportRegistry/${idTry}`, `transportRegistry/${y}/${idTry}`),
+          ]);
+          const registryEnrollment = normalizeRegistryRecord(registryRaw);
+          const assignmentUsing = assignment && assignment.status === 'Using' ? assignment : null;
+          const enrollment = enrollmentRaw || registryEnrollment;
+          if (assignmentUsing || enrollment) {
+            const mergedEnrollment = assignmentUsing ? {
+              ...(enrollment || {}),
+              ...assignmentUsing,
+              amStop: assignmentUsing.morningRouteId || assignmentUsing.amStop || enrollment?.amStop || '',
+              pmStop: assignmentUsing.eveningRouteId || assignmentUsing.pmStop || enrollment?.pmStop || '',
+              baseMonthlyFee: assignmentUsing.baseMonthlyFee || assignmentUsing.monthlyFee || enrollment?.baseMonthlyFee || enrollment?.monthlyFee,
+              monthlyFee: assignmentUsing.monthlyFee || assignmentUsing.baseMonthlyFee || enrollment?.monthlyFee || enrollment?.baseMonthlyFee,
+              startDate: assignmentUsing.startDate || assignmentUsing.start_date || enrollment?.startDate || enrollment?.start_date,
+            } : enrollment;
+            return await finishSingleStudentContext({
+              transportId: idTry,
+              studentKey: directStudent.key || requestedId,
+              student: directStudent.record,
+              enrollment: mergedEnrollment,
+              assignment: assignmentUsing,
+            });
+          }
+        }
 
         // 1) Build merged transport map exactly like admin view.
         const [
