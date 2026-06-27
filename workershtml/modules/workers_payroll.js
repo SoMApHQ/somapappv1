@@ -78,7 +78,8 @@ function computeStatutory(baseSalary, policies) {
       employer: nssfEmployer
     },
     paye,
-    total: roundCurrency(wcf + nssfEmployee + paye)
+    // WCF is an employer liability. It must never reduce the worker's net pay.
+    total: roundCurrency(nssfEmployee + paye)
   };
 }
 
@@ -161,6 +162,7 @@ export async function upsertPayrollRun(monthKey, items) {
       advances: item.advances,
       statutory: {
         nssf: item.statutory.nssf.employee,
+        nssfEmployer: item.statutory.nssf.employer,
         wcf: item.statutory.wcf,
         paye: item.statutory.paye
       },

@@ -15,6 +15,8 @@
   <script src="../firebase.js"></script>
   <script src="../shared/academic-class-utils.js"></script>
   <script src="../shared/school_calendar.js"></script>
+  <script src="../shared/payroll_core.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
   <script>
     // Required by finance_math.js for anchor enrollment year
     var SOMAP_DEFAULT_YEAR = new Date().getFullYear();
@@ -654,6 +656,7 @@
         await loadProfile().catch((err) => {
           console.warn('Profile load warning:', err?.message || err);
         });
+        showPayrollReminderIfNeeded().catch((err) => console.warn('Payroll reminder check failed', err));
         await refreshAll();
       } catch (error) {
         console.error('Attendance init failed', error);
@@ -2202,6 +2205,115 @@
 
     // ==========================================
 
+    function payrollAcknowledgement(slip) {
+      return slip?.acknowledgement || slip || {};
+    }
+
+    async function getPreviousPayrollSlip(timestamp = Date.now()) {
+      const now = new Date(timestamp);
+      const previousKey = window.SomapPayrollCore.previousMonth(now);
+      const payrollYear = previousKey.slice(0, 4);
+      const snap = await schoolRef(`years/${payrollYear}/workers_payslips/${state.workerId}/${previousKey}`).once('value');
+      return { slip: snap.val() || null, monthKey: previousKey, payrollYear };
+    }
+
+    function isPaidOrPublishedSlip(slip) {
+      const status = String(slip?.paymentStatus || slip?.status || '').toLowerCase();
+      return ['paid', 'published', 'accepted', 'disputed', 'closed'].includes(status);
+    }
+
+    async function showPayrollReminderIfNeeded() {
+      const now = new Date();
+      if (now.getDate() > 3 || !state.workerId) return;
+      const result = await getPreviousPayrollSlip(now.getTime());
+      const acknowledgement = payrollAcknowledgement(result.slip);
+      if (!isPaidOrPublishedSlip(result.slip) || acknowledgement.accepted || acknowledgement.downloaded || acknowledgement.disputed) return;
+      toast(`Kumbusho: Salary slip ya ${result.slip.monthLabel || window.SomapPayrollCore.monthLabel(result.monthKey)} ipo tayari. Ipitie kabla ya tarehe 4.`, 'warning', 8500);
+    }
+
+    async function checkPayrollBeforeAttendance(timestamp) {
+      const now = new Date(timestamp);
+      const result = await getPreviousPayrollSlip(timestamp);
+      return { ...window.SomapPayrollCore.attendanceGateDecision(now, result.slip), ...result };
+    }
+
+    function payrollMoney(value) {
+      return `TSh ${Number(value || 0).toLocaleString('en-US')}`;
+    }
+
+    function escapeHtml(value) {
+      const el = document.createElement('div');
+      el.textContent = String(value ?? '');
+      return el.innerHTML;
+    }
+
+    function openPayrollGateModal(gate) {
+      return new Promise((resolve) => {
+        const slip = gate.slip;
+        const monthLabelText = slip.monthLabel || window.SomapPayrollCore.monthLabel(gate.monthKey);
+        const current = new Date();
+        const overlay = document.createElement('div');
+        overlay.className = 'mini-modal-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(2,8,18,.88);z-index:12000;display:grid;place-items:center;padding:16px;';
+        overlay.innerHTML = `<div class="mini-modal-card" style="width:min(680px,100%);max-height:92vh;overflow:auto;background:#101d33;border:1px solid rgba(148,163,184,.25);border-radius:22px;padding:24px;color:#e2e8f0;box-shadow:0 28px 90px rgba(0,0,0,.45)">
+          <div style="font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:#fbbf24;font-weight:900">Gate 0 · Payroll</div>
+          <h2 style="margin:7px 0">SALARY SLIP ACKNOWLEDGEMENT REQUIRED</h2>
+          <p>Your salary slip for <strong>${escapeHtml(monthLabelText)}</strong> is ready.</p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:16px 0"><div style="padding:13px;background:#091528;border-radius:12px"><small style="color:#94a3b8">Net Salary</small><br><strong>${payrollMoney(slip.netPay || slip.net)}</strong></div><div style="padding:13px;background:#091528;border-radius:12px"><small style="color:#94a3b8">Payment Status</small><br><strong>${escapeHtml(slip.paymentStatus || slip.status)}</strong></div></div>
+          <p><strong>Deadline:</strong> 4 ${current.toLocaleString('en-US', { month: 'long' })} ${current.getFullYear()}</p>
+          <p style="color:#94a3b8">Before signing today's mahudhurio, you must review and download your salary slip. You may accept it if correct or raise a dispute if there is a problem.</p>
+          <p style="color:#fbbf24">This is an added payroll rule. All normal attendance rules will still apply after this step.</p>
+          <div id="payrollGateReasonWrap" style="display:none;margin-top:13px"><label for="payrollGateReason"><strong>Dispute reason (at least 10 characters)</strong></label><textarea id="payrollGateReason" style="width:100%;min-height:110px;margin-top:7px;background:#091528;color:#e2e8f0;border:1px solid rgba(148,163,184,.3);border-radius:10px;padding:11px" placeholder="Explain what is wrong with the payment or salary slip..."></textarea></div>
+          <div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:18px"><button type="button" class="mini-modal-btn" data-action="view">View Salary Slip</button><button type="button" class="workers-btn" data-action="accept">Accept, Download & Continue Check-In</button><button type="button" class="mini-modal-btn" data-action="dispute">Raise Dispute & Continue Check-In</button><button type="button" class="mini-modal-btn" data-action="cancel">Cancel</button></div>
+        </div>`;
+        document.body.appendChild(overlay);
+        const finish = (value) => { overlay.remove(); resolve(value); };
+        overlay.querySelector('[data-action="view"]').onclick = () => window.open(`workerssalary.html?month=${encodeURIComponent(gate.monthKey)}`, '_blank', 'noopener');
+        overlay.querySelector('[data-action="cancel"]').onclick = () => finish({ continue: false });
+        overlay.querySelector('[data-action="accept"]').onclick = () => finish({ continue: true, action: 'accept' });
+        overlay.querySelector('[data-action="dispute"]').onclick = () => {
+          const wrap = overlay.querySelector('#payrollGateReasonWrap');
+          const input = overlay.querySelector('#payrollGateReason');
+          if (wrap.style.display === 'none') { wrap.style.display = 'block'; input.focus(); return; }
+          const reason = input.value.trim();
+          if (reason.length < 10) { toast('Andika sababu ya dispute yenye herufi 10 au zaidi.', 'warning'); input.focus(); return; }
+          finish({ continue: true, action: 'dispute', reason });
+        };
+      });
+    }
+
+    async function savePayrollGateDecision(gate, decision) {
+      const now = firebase.database.ServerValue.TIMESTAMP;
+      const workerName = state.profile?.fullNameUpper || [state.profile?.firstName, state.profile?.middleName, state.profile?.lastName].filter(Boolean).join(' ');
+      const uid = firebase.auth().currentUser?.uid || '';
+      const root = SOMAP.P('');
+      const base = `years/${gate.payrollYear}`;
+      const acknowledgement = decision.action === 'accept'
+        ? { accepted: true, downloaded: true, disputed: false, acceptedAt: now, downloadedAt: now, acceptedByUid: uid, acceptedByWorkerId: state.workerId, acceptedByName: workerName, acceptanceText: 'I confirm that I have reviewed this salary slip and received the net salary shown for the stated month. I understand that this acknowledgement will be recorded in SoMAp with date and time.' }
+        : { accepted: false, disputed: true, disputedAt: now, disputedByUid: uid, disputedByWorkerId: state.workerId, disputedByName: workerName, disputeReason: decision.reason, disputeText: 'I do not accept this salary slip as correct. I am submitting a payroll dispute for review by the administration.' };
+      const updates = {};
+      updates[`${base}/workers_payslips/${state.workerId}/${gate.monthKey}/acknowledgement`] = acknowledgement;
+      updates[`${base}/workers_payslips/${state.workerId}/${gate.monthKey}/status`] = decision.action === 'accept' ? 'accepted' : 'disputed';
+      updates[`${base}/workers_payroll/${gate.monthKey}/items/${state.workerId}/acknowledgement`] = acknowledgement;
+      await db.ref(root).update(updates);
+      if (decision.action === 'dispute') {
+        await schoolRef(`${base}/payroll_alerts`).push().set({ type: 'salary_dispute', workerId: state.workerId, workerName, monthKey: gate.monthKey, reason: decision.reason, status: 'open', createdAt: now });
+      }
+      return acknowledgement;
+    }
+
+    async function downloadAttendancePayslip(gate, acknowledgement) {
+      if (!window.html2pdf) { window.open(`workerssalary.html?month=${encodeURIComponent(gate.monthKey)}`, '_blank', 'noopener'); return; }
+      const slip = { ...gate.slip, acknowledgement };
+      const calc = window.SomapPayrollCore.calculate(slip);
+      const el = document.createElement('section');
+      el.style.cssText = 'width:720px;background:#fff;color:#172033;padding:38px;font:14px/1.5 Arial,sans-serif';
+      el.innerHTML = `<div style="text-align:center;border-bottom:3px solid #17375e;padding-bottom:14px"><h1 style="margin:0">${escapeHtml(slip.schoolName || state.schoolName || 'School')}</h1><b>SALARY SLIP</b><div>${escapeHtml(slip.monthLabel || window.SomapPayrollCore.monthLabel(gate.monthKey))}</div></div><p><b>Worker:</b> ${escapeHtml(slip.staffName || state.profile?.fullNameUpper || '')}<br><b>Worker ID:</b> ${escapeHtml(state.workerId)}<br><b>Role:</b> ${escapeHtml(slip.role || state.profile?.role || '')}<br><b>Slip:</b> ${escapeHtml(slip.slipId || `PAY-${gate.monthKey}-${state.workerId}`)}</p><table style="width:100%;border-collapse:collapse"><tr><td style="padding:8px;border-bottom:1px solid #ddd">Gross pay</td><td style="text-align:right">${payrollMoney(calc.grossPay)}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #ddd">Total deductions</td><td style="text-align:right">${payrollMoney(calc.totalDeductions)}</td></tr><tr style="font-size:20px;background:#e9f8ef"><td style="padding:10px"><b>NET SALARY PAYABLE</b></td><td style="text-align:right"><b>${payrollMoney(calc.netPay)}</b></td></tr></table><p><b>Acknowledgement:</b> ACCEPTED<br><b>Generated by:</b> SoMAp</p><small>WCF employer contribution is an employer cost and is not deducted from employee net salary. Open Salary Center for the full detailed slip.</small>`;
+      document.body.appendChild(el);
+      await window.html2pdf().set({ margin: 10, filename: `${slip.slipId || `PAY-${gate.monthKey}-${state.workerId}`}.pdf`, html2canvas: { scale: 2 }, jsPDF: { unit: 'mm', format: 'a4' } }).from(el).save();
+      el.remove();
+    }
+
     async function handleCheck(direction) {
       if (!state.workerId) {
         toast('Worker session haijapatikana. Tafadhali ingia tena.', 'error');
@@ -2244,6 +2356,22 @@
         if (direction === 'in' && existing.checkInTs) {
           toast('Ulishafanya check-in leo.', 'warning');
           return;
+        }
+
+        // Gate 0: paid/published previous-month salary slip acknowledgement.
+        // Every existing attendance gate below remains in its original order.
+        if (direction === 'in') {
+          if (btn) btn.textContent = 'Inaangalia salary slip...';
+          const payrollGate = await checkPayrollBeforeAttendance(timestamp);
+          if (!payrollGate.allowed) {
+            if (btn) { btn.disabled = false; btn.textContent = initialText || 'Check-In Sasa'; }
+            const decision = await openPayrollGateModal(payrollGate);
+            if (!decision.continue) return;
+            if (btn) { btn.disabled = true; btn.textContent = decision.action === 'accept' ? 'Inahifadhi salary acknowledgement...' : 'Inatuma payroll dispute...'; }
+            const acknowledgement = await savePayrollGateDecision(payrollGate, decision);
+            if (decision.action === 'accept') await downloadAttendancePayslip(payrollGate, acknowledgement);
+            toast(decision.action === 'accept' ? 'Salary slip imekubaliwa. Kanuni za kawaida za attendance zinaendelea.' : 'Payroll dispute imetumwa. Kanuni za kawaida za attendance zinaendelea.', 'success', 6500);
+          }
         }
 
         // Teacher-specific readiness gate
