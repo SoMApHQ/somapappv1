@@ -99,7 +99,7 @@
     const name = cleanText(item?.accountName || item?.staffName || item?.fullName).toUpperCase();
     const account = cleanText(item?.bankAccountNumber).replace(/\s+/g, '');
     const bank = cleanText(item?.bankName || item?.paymentMethod).toUpperCase();
-    const net = money(item?.netPay ?? item?.net);
+    const net = money(item?.bankPaymentAmount ?? item?.paymentAmount ?? item?.netPay ?? item?.net);
     if (!name) return { skipped: true, reason: 'Missing beneficiary name' };
     if (bank !== 'NMB') return { skipped: true, reason: bank ? 'Payment account is not NMB' : 'Payment method is missing' };
     if (!account) return { skipped: true, reason: 'Missing bank account number' };
