@@ -101,9 +101,9 @@
     const bank = cleanText(item?.bankName || item?.paymentMethod).toUpperCase();
     const net = money(item?.netPay ?? item?.net);
     if (!name) return { skipped: true, reason: 'Missing beneficiary name' };
+    if (bank !== 'NMB') return { skipped: true, reason: bank ? 'Payment account is not NMB' : 'Payment method is missing' };
     if (!account) return { skipped: true, reason: 'Missing bank account number' };
     if (!net) return { skipped: true, reason: 'Net pay is zero' };
-    if (bank !== 'NMB') return { skipped: true, reason: 'Payment account is not NMB' };
     return {
       skipped: false,
       row: {
