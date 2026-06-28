@@ -2314,6 +2314,152 @@
       el.remove();
     }
 
+    function openAttendanceGateDialog({ title, body, actions }) {
+      return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:12000;background:rgba(2,8,23,.88);display:grid;place-items:center;padding:16px';
+        overlay.innerHTML = `<section style="width:min(680px,100%);max-height:92vh;overflow:auto;background:#111c31;color:#e2e8f0;border:1px solid rgba(148,163,184,.25);border-radius:20px;padding:24px;box-shadow:0 30px 90px rgba(0,0,0,.45)"><h2 style="margin:0 0 12px;color:#f8fafc">${escapeHtml(title)}</h2><div class="attendance-gate-body">${body}</div><div class="attendance-gate-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:20px"></div></section>`;
+        document.body.appendChild(overlay);
+        const finish = value => { overlay.remove(); resolve(value); };
+        const host = overlay.querySelector('.attendance-gate-actions');
+        actions.forEach(action => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = action.primary ? 'workers-btn' : 'mini-modal-btn';
+          button.textContent = action.label;
+          button.onclick = () => action.onClick({ overlay, finish, button });
+          host.appendChild(button);
+        });
+      });
+    }
+
+    async function checkContractBeforeAttendance(year) {
+      try {
+        const [contractSnap, termsSnap] = await Promise.all([
+          schoolRef(`years/${year}/workersContracts/${state.workerId}`).once('value'),
+          schoolRef(`years/${year}/workers/${state.workerId}/contract/terms`).once('value')
+        ]);
+        const contract = contractSnap.val() || {};
+        const terms = termsSnap.val() || {};
+        const signing = contract.signing || {};
+        const prepared = Boolean(signing.draftPdfUrl || contract.publishedAt || contract.preparedAt);
+        const signed = ['worker_uploaded', 'approved'].includes(String(signing.status || '').toLowerCase()) || Boolean(signing.signedPdfUrl || signing.signatureUrl);
+        return { allowed: !prepared || signed, prepared, signed, signing, terms };
+      } catch (error) {
+        console.warn('Contract gate lookup failed; attendance remains available because no prepared contract could be verified.', error);
+        return { allowed: true, lookupFailed: true };
+      }
+    }
+
+    async function showContractGate() {
+      return openAttendanceGateDialog({
+        title: 'CONTRACT SIGNATURE REQUIRED',
+        body: `<p>Your employment contract is ready but has not yet been signed.</p><p style="color:#cbd5e1;line-height:1.6">Before signing today’s mahudhurio, open your contract, review/download the draft PDF, upload your handwritten signature, and complete the signing step.</p><p style="color:#fbbf24">This is required before continuing with attendance.</p>`,
+        actions: [
+          { label: 'Open Contract Page', primary: true, onClick: ({ finish }) => { location.href = 'workerscontracts.html'; finish(false); } },
+          { label: 'Cancel', onClick: ({ finish }) => finish(false) }
+        ]
+      });
+    }
+
+    function responsibilityEventPath(year, monthKey, eventId = '') {
+      const base = `years/${year}/workerDiscipline/${monthKey}/workers/${state.workerId}`;
+      return eventId ? `${base}/events/${eventId}` : base;
+    }
+
+    async function loadResponsibilityPosition(year, monthKey, pendingLate = null) {
+      const [disciplineSnap, termsSnap] = await Promise.all([
+        schoolRef(responsibilityEventPath(year, monthKey)).once('value'),
+        schoolRef(`years/${year}/workers/${state.workerId}/contract/terms`).once('value')
+      ]);
+      const record = disciplineSnap.val() || {};
+      const events = { ...(record.events || {}) };
+      if (pendingLate && !events[pendingLate.eventId]) events[pendingLate.eventId] = pendingLate;
+      const summary = window.SomapPayrollCore.responsibilitySummary(events);
+      const terms = termsSnap.val() || {};
+      const registeredTotal = Number(state.profile?.baseSalary || state.profile?.monthlySalary || 0);
+      const explicitBasic = Number(terms.roleSalary || 0) > 0 ? Number(terms.roleSalary) : null;
+      const salary = window.SomapPayrollCore.splitInclusiveSalary(registeredTotal, 50000, explicitBasic);
+      return { record, events, summary, salary };
+    }
+
+    function makeLateDisciplineEvent(year, monthKey, dayKey, timestamp, lateMinutes, reason, existingEvents) {
+      const eventId = `${dayKey}_late`;
+      if (existingEvents?.[eventId]) return null;
+      const priorLateCount = Object.values(existingEvents || {}).filter(event => event?.eventType === 'late' && !['cancelled', 'dismissed'].includes(String(event.reviewStatus || '').toLowerCase())).length;
+      const lateNumber = priorLateCount + 1;
+      const deductionAmount = lateNumber <= 3 ? 0 : lateNumber === 4 ? 1000 : 500;
+      return {
+        eventId, workerId: state.workerId, schoolId: state.schoolId, year, month: monthKey,
+        date: `${dayKey.slice(0,4)}-${dayKey.slice(4,6)}-${dayKey.slice(6,8)}`,
+        eventType: 'late', minutesLate: lateMinutes, deductionAmount, reason: reason || 'Late check-in',
+        linkedAttendanceId: dayKey, workerLetter: reason || '', workerAccepted: false, workerRejected: false,
+        reviewStatus: deductionAmount > 0 ? 'pending' : 'warning', lateCount: lateNumber,
+        createdAt: timestamp, updatedAt: timestamp
+      };
+    }
+
+    async function openResponsibilityConfirmation(position) {
+      const { summary, salary, events } = position;
+      const monthText = window.SomapPayrollCore.monthLabel(state.monthKey);
+      const currentExpectedSalary = salary.basicSalary + summary.remainingResponsibilityAllowance;
+      const activeEvents = Object.values(events).filter(event => !['cancelled', 'dismissed'].includes(String(event.reviewStatus || '').toLowerCase()));
+      const latest = activeEvents.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0] || null;
+      const reason = latest ? `<div style="margin-top:14px;padding:12px;border-radius:12px;background:#091528"><strong>Latest attendance event</strong><br>${escapeHtml(latest.date || '')}: ${escapeHtml(latest.eventType === 'no_sign_in' ? 'did not sign in' : `late-coming number ${latest.lateCount || summary.lateCount}`)}${latest.deductionAmount ? ` · ${payrollMoney(latest.deductionAmount)}` : ' · warning only'}</div>` : '';
+      const body = `<p>Your current salary position for <strong>${escapeHtml(monthText)}</strong> is shown below.</p><div style="display:grid;grid-template-columns:1fr 1fr;gap:9px"><div style="padding:12px;background:#091528;border-radius:11px"><small>Basic Salary (unchanged)</small><br><strong>${payrollMoney(salary.basicSalary)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Special Responsibility Allowance</small><br><strong>${payrollMoney(summary.allowance)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Allowance Deductions</small><br><strong>${payrollMoney(summary.totalResponsibilityDeduction)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Remaining Allowance</small><br><strong>${payrollMoney(summary.remainingResponsibilityAllowance)}</strong></div></div><p style="font-size:1.08rem"><strong>Current Expected Salary: ${payrollMoney(currentExpectedSalary)}</strong></p>${reason}<p style="color:#cbd5e1">First 3 late days are warnings; the 4th deducts TZS 1,000; each later late day deducts TZS 500. A no-sign-in day without approved permission deducts TZS 2,000. Deductions apply only to this allowance and never exceed TZS 50,000.</p>${summary.totalResponsibilityDeduction ? '<p style="color:#fbbf24">You may accept this position or reject it and submit an explanation for review.</p>' : '<p style="color:#86efac">Your responsibility allowance is currently intact. Please confirm that you have seen this salary position.</p>'}`;
+      return openAttendanceGateDialog({
+        title: 'SALARY RESPONSIBILITY ALLOWANCE CONFIRMATION', body,
+        actions: [
+          { label: summary.totalResponsibilityDeduction ? 'Accept & Continue Check-In' : 'Confirm & Continue Check-In', primary: true, onClick: ({ finish }) => finish({ action: 'accept', latestEventId: latest?.eventId || '' }) },
+          ...(summary.totalResponsibilityDeduction ? [{ label: 'Reject & Write Explanation', onClick: ({ overlay, finish }) => {
+            const bodyHost = overlay.querySelector('.attendance-gate-body');
+            bodyHost.innerHTML = `<p>You are rejecting this deduction. Explain clearly why it should not apply. Your explanation will be sent for review.</p><textarea id="responsibilityRejectReason" style="width:100%;min-height:180px;background:#091528;color:#e2e8f0;border:1px solid rgba(148,163,184,.35);border-radius:11px;padding:12px" placeholder="Write your explanation here (at least 100 words)..."></textarea><p id="responsibilityWordCount" style="color:#94a3b8">0 / 100 words</p>`;
+            const actionHost = overlay.querySelector('.attendance-gate-actions');
+            actionHost.innerHTML = '';
+            const cancel = document.createElement('button'); cancel.className = 'mini-modal-btn'; cancel.textContent = 'Cancel'; cancel.onclick = () => finish(null);
+            const submit = document.createElement('button'); submit.className = 'workers-btn'; submit.textContent = 'Submit Explanation & Continue'; submit.disabled = true;
+            const input = bodyHost.querySelector('#responsibilityRejectReason'), count = bodyHost.querySelector('#responsibilityWordCount');
+            input.oninput = () => { const words = countWords(input.value); count.textContent = `${words} / 100 words`; submit.disabled = words < 100; };
+            submit.onclick = () => finish({ action: 'reject', reason: input.value.trim(), latestEventId: latest?.eventId || '' });
+            actionHost.append(cancel, submit); input.focus();
+          }}] : []),
+          { label: 'Cancel', onClick: ({ finish }) => finish(null) }
+        ]
+      });
+    }
+
+    async function saveResponsibilityConfirmation(year, monthKey, dayKey, position, decision, pendingEvent) {
+      const now = firebase.database.ServerValue.TIMESTAMP;
+      const events = { ...position.events };
+      if (pendingEvent) events[pendingEvent.eventId] = pendingEvent;
+      const targetId = decision.latestEventId || pendingEvent?.eventId || '';
+      if (targetId && events[targetId]) {
+        events[targetId] = {
+          ...events[targetId], workerAccepted: decision.action === 'accept', workerRejected: decision.action === 'reject',
+          rejectionReason: decision.reason || '', workerLetter: decision.action === 'reject' ? decision.reason : (events[targetId].workerLetter || ''),
+          reviewStatus: decision.action === 'reject' ? 'pending_review' : (events[targetId].deductionAmount > 0 ? 'accepted' : events[targetId].reviewStatus),
+          acceptedAt: decision.action === 'accept' ? now : null, rejectedAt: decision.action === 'reject' ? now : null, updatedAt: now
+        };
+      }
+      const summary = window.SomapPayrollCore.responsibilitySummary(events);
+      const snapshot = { ...summary, basicSalary: position.salary.basicSalary, currentExpectedSalary: position.salary.basicSalary + summary.remainingResponsibilityAllowance, workerAccepted: decision.action === 'accept', workerRejected: decision.action === 'reject', rejectionReason: decision.reason || '', confirmedAt: now };
+      const base = responsibilityEventPath(year, monthKey);
+      const updates = {};
+      updates[`${base}/events`] = events;
+      updates[`${base}/summary`] = { ...summary, updatedAt: now };
+      updates[`${base}/confirmations/${dayKey}`] = snapshot;
+      const payrollSnap = await schoolRef(`years/${year}/workers_payroll/${monthKey}`).once('value');
+      const payroll = payrollSnap.val() || {};
+      if (payroll.items?.[state.workerId] && ['draft', ''].includes(String(payroll.status || 'draft').toLowerCase())) {
+        updates[`years/${year}/workers_payroll/${monthKey}/items/${state.workerId}/earnings/responsibilityAllowance`] = summary.allowance;
+        updates[`years/${year}/workers_payroll/${monthKey}/items/${state.workerId}/earnings/basicSalary`] = position.salary.basicSalary;
+        updates[`years/${year}/workers_payroll/${monthKey}/items/${state.workerId}/deductions/responsibilityAllowanceDeduction`] = summary.totalResponsibilityDeduction;
+        updates[`years/${year}/workers_payroll/${monthKey}/items/${state.workerId}/responsibilityDiscipline`] = { ...summary, confirmationStatus: decision.action === 'reject' ? 'pending_review' : 'accepted' };
+      }
+      await schoolRef('').update(updates);
+      return summary;
+    }
+
     async function handleCheck(direction) {
       if (!state.workerId) {
         toast('Worker session haijapatikana. Tafadhali ingia tena.', 'error');
@@ -2339,6 +2485,16 @@
         state.monthKey = monthKey;
         if (yearSelect && yearSelect.value !== systemYear) yearSelect.value = systemYear;
         if (yearLabel) yearLabel.textContent = `Mwaka: ${state.year}`;
+
+        if (direction === 'in') {
+          if (btn) btn.textContent = 'Inaangalia mkataba...';
+          const contractGate = await checkContractBeforeAttendance(systemYear);
+          if (!contractGate.allowed) {
+            if (btn) { btn.disabled = false; btn.textContent = initialText || 'Check-In Sasa'; }
+            await showContractGate();
+            return;
+          }
+        }
         const roleContext = await resolveAttendanceRoleContext(systemYear);
         const todayCalendarStatus = await resolveWorkerCalendarStatus(ymd, systemYear);
 
@@ -2650,6 +2806,32 @@
           payload.checkOutStatus = 'pending';
           payload.checkOutReason = reason;
           payload.checkOutReasonTs = Date.now();
+        }
+
+        if (direction === 'in') {
+          if (btn) btn.textContent = 'Inaandaa salary confirmation...';
+          let responsibilityPosition = await loadResponsibilityPosition(systemYear, monthKey);
+          const pendingEvent = (payload.lateMinutes || 0) > 0
+            ? makeLateDisciplineEvent(systemYear, monthKey, dayKey, timestamp, payload.lateMinutes, payload.checkInReason, responsibilityPosition.events)
+            : null;
+          if (pendingEvent) {
+            const events = { ...responsibilityPosition.events, [pendingEvent.eventId]: pendingEvent };
+            responsibilityPosition = { ...responsibilityPosition, events, summary: window.SomapPayrollCore.responsibilitySummary(events) };
+          }
+          if (btn) { btn.disabled = false; btn.textContent = initialText || 'Check-In Sasa'; }
+          const responsibilityDecision = await openResponsibilityConfirmation(responsibilityPosition);
+          if (!responsibilityDecision) {
+            toast('Check-in imeghairiwa; salary responsibility confirmation haijakamilika.', 'warning', 6000);
+            return;
+          }
+          if (btn) { btn.disabled = true; btn.textContent = responsibilityDecision.action === 'reject' ? 'Inatuma maelezo...' : 'Inahifadhi uthibitisho...'; }
+          const responsibilitySummary = await saveResponsibilityConfirmation(systemYear, monthKey, dayKey, responsibilityPosition, responsibilityDecision, pendingEvent);
+          payload.responsibilityConfirmation = {
+            status: responsibilityDecision.action === 'reject' ? 'pending_review' : 'accepted',
+            totalDeduction: responsibilitySummary.totalResponsibilityDeduction,
+            remainingAllowance: responsibilitySummary.remainingResponsibilityAllowance,
+            confirmedAt: Date.now()
+          };
         }
 
         let writeSource = await writeAttendanceUpdate(source, scopedDayPath, legacyDayPath, payload);
@@ -4379,6 +4561,27 @@
         blockInfo.legacyDayPath,
         payload
       );
+      const absenceYear = String(blockInfo.dayKey).slice(0, 4);
+      const absenceMonth = String(blockInfo.dayKey).slice(0, 6);
+      const eventId = `${blockInfo.dayKey}_no_sign_in`;
+      const base = responsibilityEventPath(absenceYear, absenceMonth);
+      const disciplineSnap = await schoolRef(base).once('value');
+      const discipline = disciplineSnap.val() || {};
+      const events = { ...(discipline.events || {}) };
+      if (!events[eventId]) {
+        events[eventId] = {
+          eventId, workerId: state.workerId, schoolId: state.schoolId, year: absenceYear, month: absenceMonth,
+          date: `${blockInfo.dayKey.slice(0,4)}-${blockInfo.dayKey.slice(4,6)}-${blockInfo.dayKey.slice(6,8)}`,
+          eventType: 'no_sign_in', deductionAmount: 2000, reason: 'No attendance check-in recorded on a working day',
+          linkedAttendanceId: blockInfo.dayKey, workerLetter: explanation, workerAccepted: false, workerRejected: false,
+          reviewStatus: 'pending_review', createdAt: Date.now(), updatedAt: Date.now()
+        };
+        const summary = window.SomapPayrollCore.responsibilitySummary(events);
+        await schoolRef('').update({
+          [`${base}/events/${eventId}`]: events[eventId],
+          [`${base}/summary`]: { ...summary, updatedAt: firebase.database.ServerValue.TIMESTAMP }
+        });
+      }
     }
 
     async function saveMissedCheckoutExplanation(blockInfo, explanationText) {
