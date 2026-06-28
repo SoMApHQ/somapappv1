@@ -2367,6 +2367,67 @@
       return eventId ? `${base}/events/${eventId}` : base;
     }
 
+    const PERMISSION_TYPES = {
+      late: new Set(['late_coming', 'half_day', 'hospital', 'official_duty', 'sent_by_admin', 'government_appointment', 'transport_delay', 'weather_road', 'family_care', 'personal_emergency']),
+      absence: new Set(['full_day_absence', 'half_day', 'sick_leave', 'hospital', 'family_emergency', 'funeral', 'official_duty', 'sent_by_admin', 'government_appointment', 'family_care', 'personal_emergency', 'normal_leave', 'exam_study', 'religious_community', 'other']),
+      early: new Set(['early_checkout', 'half_day', 'sick_leave', 'hospital', 'family_emergency', 'funeral', 'official_duty', 'sent_by_admin', 'family_care', 'personal_emergency', 'other'])
+    };
+
+    function permissionCoversTime(permission, timestamp) {
+      if (permission.isFullDay || (!permission.startTime && !permission.endTime)) return true;
+      const date = new Date(timestamp);
+      const minutes = date.getHours() * 60 + date.getMinutes();
+      const parse = value => {
+        const [hours, mins] = String(value || '').split(':').map(Number);
+        return Number.isFinite(hours) && Number.isFinite(mins) ? hours * 60 + mins : null;
+      };
+      const start = parse(permission.startTime), end = parse(permission.endTime);
+      return (start === null || minutes >= start) && (end === null || minutes <= end);
+    }
+
+    async function findAttendancePermission(year, dateYmd, kind, timestamp = Date.now()) {
+      try {
+        const snap = await schoolRef(`years/${year}/workerPermissionsByWorker/${state.workerId}`).once('value');
+        const requests = Object.values(snap.val() || {}).filter(permission =>
+          permission && permission.dateFrom <= dateYmd && permission.dateTo >= dateYmd &&
+          PERMISSION_TYPES[kind]?.has(permission.permissionType) && permissionCoversTime(permission, timestamp)
+        );
+        const approved = requests.find(permission => ['approved', 'used'].includes(String(permission.status || '').toLowerCase()) && permission.payrollProtected === true);
+        const pending = requests.find(permission => String(permission.status || '').toLowerCase() === 'pending');
+        const rejected = requests.find(permission => String(permission.status || '').toLowerCase() === 'rejected');
+        return { approved: approved || null, pending: pending || null, rejected: rejected || null };
+      } catch (error) {
+        console.warn('Attendance permission lookup failed; normal attendance rules remain active.', error);
+        return { approved: null, pending: null, rejected: null, lookupFailed: true };
+      }
+    }
+
+    async function markPermissionUsed(permission, attendanceKind, dayKey) {
+      if (!permission?.permissionId) return;
+      const now = firebase.database.ServerValue.TIMESTAMP;
+      const base = `years/${permission.year || state.year}`;
+      const fields = { status: 'used', attendanceLinked: true, usedInAttendance: true, usedAt: now, usedFor: attendanceKind, linkedAttendanceId: dayKey };
+      const updates = {};
+      Object.entries(fields).forEach(([field, value]) => {
+        updates[`${base}/workerPermissions/${permission.permissionId}/${field}`] = value;
+        updates[`${base}/workerPermissionsByWorker/${state.workerId}/${permission.permissionId}/${field}`] = value;
+      });
+      await schoolRef('').update(updates);
+    }
+
+    function makeProtectedPermissionEvent(year, monthKey, dayKey, timestamp, kind, permission, minutes = 0) {
+      const eventId = `${dayKey}_${kind}_permission`;
+      return {
+        eventId, workerId: state.workerId, schoolId: state.schoolId, year, month: monthKey,
+        date: `${dayKey.slice(0,4)}-${dayKey.slice(4,6)}-${dayKey.slice(6,8)}`,
+        eventType: 'approved_permission', originalEventType: kind, minutesLate: kind === 'late' ? minutes : 0,
+        deductionAmount: 0, deductionOverride: 0, originalDeductionAmount: kind === 'no_sign_in' ? 2000 : 0, reason: permission.reason || permission.permissionType,
+        permissionId: permission.permissionId, permissionStatus: 'approved', payrollProtected: true,
+        linkedAttendanceId: dayKey, workerAccepted: true, workerRejected: false,
+        reviewStatus: 'approved', createdAt: timestamp, updatedAt: timestamp
+      };
+    }
+
     async function loadResponsibilityPosition(year, monthKey, pendingLate = null) {
       const [disciplineSnap, termsSnap] = await Promise.all([
         schoolRef(responsibilityEventPath(year, monthKey)).once('value'),
@@ -2405,7 +2466,8 @@
       const currentExpectedSalary = salary.basicSalary + summary.remainingResponsibilityAllowance;
       const activeEvents = Object.values(events).filter(event => !['cancelled', 'dismissed'].includes(String(event.reviewStatus || '').toLowerCase()));
       const latest = activeEvents.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0] || null;
-      const reason = latest ? `<div style="margin-top:14px;padding:12px;border-radius:12px;background:#091528"><strong>Latest attendance event</strong><br>${escapeHtml(latest.date || '')}: ${escapeHtml(latest.eventType === 'no_sign_in' ? 'did not sign in' : `late-coming number ${latest.lateCount || summary.lateCount}`)}${latest.deductionAmount ? ` · ${payrollMoney(latest.deductionAmount)}` : ' · warning only'}</div>` : '';
+      const eventLabel = latest?.eventType === 'approved_permission' ? `${latest.originalEventType || 'attendance'} — approved permission — no deduction` : latest?.eventType === 'no_sign_in' ? 'did not sign in' : `late-coming number ${latest?.lateCount || summary.lateCount}`;
+      const reason = latest ? `<div style="margin-top:14px;padding:12px;border-radius:12px;background:#091528"><strong>Latest attendance event</strong><br>${escapeHtml(latest.date || '')}: ${escapeHtml(eventLabel)}${latest.deductionAmount ? ` · ${payrollMoney(latest.deductionAmount)}` : latest.eventType === 'approved_permission' ? '' : ' · warning only'}</div>` : '';
       const body = `<p>Your current salary position for <strong>${escapeHtml(monthText)}</strong> is shown below.</p><div style="display:grid;grid-template-columns:1fr 1fr;gap:9px"><div style="padding:12px;background:#091528;border-radius:11px"><small>Basic Salary (unchanged)</small><br><strong>${payrollMoney(salary.basicSalary)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Special Responsibility Allowance</small><br><strong>${payrollMoney(summary.allowance)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Allowance Deductions</small><br><strong>${payrollMoney(summary.totalResponsibilityDeduction)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Remaining Allowance</small><br><strong>${payrollMoney(summary.remainingResponsibilityAllowance)}</strong></div></div><p style="font-size:1.08rem"><strong>Current Expected Salary: ${payrollMoney(currentExpectedSalary)}</strong></p>${reason}<p style="color:#cbd5e1">First 3 late days are warnings; the 4th deducts TZS 1,000; each later late day deducts TZS 500. A no-sign-in day without approved permission deducts TZS 2,000. Deductions apply only to this allowance and never exceed TZS 50,000.</p>${summary.totalResponsibilityDeduction ? '<p style="color:#fbbf24">You may accept this position or reject it and submit an explanation for review.</p>' : '<p style="color:#86efac">Your responsibility allowance is currently intact. Please confirm that you have seen this salary position.</p>'}`;
       return openAttendanceGateDialog({
         title: 'SALARY RESPONSIBILITY ALLOWANCE CONFIRMATION', body,
@@ -2469,6 +2531,8 @@
       const initialText = btn?.textContent || '';
       let preparedLateMinutes = null;
       let preparedCheckInReason = '';
+      let activeAttendancePermission = null;
+      let relatedAttendancePermission = null;
       try {
         if (btn) {
           btn.disabled = true;
@@ -2530,6 +2594,21 @@
           }
         }
 
+        if (direction === 'in') {
+          const currentLateMinutes = computeLateMinutes(timestamp);
+          if (currentLateMinutes > 0) {
+            const permissionResult = await findAttendancePermission(systemYear, ymd, 'late', timestamp);
+            preparedLateMinutes = currentLateMinutes;
+            relatedAttendancePermission = permissionResult.approved || permissionResult.pending || permissionResult.rejected || null;
+            if (permissionResult.approved) {
+              activeAttendancePermission = permissionResult.approved;
+              toast('Late sign-in allowed by approved permission. The actual arrival time will still be recorded.', 'success', 6500);
+            } else if (permissionResult.pending) {
+              toast('Your late permission is pending review. Normal late attendance and responsibility rules still apply until approval.', 'warning', 7000);
+            }
+          }
+        }
+
         // Teacher-specific readiness gate
         if (direction === 'in') {
           // ── Absent yesterday (no check-in at all) → 500-word letter required ──
@@ -2549,6 +2628,8 @@
             }
             await saveAbsenceExplanationLetter(yesterdayAbsenceCheck, input);
             toast(`Barua ya kutokuhudhuria tarehe ${yesterdayAbsenceCheck.dayLabel} imehifadhiwa. Unaendelea na check-in ya leo.`, 'info', 5500);
+          } else if (yesterdayAbsenceCheck.approvedPermission) {
+            toast(`Absent with Permission recorded for ${yesterdayAbsenceCheck.dayLabel}. No TZS 2,000 responsibility deduction applies.`, 'success', 7000);
           }
 
           const yesterdayCheck = await checkYesterdayCheckoutRequirement(timestamp);
@@ -2623,8 +2704,8 @@
                 console.warn('Head finance explanation letter save failed', e)
               );
             }
-            preparedLateMinutes = computeLateMinutes(timestamp);
-            if (preparedLateMinutes > 0) {
+            preparedLateMinutes = preparedLateMinutes === null ? computeLateMinutes(timestamp) : preparedLateMinutes;
+            if (preparedLateMinutes > 0 && !activeAttendancePermission) {
               if (btn) btn.textContent = 'Inaandika sababu ya kuchelewa...';
               const input = await openReasonModal({
                 title: 'Barua ya Kuchelewa — Maneno 200 Kamili Inahitajika',
@@ -2756,7 +2837,7 @@
               ? computeLateMinutes(timestamp)
               : preparedLateMinutes;
           let reason = preparedCheckInReason || '';
-          if (lateMinutes > 0 && !reason) {
+          if (lateMinutes > 0 && !reason && !activeAttendancePermission) {
             const input = await openReasonModal({
               title: 'Barua ya Kuchelewa — Maneno 200 Kamili Inahitajika',
               message: roleContext.isLeadershipLateRole
@@ -2777,14 +2858,30 @@
           payload.checkInReason = reason;
           payload.checkInReasonTs = Date.now();
           payload.checkInReasonWordCount = countWords(reason);
-          if (lateMinutes > 0) {
+          if (activeAttendancePermission) {
+            payload.attendanceStatus = 'Late with Permission';
+            payload.permissionId = activeAttendancePermission.permissionId;
+            payload.permissionType = activeAttendancePermission.permissionType;
+            payload.permissionReason = activeAttendancePermission.reason || '';
+            payload.payrollProtected = true;
+          }
+          if (lateMinutes > 0 && !activeAttendancePermission) {
             payload.lateLetterMinWords = 200;
             payload.lateLetterRoleLabel = roleContext.positionLabel || roleContext.roleLabel || 'worker';
           }
         } else {
           const earlyMinutes = computeEarlyMinutes(timestamp);
           const overtimeMinutes = computeOvertimeMinutes(timestamp);
-          const needsReason = earlyMinutes > 0 || overtimeMinutes > 0;
+          if (earlyMinutes > 0) {
+            const permissionResult = await findAttendancePermission(systemYear, ymd, 'early', timestamp);
+            if (permissionResult.approved) {
+              activeAttendancePermission = permissionResult.approved;
+              toast('Early checkout allowed by approved permission. The actual checkout time will still be recorded.', 'success', 6000);
+            } else if (permissionResult.pending) {
+              toast('Early-checkout permission is pending. Normal checkout rules still apply until approval.', 'warning', 6500);
+            }
+          }
+          const needsReason = (earlyMinutes > 0 && !activeAttendancePermission) || overtimeMinutes > 0;
           let reason = '';
           if (needsReason) {
             const input = await openReasonModal({
@@ -2806,14 +2903,28 @@
           payload.checkOutStatus = 'pending';
           payload.checkOutReason = reason;
           payload.checkOutReasonTs = Date.now();
+          if (activeAttendancePermission) {
+            payload.attendanceStatus = 'Early Checkout with Permission';
+            payload.permissionId = activeAttendancePermission.permissionId;
+            payload.permissionType = activeAttendancePermission.permissionType;
+            payload.permissionReason = activeAttendancePermission.reason || '';
+            payload.payrollProtected = true;
+          }
         }
 
         if (direction === 'in') {
           if (btn) btn.textContent = 'Inaandaa salary confirmation...';
           let responsibilityPosition = await loadResponsibilityPosition(systemYear, monthKey);
           const pendingEvent = (payload.lateMinutes || 0) > 0
-            ? makeLateDisciplineEvent(systemYear, monthKey, dayKey, timestamp, payload.lateMinutes, payload.checkInReason, responsibilityPosition.events)
+            ? activeAttendancePermission
+              ? makeProtectedPermissionEvent(systemYear, monthKey, dayKey, timestamp, 'late', activeAttendancePermission, payload.lateMinutes)
+              : makeLateDisciplineEvent(systemYear, monthKey, dayKey, timestamp, payload.lateMinutes, payload.checkInReason, responsibilityPosition.events)
             : null;
+          if (pendingEvent && relatedAttendancePermission && !activeAttendancePermission) {
+            pendingEvent.permissionId = relatedAttendancePermission.permissionId || '';
+            pendingEvent.permissionStatus = relatedAttendancePermission.status || 'pending';
+            pendingEvent.permissionReason = relatedAttendancePermission.reason || relatedAttendancePermission.permissionType || '';
+          }
           if (pendingEvent) {
             const events = { ...responsibilityPosition.events, [pendingEvent.eventId]: pendingEvent };
             responsibilityPosition = { ...responsibilityPosition, events, summary: window.SomapPayrollCore.responsibilitySummary(events) };
@@ -2835,6 +2946,9 @@
         }
 
         let writeSource = await writeAttendanceUpdate(source, scopedDayPath, legacyDayPath, payload);
+        if (activeAttendancePermission) {
+          await markPermissionUsed(activeAttendancePermission, direction === 'in' ? 'late_check_in' : 'early_check_out', dayKey).catch(error => console.warn('Permission usage mirror failed', error));
+        }
         await updateSummaries(existing, payload, direction, dayKey).catch((summaryErr) => {
           console.warn('Summary update skipped', summaryErr);
         });
@@ -3062,7 +3176,7 @@
           <td>${formatTs(record.checkOutTs)}</td>
           <td>${record.lateMinutes || 0}</td>
           <td>${record.earlyMinutes || 0}</td>
-          <td>IN: <span class="pill ${inStatus === 'approved' ? 'success' : inStatus === 'rejected' ? 'danger' : inStatus === 'pending' ? 'warning' : 'info'}">${inStatus}</span> • OUT: <span class="pill ${outStatus === 'approved' ? 'success' : outStatus === 'rejected' ? 'danger' : outStatus === 'pending' ? 'warning' : 'info'}">${outStatus}</span></td>
+          <td>${record.attendanceStatus ? `<div class="pill success" style="margin-bottom:5px">${escapeHtml(record.attendanceStatus)}</div>` : ''}IN: <span class="pill ${inStatus === 'approved' ? 'success' : inStatus === 'rejected' ? 'danger' : inStatus === 'pending' ? 'warning' : 'info'}">${inStatus}</span> • OUT: <span class="pill ${outStatus === 'approved' ? 'success' : outStatus === 'rejected' ? 'danger' : outStatus === 'pending' ? 'warning' : 'info'}">${outStatus}</span></td>
           ${adminCell}
         `;
         if (isAdmin) {
@@ -4522,6 +4636,30 @@
         const record = snap.val() || {};
         // If they checked in yesterday, no issue
         if (record.checkInTs) return { blocked: false };
+        const permissionResult = await findAttendancePermission(meta.year, isoDate, 'absence', yesterday.getTime() + (12 * 60 * 60 * 1000));
+        if (permissionResult.approved) {
+          const permission = permissionResult.approved;
+          await writeAttendanceUpdate(source, scopedDayPath, legacyDayPath, {
+            attendanceStatus: 'Absent with Permission',
+            absenceWithPermission: true,
+            permissionId: permission.permissionId,
+            permissionType: permission.permissionType,
+            permissionReason: permission.reason || '',
+            payrollProtected: true,
+            permissionLinkedAt: Date.now()
+          });
+          const event = makeProtectedPermissionEvent(meta.year, meta.monthKey, meta.dayKey, Date.now(), 'no_sign_in', permission);
+          const base = responsibilityEventPath(meta.year, meta.monthKey);
+          const disciplineSnap = await schoolRef(base).once('value');
+          const events = { ...((disciplineSnap.val() || {}).events || {}), [event.eventId]: event };
+          const summary = window.SomapPayrollCore.responsibilitySummary(events);
+          await schoolRef('').update({
+            [`${base}/events/${event.eventId}`]: event,
+            [`${base}/summary`]: { ...summary, updatedAt: firebase.database.ServerValue.TIMESTAMP }
+          });
+          await markPermissionUsed(permission, 'absence', meta.dayKey).catch(error => console.warn('Absence permission usage mirror failed', error));
+          return { blocked: false, approvedPermission: true, permission, dayKey: meta.dayKey, dayLabel: formatDayKey(meta.dayKey) };
+        }
         // If they already submitted an absence explanation letter, allow through
         const savedExplanation = String(record?.absenceExplanation?.text || '').trim();
         if (savedExplanation) return { blocked: false, alreadyExplained: true };
@@ -4531,9 +4669,10 @@
           scopedDayPath,
           legacyDayPath,
           record,
+          permission: permissionResult.pending || permissionResult.rejected || null,
           dayKey: meta.dayKey,
           dayLabel: formatDayKey(meta.dayKey),
-          message: `Hukuingia kazini siku ya ${formatDayKey(meta.dayKey)} (siku ya kazi). Lazima utoe barua ya maelezo ya maneno 500 au zaidi kabla ya kufanya check-in ya leo.`,
+          message: `${permissionResult.pending ? 'Ombi lako la ruhusa bado linasubiri uamuzi; halijazuia kanuni za attendance. ' : ''}Hukuingia kazini siku ya ${formatDayKey(meta.dayKey)} (siku ya kazi). Lazima utoe barua ya maelezo ya maneno 500 au zaidi kabla ya kufanya check-in ya leo.`,
         };
       } catch (error) {
         console.warn('Yesterday absence check skipped', error);
@@ -4576,6 +4715,11 @@
           linkedAttendanceId: blockInfo.dayKey, workerLetter: explanation, workerAccepted: false, workerRejected: false,
           reviewStatus: 'pending_review', createdAt: Date.now(), updatedAt: Date.now()
         };
+        if (blockInfo.permission) {
+          events[eventId].permissionId = blockInfo.permission.permissionId || '';
+          events[eventId].permissionStatus = blockInfo.permission.status || 'pending';
+          events[eventId].permissionReason = blockInfo.permission.reason || blockInfo.permission.permissionType || '';
+        }
         const summary = window.SomapPayrollCore.responsibilitySummary(events);
         await schoolRef('').update({
           [`${base}/events/${eventId}`]: events[eventId],

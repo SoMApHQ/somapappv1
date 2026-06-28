@@ -67,6 +67,13 @@
     const lateEvents = active.filter(event => event?.eventType === 'late');
     const noSignInEvents = active.filter(event => event?.eventType === 'no_sign_in');
     const manualEvents = active.filter(event => event?.eventType === 'manual_adjustment');
+    const protectedEvents = active.filter(event => event?.eventType === 'approved_permission').map(event => ({
+      date: cleanText(event.date),
+      eventType: cleanText(event.originalEventType || 'attendance'),
+      permissionId: cleanText(event.permissionId),
+      reason: cleanText(event.permissionReason || event.reason),
+      deductionAmount: 0
+    }));
     const lateCount = lateEvents.length;
     const lateDeduction = lateEvents.some(event => event?.deductionOverride != null)
       ? lateEvents.reduce((sum, event) => sum + money(event.deductionOverride ?? event.deductionAmount), 0)
@@ -90,6 +97,7 @@
       remainingResponsibilityAllowance: Math.max(0, originalAllowance - totalResponsibilityDeduction),
       capped: uncappedDeduction > originalAllowance,
       finalReviewRequired: uncappedDeduction >= originalAllowance,
+      protectedEvents,
       status: disputed ? 'pending_review' : totalResponsibilityDeduction > 0 ? 'deducted' : lateCount > 0 ? 'warning_only' : 'intact'
     };
   }
