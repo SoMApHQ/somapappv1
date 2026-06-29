@@ -2389,7 +2389,7 @@
       try {
         const snap = await schoolRef(`years/${year}/workerPermissionsByWorker/${state.workerId}`).once('value');
         const requests = Object.values(snap.val() || {}).filter(permission =>
-          permission && permission.dateFrom <= dateYmd && permission.dateTo >= dateYmd &&
+          permission && permission.dateFrom <= dateYmd && (permission.dateTo || (permission.returnDateUnknown ? '9999-12-31' : permission.dateFrom)) >= dateYmd &&
           PERMISSION_TYPES[kind]?.has(permission.permissionType) && permissionCoversTime(permission, timestamp)
         );
         const approved = requests.find(permission => ['approved', 'used'].includes(String(permission.status || '').toLowerCase()) && permission.payrollProtected === true);
@@ -2411,6 +2411,28 @@
       Object.entries(fields).forEach(([field, value]) => {
         updates[`${base}/workerPermissions/${permission.permissionId}/${field}`] = value;
         updates[`${base}/workerPermissionsByWorker/${state.workerId}/${permission.permissionId}/${field}`] = value;
+      });
+      await schoolRef('').update(updates);
+    }
+
+    async function closeReturnedSickPermission(year, returnDateYmd) {
+      const path = `years/${year}/workerPermissionsByWorker/${state.workerId}`;
+      const snap = await schoolRef(path).once('value');
+      const openPermissions = Object.values(snap.val() || {}).filter(permission =>
+        permission && permission.permissionType === 'sick_leave' && permission.returnDateUnknown === true &&
+        permission.dateFrom <= returnDateYmd && ['approved', 'used'].includes(String(permission.status || '').toLowerCase())
+      );
+      if (!openPermissions.length) return;
+      const previous = new Date(`${returnDateYmd}T12:00:00`); previous.setDate(previous.getDate() - 1);
+      const previousYmd = `${previous.getFullYear()}-${String(previous.getMonth() + 1).padStart(2, '0')}-${String(previous.getDate()).padStart(2, '0')}`;
+      const updates = {};
+      openPermissions.forEach(permission => {
+        const endDate = permission.dateFrom === returnDateYmd ? returnDateYmd : previousYmd;
+        const fields = { dateTo: endDate, returnDateUnknown: false, actualReturnDate: returnDateYmd, returnedAt: firebase.database.ServerValue.TIMESTAMP, status: 'used' };
+        Object.entries(fields).forEach(([field, value]) => {
+          updates[`years/${year}/workerPermissions/${permission.permissionId}/${field}`] = value;
+          updates[`years/${year}/workerPermissionsByWorker/${state.workerId}/${permission.permissionId}/${field}`] = value;
+        });
       });
       await schoolRef('').update(updates);
     }
@@ -2946,6 +2968,9 @@
         }
 
         let writeSource = await writeAttendanceUpdate(source, scopedDayPath, legacyDayPath, payload);
+        if (direction === 'in') {
+          await closeReturnedSickPermission(systemYear, ymd).catch(error => console.warn('Could not close returned sick permission', error));
+        }
         if (activeAttendancePermission) {
           await markPermissionUsed(activeAttendancePermission, direction === 'in' ? 'late_check_in' : 'early_check_out', dayKey).catch(error => console.warn('Permission usage mirror failed', error));
         }
