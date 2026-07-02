@@ -143,6 +143,24 @@ const ME = (() => {
     return window.db.ref('mengineyoNames/' + slugifyName(name));
   }
 
+  // Keeps a plain-text recovery copy of an operator's password in mengineyoVault,
+  // so the Chair can look it up again from the SoMAp dashboard if it's forgotten.
+  // Merges onto any existing vault entry rather than overwriting it, since Firebase's
+  // multi-path update() replaces (not merges) whatever value is assigned to each path.
+  async function vaultSaveOperator(projectId, projectMeta, operatorId, opData) {
+    const opPath = 'mengineyoVault/' + projectId + '/operators/' + operatorId;
+    const existingSnap = await window.db.ref(opPath).once('value');
+    const merged = Object.assign({}, existingSnap.val() || {}, opData, {
+      updatedAt: now(),
+      updatedAtISO: isoNow(),
+    });
+    const updates = {};
+    if (projectMeta && projectMeta.projectName) updates['mengineyoVault/' + projectId + '/projectName'] = projectMeta.projectName;
+    if (projectMeta && projectMeta.projectCode) updates['mengineyoVault/' + projectId + '/projectCode'] = projectMeta.projectCode;
+    updates[opPath] = merged;
+    await window.db.ref().update(updates);
+  }
+
   // ── Timestamps ────────────────────────────────────────────
   function now() { return Date.now(); }
   function isoNow() { return new Date().toISOString(); }
@@ -321,7 +339,7 @@ const ME = (() => {
     saveSession, getSession, clearSession, requireAuth, requireRole,
     hashPin, verifyPin,
     generateProjectCode, generateAnimalId,
-    meRef, codeRef, slugifyName, nameRef,
+    meRef, codeRef, slugifyName, nameRef, vaultSaveOperator,
     now, isoNow, todayStr, baseRecord, updateMeta,
     audit,
     uploadPhoto,
