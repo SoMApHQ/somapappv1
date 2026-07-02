@@ -89,6 +89,8 @@
 
     <!-- Multischool context -->
     <script src="somapappv1multischool/js/context.js"></script>
+    <script src="Todashboardhtml/yearContext.js"></script>
+    <script src="volunteershtml/volunteers-core.js"></script>
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
@@ -208,6 +210,17 @@
         </section>
 
         <!-- WORKER -->
+
+        <!-- VOLUNTEER -->
+        <section class="bg-white rounded-xl shadow p-6 border-t-4 border-amber-500">
+          <h3 class="text-lg font-semibold mb-1">Volunteer Sign-In</h3>
+          <p class="text-center text-gray-600 mb-3">Use any two names exactly as registered, plus your phone/WhatsApp number.</p>
+          <form id="volunteerForm" class="space-y-4">
+            <div><label class="block text-sm font-medium text-gray-700 mb-1">Any Two Registered Names</label><div class="relative icon-input"><i class="fas fa-hands-helping input-icon"></i><input id="volunteerNames" class="w-full pl-10 pr-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500" placeholder="e.g. Anna Maria" required></div></div>
+            <div class="grid grid-cols-3 gap-2"><div><label class="block text-sm font-medium text-gray-700 mb-1">Country Code</label><select id="volunteerCountryCode" class="w-full py-2 border rounded-lg"><option value="+255">+255 TZ</option><option value="+254">+254 KE</option><option value="+256">+256 UG</option><option value="+250">+250 RW</option><option value="+49">+49 DE</option><option value="+44">+44 UK</option><option value="+1">+1 US/CA</option><option value="+27">+27 ZA</option><option value="+33">+33 FR</option><option value="+31">+31 NL</option></select></div><div class="col-span-2"><label class="block text-sm font-medium text-gray-700 mb-1">Phone / WhatsApp Number</label><input id="volunteerPhone" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500" placeholder="0712 345 678" required></div></div>
+            <button type="submit" class="w-full bg-amber-600 hover:bg-amber-700 text-white py-2 rounded font-semibold transition">Enter Volunteer Portal</button>
+          </form><p id="volunteerError" class="hidden text-red-600 text-sm mt-2 text-center"></p>
+        </section>
 
         <section class="bg-white rounded-xl shadow p-6">
           <h3 class="text-lg font-semibold mb-1">Worker Sign-In</h3>
@@ -606,6 +619,51 @@
         localStorage.setItem("role", "worker");
         localStorage.setItem("workerId", workerRecord.workerId);
         location.href = "workershtml/workersdashboard.html";
+      };
+
+      /* VOLUNTEER LOGIN — separate from workers, parents and staff */
+      volunteerForm.onsubmit = async (e) => {
+        e.preventDefault();
+        const V = window.SomapVolunteers;
+        const names = volunteerNames.value;
+        const normalizedPhone = V.normalizePhone(volunteerPhone.value, volunteerCountryCode.value);
+        const enteredTokens = V.nameTokens(names);
+        volunteerError.classList.add("hidden");
+        if (enteredTokens.length < 2) {
+          volunteerError.textContent = "Enter at least two registered names.";
+          volunteerError.classList.remove("hidden");
+          return;
+        }
+        const year = V.year();
+        let matched = null, phoneRecord = null, failureReason = "record_not_found";
+        try {
+          const snap = await V.ref("volunteers", year).once("value");
+          snap.forEach((child) => {
+            const record = child.val() || {};
+            if (V.normalizePhone(record.normalizedPhone || record.rawPhone, record.countryCode) !== normalizedPhone) return;
+            phoneRecord = { key: child.key, ...record };
+            if (V.hasTwoNames(names, record)) matched = phoneRecord;
+          });
+          let message = "Volunteer record not found. Please confirm your registered names and phone number with the school.";
+          if (!matched && phoneRecord) { failureReason = "name_mismatch"; message = "Phone number found, but the names do not match the registered volunteer record."; }
+          if (matched) {
+            const expires = matched.accessExpiresAt && new Date(matched.accessExpiresAt + "T23:59:59").getTime() < Date.now();
+            if (matched.status === "suspended") { failureReason = "suspended"; message = "Your volunteer access has been suspended. Please contact the school."; matched = null; }
+            else if (!matched.accessEnabled) { failureReason = "access_disabled"; message = "Your volunteer access is not active. Please contact the school."; matched = null; }
+            else if (expires) { failureReason = "expired"; message = "Your volunteer access has expired. Please contact the school."; matched = null; }
+            else if (!['expected','active'].includes(matched.status) && !(matched.status === 'past' && matched.archiveAccessAllowed)) { failureReason = "status_not_allowed"; message = "Your volunteer access is not active. Please contact the school."; matched = null; }
+          }
+          const logRef = V.ref("volunteerAccessLogs", year).push();
+          await logRef.set({logId:logRef.key,schoolId:V.school().id,year,enteredNames:names,normalizedPhone,matchedVolunteerId:(matched||phoneRecord)?.volunteerId||"",success:!!matched,failureReason:matched?"":failureReason,timestamp:firebase.database.ServerValue.TIMESTAMP,userAgent:navigator.userAgent.slice(0,250)});
+          if (!matched) { volunteerError.textContent = message; volunteerError.classList.remove("hidden"); return; }
+          await V.ref(`volunteers/${matched.key}`, year).update({lastLoginAt:firebase.database.ServerValue.TIMESTAMP});
+          V.saveSession(matched, year);
+          location.href = "volunteershtml/volunteerportal.html";
+        } catch (err) {
+          console.error("Volunteer login failed", err);
+          volunteerError.textContent = "Volunteer sign-in is temporarily unavailable. Please try again.";
+          volunteerError.classList.remove("hidden");
+        }
       };
       function shakeField(id) {
         const el = document.getElementById(id);
