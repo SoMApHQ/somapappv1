@@ -134,6 +134,15 @@ const ME = (() => {
     return window.db.ref('mengineyoCodes/' + code);
   }
 
+  // Normalizes a project name into a lookup key: lowercase, letters/digits only.
+  function slugifyName(name) {
+    return String(name || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  function nameRef(name) {
+    return window.db.ref('mengineyoNames/' + slugifyName(name));
+  }
+
   // ── Timestamps ────────────────────────────────────────────
   function now() { return Date.now(); }
   function isoNow() { return new Date().toISOString(); }
@@ -312,7 +321,7 @@ const ME = (() => {
     saveSession, getSession, clearSession, requireAuth, requireRole,
     hashPin, verifyPin,
     generateProjectCode, generateAnimalId,
-    meRef, codeRef,
+    meRef, codeRef, slugifyName, nameRef,
     now, isoNow, todayStr, baseRecord, updateMeta,
     audit,
     uploadPhoto,

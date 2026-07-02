@@ -24,35 +24,28 @@
     <!-- Card -->
     <div class="bg-white rounded-2xl shadow-xl p-6">
       <h2 class="font-bold text-gray-800 text-lg mb-1">Login to Your Project</h2>
-      <p class="text-xs text-gray-500 mb-5">Enter your project code, phone number, and PIN.</p>
+      <p class="text-xs text-gray-500 mb-5">Enter your project name and password.</p>
 
       <div id="meAlert"></div>
 
-      <!-- Project code -->
+      <!-- Project name -->
       <div class="mb-4">
-        <label class="block text-sm font-semibold text-gray-700 mb-1">Project Code <span class="text-red-500">*</span></label>
-        <input id="loginCode" type="text" placeholder="e.g. ME-2026-AB3X" class="w-full border border-gray-300 rounded-lg px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 uppercase" style="text-transform:uppercase" />
-        <p class="text-xs text-gray-400 mt-1">Your project code was shown when you registered.</p>
-      </div>
-
-      <!-- Phone -->
-      <div class="mb-4">
-        <label class="block text-sm font-semibold text-gray-700 mb-1">Phone Number <span class="text-red-500">*</span></label>
-        <input id="loginPhone" type="tel" placeholder="+254 700 000 000" class="w-full border border-gray-300 rounded-lg px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+        <label class="block text-sm font-semibold text-gray-700 mb-1">Project Name <span class="text-red-500">*</span></label>
+        <input id="loginName" type="text" placeholder="e.g. Mnyore Empire Livestock" class="w-full border border-gray-300 rounded-lg px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
       </div>
 
       <!-- PIN -->
       <div class="mb-5">
-        <label class="block text-sm font-semibold text-gray-700 mb-1">PIN / Password <span class="text-red-500">*</span></label>
+        <label class="block text-sm font-semibold text-gray-700 mb-1">Password <span class="text-red-500">*</span></label>
         <div class="relative">
-          <input id="loginPin" type="password" placeholder="Enter your PIN" class="w-full border border-gray-300 rounded-lg px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 pr-10" />
-          <button type="button" onclick="togglePin()" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+          <input id="loginPin" type="password" placeholder="Enter your password" class="w-full border border-gray-300 rounded-lg px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 pr-10" />
+          <button type="button" onclick="togglePin()" title="Show or hide password" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
             <i id="pinEye" class="fas fa-eye"></i>
           </button>
         </div>
       </div>
 
-      <button id="loginBtn" onclick="doLogin()" class="w-full py-3 rounded-xl font-bold text-white bg-emerald-600 hover:bg-emerald-700 text-sm">
+      <button type="button" id="loginBtn" onclick="doLogin()" class="w-full py-3 rounded-xl font-bold text-white bg-emerald-600 hover:bg-emerald-700 text-sm">
         <i class="fas fa-sign-in-alt mr-2"></i>Login
       </button>
 
@@ -93,30 +86,28 @@
     }
 
     // Allow Enter key to login
-    ['loginCode','loginPhone','loginPin'].forEach(id => {
+    ['loginName','loginPin'].forEach(id => {
       document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
     });
 
     async function doLogin() {
-      const code  = document.getElementById('loginCode').value.trim().toUpperCase();
-      const phone = document.getElementById('loginPhone').value.trim();
-      const pin   = document.getElementById('loginPin').value;
+      const name = document.getElementById('loginName').value.trim();
+      const pin  = document.getElementById('loginPin').value;
 
-      if (!code)  { ME.showAlert('Please enter your project code.', 'error'); return; }
-      if (!phone) { ME.showAlert('Please enter your phone number.', 'error'); return; }
-      if (!pin)   { ME.showAlert('Please enter your PIN.', 'error'); return; }
+      if (!name) { ME.showAlert('Please enter your project name.', 'error'); return; }
+      if (!pin)  { ME.showAlert('Please enter your password.', 'error'); return; }
 
       ME.setBtnLoading('loginBtn', true, 'Login');
 
       try {
-        // 1. Look up project by code
-        const codeSnap = await ME.codeRef(code).once('value');
-        if (!codeSnap.exists()) {
-          ME.showAlert('Project code not found. Please check and try again.', 'error');
+        // 1. Look up project by name
+        const nameSnap = await ME.nameRef(name).once('value');
+        if (!nameSnap.exists()) {
+          ME.showAlert('Project not found. Please check the name and try again.', 'error');
           ME.setBtnLoading('loginBtn', false, 'Login');
           return;
         }
-        const projectId = codeSnap.val();
+        const projectId = nameSnap.val();
 
         // 2. Load project profile
         const profSnap = await ME.meRef(projectId, 'profile').once('value');
@@ -127,37 +118,25 @@
         }
         const profile = profSnap.val();
 
-        // 3. Find operator by phone
-        const opSnap = await ME.meRef(projectId, 'operators').orderByChild('phone').equalTo(phone).once('value');
-        if (!opSnap.exists()) {
-          ME.showAlert('Incorrect project code, phone, or PIN.', 'error');
-          ME.setBtnLoading('loginBtn', false, 'Login');
-          return;
-        }
-
+        // 3. Find the active operator whose password matches
+        const opsSnap = await ME.meRef(projectId, 'operators').once('value');
         let matchedOp = null, matchedOpId = null;
-        opSnap.forEach(child => {
-          const op = child.val();
-          if (op.active !== false) { matchedOp = op; matchedOpId = child.key; }
-        });
+        if (opsSnap.exists()) {
+          for (const child of Object.entries(opsSnap.val())) {
+            const [opId, op] = child;
+            if (op.active === false) continue;
+            const pinToCheck = op.temporaryPin ? op.temporaryPinHash : op.pinHash;
+            if (await ME.verifyPin(pin, pinToCheck)) { matchedOp = op; matchedOpId = opId; break; }
+          }
+        }
 
         if (!matchedOp) {
-          ME.showAlert('This account has been deactivated. Contact your project Chair.', 'error');
-          ME.setBtnLoading('loginBtn', false, 'Login');
-          return;
-        }
-
-        // 4. Verify PIN
-        const pinToCheck = matchedOp.temporaryPin ? matchedOp.temporaryPinHash : matchedOp.pinHash;
-        const valid = await ME.verifyPin(pin, pinToCheck);
-        if (!valid) {
-          ME.showAlert('Incorrect project code, phone, or PIN.', 'error');
+          ME.showAlert('Incorrect project name or password.', 'error');
           // Log failed attempt (best effort)
           try {
             await ME.meRef(projectId, 'auditLogs').push().set({
               action: 'login_failed',
               entityType: 'operator',
-              phone,
               projectId,
               timestamp: ME.now(),
               timestampISO: ME.isoNow(),
@@ -167,7 +146,7 @@
           return;
         }
 
-        // 5. Create session
+        // 4. Create session
         const session = {
           projectId,
           projectCode: profile.projectCode,
@@ -182,7 +161,7 @@
         };
         ME.saveSession(session);
 
-        // 6. Audit success
+        // 5. Audit success
         await ME.meRef(projectId, 'auditLogs').push().set({
           action: 'login_success',
           entityType: 'operator',
