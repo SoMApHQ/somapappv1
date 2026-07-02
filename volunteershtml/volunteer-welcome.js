@@ -1,0 +1,43 @@
+(async function(){
+  'use strict';
+  const V=SomapVolunteers,s=V.requireSession(),$=id=>document.getElementById(id);
+  const CONTACT='+255 686 828 732';
+  let volunteer=null,profile={},certificate=null;
+  function clean(value,fallback=''){return String(value||fallback).replace(/\s+/g,' ').trim()}
+  function mission(v){return clean([v.visitPurpose,v.plannedActivities,v.specialty&&`Specialty: ${v.specialty}`,v.skills&&`Skills: ${v.skills}`,v.childBenefit].filter(Boolean).join('. '),'To share time, knowledge, and care with our school community.')}
+  function date(value){return value?new Date(value+'T12:00:00').toLocaleDateString(undefined,{dateStyle:'long'}):''}
+  async function imageData(url){if(!url)return null;try{const response=await fetch(url,{mode:'cors'});if(!response.ok)throw Error('Image unavailable');const blob=await response.blob();return await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(blob)})}catch(_){return null}}
+  async function firstImage(...urls){for(const url of urls){const data=await imageData(url);if(data)return data}return null}
+  function writeWrapped(doc,text,x,y,width,lineHeight,maxLines){const lines=doc.splitTextToSize(clean(text),width).slice(0,maxLines);doc.text(lines,x,y,{align:'center'});return y+lines.length*lineHeight}
+  async function createCertificate(){
+    if(certificate)return certificate;
+    if(!window.jspdf?.jsPDF)throw Error('The PDF generator did not load. Please use the download button to try again.');
+    const {jsPDF}=window.jspdf,doc=new jsPDF({orientation:'landscape',unit:'mm',format:'a4'}),school=clean(s.schoolName||V.school().name,'Our School');
+    const [schoolLogo,volunteerPhoto,somapLogo]=await Promise.all([firstImage(profile.logoUrl,V.school().logoUrl,'../images/somap-logo.png'),firstImage(volunteer.passportPhotoUrl,'../images/somap-logo.png'),firstImage('../images/somap-logo.png')]);
+    doc.setFillColor(253,251,244);doc.rect(0,0,297,210,'F');doc.setDrawColor(23,107,77);doc.setLineWidth(2);doc.rect(7,7,283,196);doc.setDrawColor(208,163,61);doc.setLineWidth(.7);doc.rect(11,11,275,188);
+    if(somapLogo){try{doc.saveGraphicsState();doc.setGState(new doc.GState({opacity:.045}));doc.addImage(somapLogo,'PNG',93,30,110,110,undefined,'FAST');doc.restoreGraphicsState()}catch(_){}}
+    if(schoolLogo)doc.addImage(schoolLogo,schoolLogo.includes('image/png')?'PNG':'JPEG',20,18,27,27,undefined,'FAST');
+    if(volunteerPhoto){doc.setDrawColor(208,163,61);doc.setLineWidth(1.2);doc.circle(252,31.5,17.5,'S');doc.addImage(volunteerPhoto,volunteerPhoto.includes('image/png')?'PNG':'JPEG',236,15.5,32,32,undefined,'FAST')}
+    doc.setTextColor(155,118,38);doc.setFont('helvetica','bold');doc.setFontSize(10);doc.text('VOLUNTEER WELCOME CERTIFICATE',148.5,22,{align:'center'});
+    doc.setTextColor(21,79,60);doc.setFont('times','bold');doc.setFontSize(28);doc.text(`Welcome to ${school}`,148.5,39,{align:'center'});
+    doc.setTextColor(80,91,85);doc.setFont('times','normal');doc.setFontSize(12);doc.text('With gratitude and great pleasure, we welcome',148.5,54,{align:'center'});
+    doc.setTextColor(155,118,38);doc.setFont('times','bolditalic');doc.setFontSize(25);doc.text(clean(volunteer.displayName,'Our Volunteer'),148.5,68,{align:'center'});
+    doc.setTextColor(55,70,63);doc.setFont('helvetica','normal');doc.setFontSize(10.5);let y=80;
+    y=writeWrapped(doc,'Your presence, knowledge, and service enrich our school community. We value the time and purpose you have chosen to share with our children and team.',148.5,y,205,5,3)+3;
+    doc.setTextColor(23,107,77);doc.setFont('helvetica','bold');doc.text('YOUR MISSION WITH US',148.5,y,{align:'center'});y+=7;doc.setTextColor(55,70,63);doc.setFont('helvetica','normal');y=writeWrapped(doc,mission(volunteer),148.5,y,205,5,4)+3;
+    const history=clean(profile.schoolHistory||profile.history,`${school} is committed to learning, dignity, service, and creating opportunities for every child.`);doc.setTextColor(23,107,77);doc.setFont('helvetica','bold');doc.text('OUR SCHOOL STORY',148.5,y,{align:'center'});y+=7;doc.setTextColor(55,70,63);doc.setFont('helvetica','normal');writeWrapped(doc,history,148.5,y,205,5,4);
+    doc.setFillColor(237,246,240);doc.roundedRect(55,166,187,15,3,3,'F');doc.setTextColor(23,75,57);doc.setFont('helvetica','bold');doc.setFontSize(10);doc.text(`Information and assistance · WhatsApp ${CONTACT}`,148.5,175.5,{align:'center'});
+    doc.setTextColor(155,118,38);doc.setFont('times','bolditalic');doc.setFontSize(13);doc.text('We value you. Welcome to our school family.',148.5,190,{align:'center'});
+    doc.setTextColor(95,105,100);doc.setFont('helvetica','normal');doc.setFontSize(8);doc.text([date(volunteer.plannedArrivalDate),volunteer.volunteerId].filter(Boolean).join(' · '),148.5,197,{align:'center'});
+    certificate=doc;return doc;
+  }
+  async function download(){const button=$('downloadCertificate');button.disabled=true;$('downloadStatus').textContent='Creating your personalized certificate…';try{const doc=await createCertificate(),name=clean(volunteer.displayName,'volunteer').replace(/[^a-z0-9]+/gi,'-').replace(/^-|-$/g,'');doc.save(`Welcome-${name}-${s.year}.pdf`);$('downloadHeading').textContent='Welcome certificate ready';$('downloadStatus').textContent='Your certificate has been downloaded. If your browser blocked it, use the download button below.';sessionStorage.setItem('somap.volunteerWelcomeDownloaded',`${s.volunteerId}:${s.year}`);startRedirect()}catch(err){$('downloadHeading').textContent='Your welcome certificate is ready to retry';$('downloadStatus').textContent=err.message}finally{button.disabled=false}}
+  function startRedirect(){let seconds=7;const tick=()=>{$('redirectStatus').textContent=`Opening your volunteer dashboard in ${seconds} second${seconds===1?'':'s'}…`;if(seconds--<=0)location.replace('volunteerportal.html');else setTimeout(tick,1000)};tick()}
+  try{
+    const base=path=>firebase.database().ref(window.SOMAP?.P?SOMAP.P(path):path),[all,profileSnap]=await Promise.all([V.ref('volunteers',s.year).once('value'),base('profile').once('value').catch(()=>null)]);
+    all.forEach(child=>{const value=child.val();if(value?.volunteerId===s.volunteerId)volunteer=value});if(!volunteer)throw Error('Your volunteer record could not be loaded.');profile=profileSnap?.val()||{};
+    const school=clean(s.schoolName||V.school().name,'Our School');$('schoolName').textContent=school;$('volunteerName').textContent=clean(volunteer.displayName,'Volunteer');$('volunteerPhoto').src=volunteer.passportPhotoUrl||'../images/somap-logo.png';$('schoolLogo').src=profile.logoUrl||V.school().logoUrl||'../images/somap-logo.png';$('volunteerMeta').textContent=[volunteer.country,volunteer.specialty,date(volunteer.plannedArrivalDate)].filter(Boolean).join(' · ');$('missionText').textContent=mission(volunteer);$('schoolHistory').textContent=clean(profile.schoolHistory||profile.history,`${school} is committed to learning, dignity, service, and creating opportunities for every child.`);
+    $('downloadCertificate').onclick=download;
+    const marker=`${s.volunteerId}:${s.year}`;if(sessionStorage.getItem('somap.volunteerWelcomeDownloaded')===marker)startRedirect();else setTimeout(download,700);
+  }catch(err){$('downloadHeading').textContent='Unable to prepare the welcome certificate';$('downloadStatus').textContent=err.message;$('downloadCertificate').disabled=true}
+})();
