@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MENGINEYO — Login</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <style>
+    .me-hero { background: linear-gradient(135deg, #064e3b 0%, #065f46 60%, #047857 100%); }
+  </style>
+</head>
+<body class="min-h-screen me-hero flex flex-col items-center justify-center px-4 py-10">
+
+  <div class="w-full max-w-sm">
+    <!-- Logo -->
+    <div class="text-center mb-6">
+      <a href="mengineyo.html" class="inline-block">
+        <div class="text-white font-extrabold text-4xl tracking-widest">MENGINEYO</div>
+        <div class="text-emerald-200 text-xs mt-1">Society Project Management</div>
+      </a>
+    </div>
+
+    <!-- Card -->
+    <div class="bg-white rounded-2xl shadow-xl p-6">
+      <h2 class="font-bold text-gray-800 text-lg mb-1">Login to Your Project</h2>
+      <p class="text-xs text-gray-500 mb-5">Enter your project code, phone number, and PIN.</p>
+
+      <div id="meAlert"></div>
+
+      <!-- Project code -->
+      <div class="mb-4">
+        <label class="block text-sm font-semibold text-gray-700 mb-1">Project Code <span class="text-red-500">*</span></label>
+        <input id="loginCode" type="text" placeholder="e.g. ME-2026-AB3X" class="w-full border border-gray-300 rounded-lg px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 uppercase" style="text-transform:uppercase" />
+        <p class="text-xs text-gray-400 mt-1">Your project code was shown when you registered.</p>
+      </div>
+
+      <!-- Phone -->
+      <div class="mb-4">
+        <label class="block text-sm font-semibold text-gray-700 mb-1">Phone Number <span class="text-red-500">*</span></label>
+        <input id="loginPhone" type="tel" placeholder="+254 700 000 000" class="w-full border border-gray-300 rounded-lg px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+      </div>
+
+      <!-- PIN -->
+      <div class="mb-5">
+        <label class="block text-sm font-semibold text-gray-700 mb-1">PIN / Password <span class="text-red-500">*</span></label>
+        <div class="relative">
+          <input id="loginPin" type="password" placeholder="Enter your PIN" class="w-full border border-gray-300 rounded-lg px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 pr-10" />
+          <button type="button" onclick="togglePin()" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+            <i id="pinEye" class="fas fa-eye"></i>
+          </button>
+        </div>
+      </div>
+
+      <button id="loginBtn" onclick="doLogin()" class="w-full py-3 rounded-xl font-bold text-white bg-emerald-600 hover:bg-emerald-700 text-sm">
+        <i class="fas fa-sign-in-alt mr-2"></i>Login
+      </button>
+
+      <div class="mt-4 text-center">
+        <a href="mengineyo-register.html" class="text-xs text-emerald-600 hover:text-emerald-800 font-semibold">Don't have a project? Register here →</a>
+      </div>
+    </div>
+
+    <!-- Forgot access note -->
+    <div class="mt-4 bg-white/10 rounded-xl p-4 text-center">
+      <p class="text-emerald-100 text-xs">Lost access? Ask your project Chair to reset your PIN from the Operators page.</p>
+    </div>
+
+    <div class="mt-4 text-center">
+      <a href="../index.html" class="text-emerald-300 text-xs hover:text-white">← Back to SoMAp Home</a>
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
+  <script src="../firebase.js"></script>
+  <script src="./mengineyo-core.js"></script>
+  <script>
+    // If already logged in, go to dashboard
+    if (ME.getSession()) window.location.href = 'mengineyo-dashboard.html';
+
+    function togglePin() {
+      const inp = document.getElementById('loginPin');
+      const eye = document.getElementById('pinEye');
+      if (inp.type === 'password') {
+        inp.type = 'text';
+        eye.className = 'fas fa-eye-slash';
+      } else {
+        inp.type = 'password';
+        eye.className = 'fas fa-eye';
+      }
+    }
+
+    // Allow Enter key to login
+    ['loginCode','loginPhone','loginPin'].forEach(id => {
+      document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+    });
+
+    async function doLogin() {
+      const code  = document.getElementById('loginCode').value.trim().toUpperCase();
+      const phone = document.getElementById('loginPhone').value.trim();
+      const pin   = document.getElementById('loginPin').value;
+
+      if (!code)  { ME.showAlert('Please enter your project code.', 'error'); return; }
+      if (!phone) { ME.showAlert('Please enter your phone number.', 'error'); return; }
+      if (!pin)   { ME.showAlert('Please enter your PIN.', 'error'); return; }
+
+      ME.setBtnLoading('loginBtn', true, 'Login');
+
+      try {
+        // 1. Look up project by code
+        const codeSnap = await ME.codeRef(code).once('value');
+        if (!codeSnap.exists()) {
+          ME.showAlert('Project code not found. Please check and try again.', 'error');
+          ME.setBtnLoading('loginBtn', false, 'Login');
+          return;
+        }
+        const projectId = codeSnap.val();
+
+        // 2. Load project profile
+        const profSnap = await ME.meRef(projectId, 'profile').once('value');
+        if (!profSnap.exists()) {
+          ME.showAlert('Project data not found.', 'error');
+          ME.setBtnLoading('loginBtn', false, 'Login');
+          return;
+        }
+        const profile = profSnap.val();
+
+        // 3. Find operator by phone
+        const opSnap = await ME.meRef(projectId, 'operators').orderByChild('phone').equalTo(phone).once('value');
+        if (!opSnap.exists()) {
+          ME.showAlert('Incorrect project code, phone, or PIN.', 'error');
+          ME.setBtnLoading('loginBtn', false, 'Login');
+          return;
+        }
+
+        let matchedOp = null, matchedOpId = null;
+        opSnap.forEach(child => {
+          const op = child.val();
+          if (op.active !== false) { matchedOp = op; matchedOpId = child.key; }
+        });
+
+        if (!matchedOp) {
+          ME.showAlert('This account has been deactivated. Contact your project Chair.', 'error');
+          ME.setBtnLoading('loginBtn', false, 'Login');
+          return;
+        }
+
+        // 4. Verify PIN
+        const pinToCheck = matchedOp.temporaryPin ? matchedOp.temporaryPinHash : matchedOp.pinHash;
+        const valid = await ME.verifyPin(pin, pinToCheck);
+        if (!valid) {
+          ME.showAlert('Incorrect project code, phone, or PIN.', 'error');
+          // Log failed attempt (best effort)
+          try {
+            await ME.meRef(projectId, 'auditLogs').push().set({
+              action: 'login_failed',
+              entityType: 'operator',
+              phone,
+              projectId,
+              timestamp: ME.now(),
+              timestampISO: ME.isoNow(),
+            });
+          } catch(e) {}
+          ME.setBtnLoading('loginBtn', false, 'Login');
+          return;
+        }
+
+        // 5. Create session
+        const session = {
+          projectId,
+          projectCode: profile.projectCode,
+          projectName: profile.projectName,
+          operatorId: matchedOpId,
+          operatorName: matchedOp.fullName,
+          role: matchedOp.role,
+          country: profile.country,
+          currency: profile.currency,
+          currencySymbol: profile.currencySymbol,
+          isTemporaryPin: !!matchedOp.temporaryPin,
+        };
+        ME.saveSession(session);
+
+        // 6. Audit success
+        await ME.meRef(projectId, 'auditLogs').push().set({
+          action: 'login_success',
+          entityType: 'operator',
+          entityId: matchedOpId,
+          projectId,
+          performedBy: matchedOpId,
+          performedByName: matchedOp.fullName,
+          performedByRole: matchedOp.role,
+          timestamp: ME.now(),
+          timestampISO: ME.isoNow(),
+        });
+
+        ME.showAlert('Welcome, ' + matchedOp.fullName + '!', 'success');
+
+        // If temporary PIN, force change
+        if (matchedOp.temporaryPin) {
+          setTimeout(() => { window.location.href = 'mengineyo-changepin.html'; }, 1200);
+        } else {
+          setTimeout(() => { window.location.href = 'mengineyo-dashboard.html'; }, 1000);
+        }
+
+      } catch (err) {
+        console.error(err);
+        ME.showAlert('Login error: ' + err.message, 'error');
+        ME.setBtnLoading('loginBtn', false, 'Login');
+      }
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MENGINEYO — Audit Log</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+</head>
+<body class="min-h-screen bg-gray-50 pb-20">
+
+  <header class="bg-emerald-700 text-white px-4 py-3">
+    <div class="max-w-3xl mx-auto flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <a href="mengineyo-dashboard.html" class="text-emerald-200 hover:text-white"><i class="fas fa-arrow-left"></i></a>
+        <div>
+          <div class="font-bold text-base">Audit Log</div>
+          <div class="text-xs text-emerald-200" id="meProjectName"></div>
+        </div>
+      </div>
+      <span class="text-xs text-emerald-200" id="meOperatorInfo"></span>
+    </div>
+  </header>
+
+  <div class="max-w-3xl mx-auto px-4 py-4">
+    <div id="meAlert"></div>
+
+    <div class="flex flex-col sm:flex-row gap-3 mb-4">
+      <input id="filterAction" type="text" placeholder="Search by action or operator…" oninput="filterLogs()" class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
+      <div class="flex gap-2">
+        <input id="auditFrom" type="date" onchange="loadLogs()" class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
+        <input id="auditTo"   type="date" onchange="loadLogs()" class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
+      </div>
+    </div>
+
+    <div id="auditList" class="space-y-2">
+      <div class="text-center text-gray-400 text-sm py-8">Loading audit logs…</div>
+    </div>
+
+    <button id="loadMoreBtn" onclick="loadMore()" class="hidden mt-4 w-full py-3 rounded-xl font-semibold text-gray-700 border border-gray-300 hover:bg-gray-50 text-sm">
+      Load More
+    </button>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
+  <script src="../firebase.js"></script>
+  <script src="./mengineyo-core.js"></script>
+  <script>
+    const session = ME.requireRole(['Chair']);
+    if (!session) throw new Error('Chair only');
+    ME.renderHeader();
+
+    let allLogs = [];
+    let pageSize = 50;
+
+    const now = new Date();
+    const month = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0');
+    document.getElementById('auditFrom').value = month + '-01';
+    document.getElementById('auditTo').value   = now.toISOString().split('T')[0];
+
+    const actionIcons = {
+      project_created: '🏗️', operator_added: '👤', operator_edited: '✏️', operator_deactivated: '🚫',
+      operator_activated: '✅', role_changed: '🎭', pin_reset: '🔑', login_success: '🔓',
+      login_failed: '⚠️', animal_added: '🐄', animal_edited: '✏️', milk_recorded: '🥛',
+      milk_confirmed: '✅', milk_rejected: '❌', milk_edited: '✏️', birth_recorded: '🐣',
+      birth_confirmed: '✅', health_record_added: '🩺', finance_recorded: '💰',
+      pregnancy_recorded: '🤰', settings_updated: '⚙️', project_deactivated: '🔒',
+      activities_updated: '📋',
+    };
+
+    async function loadLogs() {
+      const from = document.getElementById('auditFrom').value;
+      const to   = document.getElementById('auditTo').value;
+      const fromTs = from ? new Date(from).getTime() : 0;
+      const toTs   = to   ? new Date(to+'T23:59:59').getTime() : Date.now();
+
+      const snap = await ME.meRef(session.projectId, 'auditLogs')
+        .orderByChild('timestamp').startAt(fromTs).endAt(toTs)
+        .limitToLast(200).once('value');
+
+      allLogs = [];
+      snap.forEach(ch => allLogs.unshift({ id: ch.key, ...ch.val() }));
+      filterLogs();
+    }
+
+    function filterLogs() {
+      const q = (document.getElementById('filterAction').value || '').toLowerCase();
+      const filtered = q ? allLogs.filter(l =>
+        (l.action||'').toLowerCase().includes(q) ||
+        (l.performedByName||'').toLowerCase().includes(q) ||
+        (l.entityType||'').toLowerCase().includes(q)
+      ) : allLogs;
+      renderLogs(filtered.slice(0, pageSize));
+      document.getElementById('loadMoreBtn').classList.toggle('hidden', filtered.length <= pageSize);
+    }
+
+    function loadMore() {
+      pageSize += 50;
+      filterLogs();
+    }
+
+    const roleBadge = { Chair:'bg-emerald-700 text-white', CEO:'bg-blue-600 text-white', Manager:'bg-teal-600 text-white', Mchungi:'bg-amber-600 text-white', Vet:'bg-red-600 text-white', Accountant:'bg-purple-600 text-white', Viewer:'bg-gray-400 text-white' };
+
+    function renderLogs(logs) {
+      const el = document.getElementById('auditList');
+      if (!logs.length) { el.innerHTML = '<div class="text-center text-gray-400 text-sm py-8">No audit logs found for this period.</div>'; return; }
+      el.innerHTML = logs.map(l => {
+        const icon   = actionIcons[l.action] || '📝';
+        const roleCls = roleBadge[l.performedByRole] || 'bg-gray-300 text-gray-700';
+        const isWarning = l.action === 'login_failed';
+        return `
+        <div class="bg-white rounded-xl border ${isWarning?'border-amber-200':'border-gray-100'} shadow-sm px-4 py-3 flex items-start gap-3">
+          <div class="text-xl flex-shrink-0">${icon}</div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-start justify-between gap-2">
+              <div>
+                <div class="text-sm font-semibold text-gray-800">${(l.action||'unknown').replace(/_/g,' ')}</div>
+                <div class="text-xs text-gray-400">${ME.fmtDateTime(l.timestamp)}</div>
+              </div>
+              <div class="text-right flex-shrink-0">
+                <div class="text-xs font-semibold text-gray-700">${l.performedByName || 'System'}</div>
+                ${l.performedByRole ? `<span class="text-xs px-1.5 py-0.5 rounded-full ${roleCls}">${l.performedByRole}</span>` : ''}
+              </div>
+            </div>
+            ${l.entityType ? `<div class="text-xs text-gray-400 mt-0.5">Entity: <span class="text-gray-600">${l.entityType}${l.entityId?' · '+l.entityId:''}</span></div>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    loadLogs();
+  </script>
+</body>
+</html>
