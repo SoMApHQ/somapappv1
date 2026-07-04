@@ -221,8 +221,12 @@
         const options = optionMatches.map((match) => compactText(match[2])).filter((option) => option.length >= 2);
         const sourceToken = normalizeLookupToken(sourceText);
         const supported = options.filter((option) => option.length >= 3 && sourceToken.includes(normalizeLookupToken(option)));
-        if (validPrompt(prompt) && options.length >= 3 && new Set(options.map(normalizeLookupToken)).size === options.length && supported.length === 1) {
-          items.push({ type: 'multiple_choice', prompt, options, answer: supported[0] });
+        if (validPrompt(prompt) && options.length >= 3 && new Set(options.map(normalizeLookupToken)).size === options.length) {
+          items.push({
+            type: 'multiple_choice', prompt, options,
+            answer: supported.length === 1 ? supported[0] : 'Verify the correct option against the source assessment.',
+            answerNeedsReview: supported.length !== 1
+          });
         }
         return;
       }
@@ -739,6 +743,18 @@
     const analysisCache = new Map();
     const assessmentItems = topics.flatMap((topic) => parseAssessmentItems(topic.sourceHomework, topic.generationSourceText || topic.sourceText || topic.bookEvidence?.excerpt || '', topic)
       .map((item) => ({ ...item, topic })));
+    const bookSource = sourceResult.bookAssessmentSource;
+    if (bookSource?.text) {
+      const bookTopic = {
+        ...topics[0],
+        key: `active_book__${bookSource.id}`,
+        topic: bookSource.title || `${template.subject} active book`,
+        sourceText: bookSource.text,
+        sourceHomework: bookSource.text,
+        bookEvidence: { bookId: bookSource.id, bookTitle: bookSource.title, assessment: bookSource.text }
+      };
+      parseAssessmentItems(bookSource.text, bookSource.text, bookTopic).forEach((item) => assessmentItems.push({ ...item, topic: bookTopic }));
+    }
     const consumedAssessmentItems = new Set();
     const topicUseCount = new Map();
     const usedQuestions = new Set();

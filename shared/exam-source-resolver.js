@@ -648,6 +648,13 @@
     const dueSchemeRows = schemeRows.filter((row) => schemeRowIsDue(row, requestedMonth, cutoffDate));
     const schemeCutoffPositions = dueSchemeRows.map((row) => positionFromSchemeReference(activeBook, row.reference)).filter((position) => position >= 0);
     const bookCutoffPosition = schemeCutoffPositions.length ? Math.max(...schemeCutoffPositions) : -1;
+    let coveredBookText = activeBook?.text || '';
+    if (coveredBookText && bookCutoffPosition >= 0) {
+      const tail = coveredBookText.slice(bookCutoffPosition + 20);
+      const nextChapter = tail.search(/\n\s*(?:chapter|topic|unit)\s+(?:[ivxlcdm]+|\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/i);
+      const coverageEnd = nextChapter >= 0 ? bookCutoffPosition + 20 + nextChapter : coveredBookText.length;
+      coveredBookText = coveredBookText.slice(0, coverageEnd);
+    }
     const topics = Array.from(buckets.values()).map((bucket) => {
       bucket.notes.sort((left, right) => noteStrengthForPlan(right, bucket.plan) - noteStrengthForPlan(left, bucket.plan));
       if (!bucket.preferredNoteId && bucket.notes[0]?.id) bucket.preferredNoteId = compactText(bucket.notes[0].id);
@@ -699,6 +706,11 @@
     return {
       topics: topics.filter((topic) => topic.confidenceScore >= minimumConfidenceScore),
       allTopics: topics,
+      bookAssessmentSource: activeBook ? {
+        id: activeBook.id,
+        title: activeBook.title,
+        text: coveredBookText
+      } : null,
       diagnostics: {
         lessonPlanCount: plans.length,
         lessonNoteCount: notes.length,
