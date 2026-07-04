@@ -330,7 +330,8 @@
         allowDiagramQuestions: coerceBoolean(settings.allowDiagramQuestions, true),
         requireHomeworkGivenForComplexSections: coerceBoolean(settings.requireHomeworkGivenForComplexSections, false),
         includeOnlyTopicsAboveThreshold: coerceBoolean(settings.includeOnlyTopicsAboveThreshold, true),
-        minimumConfidenceScore: Math.max(0, safeNumber(settings.minimumConfidenceScore, 60) || 60)
+        minimumConfidenceScore: Math.max(0, safeNumber(settings.minimumConfidenceScore, 60) || 60),
+        sourceMode: compactText(settings.sourceMode || 'lesson_notes_first') || 'lesson_notes_first'
       },
       createdAt: safeNumber(raw.createdAt, nowTs()),
       updatedAt: safeNumber(raw.updatedAt, nowTs()),

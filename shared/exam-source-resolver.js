@@ -350,6 +350,36 @@
     return rows;
   }
 
+  async function readActiveBook(filters) {
+    const db = getDb();
+    if (!db) return null;
+    const year = String(filters.year || currentYear());
+    const classKey = sanitizeKey(filters.className || '').toLowerCase();
+    const subjectKey = sanitizeKey(filters.subject || '').toLowerCase();
+    const index = await readMergedObject([`classbooksIndex/${year}/${classKey}/${subjectKey}`]);
+    const bookId = compactText(index.bookId || index.id || index.key || '');
+    if (!bookId) return null;
+    const book = await readMergedObject([`books/${bookId}`]);
+    if (normalizeLookupToken(book.status || 'active') !== 'active') return null;
+    const source = await readMergedObject([`book_texts/${bookId}`]);
+    const text = String(source.text || '');
+    return text ? { id: bookId, title: compactText(book.title || source.title || 'Classbook'), text } : null;
+  }
+
+  function bookEvidenceForTopic(book, topic) {
+    if (!book?.text || !topic) return null;
+    const position = book.text.toLowerCase().indexOf(compactText(topic).toLowerCase());
+    if (position < 0) return null;
+    const excerpt = compactText(book.text.slice(position, position + 10000));
+    const assessmentStart = excerpt.search(/\b(homework|exercise|activity|cat|continuous assessment|past paper|revision questions?)\b/i);
+    return {
+      bookId: book.id,
+      bookTitle: book.title,
+      excerpt,
+      assessment: assessmentStart >= 0 ? excerpt.slice(assessmentStart, assessmentStart + 5000) : ''
+    };
+  }
+
   function hasHomeworkGiven(plan) {
     return Boolean(plan?.homeworkGivenMeta?.given);
   }
@@ -387,7 +417,9 @@
     let score = 0;
     if (bucket.plan) score += 30;
     if (bucket.plan && isHighCoverage(bucket.plan.coverageStatus)) score += 20;
-    if (bucket.notes.length) score += 20;
+    // A saved lesson note is direct taught-content evidence and is the preferred
+    // source for wording exam questions.
+    if (bucket.notes.length) score += 60;
     if (bucket.preferredNoteId) score += 10;
     if (bucket.plan && hasHomeworkSource(bucket.plan)) score += 10;
     if (bucket.plan && hasHomeworkGiven(bucket.plan)) score += 10;
@@ -456,23 +488,37 @@
   }
 
   async function resolveVerifiedTopics(options) {
+    const requestedMonth = compactText(options?.monthKey || '');
+    // An exam assesses everything taught up to its date, not only lessons saved
+    // inside the exam month.  Using an exact month here made (for example) June
+    // notes disappear from a July paper.
+    const today = new Date();
+    const todayKey = [today.getFullYear(), String(today.getMonth() + 1).padStart(2, '0'), String(today.getDate()).padStart(2, '0')].join('-');
+    const currentMonth = todayKey.slice(0, 7);
+    const requestedCutoff = requestedMonth === currentMonth ? todayKey : (requestedMonth ? `${requestedMonth}-31` : '');
+    const configuredCutoff = normalizeDateKey(options?.dateTo || requestedCutoff);
+    const cutoffDate = configuredCutoff && configuredCutoff > todayKey ? todayKey : configuredCutoff;
     const filters = {
       schoolId: compactText(options?.schoolId || currentSchoolId()),
       year: String(options?.year || currentYear()),
       className: compactText(options?.className || ''),
       subject: compactText(options?.subject || ''),
-      term: compactText(options?.term || ''),
-      monthKey: compactText(options?.monthKey || ''),
-      dateFrom: normalizeDateKey(options?.dateFrom || ''),
-      dateTo: normalizeDateKey(options?.dateTo || '')
+      // Monthly and terminal papers may deliberately cover an earlier term.
+      term: '',
+      monthKey: '',
+      dateFrom: normalizeDateKey(options?.dateFrom || `${String(options?.year || currentYear())}-01-01`),
+      dateTo: cutoffDate
     };
     const minimumConfidenceScore = Number(options?.minimumConfidenceScore || 60) || 60;
-    const [plans, notes, logs, journals, schemeRows] = await Promise.all([
+    const [plans, notes, logs, journals, schemeRows, activeBook] = await Promise.all([
       readLessonPlans(filters),
       readLessonNotes(filters),
       readLogbooks(filters),
       readClassJournals(filters),
-      readSchemes(filters)
+      // Scheme rows often have month/week fields rather than a parseable date.
+      // Read the whole year's scheme, then use it as supporting evidence.
+      readSchemes({ ...filters, dateFrom: '', dateTo: '' }),
+      readActiveBook(filters)
     ]);
 
     const buckets = new Map();
@@ -504,14 +550,29 @@
 
     notes.forEach((note) => {
       const key = buildTopicKey(note.subject, note.topic);
-      const bucket = buckets.get(key);
+      let bucket = buckets.get(key);
       if (!bucket) {
         orphanNotes.push(note);
-        return;
+        // Lesson notes are first-class teaching evidence.  Previously they were
+        // discarded unless a same-month lesson plan with the same title existed.
+        bucket = {
+          key,
+          topic: note.topic,
+          subject: note.subject,
+          className: note.className,
+          term: note.term,
+          year: note.year,
+          schoolId: note.schoolId,
+          plan: null,
+          notes: [], logs: [], journals: [], schemeRows: [],
+          sourceTexts: [], diagrams: [], homeworkTexts: [], subTopics: [],
+          preferredNoteId: ''
+        };
+        buckets.set(key, bucket);
       }
-      if (!noteMatchesPlan(note, bucket.plan)) return;
+      if (bucket.plan && !noteMatchesPlan(note, bucket.plan)) return;
       bucket.notes.push(note);
-      if (!bucket.preferredNoteId && noteStrengthForPlan(note, bucket.plan) >= 10) {
+      if (!bucket.preferredNoteId && (!bucket.plan || noteStrengthForPlan(note, bucket.plan) >= 10)) {
         bucket.preferredNoteId = compactText(note.id || '');
       }
       addUniqueText(bucket.sourceTexts, [note.keyConcepts, note.detailedContent, note.examples, note.keyTakeaways].filter(Boolean).join('. '));
@@ -549,6 +610,7 @@
       addUniqueText(bucket.sourceTexts, conceptSourceText(bucket));
       addUniqueText(bucket.homeworkTexts, bucket.plan?.homework);
       const confidenceScore = computeTopicConfidence(bucket);
+      const bookEvidence = bookEvidenceForTopic(activeBook, bucket.topic);
       return {
         key: bucket.key,
         topic: bucket.topic,
@@ -583,9 +645,10 @@
         notes: bucket.notes,
         logs: bucket.logs,
         journals: bucket.journals,
-        schemeRows: bucket.schemeRows
+        schemeRows: bucket.schemeRows,
+        bookEvidence
       };
-    }).filter((bucket) => bucket.plan).sort((a, b) => b.confidenceScore - a.confidenceScore || a.topic.localeCompare(b.topic));
+    }).filter((bucket) => bucket.plan || bucket.notes.length).sort((a, b) => b.confidenceScore - a.confidenceScore || a.topic.localeCompare(b.topic));
 
     return {
       topics: topics.filter((topic) => topic.confidenceScore >= minimumConfidenceScore),
@@ -596,6 +659,10 @@
         logbookCount: logs.length,
         classJournalCount: journals.length,
         schemeRowCount: schemeRows.length,
+        activeBookId: activeBook?.id || '',
+        activeBookTitle: activeBook?.title || '',
+        coverageFrom: filters.dateFrom,
+        coverageTo: filters.dateTo,
         orphanNotes: orphanNotes.map((note) => ({ id: note.id, topic: note.topic, date: note.date }))
       }
     };

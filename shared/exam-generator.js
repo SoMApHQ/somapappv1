@@ -312,11 +312,30 @@
   }
 
   function analyseTopic(topic) {
-    const sourceText = compactText(topic.sourceText || topic.plan?.objectives || topic.plan?.activities || topic.topic);
+    const sourceText = compactText(topic.generationSourceText || topic.sourceText || topic.bookEvidence?.excerpt || topic.plan?.objectives || topic.plan?.activities || topic.topic);
     const sentences = splitSentences(sourceText);
     const concepts = extractConceptPairs(sourceText);
     const homeworkLines = parseHomeworkLines(topic.sourceHomework || '');
     return { sourceText, sentences, concepts, homeworkLines };
+  }
+
+  function rotate(values, offset) {
+    if (!Array.isArray(values) || values.length < 2) return values || [];
+    const start = Math.abs(Number(offset || 0)) % values.length;
+    return values.slice(start).concat(values.slice(0, start));
+  }
+
+  function varyAnalysis(analysis, offset) {
+    return {
+      ...analysis,
+      sentences: rotate(analysis.sentences, offset),
+      concepts: rotate(analysis.concepts, offset),
+      homeworkLines: rotate(analysis.homeworkLines, offset)
+    };
+  }
+
+  function questionFingerprint(value) {
+    return normalizeLookupToken(value).replace(/[^a-z0-9]+/g, ' ').trim();
   }
 
   function buildQuestionForSlot(slot, topic, analysis, context, index) {
@@ -380,7 +399,7 @@
             <span>${question.sequence}. ${formatHtmlBlock(question.prompt)}</span>
             <span>${question.marks} mark${question.marks === 1 ? '' : 's'}</span>
           </div>
-          ${question.options?.length ? `<ol type="A">${question.options.map((option) => `<li>${escHtml(option)}</li>`).join('')}</ol>` : ''}
+          ${question.options?.length ? `<div class="exam-options">${question.options.map((option, optionIndex) => `<span><strong>${String.fromCharCode(65 + optionIndex)}.</strong> ${escHtml(option)}</span>`).join('')}</div>` : ''}
           ${question.diagram?.svg ? `<div class="diagram-wrap">${question.diagram.svg}</div>` : ''}
         </li>
       `).join('');
@@ -417,6 +436,8 @@
           .exam-question:last-child { border-bottom: none; }
           .question-head { display: flex; justify-content: space-between; gap: 12px; font-weight: 600; }
           .question-head span:first-child { flex: 1; }
+          .exam-options { display: flex; flex-wrap: wrap; gap: 5px 22px; margin: 6px 0 0 20px; }
+          .exam-options span { white-space: normal; }
           .diagram-wrap { margin-top: 10px; }
           ol { padding-left: 20px; }
           .paper-footer-note { margin-top: 18px; font-size: 11px; color: #64748b; text-align: right; }
@@ -538,9 +559,23 @@
       subject: template.subject,
       term: template.term,
       monthKey,
+      dateTo: compactText(template.settings.schedule?.exactDate || ''),
       minimumConfidenceScore: template.settings.minimumConfidenceScore || generalSettings.minimumConfidenceScore || 60
     });
     let topics = template.settings.includeOnlyTopicsAboveThreshold ? sourceResult.topics : sourceResult.allTopics;
+    const sourceMode = compactText(template.settings.sourceMode || 'lesson_notes_first');
+    if (sourceMode === 'book_notes') topics = topics.filter((topic) => topic.bookEvidence?.excerpt);
+    if (sourceMode === 'book_assessments') topics = topics.filter((topic) => topic.bookEvidence?.assessment);
+    if (sourceMode === 'book_notes') {
+      topics = topics.map((topic) => ({ ...topic, generationSourceText: topic.bookEvidence.excerpt }));
+    }
+    if (sourceMode === 'book_assessments') {
+      topics = topics.map((topic) => ({
+        ...topic,
+        generationSourceText: topic.bookEvidence.assessment,
+        sourceHomework: [topic.sourceHomework, topic.bookEvidence.assessment].filter(Boolean).join('\n')
+      }));
+    }
     if (template.settings.requireHomeworkGivenForComplexSections) {
       topics = topics.filter((topic) => compactText(topic.sourceHomework));
     }
@@ -552,22 +587,58 @@
     const namePool = template.settings.useFamiliarNames ? await NamePool.loadPool({ schoolId, year, className: template.className }) : null;
     const questionsWithAnswers = [];
     const analysisCache = new Map();
+    const topicUseCount = new Map();
+    const usedQuestions = new Set();
     slots.forEach((slot, index) => {
       const topic = selectTopic(topics, index, slot.sourcePreference);
-      const analysis = analysisCache.get(topic.key) || analyseTopic(topic);
-      analysisCache.set(topic.key, analysis);
+      let selectedTopic = topic;
+      const baseAnalysis = analysisCache.get(topic.key) || analyseTopic(topic);
+      analysisCache.set(topic.key, baseAnalysis);
+      const useCount = topicUseCount.get(topic.key) || 0;
+      topicUseCount.set(topic.key, useCount + 1);
+      const analysis = varyAnalysis(baseAnalysis, useCount);
       const context = namePool ? NamePool.pickContext(namePool, index) : {
         studentName: 'A pupil',
         helperName: 'another pupil',
         placeName: 'the classroom'
       };
-      const built = buildQuestionForSlot(slot, topic, analysis, context, index);
-      const question = makeQuestionRecord(slot, topic, built, index);
+      let built = buildQuestionForSlot(slot, topic, analysis, context, index);
+      let fingerprint = questionFingerprint(built.prompt);
+      // Never knowingly place the same question twice. Try other taught topics
+      // before using a clear, age-appropriate alternative wording.
+      for (let attempt = 1; usedQuestions.has(fingerprint) && attempt < topics.length; attempt += 1) {
+        const alternate = topics[(index + attempt) % topics.length];
+        const alternateAnalysis = varyAnalysis(analysisCache.get(alternate.key) || analyseTopic(alternate), useCount + attempt);
+        built = buildQuestionForSlot(slot, alternate, alternateAnalysis, context, index + attempt);
+        selectedTopic = alternate;
+        fingerprint = questionFingerprint(built.prompt);
+      }
+      if (usedQuestions.has(fingerprint)) {
+        built.prompt = `${built.prompt.replace(/[.\s]+$/, '')}. Give example ${index + 1} from the lesson.`;
+        fingerprint = questionFingerprint(built.prompt);
+      }
+      usedQuestions.add(fingerprint);
+      const question = makeQuestionRecord(slot, selectedTopic, built, index);
       if (template.settings.useFamiliarNames) {
         question.familiarNamesUsed = [context.studentName, context.helperName].filter((name) => compactText(built.prompt || '').includes(name));
       }
       questionsWithAnswers.push(question);
     });
+
+    // Diagrams are required by default. Preserve the section and marks by
+    // converting one suitable response item when the template has no diagram row.
+    if (template.settings.allowDiagramQuestions && !questionsWithAnswers.some((question) => question.diagram?.svg)) {
+      const candidate = questionsWithAnswers.find((question) => ['short_answer', 'practical_or_activity', 'fill_blank'].includes(question.type)) || questionsWithAnswers[questionsWithAnswers.length - 1];
+      if (candidate) {
+        const source = topics.find((topic) => topic.topic === candidate.sourceTopic) || topics[0];
+        const diagramQuestion = DiagramEngine.createDiagramQuestion({ topic: source.topic, subject: source.subject });
+        candidate.prompt = diagramQuestion.prompt;
+        candidate.answer = diagramQuestion.answer;
+        candidate.options = [];
+        candidate.diagram = diagramQuestion.diagram;
+        candidate.type = 'diagram';
+      }
+    }
 
     const sections = Shared.summarizeTemplate(template).sections.map((section) => ({
       sectionKey: section.sectionKey,
@@ -609,6 +680,9 @@
         homeworkGiven: Boolean(topic.homeworkGiven),
         homeworkSourceTopic: compactText(topic.homeworkGivenMeta?.sourceTopic || topic.homeworkSourceMeta?.topic || ''),
         preferredNoteId: compactText(topic.preferredNoteId || '')
+        ,bookId: compactText(topic.bookEvidence?.bookId || '')
+        ,bookTitle: compactText(topic.bookEvidence?.bookTitle || '')
+        ,bookAssessmentAvailable: Boolean(topic.bookEvidence?.assessment)
       })),
       sections,
       questions: questionsWithAnswers.map((question) => ({
