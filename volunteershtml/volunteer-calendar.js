@@ -12,18 +12,24 @@
   const schoolId = session.schoolId || 'socrates-school';
   const escape = Volunteers.escapeHtml;
   const card = list.closest('.portal-card');
-  card.classList.add('events-card');
-  card.innerHTML = `<div class="events-heading"><div><div class="eyebrow">Shared school calendar</div><h2>Events &amp; Important Dates</h2><p class="muted" id="eventsIntro">Loading published events…</p></div><div class="events-actions"><button class="btn secondary" id="eventsViewToggle" type="button" aria-pressed="false">View full year</button><button class="btn" id="downloadEventsPdf" type="button" disabled>Download PDF</button></div></div><div class="event-legend" id="eventLegend" aria-label="Event colour legend"></div><div id="events" class="events-list" aria-live="polite"><div class="events-empty">Preparing the shared calendar…</div></div>`;
+  card.classList.add('calendar-summary-card');
+  card.setAttribute('tabindex', '0');
+  card.setAttribute('role', 'button');
+  card.setAttribute('aria-haspopup', 'dialog');
+  card.innerHTML = `<div class="eyebrow">Shared school calendar</div><h2>Events &amp; Important Dates</h2><div id="events" class="calendar-preview" aria-live="polite"><p class="muted">Loading the next important date…</p></div><span class="snapshot-link calendar-open-link">Open full calendar →</span>`;
+  document.body.insertAdjacentHTML('beforeend', `<div class="calendar-modal hidden" id="calendarModal" role="dialog" aria-modal="true" aria-labelledby="calendarModalTitle"><div class="calendar-dialog"><div class="events-heading"><div><div class="eyebrow">Shared school calendar</div><h2 id="calendarModalTitle">Events &amp; Important Dates</h2><p class="muted" id="eventsIntro">Loading published events…</p></div><button class="modal-close" id="closeCalendar" type="button" aria-label="Close calendar">×</button></div><div class="event-legend" id="eventLegend" aria-label="Event colour legend"></div><div id="calendarEventsList" class="events-list" aria-live="polite"><div class="events-empty">Preparing the shared calendar…</div></div><div class="calendar-modal-actions"><button class="btn" id="downloadEventsPdf" type="button" disabled>Download PDF</button><button class="btn secondary" id="closeCalendarBottom" type="button">Close</button></div></div></div>`);
 
-  const eventsList = document.getElementById('events');
+  const preview = document.getElementById('events');
+  const eventsList = document.getElementById('calendarEventsList');
   const intro = document.getElementById('eventsIntro');
-  const toggle = document.getElementById('eventsViewToggle');
   const pdfButton = document.getElementById('downloadEventsPdf');
   const legend = document.getElementById('eventLegend');
+  const modal = document.getElementById('calendarModal');
+  const closeButton = document.getElementById('closeCalendar');
+  const closeBottom = document.getElementById('closeCalendarBottom');
   const monthNames = Array.from({ length: 12 }, (_, month) => new Date(Number(year), month, 1).toLocaleDateString(undefined, { month: 'long' }));
   let entries = [];
   let meta = null;
-  let fullYear = false;
 
   const todayIso = (() => {
     const now = new Date();
@@ -61,16 +67,17 @@
   }
 
   function render() {
-    const visible = fullYear ? entries : entries.filter((entry) => (entry.endDate || entry.startDate) >= todayIso).slice(0, 6);
-    intro.textContent = fullYear ? `${entries.length} published date${entries.length === 1 ? '' : 's'} across January–December ${year}` : `What is coming up at ${meta.schoolName} in ${year}`;
-    toggle.textContent = fullYear ? 'Show upcoming' : 'View full year';
-    toggle.setAttribute('aria-pressed', String(fullYear));
-    if (!visible.length) {
-      eventsList.innerHTML = `<div class="events-empty"><strong>${fullYear ? 'No published dates for this year' : 'No more upcoming dates'}</strong>${fullYear ? 'The school will publish shared events here.' : `Choose “View full year” to see earlier events from ${escape(year)}.`}</div>`;
+    const upcoming = entries.find((entry) => (entry.endDate || entry.startDate) >= todayIso);
+    intro.textContent = `${entries.length} published date${entries.length === 1 ? '' : 's'} from January–December ${year}`;
+    preview.innerHTML = upcoming
+      ? `<div class="calendar-next"><span class="event-type" style="--event-color:${typeMeta(upcoming).color}">${escape(typeMeta(upcoming).label)}</span><strong>${escape(upcoming.title)}</strong><small>${escape(readableRange(upcoming))}</small></div>`
+      : `<p class="muted">No more upcoming dates. Open the calendar to review ${escape(year)}.</p>`;
+    if (!entries.length) {
+      eventsList.innerHTML = '<div class="events-empty"><strong>No published dates for this year</strong>The school will publish shared events here.</div>';
       return;
     }
     const grouped = new Map();
-    visible.forEach((entry) => {
+    entries.forEach((entry) => {
       const month = Number(entry.startDate.slice(5, 7)) - 1;
       if (!grouped.has(month)) grouped.set(month, []);
       grouped.get(month).push(entry);
@@ -145,7 +152,26 @@
     }
   }
 
-  toggle.addEventListener('click', () => { fullYear = !fullYear; render(); });
+  function openCalendar() {
+    modal.classList.remove('hidden');
+    document.body.classList.add('modal-open');
+    closeButton.focus();
+  }
+
+  function closeCalendar() {
+    modal.classList.add('hidden');
+    document.body.classList.remove('modal-open');
+    card.focus();
+  }
+
+  card.addEventListener('click', openCalendar);
+  card.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openCalendar(); }
+  });
+  closeButton.addEventListener('click', closeCalendar);
+  closeBottom.addEventListener('click', closeCalendar);
+  modal.addEventListener('click', (event) => { if (event.target === modal) closeCalendar(); });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeCalendar(); });
   pdfButton.addEventListener('click', downloadPdf);
 
   try {
@@ -162,6 +188,7 @@
     pdfButton.disabled = !entries.length;
   } catch (error) {
     console.error('Volunteer calendar failed to load', error);
+    preview.innerHTML = '<p class="muted">The shared calendar is temporarily unavailable.</p>';
     intro.textContent = 'The shared calendar is temporarily unavailable.';
     eventsList.innerHTML = '<div class="events-empty events-error"><strong>Calendar unavailable</strong>Please try again later.</div>';
   }
