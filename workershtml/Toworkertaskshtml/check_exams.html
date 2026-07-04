@@ -404,6 +404,15 @@
   }
   function rebuildPrintableHtml(paper) {
     if (!paper) return '';
+    // Remove the old generic plant fallback from unrelated saved papers. Those
+    // SVGs remain inside Firebase drafts even after the generator is corrected.
+    (paper.questions || []).forEach((question) => {
+      const svg = String(question.diagram?.svg || '');
+      const topic = lower(question.sourceTopic || question.prompt || '');
+      const isPlantDiagram = /\bStem\b/.test(svg) && /\bLeaf\b/.test(svg);
+      const isPlantTopic = /\b(plant|root|stem|leaf|flower|photosynthesis)\b/.test(topic);
+      if (isPlantDiagram && !isPlantTopic) question.diagram = null;
+    });
     paper.schoolId = compact(paper.schoolId || schoolId);
     paper.schoolName = compact(paper.schoolName || prettifySchool(paper.schoolId));
     paper.schoolLogoUrl = compact(paper.schoolLogoUrl || fallbackLogoUrl());
@@ -497,7 +506,10 @@
   }
   async function dbGet(path) {
     const db = getDb(); if (!db) return null;
-    const snap = await db.ref(path).once('value').catch(()=>({val:()=>null}));
+    const snap = await Promise.race([
+      db.ref(path).once('value').catch(()=>({val:()=>null})),
+      new Promise(resolve => setTimeout(() => resolve({val:()=>null}), 8000))
+    ]);
     return snap.val();
   }
   async function dbSet(path, data) {
@@ -1505,11 +1517,10 @@
     state.selectedId = '';
     renderQuestions(null);
     renderSourceTopics(null);
-    await loadClassSubjectRegistry();
     refreshFilterOptions();
-    await loadTemplates();
-    await loadExams();
-    await refreshDiagnostics();
+    await Promise.all([loadTemplates(), loadExams()]);
+    loadClassSubjectRegistry().then(() => refreshFilterOptions()).catch(() => {});
+    refreshDiagnostics().catch(() => {});
   }
 
   // ── Bind events ───────────────────────────────────────────────────────
@@ -1555,11 +1566,10 @@
     }
 
     try {
-      await loadClassSubjectRegistry();
       refreshFilterOptions();
-      await loadTemplates();
-      await loadExams();
-      await refreshDiagnostics();
+      await Promise.all([loadTemplates(), loadExams()]);
+      loadClassSubjectRegistry().then(() => refreshFilterOptions()).catch(() => {});
+      refreshDiagnostics().catch(() => {});
     } catch (err) {
       console.error('init error', err);
       setNotice('Load error: ' + (err.message||err) + '. Check console.', 'error');
