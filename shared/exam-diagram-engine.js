@@ -125,10 +125,43 @@
 </svg>`;
   }
 
+  function buildCircuitDiagram() {
+    return `<svg viewBox="0 0 420 190" xmlns="http://www.w3.org/2000/svg" style="background:#fff;max-width:100%;">
+      <path d="M45 45 H165 M235 45 H370 V145 H45 V45" fill="none" stroke="#111827" stroke-width="3"/>
+      <line x1="165" y1="30" x2="165" y2="60" stroke="#111827" stroke-width="3"/><line x1="180" y1="22" x2="180" y2="68" stroke="#111827" stroke-width="5"/>
+      <circle cx="220" cy="45" r="18" fill="white" stroke="#111827" stroke-width="3"/><path d="M208 33 L232 57 M232 33 L208 57" stroke="#f59e0b" stroke-width="3"/>
+      <rect x="170" y="132" width="70" height="26" fill="white" stroke="#111827" stroke-width="3"/><path d="M178 145 H232" stroke="#dc2626" stroke-width="3"/>
+      <text x="155" y="88" font-family="Arial" font-size="13">dry cells</text><text x="202" y="82" font-family="Arial" font-size="13">bulb</text><text x="177" y="178" font-family="Arial" font-size="13">resistor</text>
+    </svg>`;
+  }
+
+  function buildMagnetDiagram() {
+    return `<svg viewBox="0 0 360 170" xmlns="http://www.w3.org/2000/svg" style="background:#fff;max-width:100%;">
+      <rect x="45" y="60" width="270" height="55" rx="8" fill="#e5e7eb" stroke="#111827" stroke-width="3"/>
+      <path d="M45 68 Q10 88 45 108 M315 68 Q350 88 315 108" fill="none" stroke="#2563eb" stroke-width="2"/>
+      <line x1="180" y1="60" x2="180" y2="115" stroke="#111827" stroke-width="2"/>
+      <text x="105" y="96" text-anchor="middle" font-family="Arial" font-size="24" font-weight="bold">N</text><text x="250" y="96" text-anchor="middle" font-family="Arial" font-size="24" font-weight="bold">S</text>
+    </svg>`;
+  }
+
+  function buildReproductiveSystemDiagram() {
+    return `<svg viewBox="0 0 330 260" xmlns="http://www.w3.org/2000/svg" style="background:#fff;max-width:100%;">
+      <path d="M165 105 C135 65 105 55 78 70 M165 105 C195 65 225 55 252 70" fill="none" stroke="#be185d" stroke-width="7"/>
+      <ellipse cx="68" cy="72" rx="18" ry="13" fill="#f9a8d4" stroke="#831843" stroke-width="2"/><ellipse cx="262" cy="72" rx="18" ry="13" fill="#f9a8d4" stroke="#831843" stroke-width="2"/>
+      <path d="M128 100 Q165 75 202 100 L194 180 Q165 210 136 180 Z" fill="#fbcfe8" stroke="#831843" stroke-width="3"/><path d="M165 196 V235" stroke="#831843" stroke-width="7"/>
+      <line x1="65" y1="42" x2="65" y2="58" stroke="#111827"/><line x1="265" y1="42" x2="265" y2="58" stroke="#111827"/><line x1="228" y1="135" x2="202" y2="135" stroke="#111827"/>
+      <text x="65" y="32" text-anchor="middle" font-family="Arial" font-size="12">A</text><text x="265" y="32" text-anchor="middle" font-family="Arial" font-size="12">B</text><text x="240" y="139" font-family="Arial" font-size="12">C</text>
+    </svg>`;
+  }
+
   const DIAGRAM_MAP = {
     'food chain': buildFoodChainDiagram,
     'water cycle': buildWaterCycleDiagram,
     'plant': buildPlantPartsDiagram,
+    'circuit': buildCircuitDiagram,
+    'electric': buildCircuitDiagram,
+    'magnet': buildMagnetDiagram,
+    'reproductive': buildReproductiveSystemDiagram,
     'compass': buildMapCompassDiagram,
     'number line': () => buildNumberLineDiagram(0, 10),
     'map': buildMapCompassDiagram
@@ -138,7 +171,7 @@
     const settings = options && typeof options === 'object' ? options : {};
     const topic = compactText(settings.topic || '');
     const subject = normalizeLookupToken(settings.subject || '');
-    const topicToken = normalizeLookupToken(topic);
+    const topicToken = normalizeLookupToken(`${topic} ${settings.sourceHint || ''}`);
 
     // Find matching diagram generator
     let svgHtml = null;
@@ -149,22 +182,20 @@
       }
     }
 
-    // Default blank diagram with label if no match
+    // Never insert an unrelated generic diagram.
     if (!svgHtml) {
       if (subject.includes('math') || subject.includes('arithmetic')) {
         svgHtml = buildNumberLineDiagram(0, 20);
-      } else if (subject.includes('science')) {
-        svgHtml = buildPlantPartsDiagram();
       } else if (subject.includes('geography') || subject.includes('social')) {
         svgHtml = buildMapCompassDiagram();
       } else {
-        svgHtml = buildBlankDiagram(`Label the diagram: ${topic}`);
+        return null;
       }
     }
 
     return {
-      prompt: `Study the diagram below and answer: Label or describe what is shown in the diagram about ${topic || 'the topic studied'}.`,
-      answer: `Students should correctly label or describe the key parts shown in the diagram related to ${topic}.`,
+      prompt: `Study the diagram below. Name the labelled parts and state one function shown by the diagram.`,
+      answer: `The labels and function must agree with the diagram and the source notes for ${topic}.`,
       diagram: { svg: svgHtml, type: 'inline_svg' }
     };
   }
@@ -176,6 +207,9 @@
     buildWaterCycleDiagram,
     buildNumberLineDiagram,
     buildMapCompassDiagram
+    ,buildCircuitDiagram
+    ,buildMagnetDiagram
+    ,buildReproductiveSystemDiagram
   };
 
   global.SoMApExamDiagramEngine = api;

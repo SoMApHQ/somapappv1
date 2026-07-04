@@ -9,6 +9,23 @@
     return Shared ? Shared.compactText(value) : String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   }
 
+  function multilineText(value) {
+    return String(value == null ? '' : value)
+      .replace(/\r\n?/g, '\n')
+      .replace(/[\t ]+/g, ' ')
+      .replace(/ *\n */g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function dateFromTimestamp(value) {
+    const stamp = Number(value || 0);
+    if (!stamp) return '';
+    const date = new Date(stamp);
+    if (Number.isNaN(date.getTime())) return '';
+    return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
+  }
+
   function normalizeLookupToken(value) {
     return Shared ? Shared.normalizeLookupToken(value) : compactText(value).toLowerCase();
   }
@@ -137,7 +154,7 @@
   function normalizeNoteRecord(id, note) {
     const raw = note && typeof note === 'object' ? note : {};
     const className = normalizeClassName(raw.class || raw.className || '');
-    const date = compactText(raw.lessonDateContext || raw.date || '');
+    const date = compactText(raw.lessonDateContext || raw.date || dateFromTimestamp(raw.createdAt || raw.updatedAt));
     const year = String(raw.year || raw.academicYear || currentYear());
     return {
       id: compactText(raw.id || id || ''),
@@ -151,14 +168,18 @@
       topic: compactText(raw.topic || ''),
       subTopic: compactText(raw.subTopic || ''),
       keyConcepts: compactText(raw.keyConcepts || ''),
-      detailedContent: compactText(raw.detailedContent || ''),
+      detailedContent: multilineText(raw.detailedContent || ''),
       examples: compactText(raw.examples || ''),
       keyTakeaways: compactText(raw.keyTakeaways || ''),
-      diagrams: compactText(raw.diagrams || ''),
-      practiceQuestions: compactText(raw.practiceQuestions || ''),
+      diagrams: multilineText(raw.diagrams || ''),
+      practiceQuestions: multilineText(raw.practiceQuestions || ''),
       references: compactText(raw.references || ''),
       bookTitle: compactText(raw.bookTitle || ''),
-      homeworkMeta: raw.homeworkMeta || null
+      homeworkMeta: raw.homeworkMeta || null,
+      bookId: compactText(raw.bookId || ''),
+      bookUrl: compactText(raw.bookUrl || ''),
+      bookTopic: compactText(raw.bookTopic || ''),
+      contentImageRefs: Array.isArray(raw.contentImageRefs) ? raw.contentImageRefs : []
     };
   }
 
@@ -375,9 +396,29 @@
     return {
       bookId: book.id,
       bookTitle: book.title,
+      position,
       excerpt,
       assessment: assessmentStart >= 0 ? excerpt.slice(assessmentStart, assessmentStart + 5000) : ''
     };
+  }
+
+  function schemeRowIsDue(row, monthKey, cutoffDate) {
+    if (!monthKey || !row.monthKey) return true;
+    if (row.monthKey < monthKey) return true;
+    if (row.monthKey > monthKey) return false;
+    const currentWeek = Math.max(1, Math.ceil(Number(String(cutoffDate || '').slice(8, 10) || 1) / 7));
+    const rowWeek = Number(String(row.week || '').match(/\d+/)?.[0] || 0);
+    return !rowWeek || rowWeek <= currentWeek;
+  }
+
+  function positionFromSchemeReference(book, reference) {
+    if (!book?.text || !reference) return -1;
+    const cleaned = compactText(reference)
+      .replace(/\b(?:chapter|topic|unit)\s+(?:[ivxlcdm]+|\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b\s*[:.-]?/ig, '')
+      .replace(/\b(?:pp?|pages?|§)\.?\s*[\d–—-]+.*$/i, '')
+      .trim();
+    if (cleaned.length < 4) return -1;
+    return book.text.toLowerCase().indexOf(cleaned.toLowerCase());
   }
 
   function hasHomeworkGiven(plan) {
@@ -604,6 +645,9 @@
       });
     });
 
+    const dueSchemeRows = schemeRows.filter((row) => schemeRowIsDue(row, requestedMonth, cutoffDate));
+    const schemeCutoffPositions = dueSchemeRows.map((row) => positionFromSchemeReference(activeBook, row.reference)).filter((position) => position >= 0);
+    const bookCutoffPosition = schemeCutoffPositions.length ? Math.max(...schemeCutoffPositions) : -1;
     const topics = Array.from(buckets.values()).map((bucket) => {
       bucket.notes.sort((left, right) => noteStrengthForPlan(right, bucket.plan) - noteStrengthForPlan(left, bucket.plan));
       if (!bucket.preferredNoteId && bucket.notes[0]?.id) bucket.preferredNoteId = compactText(bucket.notes[0].id);
@@ -648,7 +692,9 @@
         schemeRows: bucket.schemeRows,
         bookEvidence
       };
-    }).filter((bucket) => bucket.plan || bucket.notes.length).sort((a, b) => b.confidenceScore - a.confidenceScore || a.topic.localeCompare(b.topic));
+    }).filter((bucket) => bucket.plan || bucket.notes.length)
+      .filter((bucket) => bookCutoffPosition < 0 || bucket.bookEvidence?.position == null || bucket.bookEvidence.position <= bookCutoffPosition)
+      .sort((a, b) => b.confidenceScore - a.confidenceScore || a.topic.localeCompare(b.topic));
 
     return {
       topics: topics.filter((topic) => topic.confidenceScore >= minimumConfidenceScore),
@@ -661,6 +707,7 @@
         schemeRowCount: schemeRows.length,
         activeBookId: activeBook?.id || '',
         activeBookTitle: activeBook?.title || '',
+        bookCutoffPosition,
         coverageFrom: filters.dateFrom,
         coverageTo: filters.dateTo,
         orphanNotes: orphanNotes.map((note) => ({ id: note.id, topic: note.topic, date: note.date }))

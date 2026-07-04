@@ -438,6 +438,27 @@
     if (primary || !fallbackUrl || targetUrl === fallbackUrl) return primary;
     return tryLoad(fallbackUrl);
   }
+  function svgToPngDataUrl(svg) {
+    return new Promise((resolve) => {
+      if (!svg) { resolve(null); return; }
+      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const image = new Image();
+      image.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 840; canvas.height = 420;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+          resolve(canvas.toDataURL('image/png'));
+        } catch (_) { resolve(null); }
+        URL.revokeObjectURL(url);
+      };
+      image.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+      image.src = url;
+    });
+  }
 
   // ── Tanzania class/subject registry ──────────────────────────────────
   const CLASS_LIST = [
@@ -1338,13 +1359,16 @@
     doc.text(instructionLines, margin + 12, y + 30);
     y += instructionHeight + 18;
 
-    (paper.questions||[]).forEach((q,i) => {
-      const promptLines = doc.splitTextToSize(`${i+1}. ${String(q.prompt||'').replace(/\s+/g, ' ')} (${q.marks||1} mark${q.marks===1?'':'s'})`, contentWidth);
+    for (const [i, q] of (paper.questions || []).entries()) {
+      const promptText = q.passage ? 'Read the passage below and answer the question.' : String(q.prompt || '').replace(/\s+/g, ' ');
+      const promptLines = doc.splitTextToSize(`${i+1}. ${promptText} (${q.marks||1} mark${q.marks===1?'':'s'})`, contentWidth);
       const optionText = (q.options || []).map((option, optionIndex) =>
         `${String.fromCharCode(65 + optionIndex)}. ${String(option)}`
       ).join('     ');
       const optionLines = optionText ? doc.splitTextToSize(optionText, contentWidth - 18) : [];
-      const neededHeight = (promptLines.length * 13) + (optionLines.length * 11) + (q.diagram?.svg ? 18 : 0) + 12;
+      const passageLines = q.passage ? doc.splitTextToSize(String(q.passage), contentWidth - 24) : [];
+      const matchingRows = q.matching?.left?.length || 0;
+      const neededHeight = (promptLines.length * 13) + (passageLines.length * 11) + ((q.subQuestions?.length || 0) * 18) + (optionLines.length * 11) + (matchingRows * 18) + (q.diagram?.svg ? 150 : 0) + 36;
       if (y + neededHeight > pageHeight - 42) {
         doc.addPage();
         y = 42;
@@ -1354,6 +1378,33 @@
       doc.setFontSize(11);
       doc.text(promptLines, margin, y);
       y += promptLines.length * 13;
+      if (passageLines.length) {
+        doc.setFillColor(248, 250, 252); doc.setDrawColor(148, 163, 184);
+        const boxHeight = passageLines.length * 11 + 18;
+        doc.roundedRect(margin + 10, y, contentWidth - 20, boxHeight, 5, 5, 'FD');
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.text('READ THE PASSAGE BELOW', margin + 18, y + 12);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.text(passageLines, margin + 18, y + 26);
+        y += boxHeight + 5;
+        const passageQuestions = q.subQuestions?.length ? q.subQuestions.map((item, subIndex) => `${String.fromCharCode(97 + subIndex)}) ${item.prompt}`) : [`Question: ${String(q.prompt || '')}`];
+        doc.setFont('helvetica', 'bold');
+        passageQuestions.forEach((questionText) => {
+          const lines = doc.splitTextToSize(questionText, contentWidth - 18);
+          doc.text(lines, margin + 10, y + 2); y += lines.length * 11 + 3;
+        });
+      }
+      if (matchingRows) {
+        const left = q.matching.left || [], right = q.matching.right || [];
+        const colWidth = (contentWidth - 44) / 2;
+        doc.setFontSize(9); doc.setFont('helvetica', 'bold');
+        doc.text('Column A', margin + 12, y + 12); doc.text('Column B', margin + 24 + colWidth, y + 12);
+        y += 18; doc.setFont('helvetica', 'normal');
+        left.forEach((item, rowIndex) => {
+          doc.rect(margin + 8, y - 10, colWidth, 18); doc.rect(margin + 20 + colWidth, y - 10, colWidth, 18);
+          doc.text(`${String.fromCharCode(65 + rowIndex)}. ${String(item)}`, margin + 12, y + 2, { maxWidth: colWidth - 8 });
+          doc.text(`${rowIndex + 1}. ${String(right[rowIndex] || '')}`, margin + 24 + colWidth, y + 2, { maxWidth: colWidth - 8 });
+          y += 18;
+        });
+      }
       if (optionLines.length) {
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(10);
@@ -1361,13 +1412,11 @@
         y += optionLines.length * 11 + 4;
       }
       if (q.diagram?.svg) {
-        doc.setTextColor(71, 85, 105);
-        doc.setFontSize(9);
-        doc.text('Diagram is included in the print view. Use Print for exact SVG rendering.', margin + 16, y + 2);
-        y += 14;
+        const diagramPng = await svgToPngDataUrl(q.diagram.svg);
+        if (diagramPng) { doc.addImage(diagramPng, 'PNG', margin + 70, y, contentWidth - 140, 140); y += 146; }
       }
       y += 10;
-    });
+    }
     doc.save(`${(paper.title||'exam').replace(/[^a-z0-9]+/gi,'-').toLowerCase()}.pdf`);
   }
 

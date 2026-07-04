@@ -129,19 +129,24 @@
     return compactText(text)
       .split(/(?<=[.!?])\s+/)
       .map((item) => compactText(item))
-      .filter((item) => item.length >= 12);
+      .filter((item) => item.length >= 12 && !item.includes('?'));
+  }
+
+  function isWeakTerm(value) {
+    const clean = normalizeLookupToken(value);
+    return !clean || clean.split(' ').length > 8 || /^(what|which|who|where|when|why|how|which of the following|devices?|things?|it|they)$/.test(clean);
   }
 
   function extractConceptPairs(sourceText) {
     const pairs = [];
     splitSentences(sourceText).forEach((sentence) => {
       const colon = sentence.match(/^([^:]{3,60})\s*:\s*(.{4,180})$/);
-      if (colon) {
+      if (colon && !isWeakTerm(colon[1]) && !colon[2].includes('?')) {
         pairs.push({ term: compactText(colon[1]), description: compactText(colon[2]) });
         return;
       }
       const isMatch = sentence.match(/^(.{3,60})\s+(is|are|means)\s+(.{4,180})$/i);
-      if (isMatch) {
+      if (isMatch && !isWeakTerm(isMatch[1]) && !isMatch[3].includes('?')) {
         pairs.push({ term: compactText(isMatch[1]), description: compactText(isMatch[3]) });
       }
     });
@@ -153,6 +158,81 @@
       .split(/\r?\n/)
       .map((line) => compactText(line.replace(/^\d+[\).\s-]*/, '')))
       .filter(Boolean);
+  }
+
+  function cleanAssessmentPrompt(value) {
+    return compactText(String(value || '')
+      .replace(/^Q\d+[.)]\s*/i, '')
+      .replace(/^(multiple choice|true or false|passage question|word problem|reflection|short answer)\s*:\s*/i, ''));
+  }
+
+  function validPrompt(value) {
+    const clean = cleanAssessmentPrompt(value);
+    if (clean.length < 10 || clean.length > 420) return false;
+    if (/^(what|which|who|where|when|why|how|which of the following)\??$/i.test(clean)) return false;
+    if (/\b(from|in) (the )?lesson\b/i.test(clean)) return false;
+    return !/\b(undefined|null|example \d+ from)\b/i.test(clean);
+  }
+
+  function answerFromContent(prompt, sourceText) {
+    const stop = new Set(['what','which','where','when','does','from','with','that','this','into','about','following','explain']);
+    const words = normalizeLookupToken(prompt).split(' ').filter((word) => word.length > 3 && !stop.has(word));
+    const candidates = splitSentences(sourceText).filter((sentence) => !sentence.includes('?'));
+    return candidates.map((sentence) => ({
+      sentence,
+      score: words.reduce((sum, word) => sum + (normalizeLookupToken(sentence).includes(word) ? 1 : 0), 0)
+    })).sort((a, b) => b.score - a.score || a.sentence.length - b.sentence.length)[0]?.sentence || '';
+  }
+
+  function parseAssessmentItems(text, sourceText, topic) {
+    const raw = String(text || '').replace(/\r\n?/g, '\n').trim();
+    if (!raw) return [];
+    const blocks = raw.split(/(?=^\s*Q?\d+[.)]\s+|^\s*(?:Multiple Choice|Matching|True or False|Passage Question|Word Problem|Reflection)\s*:)/gmi)
+      .map((block) => block.trim()).filter(Boolean);
+    const items = [];
+    blocks.forEach((block) => {
+      const cleanBlock = block.replace(/^Q?\d+[.)]\s*/i, '').trim();
+      const typeLabel = (cleanBlock.match(/^(Multiple Choice|Matching|True or False|Passage Question|Word Problem|Reflection)\s*:/i) || [])[1] || '';
+      const lowerType = typeLabel.toLowerCase();
+      if (lowerType === 'matching') {
+        const aPart = cleanBlock.match(/Column A\s*:\s*([\s\S]*?)(?=Column B\s*:)/i)?.[1] || '';
+        const bPart = cleanBlock.match(/Column B\s*:\s*([\s\S]*)/i)?.[1] || '';
+        const left = aPart.split(/\n/).map((line) => compactText(line.replace(/^[A-Z][.)]\s*/i, ''))).filter(Boolean);
+        const right = bPart.split(/\n/).map((line) => compactText(line.replace(/^\d+[.)]\s*/, ''))).filter(Boolean);
+        const concepts = extractConceptPairs(sourceText);
+        const resolved = left.map((term) => concepts.find((pair) => normalizeLookupToken(pair.term) === normalizeLookupToken(term))).filter(Boolean);
+        if (left.length >= 2 && right.length >= 2 && resolved.length === left.length) {
+          items.push({ type: 'matching', prompt: 'Match Column A with Column B.', matching: { left, right }, answer: resolved.map((pair) => `${pair.term} - ${pair.description}`).join('; ') });
+        }
+        return;
+      }
+      if (lowerType === 'passage question') {
+        const passage = compactText(cleanBlock.match(/Passage\s*:\s*([\s\S]*?)(?=Question\s*:)/i)?.[1] || '');
+        const prompt = cleanAssessmentPrompt(cleanBlock.match(/Question\s*:\s*([\s\S]*)/i)?.[1] || '');
+        if (passage.length >= 40 && validPrompt(prompt) && !passage.includes('?')) {
+          items.push({ type: 'passage', prompt, passage, answer: answerFromContent(prompt, passage) });
+        }
+        return;
+      }
+      const optionMatches = [...cleanBlock.matchAll(/(?:^|\n|\s)([A-E])[.)]\s*([\s\S]*?)(?=(?:\n|\s)[A-E][.)]\s|$)/gi)];
+      if (lowerType === 'multiple choice' || optionMatches.length >= 3) {
+        const firstOption = cleanBlock.search(/(?:^|\n)\s*A[.)]\s*/im);
+        const prompt = cleanAssessmentPrompt((firstOption >= 0 ? cleanBlock.slice(0, firstOption) : cleanBlock).replace(/^Multiple Choice\s*:\s*/i, ''));
+        const options = optionMatches.map((match) => compactText(match[2])).filter((option) => option.length >= 2);
+        const sourceToken = normalizeLookupToken(sourceText);
+        const supported = options.filter((option) => option.length >= 3 && sourceToken.includes(normalizeLookupToken(option)));
+        if (validPrompt(prompt) && options.length >= 3 && new Set(options.map(normalizeLookupToken)).size === options.length && supported.length === 1) {
+          items.push({ type: 'multiple_choice', prompt, options, answer: supported[0] });
+        }
+        return;
+      }
+      const prompt = cleanAssessmentPrompt(cleanBlock);
+      if (!validPrompt(prompt)) return;
+      const type = lowerType === 'true or false' ? 'true_false' : (lowerType === 'word problem' ? 'word_problem' : 'short_answer');
+      const answer = answerFromContent(prompt, sourceText);
+      if (answer) items.push({ type, prompt, options: type === 'true_false' ? ['True', 'False'] : [], answer });
+    });
+    return items.map((item) => ({ ...item, sourceTopic: topic.topic }));
   }
 
   function selectTopic(topics, index, selector) {
@@ -175,23 +255,16 @@
       if (!candidate || candidate === correct || distractors.includes(candidate)) return;
       distractors.push(candidate);
     });
-    if (distractors.length < 3) {
-      [
-        `It means something not related to ${topic.topic.toLowerCase()}.`,
-        'It is always false.',
-        'It is only used once and then forgotten.',
-        'It is not part of the lesson.'
-      ].forEach((candidate) => {
-        if (candidate !== correct && !distractors.includes(candidate)) distractors.push(candidate);
-      });
-    }
     return distractors.slice(0, 3);
   }
 
   function buildMcq(slot, topic, analysis) {
     const pair = analysis.concepts[0] || null;
+    if (!pair || isWeakTerm(pair.term)) return null;
     const correct = compactText(pair?.description || analysis.sentences[0] || `It explains ${topic.topic.toLowerCase()}.`);
-    const options = [correct, ...buildDistractors(topic, analysis.concepts.slice(1), correct)].sort((a, b) => a.localeCompare(b));
+    const distractors = buildDistractors(topic, analysis.concepts.slice(1), correct);
+    if (distractors.length < 3) return null;
+    const options = [correct, ...distractors].sort((a, b) => a.localeCompare(b));
     return {
       prompt: pair ? `Which option best explains ${pair.term}?` : `Which statement about ${topic.topic} is correct?`,
       answer: correct,
@@ -213,6 +286,7 @@
 
   function buildShortAnswer(topic, analysis) {
     const pair = analysis.concepts[0] || null;
+    if (!pair || isWeakTerm(pair.term)) return null;
     return {
       prompt: pair ? `Explain ${pair.term}.` : `Write one key idea you learned about ${topic.topic}.`,
       answer: compactText(pair?.description || analysis.sentences[0] || topic.sourceText)
@@ -220,10 +294,12 @@
   }
 
   function buildPassage(topic, analysis) {
+    if (analysis.sentences.length < 3 || !analysis.concepts[0] || isWeakTerm(analysis.concepts[0].term)) return null;
     const passage = analysis.sentences.slice(0, 3).join(' ');
     return {
-      prompt: `Read the passage and answer the question.\n\n${passage}\n\nQuestion: What is one important idea from the passage?`,
-      answer: compactText(analysis.sentences[0] || `One important idea is ${topic.topic}.`)
+      prompt: `According to the passage, what is ${analysis.concepts[0].term}?`,
+      passage,
+      answer: compactText(analysis.concepts[0].description)
     };
   }
 
@@ -272,6 +348,7 @@
 
   function buildFillBlank(topic, analysis) {
     const pair = analysis.concepts[0];
+    if (!pair || isWeakTerm(pair.term)) return null;
     if (pair) {
       return {
         prompt: `${pair.term} means __________.`,
@@ -296,12 +373,65 @@
 
   function buildMatching(topic, analysis) {
     const pairs = analysis.concepts.slice(0, 3);
-    const promptLines = pairs.map((pair, index) => `${String.fromCharCode(65 + index)}. ${pair.term}`).join('\n');
-    const answerLines = pairs.map((pair, index) => `${String.fromCharCode(65 + index)} - ${pair.description}`).join('; ');
+    if (pairs.length < 3 || pairs.some((pair) => isWeakTerm(pair.term))) return null;
     return {
-      prompt: `Match each item with its meaning.\n${promptLines}`,
-      answer: answerLines
+      prompt: 'Match Column A with Column B.',
+      matching: { left: pairs.map((pair) => pair.term), right: pairs.map((pair) => pair.description).reverse() },
+      answer: pairs.map((pair) => `${pair.term} - ${pair.description}`).join('; ')
     };
+  }
+
+  function buildMatchingGroup(topics, count) {
+    const pairs = [];
+    const seen = new Set();
+    topics.forEach((topic) => {
+      analyseTopic(topic).concepts.forEach((pair) => {
+        const key = normalizeLookupToken(pair.term);
+        if (!key || seen.has(key) || isWeakTerm(pair.term)) return;
+        seen.add(key); pairs.push(pair);
+      });
+    });
+    if (pairs.length < count) return null;
+    const selected = pairs.slice(0, count);
+    return {
+      prompt: 'Match Column A with Column B.',
+      matching: { left: selected.map((pair) => pair.term), right: selected.map((pair) => pair.description).reverse() },
+      answer: selected.map((pair) => `${pair.term} - ${pair.description}`).join('; ')
+    };
+  }
+
+  function buildPassageGroup(topics, count) {
+    const candidates = topics.map((topic) => ({ topic, analysis: analyseTopic(topic) }))
+      .filter((entry) => entry.analysis.sentences.length >= 3 && entry.analysis.concepts.length >= count)
+      .sort((a, b) => b.analysis.sentences.length - a.analysis.sentences.length);
+    const selected = candidates[0];
+    if (!selected) return null;
+    const passage = selected.analysis.sentences.slice(0, 6).join(' ');
+    const subQuestions = selected.analysis.concepts.slice(0, count).map((pair) => ({
+      prompt: `What does ${pair.term} mean?`, answer: pair.description
+    }));
+    return {
+      prompt: 'Answer the questions that follow.', passage, subQuestions,
+      answer: subQuestions.map((item, index) => `${String.fromCharCode(97 + index)}) ${item.answer}`).join('; ')
+    };
+  }
+
+  function collapseStructuredSlots(rawSlots) {
+    const result = [];
+    const grouped = new Set();
+    rawSlots.forEach((slot) => {
+      if (!['matching', 'passage'].includes(slot.questionType)) { result.push(slot); return; }
+      const key = `${slot.sectionKey}__${slot.questionType}`;
+      if (grouped.has(key)) return;
+      grouped.add(key);
+      const group = rawSlots.filter((item) => item.sectionKey === slot.sectionKey && item.questionType === slot.questionType);
+      result.push({
+        ...slot,
+        marks: group.reduce((sum, item) => sum + Number(item.marks || 0), 0),
+        structuredItemCount: group.length
+      });
+    });
+    return result;
   }
 
   function buildPractical(topic) {
@@ -351,7 +481,7 @@
       case 'word_problem':
         return buildWordProblem(topic, analysis, context, index);
       case 'diagram':
-        return DiagramEngine.createDiagramQuestion({ topic: topic.topic, subject: topic.subject });
+        return DiagramEngine.createDiagramQuestion({ topic: topic.topic, subject: topic.subject, sourceHint: [topic.diagrams, topic.sourceText].flat().filter(Boolean).join(' ') });
       case 'fill_blank':
         return buildFillBlank(topic, analysis);
       case 'composition':
@@ -381,6 +511,9 @@
       answer: compactText(built.answer || ''),
       options: Array.isArray(built.options) ? built.options : [],
       diagram: built.diagram || null,
+      passage: compactText(built.passage || ''),
+      matching: built.matching || null,
+      subQuestions: Array.isArray(built.subQuestions) ? built.subQuestions : [],
       familiarNamesUsed: compactText(built.prompt || '').includes(' ') ? [] : [],
       confidenceScore: Number(topic.confidenceScore || 0) || 0,
       generatedAt: Date.now(),
@@ -396,9 +529,13 @@
       const questions = paper.questions.filter((question) => question.sectionKey === section.sectionKey).map((question) => `
         <li class="exam-question">
           <div class="question-head">
-            <span>${question.sequence}. ${formatHtmlBlock(question.prompt)}</span>
+            <span>${question.sequence}. ${question.passage ? 'Read the passage below and answer the question.' : formatHtmlBlock(question.prompt)}</span>
             <span>${question.marks} mark${question.marks === 1 ? '' : 's'}</span>
           </div>
+          ${question.passage ? `<div class="passage-block"><strong>Read the passage below.</strong><p>${escHtml(question.passage)}</p></div>` : ''}
+          ${question.passage && question.subQuestions?.length ? `<ol class="passage-questions" type="a">${question.subQuestions.map((item) => `<li>${escHtml(item.prompt)}</li>`).join('')}</ol>` : ''}
+          ${question.passage && !question.subQuestions?.length ? `<div class="passage-question"><strong>Question:</strong> ${escHtml(question.prompt)}</div>` : ''}
+          ${question.matching ? `<table class="matching-table"><thead><tr><th>Column A</th><th>Column B</th><th>Answer</th></tr></thead><tbody>${question.matching.left.map((left, pairIndex) => `<tr><td>${String.fromCharCode(65 + pairIndex)}. ${escHtml(left)}</td><td>${pairIndex + 1}. ${escHtml(question.matching.right[pairIndex] || '')}</td><td></td></tr>`).join('')}</tbody></table>` : ''}
           ${question.options?.length ? `<div class="exam-options">${question.options.map((option, optionIndex) => `<span><strong>${String.fromCharCode(65 + optionIndex)}.</strong> ${escHtml(option)}</span>`).join('')}</div>` : ''}
           ${question.diagram?.svg ? `<div class="diagram-wrap">${question.diagram.svg}</div>` : ''}
         </li>
@@ -438,6 +575,13 @@
           .question-head span:first-child { flex: 1; }
           .exam-options { display: flex; flex-wrap: wrap; gap: 5px 22px; margin: 6px 0 0 20px; }
           .exam-options span { white-space: normal; }
+          .passage-block { margin: 9px 0; padding: 10px 12px; border-left: 4px solid #1d4ed8; background: #f8fafc; }
+          .passage-block p { margin: 6px 0 0; text-align: justify; }
+          .passage-question { margin: 7px 0 0 12px; }
+          .passage-questions { margin-top: 7px; }
+          .matching-table { width: 100%; border-collapse: collapse; margin-top: 9px; }
+          .matching-table th, .matching-table td { border: 1px solid #64748b; padding: 7px; text-align: left; }
+          .matching-table th { background: #e2e8f0; }
           .diagram-wrap { margin-top: 10px; }
           ol { padding-left: 20px; }
           .paper-footer-note { margin-top: 18px; font-size: 11px; color: #64748b; text-align: right; }
@@ -576,6 +720,12 @@
         sourceHomework: [topic.sourceHomework, topic.bookEvidence.assessment].filter(Boolean).join('\n')
       }));
     }
+    if (sourceMode === 'balanced') {
+      topics = topics.map((topic) => ({
+        ...topic,
+        sourceHomework: [topic.sourceHomework, topic.bookEvidence?.assessment].filter(Boolean).join('\n\n')
+      }));
+    }
     if (template.settings.requireHomeworkGivenForComplexSections) {
       topics = topics.filter((topic) => compactText(topic.sourceHomework));
     }
@@ -583,10 +733,13 @@
       throw new Error('No verified taught topics met the confidence threshold for this class, subject, and month.');
     }
 
-    const slots = Shared.expandQuestionSlots(template);
+    const slots = collapseStructuredSlots(Shared.expandQuestionSlots(template));
     const namePool = template.settings.useFamiliarNames ? await NamePool.loadPool({ schoolId, year, className: template.className }) : null;
     const questionsWithAnswers = [];
     const analysisCache = new Map();
+    const assessmentItems = topics.flatMap((topic) => parseAssessmentItems(topic.sourceHomework, topic.generationSourceText || topic.sourceText || topic.bookEvidence?.excerpt || '', topic)
+      .map((item) => ({ ...item, topic })));
+    const consumedAssessmentItems = new Set();
     const topicUseCount = new Map();
     const usedQuestions = new Set();
     slots.forEach((slot, index) => {
@@ -602,21 +755,40 @@
         helperName: 'another pupil',
         placeName: 'the classroom'
       };
-      let built = buildQuestionForSlot(slot, topic, analysis, context, index);
+      const compatibleTypes = slot.questionType === 'short_answer'
+        ? ['short_answer', 'reflection']
+        : [slot.questionType];
+      const directIndex = assessmentItems.findIndex((item, itemIndex) =>
+        !consumedAssessmentItems.has(itemIndex) && compatibleTypes.includes(item.type));
+      let built = null;
+      if (slot.questionType === 'matching' && slot.structuredItemCount > 1) {
+        built = buildMatchingGroup(topics, slot.structuredItemCount);
+      } else if (slot.questionType === 'passage' && slot.structuredItemCount > 1) {
+        built = buildPassageGroup(topics, slot.structuredItemCount);
+      } else if (directIndex >= 0) {
+        consumedAssessmentItems.add(directIndex);
+        const direct = assessmentItems[directIndex];
+        selectedTopic = direct.topic;
+        built = direct;
+      } else {
+        built = buildQuestionForSlot(slot, topic, analysis, context, index);
+      }
+      if (!built || !validPrompt(built.prompt)) {
+        throw new Error(`Not enough valid ${Shared.questionTypeLabel(slot.questionType).toLowerCase()} questions were found in the saved lesson-note homework or active book assessments. Generation stopped instead of inserting an unclear question.`);
+      }
       let fingerprint = questionFingerprint(built.prompt);
       // Never knowingly place the same question twice. Try other taught topics
       // before using a clear, age-appropriate alternative wording.
       for (let attempt = 1; usedQuestions.has(fingerprint) && attempt < topics.length; attempt += 1) {
         const alternate = topics[(index + attempt) % topics.length];
         const alternateAnalysis = varyAnalysis(analysisCache.get(alternate.key) || analyseTopic(alternate), useCount + attempt);
-        built = buildQuestionForSlot(slot, alternate, alternateAnalysis, context, index + attempt);
+        const alternateBuilt = buildQuestionForSlot(slot, alternate, alternateAnalysis, context, index + attempt);
+        if (!alternateBuilt || !validPrompt(alternateBuilt.prompt)) continue;
+        built = alternateBuilt;
         selectedTopic = alternate;
         fingerprint = questionFingerprint(built.prompt);
       }
-      if (usedQuestions.has(fingerprint)) {
-        built.prompt = `${built.prompt.replace(/[.\s]+$/, '')}. Give example ${index + 1} from the lesson.`;
-        fingerprint = questionFingerprint(built.prompt);
-      }
+      if (usedQuestions.has(fingerprint)) throw new Error('The available source material does not contain enough distinct questions for this exam format. Generation stopped to prevent repetition.');
       usedQuestions.add(fingerprint);
       const question = makeQuestionRecord(slot, selectedTopic, built, index);
       if (template.settings.useFamiliarNames) {
@@ -631,7 +803,8 @@
       const candidate = questionsWithAnswers.find((question) => ['short_answer', 'practical_or_activity', 'fill_blank'].includes(question.type)) || questionsWithAnswers[questionsWithAnswers.length - 1];
       if (candidate) {
         const source = topics.find((topic) => topic.topic === candidate.sourceTopic) || topics[0];
-        const diagramQuestion = DiagramEngine.createDiagramQuestion({ topic: source.topic, subject: source.subject });
+        const diagramQuestion = DiagramEngine.createDiagramQuestion({ topic: source.topic, subject: source.subject, sourceHint: [source.diagrams, source.sourceText].flat().filter(Boolean).join(' ') });
+        if (!diagramQuestion) throw new Error('No relevant diagram could be verified from the selected notes or active book. Generation stopped instead of inserting an unrelated diagram.');
         candidate.prompt = diagramQuestion.prompt;
         candidate.answer = diagramQuestion.answer;
         candidate.options = [];
@@ -715,6 +888,9 @@
         answer: question.answer,
         options: question.options || [],
         diagram: question.diagram || null,
+        passage: question.passage || '',
+        matching: question.matching || null,
+        subQuestions: question.subQuestions || [],
         sourceTopic: question.sourceTopic
       })),
       gateVersion: 'sha256-v1'
@@ -726,7 +902,10 @@
 
   const api = {
     generateDraftExam,
-    buildPrintableHtml
+    buildPrintableHtml,
+    validateAssessmentText(text, sourceText, topic) {
+      return parseAssessmentItems(text, sourceText, topic || { topic: 'Topic' });
+    }
   };
 
   global.SoMApExamGenerator = api;
