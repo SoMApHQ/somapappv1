@@ -231,6 +231,9 @@
       term: compactText(meta.term || ''),
       topic: compactText(raw.specificActivities || raw.specificCompetence || raw.mainCompetence || ''),
       reference: compactText(raw.reference || ''),
+      bookChapter: compactText(raw.bookChapter || raw.bookMapping?.chapter || ''),
+      bookTopic: compactText(raw.bookTopic || raw.bookMapping?.topic || ''),
+      bookSubtopic: compactText(raw.bookSubtopic || raw.bookMapping?.subtopic || ''),
       month: compactText(raw.month || ''),
       monthKey: normalizeMonthKey(raw.month || '', meta.year || currentYear()),
       week: compactText(raw.week || '')
@@ -664,6 +667,23 @@
     return position;
   }
 
+  // Teachers usually pick the book chapter/topic from the structured dropdown
+  // in schemes.html rather than typing a free-text "Reference". Try those
+  // structured fields first (most specific first) before falling back to the
+  // free-text reference, so a scheme row still locates its place in the book
+  // even when Reference was left blank.
+  function positionFromSchemeRow(book, row) {
+    if (!book?.text || !row) return -1;
+    const candidates = [row.bookSubtopic, row.bookTopic, row.bookChapter];
+    for (const candidate of candidates) {
+      const clean = compactText(candidate);
+      if (clean.length < 4) continue;
+      const position = book.text.toLowerCase().indexOf(clean.toLowerCase());
+      if (position >= 0) return position;
+    }
+    return positionFromSchemeReference(book, row.reference);
+  }
+
   function hasHomeworkGiven(plan) {
     return Boolean(plan?.homeworkGivenMeta?.given);
   }
@@ -891,7 +911,7 @@
     });
 
     const dueSchemeRows = schemeRows.filter((row) => schemeRowInCoverage(row, filters.dateFrom, filters.dateTo));
-    const schemeCutoffPositions = dueSchemeRows.map((row) => positionFromSchemeReference(activeBook, row.reference)).filter((position) => position >= 0);
+    const schemeCutoffPositions = dueSchemeRows.map((row) => positionFromSchemeRow(activeBook, row)).filter((position) => position >= 0);
     const bookCoverageStartPosition = schemeCutoffPositions.length ? Math.min(...schemeCutoffPositions) : -1;
     const bookCutoffPosition = schemeCutoffPositions.length ? Math.max(...schemeCutoffPositions) : -1;
     let coveredBookText = activeBook?.text || '';
@@ -955,7 +975,9 @@
       bookAssessmentSource: activeBook ? {
         id: activeBook.id,
         title: activeBook.title,
-        text: coveredBookText
+        text: coveredBookText,
+        rawText: activeBook.text || '',
+        rawTextLength: (activeBook.text || '').length
       } : null,
       diagnostics: {
         ...activeBookDiagnostics,
@@ -968,8 +990,9 @@
         activeBookTitle: activeBookDiagnostics.activeBookTitle || activeBook?.title || '',
         bookCutoffPosition,
         bookCoverageStartPosition,
+        coveredBookTextLength: coveredBookText.length,
         coverageSchemeRowCount: dueSchemeRows.length,
-        coverageSchemeReferences: uniqueStrings(dueSchemeRows.map((row) => row.reference)),
+        coverageSchemeReferences: uniqueStrings(dueSchemeRows.map((row) => row.bookSubtopic || row.bookTopic || row.bookChapter || row.reference)),
         coverageFrom: filters.dateFrom,
         coverageTo: filters.dateTo,
         orphanNotes: orphanNotes.map((note) => ({ id: note.id, topic: note.topic, date: note.date }))
@@ -982,7 +1005,8 @@
     readActiveBook,
     countMultipleChoiceItems,
     schemeRowInCoverage,
-    positionFromSchemeReference
+    positionFromSchemeReference,
+    positionFromSchemeRow
   };
 
   global.SoMApExamSourceResolver = api;
