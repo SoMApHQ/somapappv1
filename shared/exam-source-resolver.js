@@ -628,13 +628,23 @@
     };
   }
 
-  function schemeRowIsDue(row, monthKey, cutoffDate) {
-    if (!monthKey || !row.monthKey) return true;
-    if (row.monthKey < monthKey) return true;
-    if (row.monthKey > monthKey) return false;
-    const currentWeek = Math.max(1, Math.ceil(Number(String(cutoffDate || '').slice(8, 10) || 1) / 7));
+  function schemeRowInCoverage(row, dateFrom, dateTo) {
+    if (!row?.monthKey) return true;
+    const startMonth = monthKeyFromDate(dateFrom);
+    const endMonth = monthKeyFromDate(dateTo);
+    if (startMonth && row.monthKey < startMonth) return false;
+    if (endMonth && row.monthKey > endMonth) return false;
     const rowWeek = Number(String(row.week || '').match(/\d+/)?.[0] || 0);
-    return !rowWeek || rowWeek <= currentWeek;
+    if (!rowWeek) return true;
+    if (startMonth && row.monthKey === startMonth) {
+      const startWeek = Math.max(1, Math.ceil(Number(String(dateFrom || '').slice(8, 10) || 1) / 7));
+      if (rowWeek < startWeek) return false;
+    }
+    if (endMonth && row.monthKey === endMonth) {
+      const endWeek = Math.max(1, Math.ceil(Number(String(dateTo || '').slice(8, 10) || 1) / 7));
+      if (rowWeek > endWeek) return false;
+    }
+    return true;
   }
 
   function positionFromSchemeReference(book, reference) {
@@ -642,9 +652,16 @@
     const cleaned = compactText(reference)
       .replace(/\b(?:chapter|topic|unit)\s+(?:[ivxlcdm]+|\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b\s*[:.-]?/ig, '')
       .replace(/\b(?:pp?|pages?|§)\.?\s*[\d–—-]+.*$/i, '')
+      .replace(/[(:;,\s-]+$/g, '')
       .trim();
     if (cleaned.length < 4) return -1;
-    return book.text.toLowerCase().indexOf(cleaned.toLowerCase());
+    const haystack = book.text.toLowerCase();
+    const needle = cleaned.toLowerCase();
+    const chapterOnePositions = [...haystack.matchAll(/\n\s*chapter\s+(?:one|1)\b/gi)].map((match) => match.index || 0);
+    const bodyStart = chapterOnePositions.length ? Math.max(...chapterOnePositions) : 0;
+    let position = haystack.indexOf(needle, bodyStart);
+    if (position < 0) position = haystack.indexOf(needle);
+    return position;
   }
 
   function hasHomeworkGiven(plan) {
@@ -873,15 +890,16 @@
       });
     });
 
-    const dueSchemeRows = schemeRows.filter((row) => schemeRowIsDue(row, requestedMonth, cutoffDate));
+    const dueSchemeRows = schemeRows.filter((row) => schemeRowInCoverage(row, filters.dateFrom, filters.dateTo));
     const schemeCutoffPositions = dueSchemeRows.map((row) => positionFromSchemeReference(activeBook, row.reference)).filter((position) => position >= 0);
+    const bookCoverageStartPosition = schemeCutoffPositions.length ? Math.min(...schemeCutoffPositions) : -1;
     const bookCutoffPosition = schemeCutoffPositions.length ? Math.max(...schemeCutoffPositions) : -1;
     let coveredBookText = activeBook?.text || '';
     if (coveredBookText && bookCutoffPosition >= 0) {
       const tail = coveredBookText.slice(bookCutoffPosition + 20);
       const nextChapter = tail.search(/\n\s*(?:chapter|topic|unit)\s+(?:[ivxlcdm]+|\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/i);
       const coverageEnd = nextChapter >= 0 ? bookCutoffPosition + 20 + nextChapter : coveredBookText.length;
-      coveredBookText = coveredBookText.slice(0, coverageEnd);
+      coveredBookText = coveredBookText.slice(Math.max(0, bookCoverageStartPosition), coverageEnd);
     }
     const topics = Array.from(buckets.values()).map((bucket) => {
       bucket.notes.sort((left, right) => noteStrengthForPlan(right, bucket.plan) - noteStrengthForPlan(left, bucket.plan));
@@ -949,6 +967,9 @@
         activeBookId: activeBookDiagnostics.activeBookId || activeBook?.id || '',
         activeBookTitle: activeBookDiagnostics.activeBookTitle || activeBook?.title || '',
         bookCutoffPosition,
+        bookCoverageStartPosition,
+        coverageSchemeRowCount: dueSchemeRows.length,
+        coverageSchemeReferences: uniqueStrings(dueSchemeRows.map((row) => row.reference)),
         coverageFrom: filters.dateFrom,
         coverageTo: filters.dateTo,
         orphanNotes: orphanNotes.map((note) => ({ id: note.id, topic: note.topic, date: note.date }))
@@ -959,7 +980,9 @@
   const api = {
     resolveVerifiedTopics,
     readActiveBook,
-    countMultipleChoiceItems
+    countMultipleChoiceItems,
+    schemeRowInCoverage,
+    positionFromSchemeReference
   };
 
   global.SoMApExamSourceResolver = api;

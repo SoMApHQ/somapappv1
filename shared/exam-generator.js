@@ -724,7 +724,8 @@
       subject: template.subject,
       term: template.term,
       monthKey,
-      dateTo: compactText(template.settings.schedule?.exactDate || ''),
+      dateFrom: compactText(template.settings.coverage?.startDate || `${year}-01-01`),
+      dateTo: compactText(template.settings.coverage?.endDate || template.settings.schedule?.exactDate || ''),
       minimumConfidenceScore: template.settings.minimumConfidenceScore || generalSettings.minimumConfidenceScore || 60
     });
     let topics = template.settings.includeOnlyTopicsAboveThreshold ? sourceResult.topics : sourceResult.allTopics;

@@ -326,6 +326,10 @@
       uploadedReferenceId: compactText(raw.uploadedReferenceId || raw.uploadId || ''),
       settings: {
         schedule: normalizeSchedule(settings.schedule || raw.schedule, 'day_of_month'),
+        coverage: {
+          startDate: compactText(settings.coverage?.startDate || raw.coverageStartDate || `${year}-01-01`),
+          endDate: compactText(settings.coverage?.endDate || raw.coverageEndDate || settings.schedule?.exactDate || '')
+        },
         useFamiliarNames: coerceBoolean(settings.useFamiliarNames, true),
         allowDiagramQuestions: coerceBoolean(settings.allowDiagramQuestions, true),
         requireHomeworkGivenForComplexSections: coerceBoolean(settings.requireHomeworkGivenForComplexSections, false),
