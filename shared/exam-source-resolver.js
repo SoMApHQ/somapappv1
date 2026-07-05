@@ -988,6 +988,7 @@
         ...activeBookDiagnostics,
         lessonPlanCount: plans.length,
         lessonNoteCount: notes.length,
+        lessonNotesFetchedCount: notes.length,
         lessonNoteCountUnscoped: notesUnscoped.length,
         fetchedLessonNotes: notes.map((note) => ({ id: note.id, topic: note.topic, subject: note.subject, className: note.className, date: note.date, monthKey: note.monthKey })),
         lessonNotesDroppedByDateFilter: droppedByDateFilter.map((note) => ({ id: note.id, topic: note.topic, subject: note.subject, className: note.className, date: note.date || '(no date field found)' })),

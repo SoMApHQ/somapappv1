@@ -134,7 +134,46 @@
 
   function isWeakTerm(value) {
     const clean = normalizeLookupToken(value);
-    return !clean || clean.split(' ').length > 8 || /^(what|which|who|where|when|why|how|which of the following|devices?|things?|it|they)$/.test(clean);
+    if (!clean) return true;
+    const wordCount = clean.split(' ').length;
+    if (wordCount > 8) return true;
+    // Bare question words/fragments ("what", "which of the following") and
+    // leftover option-letter fragments ("different c", "the circuit becomes
+    // incomplete d") are not real vocabulary terms — they are evidence that
+    // extraction mis-split a question stem or an option list.
+    if (/^(what|which|who|where|when|why|how|which of the following|devices?|things?|it|they)$/.test(clean)) return true;
+    if (wordCount <= 4 && /^(what|which|who|where|when|why|how)\b/.test(clean)) return true;
+    if (/\b[a-e]\.?$/.test(clean) && wordCount <= 6) return true;
+    return false;
+  }
+
+  // A "stem" is bad when it is a fragment of a mis-split question/option list
+  // rather than a real question: a bare question word, an option letter left
+  // dangling at the end, or text too short to carry meaning on its own.
+  function isBadStem(value) {
+    const clean = compactText(value).replace(/[?.!]+$/, '');
+    if (!clean) return true;
+    const lower = normalizeLookupToken(clean);
+    if (clean.length < 12) return true;
+    if (/^(what|which|who|where|when|why|how)$/.test(lower)) return true;
+    if (/^which of the following$/.test(lower)) return true;
+    if (/^(devices?|things?|voltage across devices)$/.test(lower)) return true;
+    // Ends with a lone option letter ("... Different C", "...incomplete D") —
+    // a sign the real option text was chopped off the previous item.
+    if (/\b[a-e]$/i.test(clean) && clean.split(' ').length <= 8) return true;
+    return false;
+  }
+
+  // Used for True/False, matching, and fill-in-the-blank source material: a
+  // declarative fact that can be traced back to the book/notes, never a
+  // question, option fragment, or filler sentence.
+  function isDeclarativeSentence(value) {
+    const clean = compactText(value);
+    if (!clean || clean.includes('?')) return false;
+    if (clean.length < 20 || clean.length > 220) return false;
+    if (/^(what|which|who|where|when|why|how)\b/i.test(clean)) return false;
+    if (/\b[A-E]\.?$/.test(clean)) return false;
+    return /\b(is|are|was|were|has|have|means|can|contains|produces|causes|allows|consists|includes|measures|represents|acts|works|helps|makes|forms|occurs)\b/i.test(clean);
   }
 
   function extractConceptPairs(sourceText) {
@@ -171,7 +210,101 @@
     if (clean.length < 10 || clean.length > 420) return false;
     if (/^(what|which|who|where|when|why|how|which of the following)\??$/i.test(clean)) return false;
     if (/\b(from|in) (the )?lesson\b/i.test(clean)) return false;
+    if (isBadStem(clean)) return false;
     return !/\b(undefined|null|example \d+ from)\b/i.test(clean);
+  }
+
+  // Book/word-doc text extraction frequently loses the line breaks that
+  // separated numbered questions ("1. ... 2. ...") or lettered options
+  // ("A. ... B. ..."), which merges several exercise items into one
+  // unparsable blob. Detect genuine sequential runs (1,2,3,... or A,B,C,...)
+  // that are close together in the text and re-insert a line break before
+  // each — but only inside runs, so normal prose ("Chapter 2. Growth...")
+  // is left untouched.
+  function repairSequenceBreaks(text, markerRegex, toValue, options) {
+    const maxGap = (options && options.maxGap) || 400;
+    const minRun = (options && options.minRun) || 2;
+    const source = String(text || '');
+    const matches = [...source.matchAll(markerRegex)];
+    if (matches.length < minRun) return source;
+    const runs = [];
+    let current = [];
+    matches.forEach((match) => {
+      const value = toValue(match[1]);
+      if (!current.length) { current = [match]; return; }
+      const prev = current[current.length - 1];
+      const gap = match.index - (prev.index + prev[0].length);
+      if (value === toValue(prev[1]) + 1 && gap >= 0 && gap <= maxGap) {
+        current.push(match);
+      } else {
+        if (current.length >= minRun) runs.push(current);
+        current = [match];
+      }
+    });
+    if (current.length >= minRun) runs.push(current);
+    if (!runs.length) return source;
+    const breakPositions = new Set();
+    runs.forEach((run) => run.forEach((match) => breakPositions.add(match.index)));
+    const sortedPositions = [...breakPositions].sort((a, b) => a - b);
+    let result = '';
+    let lastIndex = 0;
+    sortedPositions.forEach((pos) => {
+      result += source.slice(lastIndex, pos);
+      if (!/\n[ \t]*$/.test(result)) result += '\n';
+      lastIndex = pos;
+    });
+    result += source.slice(lastIndex);
+    return result;
+  }
+
+  function repairAssessmentText(text) {
+    let repaired = String(text || '');
+    repaired = repairSequenceBreaks(repaired, /\b(\d{1,2})[.)]\s+(?=[A-Z(])/g, Number, { maxGap: 500, minRun: 2 });
+    repaired = repairSequenceBreaks(repaired, /\b([A-E])[.)]\s+(?=\S)/g, (v) => v.toUpperCase().charCodeAt(0), { maxGap: 200, minRun: 3 });
+    return repaired;
+  }
+
+  // Locate exercise/homework/CAT/test/revision/assessment blocks inside the
+  // active book's covered text so parsing works on real question sections
+  // instead of narrative chapter prose.
+  const ASSESSMENT_SECTION_REGEX = /\b(exercise|home\s*work|test|c\.?a\.?t\.?|continuous assessment|revision|questions?|assessment|activit(?:y|ies))\b\s*[:\-]?/gi;
+
+  function extractAssessmentSections(bookText) {
+    const text = String(bookText || '');
+    if (!text) return [];
+    const headerMatches = [...text.matchAll(ASSESSMENT_SECTION_REGEX)];
+    if (!headerMatches.length) return [];
+    const sections = [];
+    headerMatches.forEach((match, index) => {
+      const start = match.index;
+      const nextStart = headerMatches[index + 1] ? headerMatches[index + 1].index : text.length;
+      const hardEnd = start + match[0].length + 8000;
+      const windowEnd = Math.min(nextStart, hardEnd, text.length);
+      const chapterBoundary = text.slice(start + match[0].length, windowEnd).search(/\n\s*(?:chapter|topic|unit)\s+(?:[ivxlcdm]+|\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/i);
+      const end = chapterBoundary >= 0 ? start + match[0].length + chapterBoundary : windowEnd;
+      const sectionText = compactText(text.slice(start, end)).length > 20 ? text.slice(start, end).trim() : '';
+      if (sectionText) sections.push({ label: match[1].toLowerCase(), position: start, text: sectionText });
+    });
+    return sections;
+  }
+
+  // Remove exercise/homework/CAT/test blocks from a chunk of book/notes text,
+  // leaving only narrative content behind. Concept extraction and True/False
+  // generation must run on this narrative-only text — an exercise block
+  // full of question stems and option letters looks nothing like a fact and
+  // otherwise gets misread as one (e.g. "Voltage across devices" mistaken
+  // for a vocabulary term).
+  function stripAssessmentSections(text) {
+    const source = String(text || '');
+    const sections = extractAssessmentSections(source);
+    if (!sections.length) return source;
+    let result = source;
+    [...sections].sort((a, b) => b.position - a.position).forEach((section) => {
+      const start = section.position;
+      const end = start + section.text.length;
+      result = `${result.slice(0, start)} ${result.slice(end)}`;
+    });
+    return result;
   }
 
   function answerFromContent(prompt, sourceText) {
@@ -188,11 +321,33 @@
     return [...String(text || '').matchAll(/(?:^|\n|\s|\()([A-E])[.)]\s*([\s\S]*?)(?=(?:\n|\s|\()[A-E][.)]\s|$)/gi)];
   }
 
-  function parseAssessmentItems(text, sourceText, topic) {
-    const raw = String(text || '').replace(/\r\n?/g, '\n').trim();
+  // An option is malformed when it is really another question stem (contains
+  // "?"), is far too long to be a single option (multiple items got glued
+  // together), or is itself a bad/fragment stem.
+  function isMalformedOption(option) {
+    const clean = compactText(option);
+    if (!clean || clean.length < 2 || clean.length > 150) return true;
+    if (clean.includes('?')) return true;
+    return false;
+  }
+
+  function parseAssessmentItems(text, sourceText, topic, counters) {
+    const stats = counters || {};
+    const raw = repairAssessmentText(String(text || '').replace(/\r\n?/g, '\n').trim());
     if (!raw) return [];
-    const blocks = raw.split(/(?=^\s*Q?\d+[.)]\s+|^\s*(?:Multiple Choice|Matching|True or False|Passage Question|Word Problem|Reflection)\s*:)/gmi)
-      .map((block) => block.trim()).filter(Boolean);
+    // Split on type labels first. A "Matching:"/"Passage Question:" block
+    // legitimately contains its own internal numbering (Column B is often a
+    // numbered list) — splitting further on "1. 2. 3." would shred one
+    // matching set into several meaningless fragments, so those two types
+    // are kept atomic and only everything else is split by question number.
+    const blocks = [];
+    raw.split(/(?=^\s*(?:Multiple Choice|Matching|True or False|Passage Question|Word Problem|Reflection)\s*:)/gmi)
+      .map((segment) => segment.trim()).filter(Boolean)
+      .forEach((segment) => {
+        const label = (segment.match(/^(Matching|Passage Question)\s*:/i) || [])[1];
+        if (label) { blocks.push(segment); return; }
+        segment.split(/(?=^\s*Q?\d+[.)]\s+)/gmi).map((block) => block.trim()).filter(Boolean).forEach((block) => blocks.push(block));
+      });
     const items = [];
     blocks.forEach((block) => {
       const cleanBlock = block.replace(/^Q?\d+[.)]\s*/i, '').trim();
@@ -205,8 +360,10 @@
         const right = bPart.split(/\n/).map((line) => compactText(line.replace(/^\d+[.)]\s*/, ''))).filter(Boolean);
         const concepts = extractConceptPairs(sourceText);
         const resolved = left.map((term) => concepts.find((pair) => normalizeLookupToken(pair.term) === normalizeLookupToken(term))).filter(Boolean);
-        if (left.length >= 2 && right.length >= 2 && resolved.length === left.length) {
+        if (left.length >= 2 && right.length >= 2 && resolved.length === left.length && !left.some(isWeakTerm)) {
           items.push({ type: 'matching', prompt: 'Match Column A with Column B.', matching: { left, right }, answer: resolved.map((pair) => `${pair.term} - ${pair.description}`).join('; ') });
+        } else {
+          stats.rejectedBadStemCount = (stats.rejectedBadStemCount || 0) + 1;
         }
         return;
       }
@@ -215,6 +372,8 @@
         const prompt = cleanAssessmentPrompt(cleanBlock.match(/Question\s*:\s*([\s\S]*)/i)?.[1] || '');
         if (passage.length >= 40 && validPrompt(prompt) && !passage.includes('?')) {
           items.push({ type: 'passage', prompt, passage, answer: answerFromContent(prompt, passage) });
+        } else {
+          stats.rejectedBadStemCount = (stats.rejectedBadStemCount || 0) + 1;
         }
         return;
       }
@@ -223,6 +382,13 @@
         const firstOption = cleanBlock.search(/(?:^|\n|\s|\()A[.)]\s*/im);
         const prompt = cleanAssessmentPrompt((firstOption >= 0 ? cleanBlock.slice(0, firstOption) : cleanBlock).replace(/^Multiple Choice\s*:\s*/i, ''));
         const options = optionMatches.map((match) => compactText(match[2])).filter((option) => option.length >= 2);
+        if (options.some(isMalformedOption)) {
+          // Reject the whole item rather than keep a garbled option — a
+          // question built from a broken option list is worse than no
+          // question at all.
+          stats.rejectedMalformedOptionsCount = (stats.rejectedMalformedOptionsCount || 0) + 1;
+          return;
+        }
         const sourceToken = normalizeLookupToken(sourceText);
         const supported = options.filter((option) => option.length >= 3 && sourceToken.includes(normalizeLookupToken(option)));
         if (validPrompt(prompt) && options.length >= 3 && new Set(options.map(normalizeLookupToken)).size === options.length) {
@@ -231,14 +397,27 @@
             answer: supported.length === 1 ? supported[0] : 'Verify the correct option against the source assessment.',
             answerNeedsReview: supported.length !== 1
           });
+          stats.mcqParsedCount = (stats.mcqParsedCount || 0) + 1;
+        } else {
+          stats.rejectedBadStemCount = (stats.rejectedBadStemCount || 0) + 1;
         }
         return;
       }
       const prompt = cleanAssessmentPrompt(cleanBlock);
-      if (!validPrompt(prompt)) return;
+      if (!validPrompt(prompt)) { stats.rejectedBadStemCount = (stats.rejectedBadStemCount || 0) + 1; return; }
       const type = lowerType === 'true or false' ? 'true_false' : (lowerType === 'word problem' ? 'word_problem' : 'short_answer');
+      if (type === 'true_false') {
+        // A True/False statement lifted straight from a book exercise has no
+        // stated verdict — that is the point of the exercise. Guessing one
+        // would be an untraceable, possibly wrong answer, so flag it for a
+        // teacher to confirm instead of fabricating True/False.
+        items.push({ type, prompt, options: ['True', 'False'], answer: 'Verify against source material — extracted from a book exercise with no stated answer.', answerNeedsReview: true });
+        return;
+      }
       const answer = answerFromContent(prompt, sourceText);
-      if (answer) items.push({ type, prompt, options: type === 'true_false' ? ['True', 'False'] : [], answer });
+      if (answer) {
+        items.push({ type, prompt, options: [], answer });
+      }
     });
     return items.map((item) => ({ ...item, sourceTopic: topic.topic }));
   }
@@ -281,15 +460,20 @@
   }
 
   function buildTrueFalse(slot, topic, analysis, index) {
-    const sentence = analysis.sentences[0] || `${topic.topic} is part of the lesson.`;
-    const makeFalse = index % 2 === 1 && analysis.concepts[1];
-    if (!makeFalse) {
-      return { prompt: `${sentence} (True or False)`, answer: 'True' };
+    // Every True/False statement must trace back to an actual declarative
+    // sentence or concept pair from the book/notes — never a generic filler
+    // like "<topic> is part of the lesson," which is not sourced from
+    // anything the pupil was taught.
+    const wantFalse = index % 2 === 1 && analysis.concepts[1] && !isWeakTerm(analysis.concepts[0]?.term) && !isWeakTerm(analysis.concepts[1]?.term);
+    if (wantFalse) {
+      return {
+        prompt: `${analysis.concepts[0].term} means ${analysis.concepts[1].description} (True or False)`,
+        answer: 'False'
+      };
     }
-    return {
-      prompt: `${analysis.concepts[0]?.term || topic.topic} means ${analysis.concepts[1]?.description || 'something different from the lesson'} (True or False)`,
-      answer: 'False'
-    };
+    const sentence = analysis.declarativeSentences[0];
+    if (!sentence) return null;
+    return { prompt: `${sentence} (True or False)`, answer: 'True' };
   }
 
   function buildShortAnswer(topic, analysis) {
@@ -302,8 +486,8 @@
   }
 
   function buildPassage(topic, analysis) {
-    if (analysis.sentences.length < 3 || !analysis.concepts[0] || isWeakTerm(analysis.concepts[0].term)) return null;
-    const passage = analysis.sentences.slice(0, 3).join(' ');
+    if (analysis.declarativeSentences.length < 3 || !analysis.concepts[0] || isWeakTerm(analysis.concepts[0].term)) return null;
+    const passage = analysis.declarativeSentences.slice(0, 3).join(' ');
     return {
       prompt: `According to the passage, what is ${analysis.concepts[0].term}?`,
       passage,
@@ -356,16 +540,17 @@
 
   function buildFillBlank(topic, analysis) {
     const pair = analysis.concepts[0];
-    if (!pair || isWeakTerm(pair.term)) return null;
-    if (pair) {
+    if (pair && !isWeakTerm(pair.term)) {
       return {
         prompt: `${pair.term} means __________.`,
         answer: pair.description
       };
     }
-    const sentence = analysis.sentences[0] || `${topic.topic} is important in the lesson.`;
+    const sentence = analysis.declarativeSentences[0];
+    if (!sentence) return null;
     const words = sentence.split(' ');
-    const hiddenWord = words.find((word) => word.length > 5) || words[0] || topic.topic;
+    const hiddenWord = words.find((word) => word.length > 5) || words[0];
+    if (!hiddenWord) return null;
     return {
       prompt: sentence.replace(hiddenWord, '__________'),
       answer: hiddenWord
@@ -410,11 +595,11 @@
 
   function buildPassageGroup(topics, count) {
     const candidates = topics.map((topic) => ({ topic, analysis: analyseTopic(topic) }))
-      .filter((entry) => entry.analysis.sentences.length >= 3 && entry.analysis.concepts.length >= count)
-      .sort((a, b) => b.analysis.sentences.length - a.analysis.sentences.length);
+      .filter((entry) => entry.analysis.declarativeSentences.length >= 3 && entry.analysis.concepts.length >= count)
+      .sort((a, b) => b.analysis.declarativeSentences.length - a.analysis.declarativeSentences.length);
     const selected = candidates[0];
     if (!selected) return null;
-    const passage = selected.analysis.sentences.slice(0, 6).join(' ');
+    const passage = selected.analysis.declarativeSentences.slice(0, 6).join(' ');
     const subQuestions = selected.analysis.concepts.slice(0, count).map((pair) => ({
       prompt: `What does ${pair.term} mean?`, answer: pair.description
     }));
@@ -450,11 +635,17 @@
   }
 
   function analyseTopic(topic) {
-    const sourceText = compactText(topic.generationSourceText || topic.sourceText || topic.bookEvidence?.excerpt || topic.plan?.objectives || topic.plan?.activities || topic.topic);
+    // True/False, matching and fill-blank generation must only ever draw from
+    // the book/lesson-note CONTENT (narrative chapter text), never from an
+    // assessment/exercise block — that text is full of question stems and
+    // option fragments which look like facts but aren't.
+    const rawSourceText = topic.generationSourceText || topic.sourceText || topic.bookEvidence?.excerpt || topic.plan?.objectives || topic.plan?.activities || topic.topic;
+    const sourceText = compactText(stripAssessmentSections(String(rawSourceText || '')));
     const sentences = splitSentences(sourceText);
-    const concepts = extractConceptPairs(sourceText);
+    const declarativeSentences = sentences.filter(isDeclarativeSentence);
+    const concepts = extractConceptPairs(sourceText).filter((pair) => !isWeakTerm(pair.term));
     const homeworkLines = parseHomeworkLines(topic.sourceHomework || '');
-    return { sourceText, sentences, concepts, homeworkLines };
+    return { sourceText, sentences, declarativeSentences, concepts, homeworkLines };
   }
 
   function rotate(values, offset) {
@@ -467,6 +658,7 @@
     return {
       ...analysis,
       sentences: rotate(analysis.sentences, offset),
+      declarativeSentences: rotate(analysis.declarativeSentences, offset),
       concepts: rotate(analysis.concepts, offset),
       homeworkLines: rotate(analysis.homeworkLines, offset)
     };
@@ -759,8 +951,25 @@
     const namePool = template.settings.useFamiliarNames ? await NamePool.loadPool({ schoolId, year, className: template.className }) : null;
     const questionsWithAnswers = [];
     const analysisCache = new Map();
-    const assessmentItems = topics.flatMap((topic) => parseAssessmentItems(topic.sourceHomework, topic.generationSourceText || topic.sourceText || topic.bookEvidence?.excerpt || '', topic)
-      .map((item) => ({ ...item, topic })));
+    // Source extraction happens fully before any exam assembly: locate real
+    // assessment sections, repair broken numbering/options, parse clean
+    // items, and count every rejection so a failure can point at exactly
+    // which stage ran short instead of a generic "not enough" message.
+    const counters = {
+      assessmentSectionsFound: 0,
+      mcqParsedCount: 0,
+      trueFalseGeneratedCount: 0,
+      matchingPairsGeneratedCount: 0,
+      rejectedBadStemCount: 0,
+      rejectedMalformedOptionsCount: 0
+    };
+    const assessmentItems = topics.flatMap((topic) => {
+      const homeworkSections = extractAssessmentSections(topic.sourceHomework || '');
+      counters.assessmentSectionsFound += homeworkSections.length;
+      const homeworkTexts = homeworkSections.length ? homeworkSections.map((section) => section.text) : [topic.sourceHomework || ''];
+      return homeworkTexts.flatMap((sectionText) => parseAssessmentItems(sectionText, topic.generationSourceText || topic.sourceText || topic.bookEvidence?.excerpt || '', topic, counters)
+        .map((item) => ({ ...item, topic })));
+    });
     const bookSource = sourceResult.bookAssessmentSource;
     if (bookSource?.text) {
       const bookTopic = {
@@ -771,7 +980,10 @@
         sourceHomework: bookSource.text,
         bookEvidence: { bookId: bookSource.id, bookTitle: bookSource.title, assessment: bookSource.text }
       };
-      const parsedBookItems = parseAssessmentItems(bookSource.text, bookSource.text, bookTopic);
+      const bookSections = extractAssessmentSections(bookSource.text);
+      counters.assessmentSectionsFound += bookSections.length;
+      const bookSectionTexts = bookSections.length ? bookSections.map((section) => section.text) : [bookSource.text];
+      const parsedBookItems = bookSectionTexts.flatMap((sectionText) => parseAssessmentItems(sectionText, bookSource.text, bookTopic, counters));
       parsedBookItems.forEach((item) => assessmentItems.push({ ...item, topic: bookTopic }));
       sourceResult.diagnostics.bookAssessmentItemCount = parsedBookItems.length;
       sourceResult.diagnostics.bookMultipleChoiceItemCount = parsedBookItems.filter((item) => item.type === 'multiple_choice').length;
@@ -779,6 +991,9 @@
     const consumedAssessmentItems = new Set();
     const topicUseCount = new Map();
     const usedQuestions = new Set();
+    function diagnosticsSummary() {
+      return `assessmentSectionsFound=${counters.assessmentSectionsFound}, mcqParsedCount=${counters.mcqParsedCount}, trueFalseGeneratedCount=${counters.trueFalseGeneratedCount}, matchingPairsGeneratedCount=${counters.matchingPairsGeneratedCount}, rejectedBadStemCount=${counters.rejectedBadStemCount}, rejectedMalformedOptionsCount=${counters.rejectedMalformedOptionsCount}, activeBookTextLength=${sourceResult.diagnostics.activeBookTextLength || 0}`;
+    }
     slots.forEach((slot, index) => {
       const topic = selectTopic(topics, index, slot.sourcePreference);
       let selectedTopic = topic;
@@ -812,23 +1027,25 @@
       } else {
         built = buildQuestionForSlot(slot, topic, analysis, context, index);
       }
-      if (!built || !validPrompt(built.prompt)) {
-        throw new Error(`Not enough valid ${Shared.questionTypeLabel(slot.questionType).toLowerCase()} questions were found in the saved lesson-note homework or active book assessments. Generation stopped instead of inserting an unclear question.`);
-      }
-      let fingerprint = builtQuestionFingerprint(built);
-      // Never knowingly place the same question twice. Try other taught topics
-      // before using a clear, age-appropriate alternative wording.
-      for (let attempt = 1; usedQuestions.has(fingerprint) && attempt < topics.length; attempt += 1) {
+      const isUsable = (candidate) => Boolean(candidate) && validPrompt(candidate.prompt) && !usedQuestions.has(builtQuestionFingerprint(candidate));
+      // Never knowingly place the same question twice, and never give up
+      // after the first topic fails to yield a clean question — try every
+      // other taught topic before concluding the source material is short.
+      for (let attempt = 1; !isUsable(built) && attempt < topics.length; attempt += 1) {
         const alternate = topics[(index + attempt) % topics.length];
         const alternateAnalysis = varyAnalysis(analysisCache.get(alternate.key) || analyseTopic(alternate), useCount + attempt);
         const alternateBuilt = buildQuestionForSlot(slot, alternate, alternateAnalysis, context, index + attempt);
-        if (!alternateBuilt || !validPrompt(alternateBuilt.prompt)) continue;
+        if (!isUsable(alternateBuilt)) continue;
         built = alternateBuilt;
         selectedTopic = alternate;
-        fingerprint = builtQuestionFingerprint(built);
       }
-      if (usedQuestions.has(fingerprint)) throw new Error(`The available source material does not contain enough distinct ${Shared.questionTypeLabel(slot.questionType).toLowerCase()} questions for ${slot.sectionTitle || slot.sectionKey || 'this section'}. Generation stopped to prevent repetition.`);
-      usedQuestions.add(fingerprint);
+      if (!isUsable(built)) {
+        const label = Shared.questionTypeLabel(slot.questionType).toLowerCase();
+        throw new Error(`Could not build enough clean, source-traceable ${label} questions for ${slot.sectionTitle || slot.sectionKey || 'this section'}. Diagnostics: ${diagnosticsSummary()}. Add more due lesson notes/homework, verify the active book text actually covers this chapter (use "Load raw active-book text" on Check Exams), or reduce this section's item count.`);
+      }
+      usedQuestions.add(builtQuestionFingerprint(built));
+      if (slot.questionType === 'true_false') counters.trueFalseGeneratedCount += 1;
+      if (slot.questionType === 'matching') counters.matchingPairsGeneratedCount += (built.matching?.left?.length || 1);
       const question = makeQuestionRecord(slot, selectedTopic, built, index);
       if (template.settings.useFamiliarNames) {
         question.familiarNamesUsed = [context.studentName, context.helperName].filter((name) => compactText(built.prompt || '').includes(name));
@@ -910,7 +1127,7 @@
       reviewMeta: {
         revision,
         regeneratedFromPaperId: sameTemplate[0]?.id || '',
-        diagnostics: sourceResult.diagnostics
+        diagnostics: { ...sourceResult.diagnostics, ...counters }
       }
     };
     paper.printableHtml = buildPrintableHtml(paper);
@@ -939,9 +1156,42 @@
     return { created: true, paper, answerKey, existing: false };
   }
 
+  // Runs the same extraction/parsing pipeline generation uses, without
+  // building a paper — lets the Check Exams diagnostics panel show exactly
+  // how much clean, usable material the active book actually contains
+  // *before* a teacher clicks Generate.
+  function analyzeBookAssessmentQuality(bookText, options) {
+    const counters = {
+      assessmentSectionsFound: 0,
+      mcqParsedCount: 0,
+      rejectedBadStemCount: 0,
+      rejectedMalformedOptionsCount: 0
+    };
+    const text = String(bookText || '');
+    const sections = extractAssessmentSections(text);
+    counters.assessmentSectionsFound = sections.length;
+    const sectionTexts = sections.length ? sections.map((section) => section.text) : (text ? [text] : []);
+    const pseudoTopic = { topic: (options && options.topic) || 'active book' };
+    const items = sectionTexts.flatMap((sectionText) => parseAssessmentItems(sectionText, text, pseudoTopic, counters));
+    return {
+      counters,
+      sections: sections.map((section) => ({ label: section.label, position: section.position, length: section.text.length })),
+      itemCounts: {
+        total: items.length,
+        multiple_choice: items.filter((item) => item.type === 'multiple_choice').length,
+        true_false: items.filter((item) => item.type === 'true_false').length,
+        matching: items.filter((item) => item.type === 'matching').length,
+        passage: items.filter((item) => item.type === 'passage').length,
+        short_answer: items.filter((item) => item.type === 'short_answer').length,
+        word_problem: items.filter((item) => item.type === 'word_problem').length
+      }
+    };
+  }
+
   const api = {
     generateDraftExam,
     buildPrintableHtml,
+    analyzeBookAssessmentQuality,
     validateAssessmentText(text, sourceText, topic) {
       return parseAssessmentItems(text, sourceText, topic || { topic: 'Topic' });
     }
