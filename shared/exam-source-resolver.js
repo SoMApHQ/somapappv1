@@ -814,9 +814,13 @@
       dateTo: cutoffDate
     };
     const minimumConfidenceScore = Number(options?.minimumConfidenceScore || 60) || 60;
-    const [plans, notes, logs, journals, schemeRows, activeBookResult] = await Promise.all([
+    const [plans, notes, notesUnscoped, logs, journals, schemeRows, activeBookResult] = await Promise.all([
       readLessonPlans(filters),
       readLessonNotes(filters),
+      // Read the same class/subject notes with no date restriction too, purely so
+      // diagnostics can show whether the date window is silently dropping notes
+      // that a teacher can plainly see on the Lesson Notes page.
+      readLessonNotes({ ...filters, dateFrom: '', dateTo: '' }),
       readLogbooks(filters),
       readClassJournals(filters),
       // Scheme rows often have month/week fields rather than a parseable date.
@@ -826,6 +830,7 @@
     ]);
     const activeBook = activeBookResult?.book || null;
     const activeBookDiagnostics = activeBookResult?.diagnostics || {};
+    const droppedByDateFilter = notesUnscoped.filter((note) => !notes.some((kept) => kept.id === note.id));
 
     const buckets = new Map();
     const orphanNotes = [];
@@ -983,6 +988,9 @@
         ...activeBookDiagnostics,
         lessonPlanCount: plans.length,
         lessonNoteCount: notes.length,
+        lessonNoteCountUnscoped: notesUnscoped.length,
+        fetchedLessonNotes: notes.map((note) => ({ id: note.id, topic: note.topic, subject: note.subject, className: note.className, date: note.date, monthKey: note.monthKey })),
+        lessonNotesDroppedByDateFilter: droppedByDateFilter.map((note) => ({ id: note.id, topic: note.topic, subject: note.subject, className: note.className, date: note.date || '(no date field found)' })),
         logbookCount: logs.length,
         classJournalCount: journals.length,
         schemeRowCount: schemeRows.length,
