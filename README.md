@@ -1,4 +1,5 @@
 
+<!-- redeploy trigger 2026-07-05 -->
 # SoMAp – Society Management App  
 
 **Educational and Society SuperApp**
