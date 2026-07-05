@@ -184,6 +184,10 @@
     })).sort((a, b) => b.score - a.score || a.sentence.length - b.sentence.length)[0]?.sentence || '';
   }
 
+  function extractOptionMatches(text) {
+    return [...String(text || '').matchAll(/(?:^|\n|\s|\()([A-E])[.)]\s*([\s\S]*?)(?=(?:\n|\s|\()[A-E][.)]\s|$)/gi)];
+  }
+
   function parseAssessmentItems(text, sourceText, topic) {
     const raw = String(text || '').replace(/\r\n?/g, '\n').trim();
     if (!raw) return [];
@@ -214,9 +218,9 @@
         }
         return;
       }
-      const optionMatches = [...cleanBlock.matchAll(/(?:^|\n|\s)([A-E])[.)]\s*([\s\S]*?)(?=(?:\n|\s)[A-E][.)]\s|$)/gi)];
+      const optionMatches = extractOptionMatches(cleanBlock);
       if (lowerType === 'multiple choice' || optionMatches.length >= 3) {
-        const firstOption = cleanBlock.search(/(?:^|\n)\s*A[.)]\s*/im);
+        const firstOption = cleanBlock.search(/(?:^|\n|\s|\()A[.)]\s*/im);
         const prompt = cleanAssessmentPrompt((firstOption >= 0 ? cleanBlock.slice(0, firstOption) : cleanBlock).replace(/^Multiple Choice\s*:\s*/i, ''));
         const options = optionMatches.map((match) => compactText(match[2])).filter((option) => option.length >= 2);
         const sourceToken = normalizeLookupToken(sourceText);
@@ -470,6 +474,19 @@
 
   function questionFingerprint(value) {
     return normalizeLookupToken(value).replace(/[^a-z0-9]+/g, ' ').trim();
+  }
+
+  function builtQuestionFingerprint(built) {
+    if (!built) return '';
+    const structured = [
+      built.prompt,
+      built.passage,
+      ...(built.options || []),
+      ...(built.matching?.left || []),
+      ...(built.matching?.right || []),
+      ...(built.subQuestions || []).map((item) => item.prompt || '')
+    ].filter(Boolean).join(' ');
+    return questionFingerprint(structured);
   }
 
   function buildQuestionForSlot(slot, topic, analysis, context, index) {
@@ -778,7 +795,9 @@
         ? ['short_answer', 'reflection']
         : [slot.questionType];
       const directIndex = assessmentItems.findIndex((item, itemIndex) =>
-        !consumedAssessmentItems.has(itemIndex) && compatibleTypes.includes(item.type));
+        !consumedAssessmentItems.has(itemIndex)
+        && compatibleTypes.includes(item.type)
+        && !usedQuestions.has(builtQuestionFingerprint(item)));
       let built = null;
       if (slot.questionType === 'matching' && slot.structuredItemCount > 1) {
         built = buildMatchingGroup(topics, slot.structuredItemCount);
@@ -795,7 +814,7 @@
       if (!built || !validPrompt(built.prompt)) {
         throw new Error(`Not enough valid ${Shared.questionTypeLabel(slot.questionType).toLowerCase()} questions were found in the saved lesson-note homework or active book assessments. Generation stopped instead of inserting an unclear question.`);
       }
-      let fingerprint = questionFingerprint(built.prompt);
+      let fingerprint = builtQuestionFingerprint(built);
       // Never knowingly place the same question twice. Try other taught topics
       // before using a clear, age-appropriate alternative wording.
       for (let attempt = 1; usedQuestions.has(fingerprint) && attempt < topics.length; attempt += 1) {
@@ -805,9 +824,9 @@
         if (!alternateBuilt || !validPrompt(alternateBuilt.prompt)) continue;
         built = alternateBuilt;
         selectedTopic = alternate;
-        fingerprint = questionFingerprint(built.prompt);
+        fingerprint = builtQuestionFingerprint(built);
       }
-      if (usedQuestions.has(fingerprint)) throw new Error('The available source material does not contain enough distinct questions for this exam format. Generation stopped to prevent repetition.');
+      if (usedQuestions.has(fingerprint)) throw new Error(`The available source material does not contain enough distinct ${Shared.questionTypeLabel(slot.questionType).toLowerCase()} questions for ${slot.sectionTitle || slot.sectionKey || 'this section'}. Generation stopped to prevent repetition.`);
       usedQuestions.add(fingerprint);
       const question = makeQuestionRecord(slot, selectedTopic, built, index);
       if (template.settings.useFamiliarNames) {

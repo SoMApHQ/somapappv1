@@ -451,7 +451,7 @@
     if (!source) return 0;
     const blocks = source.split(/(?=^\s*Q?\d+[.)]\s+|^\s*(?:Multiple Choice|Matching|True or False|Passage Question|Word Problem|Reflection)\s*:)/gmi).map((block) => block.trim()).filter(Boolean);
     return blocks.filter((block) => {
-      const optionMatches = [...block.matchAll(/(?:^|\n|\s)([A-E])[.)]\s*([\s\S]*?)(?=(?:\n|\s)[A-E][.)]\s|$)/gi)];
+      const optionMatches = [...block.matchAll(/(?:^|\n|\s|\()([A-E])[.)]\s*([\s\S]*?)(?=(?:\n|\s|\()[A-E][.)]\s|$)/gi)];
       return optionMatches.length >= 3 && /\?/.test(block.slice(0, 500));
     }).length;
   }
