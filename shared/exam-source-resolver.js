@@ -371,20 +371,246 @@
     return rows;
   }
 
-  async function readActiveBook(filters) {
+  function uniqueStrings(values) {
+    return Array.from(new Set((values || []).map((value) => compactText(value)).filter(Boolean)));
+  }
+
+  function numberWord(value) {
+    return ({ one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7' })[normalizeLookupToken(value)] || '';
+  }
+
+  function classAliasValues(className) {
+    const clean = compactText(className);
+    const normalized = normalizeLookupToken(clean);
+    const digit = normalized.match(/\b([1-7])\b/)?.[1]
+      || numberWord(normalized.match(/\b(one|two|three|four|five|six|seven)\b/)?.[1] || '');
+    if (!digit) return uniqueStrings([clean]);
+    const words = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven'];
+    return uniqueStrings([clean, `Class ${digit}`, `Standard ${words[Number(digit)]}`, `Standard ${digit}`, `Std ${digit}`]);
+  }
+
+  function subjectAliasValues(subject) {
+    const clean = compactText(subject);
+    const token = normalizeLookupToken(clean).replace(/\band\b/g, ' ').replace(/\s+/g, ' ').trim();
+    if (token === 'science' || token === 'science technology') {
+      return ['Science', 'Science and Technology', 'Science Technology'];
+    }
+    return uniqueStrings([clean]);
+  }
+
+  function canonicalClass(value) {
+    const token = normalizeLookupToken(value);
+    const digit = token.match(/\b([1-7])\b/)?.[1]
+      || numberWord(token.match(/\b(one|two|three|four|five|six|seven)\b/)?.[1] || '');
+    return digit ? `class ${digit}` : token;
+  }
+
+  function canonicalSubject(value) {
+    return normalizeLookupToken(value).replace(/\band\b/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function classMatches(left, right) {
+    return Boolean(canonicalClass(left) && canonicalClass(left) === canonicalClass(right));
+  }
+
+  function subjectMatches(left, right) {
+    const a = canonicalSubject(left);
+    const b = canonicalSubject(right);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    return (a === 'science' && b === 'science technology') || (b === 'science' && a === 'science technology');
+  }
+
+  function isActiveBook(book) {
+    const status = normalizeLookupToken(book?.status || 'active');
+    return status !== 'archived' && status !== 'deleted' && status !== 'hidden';
+  }
+
+  function textFromValue(value) {
+    if (typeof value === 'string') return multilineText(value);
+    if (Array.isArray(value)) return multilineText(value.map(textFromValue).filter(Boolean).join('\n'));
+    if (!value || typeof value !== 'object') return '';
+    return multilineText(Object.values(value).map(textFromValue).filter(Boolean).join('\n'));
+  }
+
+  function extractBookText(record) {
+    const fields = ['text', 'parsedText', 'content', 'fullText', 'assessment', 'assessments', 'questions', 'extractedText'];
+    const seen = new Set();
+    const sections = [];
+    fields.forEach((field) => {
+      const text = textFromValue(record?.[field]);
+      if (!text || seen.has(text)) return;
+      seen.add(text);
+      sections.push(text);
+    });
+    return multilineText(sections.join('\n\n'));
+  }
+
+  function countMultipleChoiceItems(text) {
+    const source = String(text || '').replace(/\r\n?/g, '\n');
+    if (!source) return 0;
+    const blocks = source.split(/(?=^\s*Q?\d+[.)]\s+|^\s*(?:Multiple Choice|Matching|True or False|Passage Question|Word Problem|Reflection)\s*:)/gmi).map((block) => block.trim()).filter(Boolean);
+    return blocks.filter((block) => {
+      const optionMatches = [...block.matchAll(/(?:^|\n|\s)([A-E])[.)]\s*([\s\S]*?)(?=(?:\n|\s)[A-E][.)]\s|$)/gi)];
+      return optionMatches.length >= 3 && /\?/.test(block.slice(0, 500));
+    }).length;
+  }
+
+  async function readPath(path, checkedPaths) {
+    if (checkedPaths) checkedPaths.push(path);
     const db = getDb();
     if (!db) return null;
+    const snap = await db.ref(path).once('value').catch(() => ({ val: () => null }));
+    return (snap && typeof snap.val === 'function') ? snap.val() : null;
+  }
+
+  async function readActiveBook(filters) {
+    const db = getDb();
+    const diagnostics = {
+      activeBookId: '', activeBookTitle: '', activeBookPathFound: '', activeBookTextLength: 0,
+      activeBookSubjectStored: '', activeBookClassStored: '', activeBookCandidatePathsChecked: [],
+      bookAssessmentItemCount: 0, rejectedReason: ''
+    };
+    if (!db) {
+      diagnostics.rejectedReason = 'Firebase database is unavailable.';
+      return { book: null, diagnostics };
+    }
+
+    const schoolId = compactText(filters.schoolId || currentSchoolId());
     const year = String(filters.year || currentYear());
-    const classKey = sanitizeKey(filters.className || '').toLowerCase();
-    const subjectKey = sanitizeKey(filters.subject || '').toLowerCase();
-    const index = await readMergedObject([`classbooksIndex/${year}/${classKey}/${subjectKey}`]);
-    const bookId = compactText(index.bookId || index.id || index.key || '');
-    if (!bookId) return null;
-    const book = await readMergedObject([`books/${bookId}`]);
-    if (normalizeLookupToken(book.status || 'active') !== 'active') return null;
-    const source = await readMergedObject([`book_texts/${bookId}`]);
-    const text = String(source.text || '');
-    return text ? { id: bookId, title: compactText(book.title || source.title || 'Classbook'), text } : null;
+    const classAliases = classAliasValues(filters.className || '');
+    const subjectAliases = subjectAliasValues(filters.subject || '');
+    const indexPaths = [];
+    const classBookPaths = [];
+    classAliases.forEach((classAlias) => {
+      const classKeys = uniqueStrings([
+        sanitizeKey(classAlias).toLowerCase(),
+        String(classAlias).replace(/[.#$/\[\]]/g, '_').toLowerCase(),
+        String(classAlias).replace(/\s+/g, '_').toLowerCase()
+      ]);
+      subjectAliases.forEach((subjectAlias) => {
+        const subjectKeys = uniqueStrings([
+          sanitizeKey(subjectAlias).toLowerCase(),
+          String(subjectAlias).replace(/[.#$/\[\]]/g, '_').toLowerCase(),
+          String(subjectAlias).replace(/\s+/g, '_').toLowerCase()
+        ]);
+        classKeys.forEach((classKey) => subjectKeys.forEach((subjectKey) => {
+          indexPaths.push(...buildCandidatePaths(`classbooksIndex/${year}/${classKey}/${subjectKey}`, schoolId));
+        }));
+      });
+      uniqueStrings([encodeURIComponent(classAlias), classAlias, String(classAlias).replace(/\s+/g, '_')]).forEach((classKey) => {
+        classBookPaths.push(...buildCandidatePaths(`class_books/${year}/${classKey}`, schoolId));
+        classBookPaths.push(...buildCandidatePaths(`class_books/${classKey}`, schoolId));
+      });
+    });
+
+    const candidateMap = new Map();
+    const uniqueIndexPaths = uniqueStrings(indexPaths);
+    const indexResults = await Promise.all(uniqueIndexPaths.map(async (path) => ({ path, value: await readPath(path, diagnostics.activeBookCandidatePathsChecked) })));
+    indexResults.forEach(({ path, value }) => {
+      if (!value || typeof value !== 'object') return;
+      const directId = compactText(value.bookId || value.id || value.key || '');
+      if (directId) candidateMap.set(directId, { id: directId, index: value, indexPath: path });
+      else Object.entries(value).forEach(([id, entry]) => {
+        if (!entry || typeof entry !== 'object') return;
+        candidateMap.set(id, { id, index: entry, indexPath: `${path}/${id}` });
+      });
+    });
+
+    if (!candidateMap.size) {
+      const uniqueClassBookPaths = uniqueStrings(classBookPaths);
+      const classBookResults = await Promise.all(uniqueClassBookPaths.map(async (path) => ({ path, value: await readPath(path, diagnostics.activeBookCandidatePathsChecked) })));
+      classBookResults.forEach(({ path, value }) => Object.entries(value || {}).forEach(([id, entry]) => {
+        if (entry && typeof entry === 'object') candidateMap.set(id, { id, index: entry, indexPath: `${path}/${id}` });
+      }));
+    }
+
+    if (!candidateMap.size) {
+      const bookRoots = uniqueStrings(buildCandidatePaths('books', schoolId));
+      const roots = await Promise.all(bookRoots.map(async (path) => ({ path, value: await readPath(path, diagnostics.activeBookCandidatePathsChecked) })));
+      roots.forEach(({ path, value }) => Object.entries(value || {}).forEach(([id, entry]) => {
+        if (entry && typeof entry === 'object') candidateMap.set(id, { id, index: entry, indexPath: `${path}/${id}` });
+      }));
+    }
+
+    const eligibleCandidates = () => Array.from(candidateMap.values()).filter((candidate) => {
+      const record = candidate.index || {};
+      const storedClass = record.class || record.className || '';
+      const storedSubject = record.subject || record.subjectName || '';
+      const storedYear = String(record.year || record.academicYear || '');
+      return isActiveBook(record)
+        && (!storedClass || classAliases.some((alias) => classMatches(storedClass, alias)))
+        && (!storedSubject || subjectAliases.some((alias) => subjectMatches(storedSubject, alias)))
+        && (!storedYear || storedYear === year);
+    }).sort((left, right) => {
+      const wordDelta = Number(Boolean(right.index?.word_text_available)) - Number(Boolean(left.index?.word_text_available));
+      if (wordDelta) return wordDelta;
+      return Number(right.index?.updatedAt || right.index?.uploadedAt || 0) - Number(left.index?.updatedAt || left.index?.uploadedAt || 0);
+    });
+    let candidates = eligibleCandidates();
+
+    // A stale classbooksIndex may still point at an archived book after a
+    // replacement. In that case search the authoritative books metadata for
+    // the active class/subject/year record instead of stopping at the stale hit.
+    if (!candidates.length) {
+      const bookRoots = uniqueStrings(buildCandidatePaths('books', schoolId));
+      const roots = await Promise.all(bookRoots.map(async (path) => ({ path, value: await readPath(path, diagnostics.activeBookCandidatePathsChecked) })));
+      roots.forEach(({ path, value }) => Object.entries(value || {}).forEach(([id, entry]) => {
+        if (entry && typeof entry === 'object') candidateMap.set(id, { id, index: entry, indexPath: `${path}/${id}` });
+      }));
+      candidates = eligibleCandidates();
+    }
+
+    for (const candidate of candidates) {
+      const metadataPaths = uniqueStrings(buildCandidatePaths(`books/${candidate.id}`, schoolId));
+      const metadataResults = await Promise.all(metadataPaths.map(async (path) => ({ path, value: await readPath(path, diagnostics.activeBookCandidatePathsChecked) })));
+      const metadataHit = metadataResults.find((entry) => entry.value && typeof entry.value === 'object');
+      const metadata = { ...(candidate.index || {}), ...((metadataHit && metadataHit.value) || {}) };
+      if (!isActiveBook(metadata)) continue;
+      const storedClass = metadata.class || metadata.className || candidate.index?.class || '';
+      const storedSubject = metadata.subject || metadata.subjectName || candidate.index?.subject || '';
+      const storedYear = String(metadata.year || metadata.academicYear || candidate.index?.year || '');
+      if (storedClass && !classAliases.some((alias) => classMatches(storedClass, alias))) continue;
+      if (storedSubject && !subjectAliases.some((alias) => subjectMatches(storedSubject, alias))) continue;
+      if (storedYear && storedYear !== year) continue;
+
+      const textPaths = uniqueStrings(buildCandidatePaths(`book_texts/${candidate.id}`, schoolId));
+      const textResults = await Promise.all(textPaths.map(async (path) => ({ path, value: await readPath(path, diagnostics.activeBookCandidatePathsChecked) })));
+      const textCandidates = [
+        ...textResults.map((entry) => ({ path: entry.path, text: extractBookText(entry.value) })),
+        { path: `${metadataHit?.path || candidate.indexPath}#metadata`, text: extractBookText(metadata) },
+        { path: `${candidate.indexPath}#index`, text: extractBookText(candidate.index) }
+      ].filter((entry) => entry.text).sort((a, b) => b.text.length - a.text.length);
+      if (!textCandidates.length) continue;
+
+      const selectedText = textCandidates[0];
+      const book = {
+        id: candidate.id,
+        title: compactText(metadata.title || candidate.index?.title || 'Classbook'),
+        text: selectedText.text,
+        subject: compactText(storedSubject),
+        className: compactText(storedClass),
+        pathFound: `${candidate.indexPath} -> ${metadataHit?.path || 'index metadata'} -> ${selectedText.path}`
+      };
+      Object.assign(diagnostics, {
+        activeBookId: book.id,
+        activeBookTitle: book.title,
+        activeBookPathFound: book.pathFound,
+        activeBookTextLength: book.text.length,
+        activeBookSubjectStored: book.subject,
+        activeBookClassStored: book.className,
+        activeBookCandidatePathsChecked: uniqueStrings(diagnostics.activeBookCandidatePathsChecked),
+        bookAssessmentItemCount: countMultipleChoiceItems(book.text),
+        rejectedReason: ''
+      });
+      return { book, diagnostics };
+    }
+
+    diagnostics.activeBookCandidatePathsChecked = uniqueStrings(diagnostics.activeBookCandidatePathsChecked);
+    diagnostics.rejectedReason = candidateMap.size
+      ? `Found ${candidateMap.size} book candidate(s), but none had active matching metadata with non-empty stored text.`
+      : 'No matching active-book index or book metadata was found.';
+    return { book: null, diagnostics };
   }
 
   function bookEvidenceForTopic(book, topic) {
@@ -551,7 +777,7 @@
       dateTo: cutoffDate
     };
     const minimumConfidenceScore = Number(options?.minimumConfidenceScore || 60) || 60;
-    const [plans, notes, logs, journals, schemeRows, activeBook] = await Promise.all([
+    const [plans, notes, logs, journals, schemeRows, activeBookResult] = await Promise.all([
       readLessonPlans(filters),
       readLessonNotes(filters),
       readLogbooks(filters),
@@ -561,6 +787,8 @@
       readSchemes({ ...filters, dateFrom: '', dateTo: '' }),
       readActiveBook(filters)
     ]);
+    const activeBook = activeBookResult?.book || null;
+    const activeBookDiagnostics = activeBookResult?.diagnostics || {};
 
     const buckets = new Map();
     const orphanNotes = [];
@@ -712,13 +940,14 @@
         text: coveredBookText
       } : null,
       diagnostics: {
+        ...activeBookDiagnostics,
         lessonPlanCount: plans.length,
         lessonNoteCount: notes.length,
         logbookCount: logs.length,
         classJournalCount: journals.length,
         schemeRowCount: schemeRows.length,
-        activeBookId: activeBook?.id || '',
-        activeBookTitle: activeBook?.title || '',
+        activeBookId: activeBookDiagnostics.activeBookId || activeBook?.id || '',
+        activeBookTitle: activeBookDiagnostics.activeBookTitle || activeBook?.title || '',
         bookCutoffPosition,
         coverageFrom: filters.dateFrom,
         coverageTo: filters.dateTo,
@@ -728,7 +957,9 @@
   }
 
   const api = {
-    resolveVerifiedTopics
+    resolveVerifiedTopics,
+    readActiveBook,
+    countMultipleChoiceItems
   };
 
   global.SoMApExamSourceResolver = api;

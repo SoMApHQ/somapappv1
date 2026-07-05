@@ -753,7 +753,10 @@
         sourceHomework: bookSource.text,
         bookEvidence: { bookId: bookSource.id, bookTitle: bookSource.title, assessment: bookSource.text }
       };
-      parseAssessmentItems(bookSource.text, bookSource.text, bookTopic).forEach((item) => assessmentItems.push({ ...item, topic: bookTopic }));
+      const parsedBookItems = parseAssessmentItems(bookSource.text, bookSource.text, bookTopic);
+      parsedBookItems.forEach((item) => assessmentItems.push({ ...item, topic: bookTopic }));
+      sourceResult.diagnostics.bookAssessmentItemCount = parsedBookItems.length;
+      sourceResult.diagnostics.bookMultipleChoiceItemCount = parsedBookItems.filter((item) => item.type === 'multiple_choice').length;
     }
     const consumedAssessmentItems = new Set();
     const topicUseCount = new Map();
