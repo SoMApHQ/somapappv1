@@ -608,7 +608,7 @@
           <input type="number" id="totalStudents" min="1" placeholder="Auto-filled from roster" readonly style="background: rgba(255,255,255,0.08); cursor: not-allowed;">
         </div>
         <div class="form-group">
-          <label>Students Present Today *</label>
+          <label>Students Present Today (after attendance)</label>
           <input type="number" id="studentsPresent" min="0" placeholder="Auto-filled from attendance" readonly style="background: rgba(255,255,255,0.08); cursor: not-allowed;">
         </div>
         <div class="form-group">
@@ -1063,14 +1063,51 @@
     }
 
     async function loadActiveClassRoster(year, className, maps = null) {
-      const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(className) : String(className || '').trim();
+      const rawTarget = String(className || '').replace(/\s+/g, ' ').trim();
+      const canonicalTarget = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(rawTarget) : rawTarget;
       const financeRoster = await getFinanceRoster(year);
+
+      // Stream entries are expanded by normalizeTeacherConfig. Their explicit
+      // student IDs are authoritative; do not count the whole base class.
+      const streamToken = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const targetToken = streamToken(rawTarget);
+      const streamMapping = (teacherConfig?.classSubjectMappings || []).find((mapping) => {
+        if (!mapping?.streamName || !Array.isArray(mapping.studentIds)) return false;
+        return [mapping.class, mapping.streamName, mapping.streamKey].some((value) => streamToken(value) === targetToken);
+      });
+      if (streamMapping) {
+        const financeById = new Map();
+        (financeRoster || []).forEach((row) => {
+          const raw = row.rawStudent || row.raw || {};
+          [row.id, row.studentId, row.admissionNumber, row.admissionNo, raw.id, raw.studentId, raw.admissionNumber, raw.admissionNo, raw.admNo]
+            .map((value) => String(value || '').trim().toLowerCase())
+            .filter(Boolean)
+            .forEach((value) => financeById.set(value, row));
+        });
+        const streamNames = Array.isArray(streamMapping.studentNames) ? streamMapping.studentNames : [];
+        return streamMapping.studentIds.map((studentId, index) => {
+          const id = String(studentId || '').trim();
+          const studentRecord = maps?.students?.[id] || {};
+          const financeRow = financeById.get(id.toLowerCase()) || {};
+          const raw = financeRow.rawStudent || financeRow.raw || {};
+          const genderValue = financeRow.gender || studentRecord.gender || studentRecord.sex || raw.gender || raw.sex || '';
+          return {
+            id,
+            admissionNo: String(financeRow.admissionNumber || studentRecord.admissionNumber || studentRecord.admissionNo || studentRecord.admNo || '').trim(),
+            name: normalizeRosterStudentName(financeRow, normalizeRosterStudentName(studentRecord, streamNames[index] || id)),
+            gender: ClassUtils.normalizeGenderBucket ? ClassUtils.normalizeGenderBucket(genderValue) : String(genderValue).trim().toLowerCase(),
+            className: rawTarget
+          };
+        }).filter((student) => student.id);
+      }
+
       if (Array.isArray(financeRoster) && financeRoster.length) {
-        return financeRoster
+        const financeClassRoster = financeRoster
           .filter((row) => {
+            const raw = row.rawStudent || row.raw || {};
             const rosterClass = ClassUtils.normalizeClassName
-              ? ClassUtils.normalizeClassName(row.classLevel || row.className || '')
-              : String(row.classLevel || row.className || '').trim();
+              ? ClassUtils.normalizeClassName(row.classLevel || row.className || row.currentClass || row.class || row.grade || raw.classLevel || raw.className || raw.currentClass || raw.class || raw.grade || '')
+              : String(row.classLevel || row.className || row.currentClass || row.class || row.grade || raw.classLevel || raw.className || raw.currentClass || raw.class || raw.grade || '').trim();
             return L(rosterClass) === L(canonicalTarget);
           })
           .map((row) => ({
@@ -1083,6 +1120,9 @@
             className: canonicalTarget
           }))
           .sort((a, b) => a.name.localeCompare(b.name));
+        // A non-empty school roster does not guarantee that every class uses the
+        // same class field. Fall through to the academic maps when no rows match.
+        if (financeClassRoster.length) return financeClassRoster;
       }
 
       const fallback = [];
@@ -2935,7 +2975,9 @@
 
     async function loadAttendanceCounts(year, className, dateStr, studentsMap, classRoster = []){
       const y = String(year);
-      const cls = ClassUtils.normalizeClassName ? ClassUtils.normalizeClassName(className) : String(className || '').trim();
+      // Preserve the stream label (for example "2 B") so path candidates try the
+      // stream register before falling back to the canonical base class.
+      const cls = String(className || '').replace(/\s+/g, ' ').trim();
       const key = yyyymmdd(dateStr);
       const tryPaths = ClassUtils.buildAttendancePathCandidates
         ? ClassUtils.buildAttendancePathCandidates(y, cls, key)
@@ -2966,14 +3008,14 @@
       
       if (!node) {
         console.log(`No attendance data found for ${cls} on ${dateStr}`);
-        const rosterStats = summarizeClassRoster(classRoster);
         return {
+          recorded: false,
           present: 0,
-          absent: rosterStats.total,
+          absent: 0,
           boysP: 0,
           girlsP: 0,
-          boysA: rosterStats.boys,
-          girlsA: rosterStats.girls
+          boysA: 0,
+          girlsA: 0
         };
       }
 
@@ -3008,7 +3050,7 @@
             else if (student.gender === 'girls') derived.girlsA += 1;
           }
         });
-        return derived;
+        return { ...derived, recorded: true };
       }
 
       const pb = summary.boysP || 0;
@@ -3018,7 +3060,7 @@
       
       console.log(`Attendance counts - Present: ${pb+pg} (♂${pb} ♀${pg}), Absent: ${ab+ag} (♂${ab} ♀${ag})`);
       
-      return summary;
+      return { ...summary, recorded: true };
     }
 
     // ========== AUTO-FILL LOGIC ==========
@@ -3072,23 +3114,30 @@
           if(statNote) statNote.textContent = 'Loading attendance data...';
           const att = await loadAttendanceCounts(year, chosenClass, dateInp.value, maps.students||{}, classRoster);
           console.log('Attendance data:', att);
-          const presentTotal = att.present || 0;
-          const attTotal = (att.present || 0) + (att.absent || 0);
-          if (!total && attTotal > 0) total = attTotal;
-          const absentTotal = Math.max(0, total - presentTotal);
-          const absentBoys = att.boysA ?? Math.max(0, (rosterStats.boys || 0) - (att.boysP || 0));
-          const absentGirls = att.girlsA ?? Math.max(0, (rosterStats.girls || 0) - (att.girlsP || 0));
-          
-          if (presentInp) presentInp.value = presentTotal;
-          if (pbEl) pbEl.value = att.boysP || 0;
-          if (pgEl) pgEl.value = att.girlsP || 0;
-          if (abEl) abEl.value = absentBoys;
-          if (agEl) agEl.value = absentGirls;
-          if (statPB) statPB.textContent = att.boysP || 0;
-          if (statPG) statPG.textContent = att.girlsP || 0;
-          if (statAB) statAB.textContent = absentBoys;
-          if (statAG) statAG.textContent = absentGirls;
-          if (statNote) statNote.textContent = `Auto from attendance: ${dateInp.value} (${presentTotal} present, ${absentTotal} absent)`;
+          if (!att.recorded) {
+            if (presentInp) presentInp.value = '';
+            [pbEl,pgEl,abEl,agEl].forEach(el=>{ if(el) el.value = ''; });
+            [statPB,statPG,statAB,statAG].forEach(el=>{ if(el) el.textContent = '--'; });
+            if (statNote) statNote.textContent = `Total: ${total || 0} students. Present and absent will appear after attendance is taken for ${dateInp.value}.`;
+          } else {
+            const presentTotal = att.present || 0;
+            const attTotal = (att.present || 0) + (att.absent || 0);
+            if (!total && attTotal > 0) total = attTotal;
+            const absentTotal = Math.max(0, total - presentTotal);
+            const absentBoys = att.boysA ?? Math.max(0, (rosterStats.boys || 0) - (att.boysP || 0));
+            const absentGirls = att.girlsA ?? Math.max(0, (rosterStats.girls || 0) - (att.girlsP || 0));
+
+            if (presentInp) presentInp.value = presentTotal;
+            if (pbEl) pbEl.value = att.boysP || 0;
+            if (pgEl) pgEl.value = att.girlsP || 0;
+            if (abEl) abEl.value = absentBoys;
+            if (agEl) agEl.value = absentGirls;
+            if (statPB) statPB.textContent = att.boysP || 0;
+            if (statPG) statPG.textContent = att.girlsP || 0;
+            if (statAB) statAB.textContent = absentBoys;
+            if (statAG) statAG.textContent = absentGirls;
+            if (statNote) statNote.textContent = `Auto from attendance: ${dateInp.value} (${presentTotal} present, ${absentTotal} absent)`;
+          }
         } else {
           if (presentInp) presentInp.value = '';
           [pbEl,pgEl,abEl,agEl].forEach(el=>{ if(el) el.value = ''; });
@@ -3213,9 +3262,10 @@
         const currentYear = String(getYear());
         const previousYear = String(Number(currentYear) - 1);
 
-        const [configSnap, workerSnap] = await Promise.all([
+        const [configSnap, workerSnap, classStreamsSnap] = await Promise.all([
           scopedOrLegacy(`years/${currentYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`),
-          scopedOrLegacy(`years/${currentYear}/workers/${workerId}`, `workers/${workerId}`)
+          scopedOrLegacy(`years/${currentYear}/workers/${workerId}`, `workers/${workerId}`),
+          scopedOrLegacy(`years/${currentYear}/classStreams`, `years/${currentYear}/classStreams`).catch(() => ({ val: () => null }))
         ]);
 
         let profile = {};
@@ -3232,6 +3282,28 @@
         teacherConfig = ClassUtils.normalizeTeacherConfig
           ? ClassUtils.normalizeTeacherConfig(configSnap.val() || {})
           : (configSnap.val() || {});
+        // Shared stream rosters are saved independently by the stream picker.
+        // Merge them into the flattened teacher mappings used by this page.
+        const sharedClassStreams = classStreamsSnap?.val?.() || {};
+        const compactStreamToken = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        (teacherConfig.classSubjectMappings || []).forEach((mapping) => {
+          if (!mapping?.streamName) return;
+          const baseClass = mapping.baseClass || (ClassUtils.getBaseClassName ? ClassUtils.getBaseClassName(mapping.class) : mapping.class);
+          const classEntry = Object.values(sharedClassStreams).find((entry) => {
+            const entryClass = entry?.className || entry?.class || '';
+            return ClassUtils.classesEquivalent
+              ? ClassUtils.classesEquivalent(entryClass, baseClass)
+              : compactStreamToken(entryClass) === compactStreamToken(baseClass);
+          });
+          if (!classEntry) return;
+          const mappingToken = compactStreamToken(mapping.streamKey || mapping.streamName || mapping.class);
+          const sharedStream = Object.values(classEntry.streams || {}).find((stream) =>
+            compactStreamToken(stream?.streamKey || stream?.name) === mappingToken
+          );
+          if (!sharedStream) return;
+          mapping.studentIds = Array.isArray(sharedStream.studentIds) ? sharedStream.studentIds.slice() : [];
+          mapping.studentNames = Array.isArray(sharedStream.studentNames) ? sharedStream.studentNames.slice() : [];
+        });
         if (!teacherConfig.teacherType) {
           const prevConfigSnap = await scopedOrLegacy(`years/${previousYear}/teachers_config/${workerId}`, `teachers_config/${workerId}`);
           const prevConfig = prevConfigSnap.val();
@@ -3814,7 +3886,7 @@ ${plan.reflection || 'N/A'}
 
       // Validate
       const required = ['planClass', 'planSubject', 'planTerm', 'planWeek', 'planDate', 
-                       'totalStudents', 'studentsPresent', 'planTopic', 
+                       'totalStudents', 'planTopic',
                        'planObjectives', 'planIntro', 'planActivities', 'planResources'];
       
       for (const id of required) {
@@ -3835,6 +3907,11 @@ ${plan.reflection || 'N/A'}
 
       const isFinalSave = canFinalizeLessonNow();
       if (isFinalSave) {
+        if (!String(document.getElementById('studentsPresent').value || '').trim()) {
+          toast('Take class attendance first. Present and absent totals are required before final saving.', 'warning');
+          document.getElementById('studentsPresent').focus();
+          return;
+        }
         const finalRequired = ['planAssessment', 'planConclusion', 'planReflection'];
         for (const id of finalRequired) {
           const el = document.getElementById(id);
@@ -3906,7 +3983,7 @@ ${plan.reflection || 'N/A'}
         endTime: resolvedSlotMeta.end,
         totals: {
           totalStudents: parseInt(document.getElementById('totalStudents').value),
-          present: parseInt(document.getElementById('studentsPresent').value),
+          present: document.getElementById('studentsPresent').value === '' ? null : parseInt(document.getElementById('studentsPresent').value),
           presentBoys: parseInt(document.getElementById('lpPresentBoys').value || 0),
           presentGirls: parseInt(document.getElementById('lpPresentGirls').value || 0),
           absentBoys: parseInt(document.getElementById('lpAbsentBoys').value || 0),

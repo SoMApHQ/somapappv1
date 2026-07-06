@@ -154,6 +154,8 @@
             baseClass,
             streamName: stream.name,
             streamKey: stream.streamKey || stream.name.toLowerCase().replace(/[^a-z0-9]/g, ''),
+            studentIds: Array.isArray(stream.studentIds) ? stream.studentIds.slice() : [],
+            studentNames: Array.isArray(stream.studentNames) ? stream.studentNames.slice() : [],
             subjects: Array.from(new Set(
               ((stream.subjects && stream.subjects.length) ? stream.subjects : (mapping?.subjects || []))
                 .map(normalizeSubjectName).filter(Boolean)
