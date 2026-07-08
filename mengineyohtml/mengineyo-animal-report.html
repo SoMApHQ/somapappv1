@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MENGINEYO — Detailed Animal Report</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <style>
+    #pdfReport { width: 210mm; min-height: 297mm; margin: 0 auto; background: white; color: #24332d; font-family: Arial, sans-serif; }
+    .report-page { padding: 12mm; }
+    .avoid-break { break-inside: avoid; page-break-inside: avoid; }
+    .section-title { color: #065f46; border-bottom: 2px solid #a7f3d0; padding-bottom: 5px; margin: 18px 0 10px; font-size: 17px; font-weight: 800; }
+    .data-table { width: 100%; border-collapse: collapse; font-size: 9px; }
+    .data-table th { background: #065f46; color: white; text-align: left; padding: 6px; }
+    .data-table td { border: 1px solid #d1d5db; padding: 5px; vertical-align: top; }
+    .data-table tr:nth-child(even) td { background: #f0fdf4; }
+    .animal-photo { width: 92px; height: 92px; object-fit: cover; border-radius: 10px; border: 3px solid #d1fae5; }
+    @media (max-width: 850px) { #pdfReport { width: 100%; min-height: auto; } .report-page { padding: 18px; } }
+    @media print { .screen-only { display: none !important; } body { background: white !important; } #pdfReport { box-shadow: none !important; } }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen pb-10">
+  <header class="screen-only bg-emerald-800 text-white px-4 py-3 sticky top-0 z-20 shadow-md">
+    <div class="max-w-5xl mx-auto flex items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <a href="mengineyo-dashboard.html" class="text-emerald-200 hover:text-white"><i class="fas fa-arrow-left"></i></a>
+        <div><div class="font-bold">Detailed Animal Report</div><div id="headerProject" class="text-xs text-emerald-200"></div></div>
+      </div>
+      <button id="downloadBtn" onclick="downloadPDF()" disabled class="bg-white text-emerald-800 disabled:opacity-50 px-4 py-2 rounded-lg font-bold text-sm shadow">
+        <i class="fas fa-file-pdf mr-1"></i>Download PDF
+      </button>
+    </div>
+  </header>
+
+  <div class="screen-only max-w-5xl mx-auto px-4 pt-4"><div id="meAlert"></div></div>
+  <main id="pdfReport" class="mt-5 shadow-xl">
+    <div id="reportBody" class="report-page">
+      <div class="text-center py-24 text-emerald-700"><i class="fas fa-spinner fa-spin text-3xl"></i><p class="mt-3 text-sm">Preparing the detailed animal report…</p></div>
+    </div>
+  </main>
+
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <script src="../firebase.js"></script>
+  <script src="./mengineyo-core.js"></script>
+  <script>
+    const session = ME.requireAuth();
+    if (!session) throw new Error('Not authenticated');
+    document.getElementById('headerProject').textContent = session.projectName || '';
+    const money = session.currencySymbol || 'KSh';
+    let reportReady = false;
+
+    const esc = value => String(value === null || value === undefined || value === '' ? 'Not recorded' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+    const num = value => Number(value || 0);
+    const date = value => value ? ME.fmtDate(value) : 'Not recorded';
+    const displayName = a => a.name || a.animalId || a.id || 'Unnamed animal';
+    const values = snap => { const out = []; snap.forEach(ch => out.push({ id: ch.key, ...ch.val() })); return out; };
+    const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+
+    function stat(label, value, color) {
+      return `<div style="background:${color};border-radius:10px;padding:10px;text-align:center"><div style="font-size:20px;font-weight:800;color:#18352a">${esc(value)}</div><div style="font-size:9px;color:#52645d;margin-top:2px">${esc(label)}</div></div>`;
+    }
+
+    function animalNarrative(a, births, milk, health) {
+      const name = esc(displayName(a));
+      const acquisition = a.acquiredBy === 'Bought'
+        ? `${name} was bought${a.dateAcquired ? ' on ' + esc(date(a.dateAcquired)) : ''}${a.seller ? ' from ' + esc(a.seller) : ''}${num(a.purchasePrice) ? ' for ' + esc(money + ' ' + num(a.purchasePrice).toFixed(2)) : ''}.`
+        : `${name} joined the project through ${esc((a.acquiredBy || 'an unrecorded source').toLowerCase())}${a.dateAcquired ? ' on ' + esc(date(a.dateAcquired)) : ''}.`;
+      const birthCount = births.reduce((sum, r) => sum + num(r.numberBorn), 0);
+      const milkTotal = milk.reduce((sum, r) => sum + num(r.totalLitres), 0);
+      const healthText = health.length
+        ? `${plural(health.length, 'health record is', 'health records are')} available. The latest entry is ${esc(health[0].type || 'a health visit')} dated ${esc(date(health[0].date))}, with recovery marked ${esc((health[0].recoveryStatus || 'not recorded').toLowerCase())}.`
+        : 'No health treatment or illness has been recorded for this animal.';
+      return `${name} is a ${esc((a.sex || 'sex not recorded').toLowerCase())} ${esc((a.breed || '').trim())} ${esc((a.species || 'animal').toLowerCase())}, currently marked ${esc((a.status || 'unknown').toLowerCase())}. ${acquisition} ${birthCount ? `${name} has ${plural(birthCount, 'recorded offspring', 'recorded offspring')} from ${plural(births.length, 'birth event', 'birth events')}.` : `No birth event has been recorded for ${name}.`} ${milk.length ? `Milk was recorded on ${plural(milk.length, 'occasion', 'occasions')}, producing ${milkTotal.toFixed(1)} litres in total.` : 'No milk production has been recorded for this animal.'} ${healthText}`;
+    }
+
+    function profileCard(a, births, milk, health) {
+      const latestMilk = milk[0];
+      const latestHealth = health[0];
+      return `<section class="avoid-break" style="border:1px solid #a7f3d0;border-radius:14px;margin:12px 0;overflow:hidden">
+        <div style="background:linear-gradient(90deg,#ecfdf5,#f0fdfa);padding:12px;display:flex;gap:14px;align-items:flex-start">
+          ${a.photoUrl ? `<img class="animal-photo" crossorigin="anonymous" src="${esc(a.photoUrl)}" alt="${esc(displayName(a))}">` : `<div class="animal-photo" style="display:flex;align-items:center;justify-content:center;background:#d1fae5;color:#047857;font-size:34px">🐄</div>`}
+          <div style="flex:1"><div style="font-size:18px;font-weight:800;color:#065f46">${esc(displayName(a))}</div>
+          <div style="font-size:10px;color:#587066;margin:2px 0 8px">${esc(a.animalId || a.id)} · ${esc(a.species)} · ${esc(a.breed)} · ${esc(a.sex)}</div>
+          <p style="font-size:10.5px;line-height:1.55;margin:0;color:#30473e">${animalNarrative(a, births, milk, health)}</p></div>
+        </div>
+        <div style="padding:10px 12px;display:grid;grid-template-columns:repeat(4,1fr);gap:7px;font-size:9px">
+          <div><b>Color/description</b><br>${esc(a.color)}</div><div><b>Age / born</b><br>${esc(a.estimatedAge || date(a.dateOfBirth))}</div>
+          <div><b>Acquired</b><br>${esc(a.acquiredBy)} · ${esc(date(a.dateAcquired))}</div><div><b>Purchase cost</b><br>${money} ${num(a.purchasePrice).toFixed(2)}</div>
+          <div><b>Mother</b><br>${esc(a.motherID || a.motherId || a.motherAnimalId)}</div><div><b>Father</b><br>${esc(a.fatherID || a.fatherId || a.fatherAnimalId)}</div>
+          <div><b>Pregnancy</b><br>${esc(a.pregnancyStatus)}${a.expectedBirthDate ? ' · ' + esc(date(a.expectedBirthDate)) : ''}</div><div><b>Milk status</b><br>${esc(a.milkStatus)}</div>
+          <div><b>Birth events</b><br>${births.length}</div><div><b>Total milk</b><br>${milk.reduce((s,r)=>s+num(r.totalLitres),0).toFixed(1)} L</div>
+          <div><b>Latest milk</b><br>${latestMilk ? esc(date(latestMilk.date)) + ' · ' + num(latestMilk.totalLitres).toFixed(1) + ' L' : 'None recorded'}</div>
+          <div><b>Latest health</b><br>${latestHealth ? esc(date(latestHealth.date)) + ' · ' + esc(latestHealth.recoveryStatus) : 'None recorded'}</div>
+        </div>
+        ${a.notes ? `<div style="padding:0 12px 10px;font-size:9px"><b>Animal notes:</b> ${esc(a.notes)}</div>` : ''}
+      </section>`;
+    }
+
+    function table(headers, rows) {
+      if (!rows.length) return '<p style="font-size:10px;color:#64748b">No records available.</p>';
+      return `<table class="data-table"><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${row.map(c=>`<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    }
+
+    async function loadReport() {
+      try {
+        const pid = session.projectId;
+        const [profileSnap, animalSnap, birthSnap, milkSnap, healthSnap, operatorSnap] = await Promise.all([
+          ME.meRef(pid, 'profile').once('value'), ME.meRef(pid, 'animals').once('value'),
+          ME.meRef(pid, 'birthRecords').once('value'), ME.meRef(pid, 'milkRecords').once('value'),
+          ME.meRef(pid, 'healthRecords').once('value'), ME.meRef(pid, 'operators').once('value')
+        ]);
+        const profile = profileSnap.val() || {};
+        const animals = values(animalSnap).sort((a,b)=>displayName(a).localeCompare(displayName(b)));
+        const births = values(birthSnap).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+        const milkRecords = values(milkSnap).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+        const healthRecords = values(healthSnap).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+        const operators = values(operatorSnap).filter(o=>o.active !== false);
+        const chair = operators.find(o=>o.role === 'Chair') || operators[0] || {};
+        const active = animals.filter(a=>a.status === 'active');
+        const species = active.reduce((out,a)=>{ const key=a.species||'Unspecified'; out[key]=(out[key]||0)+1; return out; },{});
+        const totalMilk = milkRecords.reduce((s,r)=>s+num(r.totalLitres),0);
+        const totalBirths = births.reduce((s,r)=>s+num(r.numberBorn),0);
+        const healthy = active.filter(a=>!healthRecords.some(h=>h.animalId===a.id && ['Ongoing','Follow-up needed'].includes(h.recoveryStatus))).length;
+        const generated = new Date().toLocaleString('en-KE', { dateStyle:'long', timeStyle:'short' });
+
+        const profiles = animals.map(a => profileCard(a,
+          births.filter(r=>r.motherId===a.id || r.motherAnimalId===a.id || r.motherName===a.name),
+          milkRecords.filter(r=>r.animalId===a.id), healthRecords.filter(r=>r.animalId===a.id))).join('');
+        const animalRows = animals.map(a=>[a.animalId||a.id,displayName(a),a.species,a.sex,a.breed,a.acquiredBy,date(a.dateAcquired),a.pregnancyStatus,a.milkStatus,a.status]);
+        const birthRows = births.map(r=>[date(r.date),r.motherName,r.species,r.numberBorn,r.sex,r.aliveStatus,r.healthCondition,r.confirmStatus]);
+        const milkRows = milkRecords.map(r=>[date(r.date),r.animalName,num(r.totalLitres).toFixed(1)+' L',num(r.litresSold).toFixed(1)+' L',num(r.litresHome).toFixed(1)+' L',money+' '+num(r.totalIncome).toFixed(2),r.confirmStatus]);
+        const healthRows = healthRecords.map(r=>[date(r.date),r.animalName,r.type,r.symptoms,r.medicine,r.vetName||r.vet,money+' '+num(r.cost).toFixed(2),r.recoveryStatus,date(r.nextVisitDate)]);
+
+        document.getElementById('reportBody').innerHTML = `
+          <div style="background:linear-gradient(135deg,#064e3b,#0f766e);color:white;border-radius:16px;padding:20px;position:relative;overflow:hidden">
+            <div style="font-size:11px;letter-spacing:2px;color:#a7f3d0;font-weight:bold">MENGINEYO LIVESTOCK RECORD</div>
+            <h1 style="font-size:25px;margin:6px 0 3px">${esc(profile.projectName || session.projectName)}</h1>
+            <div style="font-size:12px;color:#ccfbf1">Detailed Animal Summary &amp; History Report</div>
+            <div style="font-size:9px;margin-top:14px;color:#d1fae5">Project code: ${esc(profile.projectCode || session.projectCode)} · Generated ${esc(generated)}</div>
+          </div>
+          <h2 class="section-title">Project and Contact Details</h2>
+          <div class="avoid-break" style="display:grid;grid-template-columns:1fr 1fr;gap:9px;background:#f8fafc;border-radius:10px;padding:12px;font-size:10px">
+            <div><b>Project:</b> ${esc(profile.projectName || session.projectName)}</div><div><b>Contact person:</b> ${esc(chair.fullName || session.operatorName)} (${esc(chair.role || session.role)})</div>
+            <div><b>Location:</b> ${esc([profile.location,profile.district,profile.region,profile.country].filter(Boolean).join(', '))}</div><div><b>Phone:</b> ${esc(chair.phone)}</div>
+            <div><b>Ownership:</b> ${esc(profile.ownership)}</div><div><b>Email:</b> ${esc(chair.email)}</div>
+            <div><b>Project start date:</b> ${esc(date(profile.startDate))}</div><div><b>Land:</b> ${esc(profile.land)}</div>
+          </div>
+          <h2 class="section-title">Farm at a Glance</h2>
+          <div class="avoid-break" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">${stat('Active animals',active.length,'#d1fae5')}${stat('All registered',animals.length,'#e0f2fe')}${stat('Recorded births',totalBirths,'#fce7f3')}${stat('Milk recorded',totalMilk.toFixed(1)+' L','#fef3c7')}${stat('Healthy / no open alert',healthy,'#dcfce7')}${stat('Health records',healthRecords.length,'#fee2e2')}${stat('Sold',animals.filter(a=>a.status==='sold').length,'#ffedd5')}${stat('Dead / missing',animals.filter(a=>['dead','missing'].includes(a.status)).length,'#e5e7eb')}</div>
+          <div class="avoid-break" style="margin-top:10px;background:#ecfdf5;border-left:5px solid #10b981;padding:11px;font-size:11px;line-height:1.55"><b>Plain-language farm summary.</b> The project has ${plural(active.length,'active animal','active animals')}. ${Object.entries(species).map(([s,n])=>`${plural(n,s.toLowerCase(),s.toLowerCase())}`).join(', ') || 'No active species are recorded'}. Across all saved records, the animals have produced ${totalMilk.toFixed(1)} litres of milk and ${plural(totalBirths,'offspring','offspring')} have been recorded. There ${healthy===1?'is':'are'} ${plural(healthy,'active animal','active animals')} without an open health alert.</div>
+          <h2 class="section-title">Individual Animal Stories and Profiles</h2>
+          ${profiles || '<p style="font-size:11px">No animals have been registered.</p>'}
+          <h2 class="section-title">Complete Animal Register</h2>${table(['ID','Name','Species','Sex','Breed','Acquired','Date','Pregnancy','Milk','Status'],animalRows)}
+          <h2 class="section-title">Birth History</h2>${table(['Date','Mother','Species','Born','Sex','Survival','Health','Approval'],birthRows)}
+          <h2 class="section-title">Milk Production History</h2>${table(['Date','Animal','Produced','Sold','Home','Income','Approval'],milkRows)}
+          <h2 class="section-title">Health and Treatment History</h2>${table(['Date','Animal','Type','Symptoms','Treatment','Responsible','Cost','Recovery','Next visit'],healthRows)}
+          <div class="avoid-break" style="margin-top:22px;border-top:2px solid #065f46;padding-top:10px;font-size:9px;color:#64748b;display:flex;justify-content:space-between"><span>Prepared from MENGINEYO project records</span><span>${esc(profile.projectName || session.projectName)} · ${esc(generated)}</span></div>`;
+        reportReady = true;
+        document.getElementById('downloadBtn').disabled = false;
+      } catch (error) {
+        console.error(error);
+        document.getElementById('reportBody').innerHTML = `<div style="padding:40px;color:#b91c1c;text-align:center">Could not prepare the report: ${esc(error.message)}</div>`;
+      }
+    }
+
+    async function downloadPDF() {
+      if (!reportReady) return;
+      const button = document.getElementById('downloadBtn');
+      button.disabled = true;
+      button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Creating PDF…';
+      try {
+        const filename = (session.projectName || 'project').replace(/[^a-z0-9]+/gi,'-').replace(/^-|-$/g,'') + '-detailed-animal-report.pdf';
+        await html2pdf().set({
+          margin: 0, filename,
+          image: { type:'jpeg', quality:0.96 },
+          html2canvas: { scale:2, useCORS:true, allowTaint:false, backgroundColor:'#ffffff', logging:false },
+          jsPDF: { unit:'mm', format:'a4', orientation:'portrait' },
+          pagebreak: { mode:['css','legacy'], avoid:['.avoid-break','tr'] }
+        }).from(document.getElementById('pdfReport')).save();
+      } catch (error) {
+        ME.showAlert('PDF download failed. You can use your browser Print command and choose Save as PDF. ' + error.message, 'error');
+      } finally {
+        button.disabled = false;
+        button.innerHTML = '<i class="fas fa-file-pdf mr-1"></i>Download PDF';
+      }
+    }
+
+    loadReport();
+  </script>
+</body>
+</html>
