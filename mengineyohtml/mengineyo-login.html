@@ -24,14 +24,14 @@
     <!-- Card -->
     <div class="bg-white rounded-2xl shadow-xl p-6">
       <h2 class="font-bold text-gray-800 text-lg mb-1">Login to Your Project</h2>
-      <p class="text-xs text-gray-500 mb-5">Enter your project name and password.</p>
+      <p class="text-xs text-gray-500 mb-5">Enter the full project name or any one word from it, plus your password. Capital letters do not matter.</p>
 
       <div id="meAlert"></div>
 
       <!-- Project name -->
       <div class="mb-4">
         <label class="block text-sm font-semibold text-gray-700 mb-1">Project Name <span class="text-red-500">*</span></label>
-        <input id="loginName" type="text" placeholder="e.g. Mnyore Empire Livestock" class="w-full border border-gray-300 rounded-lg px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+        <input id="loginName" type="text" placeholder="e.g. Mnyore, Empire, or Livestock" class="w-full border border-gray-300 rounded-lg px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500" />
       </div>
 
       <!-- PIN -->
@@ -90,6 +90,41 @@
       document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
     });
 
+    function projectNameMatches(projectName, enteredName) {
+      const entered = ME.slugifyName(enteredName);
+      if (!entered) return false;
+
+      // Keep full-name login working, and also accept one complete word.
+      if (ME.slugifyName(projectName) === entered) return true;
+      return String(projectName || '')
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter(Boolean)
+        .some(word => ME.slugifyName(word) === entered);
+    }
+
+    async function findProjectIds(enteredName) {
+      const ids = new Set();
+
+      // Fast path for a complete project name.
+      const exactSnap = await ME.nameRef(enteredName).once('value');
+      if (exactSnap.exists()) ids.add(exactSnap.val());
+
+      // The existing index uses full names as keys, so inspect it to support
+      // individual words for projects that have already been registered.
+      const namesSnap = await window.db.ref('mengineyoNames').once('value');
+      if (namesSnap.exists()) {
+        const entered = ME.slugifyName(enteredName);
+        Object.entries(namesSnap.val()).forEach(([indexedName, projectId]) => {
+          // This narrows the profiles we load. projectNameMatches() below still
+          // verifies word boundaries, so partial words are not accepted.
+          if (indexedName.includes(entered)) ids.add(projectId);
+        });
+      }
+
+      return Array.from(ids);
+    }
+
     async function doLogin() {
       const name = document.getElementById('loginName').value.trim();
       const pin  = document.getElementById('loginPin').value;
@@ -100,48 +135,35 @@
       ME.setBtnLoading('loginBtn', true, 'Login');
 
       try {
-        // 1. Look up project by name
-        const nameSnap = await ME.nameRef(name).once('value');
-        if (!nameSnap.exists()) {
-          ME.showAlert('Project not found. Please check the name and try again.', 'error');
-          ME.setBtnLoading('loginBtn', false, 'Login');
-          return;
-        }
-        const projectId = nameSnap.val();
+        // 1. Find projects whose full name or one complete word matches.
+        const candidateIds = await findProjectIds(name);
+        let projectId = null, profile = null, matchedOp = null, matchedOpId = null;
 
-        // 2. Load project profile
-        const profSnap = await ME.meRef(projectId, 'profile').once('value');
-        if (!profSnap.exists()) {
-          ME.showAlert('Project data not found.', 'error');
-          ME.setBtnLoading('loginBtn', false, 'Login');
-          return;
-        }
-        const profile = profSnap.val();
+        // 2. Use the password to select the correct project if a word is shared.
+        for (const candidateId of candidateIds) {
+          const profSnap = await ME.meRef(candidateId, 'profile').once('value');
+          if (!profSnap.exists()) continue;
+          const candidateProfile = profSnap.val();
+          if (!projectNameMatches(candidateProfile.projectName, name)) continue;
 
-        // 3. Find the active operator whose password matches
-        const opsSnap = await ME.meRef(projectId, 'operators').once('value');
-        let matchedOp = null, matchedOpId = null;
-        if (opsSnap.exists()) {
-          for (const child of Object.entries(opsSnap.val())) {
-            const [opId, op] = child;
+          const opsSnap = await ME.meRef(candidateId, 'operators').once('value');
+          if (!opsSnap.exists()) continue;
+          for (const [opId, op] of Object.entries(opsSnap.val())) {
             if (op.active === false) continue;
             const pinToCheck = op.temporaryPin ? op.temporaryPinHash : op.pinHash;
-            if (await ME.verifyPin(pin, pinToCheck)) { matchedOp = op; matchedOpId = opId; break; }
+            if (await ME.verifyPin(pin, pinToCheck)) {
+              projectId = candidateId;
+              profile = candidateProfile;
+              matchedOp = op;
+              matchedOpId = opId;
+              break;
+            }
           }
+          if (matchedOp) break;
         }
 
         if (!matchedOp) {
           ME.showAlert('Incorrect project name or password.', 'error');
-          // Log failed attempt (best effort)
-          try {
-            await ME.meRef(projectId, 'auditLogs').push().set({
-              action: 'login_failed',
-              entityType: 'operator',
-              projectId,
-              timestamp: ME.now(),
-              timestampISO: ME.isoNow(),
-            });
-          } catch(e) {}
           ME.setBtnLoading('loginBtn', false, 'Login');
           return;
         }
