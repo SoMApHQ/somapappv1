@@ -286,6 +286,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
   <!-- Firebase Config - Adjust as per your project: somaptestt -->
   <script src="../firebase.js"></script>
+  <script src="../somapappv1multischool/js/context.js"></script>
   <!-- GitHub Repo for Customizations: https://github.com/MNYORE -->
   <script>
     (function() {
@@ -309,6 +310,51 @@
     statusEl.className = 'mb-4 text-center py-3 bg-red-50 border border-red-200 text-red-700 rounded-lg';
     return;
   }
+
+  // ---- Multi-school context (Socrates keeps its original root-path
+  // behavior and branding untouched; every other school reads/writes under
+  // its own schools/{id}/... path and shows its own name/contacts). ----
+  const currentSchool = (window.SOMAP && SOMAP.getSchool && SOMAP.getSchool()) || { id: 'socrates-school' };
+  const schoolId = currentSchool.id || 'socrates-school';
+  const isSocratesSchool = (schoolId === 'socrates-school' || schoolId === 'default');
+  const schoolRef = (subPath) => (window.SOMAP && SOMAP.P ? db.ref(SOMAP.P(subPath)) : db.ref(subPath));
+  let schoolBrand = {
+    name: 'Socrates School',
+    idTitle: 'SOCRATES SCHOOL ID',
+    phone: '+255 686 828 732',
+    email: 'socratesschool2020@gmail.com',
+    issuer: 'Socrates Administration'
+  };
+
+  async function loadSchoolBrand() {
+    if (isSocratesSchool) return; // keep the defaults above exactly as-is
+    try {
+      const metaSnap = await schoolRef('meta').once('value');
+      const meta = metaSnap.val() || {};
+      const name = meta.schoolName || meta.name || currentSchool.name || schoolId;
+      schoolBrand = {
+        name,
+        idTitle: `${String(name).toUpperCase()} ID`,
+        phone: meta.phone || meta.ownerPhone || '',
+        email: meta.email || meta.ownerEmail || '',
+        issuer: `${name} Administration`
+      };
+    } catch (err) {
+      console.warn('School brand lookup failed', err?.message || err);
+      schoolBrand = { name: schoolId, idTitle: `${schoolId} ID`, phone: '', email: '', issuer: `${schoolId} Administration` };
+    }
+    const titleEl = document.querySelector('h1.text-primary');
+    if (titleEl) titleEl.textContent = `${schoolBrand.name} — Student Dashboard`;
+    document.title = `SoMAp — ${schoolBrand.name} Student Dashboard`;
+    const idTitleEl = document.querySelector('#idPreview .font-bold.text-primary.text-lg');
+    if (idTitleEl) idTitleEl.textContent = schoolBrand.idTitle;
+    const contactLines = document.querySelectorAll('#idPreview .text-xs.text-gray-600');
+    if (contactLines[0]) contactLines[0].textContent = schoolBrand.phone || ' ';
+    if (contactLines[1]) contactLines[1].textContent = schoolBrand.email || ' ';
+    const issuerEl = document.querySelector('#idPreview .italic');
+    if (issuerEl) issuerEl.textContent = `Issued by ${schoolBrand.issuer}`;
+  }
+  const schoolBrandReady = loadSchoolBrand();
 
   // URL Params
   const params = new URLSearchParams(window.location.search);
@@ -353,11 +399,11 @@
       let studentKey = null;
 
       if (key) {
-        const snap = await db.ref('students/' + key).once('value');
+        const snap = await schoolRef('students/' + key).once('value');
         student = snap.val();
         studentKey = key;
       } else if (adm) {
-        const snap = await db.ref('students').orderByChild('admissionNumber').equalTo(adm).once('value');
+        const snap = await schoolRef('students').orderByChild('admissionNumber').equalTo(adm).once('value');
         const data = snap.val() || {};
         const firstKey = Object.keys(data)[0];
         if (firstKey) {
@@ -365,7 +411,7 @@
           studentKey = firstKey;
         }
       } else if (phone && firstName && lastName) {
-        const snap = await db.ref('students').once('value');
+        const snap = await schoolRef('students').once('value');
         const data = snap.val() || {};
         for (const [sKey, s] of Object.entries(data)) {
           if (s.primaryParentContact === phone && s.firstName.toLowerCase().replace(/\s+/g, '') === firstName.toLowerCase().replace(/\s+/g, '') && s.lastName.toLowerCase().replace(/\s+/g, '') === lastName.toLowerCase().replace(/\s+/g, '')) {
@@ -591,8 +637,8 @@ if (phone && firstName && lastName) {
     const w = canvas.width;
     const h = canvas.height;
     const year = new Date().getFullYear();
-    const schoolPhone = '+255 686 828 732';
-    const schoolEmail = 'socratesschool2020@gmail.com';
+    const schoolPhone = schoolBrand.phone || '';
+    const schoolEmail = schoolBrand.email || '';
     const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim() || 'N/A';
     const admNo = student.admissionNumber || student.pupilId || 'N/A';
     const classLevel = student.classLevel || 'N/A';
@@ -631,7 +677,7 @@ if (phone && firstName && lastName) {
 
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 38px Arial';
-    ctx.fillText('SOCRATES SCHOOL', 140, 92);
+    ctx.fillText(textFit(ctx, String(schoolBrand.name || 'SOCRATES SCHOOL').toUpperCase(), 800), 140, 92);
     ctx.font = '600 24px Arial';
     ctx.fillText('STUDENT ID CARD', 140, 122);
 
@@ -718,6 +764,7 @@ if (phone && firstName && lastName) {
 
   // Event Listeners
  downloadPdfBtn.onclick = async () => {
+  await schoolBrandReady;
   const params = new URLSearchParams(window.location.search);
   const key = params.get('key') || params.get('id');
   const phone = params.get('phone');
@@ -727,12 +774,12 @@ if (phone && firstName && lastName) {
   let studentKey = null;
   try {
     if (key) {
-      const snap = await db.ref('students/' + key).once('value');
+      const snap = await schoolRef('students/' + key).once('value');
       student = snap.val();
       studentKey = key;
     } else if (phone && firstName && lastName) {
       console.log('PDF Parent lookup:', { phone, firstName, lastName });
-      const snap = await db.ref('students').once('value');
+      const snap = await schoolRef('students').once('value');
       const data = snap.val() || {};
       for (const [sKey, s] of Object.entries(data)) {
         if (
