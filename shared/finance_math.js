@@ -659,11 +659,12 @@ function buildFinanceStudents(
         status === 'shifted'
       );
     };
+    const normalizeSchoolId = (value) => String(value || '').trim().toLowerCase().replace(/_/g, '-');
     const isCompleteStudent = (stu) => {
       if (!stu || typeof stu !== 'object') return false;
       if (looksDeleted(stu)) return false;
       const sid = String(stu.schoolId || '').trim();
-      if (sid && currentSchoolId && sid !== currentSchoolId) return false;
+      if (sid && currentSchoolId && normalizeSchoolId(sid) !== normalizeSchoolId(currentSchoolId)) return false;
       const admission = String(stu.admissionNumber || '').trim();
       const first = String(stu.firstName || '').trim();
       const last = String(stu.lastName || '').trim();
