@@ -572,7 +572,8 @@
 
       // If record has a schoolId, enforce it.
       const sid = String(stu.schoolId || '').trim();
-      if (sid && sid !== currentSchoolId) return false;
+      const normalizeSchoolId = (value) => String(value || '').trim().toLowerCase().replace(/_/g, '-');
+      if (sid && normalizeSchoolId(sid) !== normalizeSchoolId(currentSchoolId)) return false;
 
       const admission = String(stu.admissionNumber || '').trim();
       const first = String(stu.firstName || '').trim();
@@ -583,17 +584,14 @@
       if (!first || L(first) === 'n/a' || L(first) === 'na') return false;
       if (!last  || L(last)  === 'n/a' || L(last)  === 'na') return false;
 
-      // must have a known registration year (so we can place it in 2025 vs 2026)
-      const regYear = getRegistrationYear(stu);
-      if (!regYear) return false;
-
       return true;
     }
 
     function belongsToSelectedYear(stu, selectedYearStr) {
       const selectedYear = Number(selectedYearStr);
       const regYear = getRegistrationYear(stu);
-      if (!regYear || !Number.isFinite(selectedYear)) return false;
+      if (!Number.isFinite(selectedYear)) return false;
+      if (!regYear) return true;
       // rule: 2025 view = only 2025, 2026 = 2025+2026, etc.
       return regYear >= BASE_YEAR && regYear <= selectedYear;
     }
@@ -835,11 +833,36 @@
           gender: row.gender || raw.gender || raw.sex || '',
         };
       });
+      const byKey = new Map(records.map((rec) => [rec.key, rec]));
+      state.students.forEach((raw, key) => {
+        if (byKey.has(key) || !isCompleteStudent(raw) || !belongsToSelectedYear(raw, year)) return;
+        const fallbackClass = raw.classLevel || raw.className || raw.class || '';
+        const classLabel = resolveClassForYear(key, fallbackClass, year, raw) || fallbackClass || 'N/A';
+        byKey.set(key, {
+          key,
+          admissionNo: raw.admissionNumber || raw.admissionNo || key,
+          fullName: [raw.firstName, raw.middleName, raw.lastName].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim() || raw.fullName || raw.name || key,
+          classLabel,
+          rawClass: fallbackClass || classLabel,
+          registrationDate: formatRegistrationDate(raw),
+          photoURL: raw.passportPhotoUrl || raw.passportPhotoURL || 'https://via.placeholder.com/50',
+          contact: raw.primaryParentContact || raw.parentPhone || raw.guardianPhone || raw.contact || 'N/A',
+          fee: Number(raw.feePerYear || raw.feeDue || 0),
+          paid: 0,
+          debt: Number(raw.feePerYear || raw.feeDue || 0),
+          planId: null,
+          planLabel: raw.paymentPlan || 'Class default',
+          isGraduated: String(classLabel || '').trim().toUpperCase() === 'GRADUATED',
+          feeSource: 'Student roster',
+          gender: raw.gender || raw.sex || '',
+        });
+      });
+      const mergedRecords = Array.from(byKey.values());
 
       if (generation !== state.renderToken) return;
 
       // Filter out Graduated + any remaining incomplete rows
-      const cleaned = records.filter(r => {
+      const cleaned = mergedRecords.filter(r => {
         if (r.isGraduated) return false;
         if (L(r.admissionNo) === 'n/a' || L(r.fullName) === 'n/a') return false;
         return true;

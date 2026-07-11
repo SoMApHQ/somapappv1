@@ -1301,15 +1301,18 @@ function buildFinanceStudents(
 
   async function getFinanceRoster(year, options = {}){
     const summary = await ensureYearSummary(year);
+    const dataset = summary.dataset || {};
+    const y = normalizeYear(year);
+    const targetYearNum = Number(y);
     const includeGraduated = Boolean(options.includeGraduated);
     const classFilter = String(options.className || options.classLevel || '').trim().toLowerCase();
-    const rows = Object.entries(summary.entries || {}).map(([id, entry]) => {
-      const student = entry?.student || {};
-      const finance = entry?.finance || {};
+    const rowMap = new Map();
+    const pushRow = (id, studentRecord = {}, finance = {}, entry = {}) => {
+      const student = studentRecord || {};
       const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`
         .replace(/\s+/g, ' ')
         .trim() || student.admissionNumber || id;
-      return {
+      rowMap.set(id, {
         id,
         studentId: id,
         admissionNumber: String(student.admissionNumber || student.admissionNo || id || '').trim(),
@@ -1327,8 +1330,77 @@ function buildFinanceStudents(
         isGraduated: Boolean(student.isGraduated),
         rawStudent: student,
         finance,
-      };
+      });
+    };
+    Object.entries(summary.entries || {}).forEach(([id, entry]) => {
+      pushRow(id, entry?.student || {}, entry?.finance || {}, entry || {});
     });
+    const toMsLocal = (value) => {
+      if (value === null || value === undefined) return null;
+      if (typeof value === 'number' && Number.isFinite(value)) return value > 1e9 && value < 1e12 ? value * 1000 : value;
+      const text = String(value || '').trim();
+      if (!text) return null;
+      const parsed = /^\d{10,13}$/.test(text) ? Number(text) : Date.parse(text);
+      if (!Number.isFinite(parsed)) return null;
+      return parsed > 1e9 && parsed < 1e12 ? parsed * 1000 : parsed;
+    };
+    const studentYear = (student) => {
+      const explicit = Number(student?.academicYear || student?.admissionYear || student?.admYear || student?.year);
+      if (Number.isFinite(explicit)) return explicit;
+      const ms = (
+        toMsLocal(student?.timestamp) ??
+        toMsLocal(student?.createdAt) ??
+        toMsLocal(student?.registeredAt) ??
+        toMsLocal(student?.dateRegistered) ??
+        toMsLocal(student?.dateOfRegistration)
+      );
+      if (!ms) return null;
+      const parsedYear = new Date(ms).getFullYear();
+      return Number.isFinite(parsedYear) ? parsedYear : null;
+    };
+    const isActiveDirectStudent = (student) => {
+      if (!student || typeof student !== 'object') return false;
+      const status = String(student.status || '').trim().toLowerCase();
+      if (student.deleted === true || student.isDeleted === true || student.archived === true || student.isArchived === true || student.removed === true || student.isRemoved === true || student.active === false) return false;
+      if (['deleted', 'archived', 'removed', 'shifted', 'graduated'].includes(status)) return false;
+      const admission = String(student.admissionNumber || student.admissionNo || '').trim();
+      const first = String(student.firstName || '').trim();
+      const last = String(student.lastName || '').trim();
+      if (!admission || L(admission) === 'n/a' || L(admission) === 'na') return false;
+      if (!first || L(first) === 'n/a' || L(first) === 'na') return false;
+      if (!last || L(last) === 'n/a' || L(last) === 'na') return false;
+      const regYear = studentYear(student);
+      return !Number.isFinite(targetYearNum) || !regYear || regYear <= targetYearNum;
+    };
+    Object.entries(dataset.baseStudents || {}).forEach(([id, student]) => {
+      if (rowMap.has(id) || !isActiveDirectStudent(student)) return;
+      const enrollment = dataset.yearEnrollments?.[id] || {};
+      const anchor = dataset.anchorEnrollments?.[id] || {};
+      const regYear = studentYear(student);
+      const baseClass = enrollment.className || enrollment.classLevel || student.classLevel || student.className || anchor.className || anchor.classLevel || '';
+      const classLevel = enrollment.className || enrollment.classLevel || (
+        Number.isFinite(regYear) && Number.isFinite(targetYearNum)
+          ? shiftClassFn(normalizeClassLabel(baseClass), targetYearNum - regYear)
+          : normalizeClassLabel(baseClass || 'N/A')
+      );
+      pushRow(id, {
+        ...student,
+        classLevel,
+        className: classLevel,
+        financeYear: y,
+        academicYear: student.academicYear || y,
+        hasYearData: false
+      }, {
+        feePerYear: Number(student.feePerYear || 0),
+        paidAmount: 0,
+        balance: Number(student.feePerYear || 0)
+      }, {
+        due: Number(student.feePerYear || 0),
+        paid: 0,
+        outstanding: Number(student.feePerYear || 0)
+      });
+    });
+    const rows = Array.from(rowMap.values());
     return rows.filter((row) => {
       if (!includeGraduated && row.isGraduated) return false;
       if (classFilter && String(row.classLevel || '').trim().toLowerCase() !== classFilter) return false;
