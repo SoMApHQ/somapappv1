@@ -499,6 +499,47 @@
     return { id: matchKey, student: cachedStudents[matchKey] };
   }
   window.__finance_lookupStudent = lookupStudentByAdmission;
+
+  async function mergeSharedFinanceRosterIntoCache(targetYear) {
+    if (!window.SomapFinance?.getFinanceRoster || !cachedStudents) return;
+    try {
+      const sharedRows = await window.SomapFinance.getFinanceRoster(targetYear);
+      (sharedRows || []).forEach((row) => {
+        if (!row || row.isGraduated) return;
+        const id = String(row.id || row.studentId || '').trim();
+        if (!id || cachedStudents[id]) return;
+        const raw = row.rawStudent || {};
+        const nameParts = String(row.fullName || '').trim().split(/\s+/).filter(Boolean);
+        const classLevel = row.classLevel || row.className || raw.classLevel || raw.className || '';
+        const fee = Math.max(0, Number(row.fee ?? raw.feePerYear ?? raw.feeDue ?? 0) || 0);
+        cachedStudents[id] = {
+          ...raw,
+          id,
+          studentId: id,
+          firstName: raw.firstName || nameParts[0] || '',
+          middleName: raw.middleName || (nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : ''),
+          lastName: raw.lastName || nameParts[nameParts.length - 1] || '',
+          admissionNumber: row.admissionNumber || raw.admissionNumber || raw.admissionNo || id,
+          classLevel,
+          className: classLevel,
+          paymentPlan: row.paymentPlan || raw.paymentPlan || 'Class default',
+          feePerYear: fee,
+          baseFee: fee,
+          carryAmount: Math.max(0, Number(row.carryForward || raw.carryAmount || 0) || 0),
+          payments: raw.payments || {},
+          financeYear: String(targetYear || financeYear),
+          academicYear: raw.academicYear || String(targetYear || financeYear),
+          primaryParentContact: row.parentContact || raw.primaryParentContact || raw.parentPhone || raw.guardianPhone || raw.contact || '',
+          hasYearData: Boolean(row.fee || row.paid || row.balance || raw.hasYearData),
+          isGraduated: false,
+          previousDebt: 0,
+        };
+      });
+    } catch (err) {
+      console.warn('Finance: shared roster merge failed', err?.message || err);
+    }
+  }
+
   let showingDebtorsOnly = false;
 
   populateClassFilterDropdown();
@@ -3675,6 +3716,7 @@ function buildFinanceStudents(
         approvalsByStudent,
         targetYear
       );
+      await mergeSharedFinanceRosterIntoCache(targetYear);
       decorateStudentsWithDeadlineExtensions(cachedStudents, deadlineExtensionsSnap.val() || {});
       armDeadlineExtensionWatcher(targetYear);
 
