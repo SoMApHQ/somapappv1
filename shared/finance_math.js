@@ -635,6 +635,8 @@ function buildFinanceStudents(
       );
     };
     const getRegistrationYear = (stu) => {
+      const explicitYear = Number(stu?.academicYear || stu?.admissionYear || stu?.admYear || stu?.year);
+      if (Number.isFinite(explicitYear)) return explicitYear;
       const ms = getRegistrationMs(stu);
       if (!ms) return null;
       const d = new Date(ms);

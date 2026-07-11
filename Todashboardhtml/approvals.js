@@ -1384,9 +1384,15 @@
     const docs = draft.documents || {};
     const payment = draft.payment || {};
     const approvedAt = record.approvedAt || Date.now();
+    const serverNow = firebase.database.ServerValue.TIMESTAMP;
+    const registrationDate = new Date(approvedAt).toISOString().slice(0, 10);
 
     const studentPayload = {
-      createdAt: firebase.database.ServerValue.TIMESTAMP,
+      createdAt: studentData.createdAt || serverNow,
+      registeredAt: studentData.registeredAt || approvedAt,
+      dateRegistered: studentData.dateRegistered || registrationDate,
+      dateOfRegistration: studentData.dateOfRegistration || registrationDate,
+      status: studentData.status || 'active',
       admissionApprovedAt: approvedAt,
       admissionApprovedBy: record.approvedBy || actorEmail(),
       joiningFormPayment: {
@@ -1399,21 +1405,32 @@
       ...studentData,
       ...docs
     };
+    studentPayload.createdAt = studentPayload.createdAt || serverNow;
+    studentPayload.registeredAt = studentPayload.registeredAt || approvedAt;
+    studentPayload.dateRegistered = studentPayload.dateRegistered || registrationDate;
+    studentPayload.dateOfRegistration = studentPayload.dateOfRegistration || studentPayload.dateRegistered;
+    studentPayload.academicYear = String(studentPayload.academicYear || year);
+    studentPayload.schoolId = studentPayload.schoolId || resolveSchoolId();
 
-    await sref(`students/${studentKey}`).set(studentPayload);
-    // Ensure student is indexed in the selected year for listing in admission.html
-    await sref(`years/${year}/students/${studentKey}`).set(true);
-
-    // Optional but recommended: store enrollment snapshot for the year
     const className = studentPayload.classLevel || studentPayload.className || '';
+    const enrollmentPayload = {
+      className,
+      classLevel: className,
+      admissionNumber: studentPayload.admissionNumber || studentKey,
+      academicYear: Number(year),
+      status: 'active',
+      setBy: 'admission_approval',
+      at: serverNow
+    };
+
+    const updates = {};
+    updates[P(`students/${studentKey}`)] = studentPayload;
+    updates[P(`years/${year}/students/${studentKey}`)] = true;
     if (className) {
-      await sref(`enrollments/${year}/${studentKey}`).set({
-        className,
-        setBy: 'admission_approval',
-        at: firebase.database.ServerValue.TIMESTAMP
-      });
+      updates[P(`enrollments/${year}/${studentKey}`)] = enrollmentPayload;
+      updates[P(`years/${year}/enrollments/${studentKey}`)] = enrollmentPayload;
     }
-    await sref(`admittedStudents/${studentKey}`).set({
+    updates[P(`admittedStudents/${studentKey}`)] = {
       student: {
         firstName: studentPayload.firstName,
         middleName: studentPayload.middleName || '',
@@ -1432,7 +1449,17 @@
       joinedAt: Date.now(),
       studentId: studentKey,
       source: 'direct_admission_approved'
-    });
+    };
+    if (shouldUseScopedShadow('admissionsPending')) {
+      updates[scopedPath(`students/${studentKey}`)] = studentPayload;
+      updates[scopedPath(`years/${year}/students/${studentKey}`)] = true;
+      if (className) {
+        updates[scopedPath(`enrollments/${year}/${studentKey}`)] = enrollmentPayload;
+        updates[scopedPath(`years/${year}/enrollments/${studentKey}`)] = enrollmentPayload;
+      }
+      updates[scopedPath(`admittedStudents/${studentKey}`)] = updates[P(`admittedStudents/${studentKey}`)];
+    }
+    await db.ref().update(updates);
 
     const removals = [sref(draftPath).remove()];
     if (shouldUseScopedShadow('admissionsPending')) {
@@ -1657,6 +1684,85 @@
     }
     await firebase.database().ref().update(updates);
   }
+
+  function splitStudentName(fullName) {
+    const parts = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return { firstName: '', middleName: '', lastName: '' };
+    if (parts.length === 1) return { firstName: parts[0], middleName: '', lastName: parts[0] };
+    return {
+      firstName: parts[0],
+      middleName: parts.length > 2 ? parts.slice(1, -1).join(' ') : '',
+      lastName: parts[parts.length - 1]
+    };
+  }
+
+  async function repairApprovedAdmissionRecords(entries = []) {
+    const approvedAdmissions = entries.filter((entry) => (
+      entry &&
+      entry.sourceModule === 'admission' &&
+      String(entry.finalStatus || entry.status || '').toLowerCase() !== 'rejected'
+    ));
+    if (!approvedAdmissions.length) return;
+
+    const updates = {};
+    for (const entry of approvedAdmissions) {
+      const year = String(entry.forYear || entry.academicYear || entry.modulePayload?.year || state.selectedYear || getContextYear());
+      const admissionNumber = entry.studentAdm || entry.admissionNumber || entry.modulePayload?.admissionNumber || '';
+      const studentKey =
+        entry.modulePayload?.reservedStudentKey ||
+        entry.modulePayload?.studentKey ||
+        entry.studentKey ||
+        toFirebaseKeySegment(admissionNumber) ||
+        toFirebaseKeySegment(entry.approvalId);
+      if (!studentKey) continue;
+
+      const existingSnap = await sref(`students/${studentKey}`).once('value').catch(() => null);
+      const existing = existingSnap?.val?.() || {};
+      const names = splitStudentName(entry.studentName || existing.fullName || '');
+      const approvedAt = Number(entry.approvedAt || entry.datePaid || entry.createdAt || Date.now());
+      const registrationDate = new Date(approvedAt).toISOString().slice(0, 10);
+      const className = existing.classLevel || existing.className || entry.className || '';
+
+      if (!existing.firstName && names.firstName) updates[P(`students/${studentKey}/firstName`)] = names.firstName;
+      if (!existing.middleName && names.middleName) updates[P(`students/${studentKey}/middleName`)] = names.middleName;
+      if (!existing.lastName && names.lastName) updates[P(`students/${studentKey}/lastName`)] = names.lastName;
+      if (!existing.admissionNumber && admissionNumber) updates[P(`students/${studentKey}/admissionNumber`)] = admissionNumber;
+      if (!existing.classLevel && className) updates[P(`students/${studentKey}/classLevel`)] = className;
+      if (!existing.className && className) updates[P(`students/${studentKey}/className`)] = className;
+      if (!existing.primaryParentContact && entry.parentContact) updates[P(`students/${studentKey}/primaryParentContact`)] = entry.parentContact;
+      if (!existing.academicYear) updates[P(`students/${studentKey}/academicYear`)] = year;
+      if (!existing.schoolId) updates[P(`students/${studentKey}/schoolId`)] = resolveSchoolId();
+      if (!existing.status) updates[P(`students/${studentKey}/status`)] = 'active';
+      if (!existing.createdAt) updates[P(`students/${studentKey}/createdAt`)] = approvedAt;
+      if (!existing.registeredAt) updates[P(`students/${studentKey}/registeredAt`)] = approvedAt;
+      if (!existing.dateRegistered) updates[P(`students/${studentKey}/dateRegistered`)] = registrationDate;
+      if (!existing.dateOfRegistration) updates[P(`students/${studentKey}/dateOfRegistration`)] = registrationDate;
+      if (!existing.admissionApprovedAt) updates[P(`students/${studentKey}/admissionApprovedAt`)] = approvedAt;
+      if (!existing.admissionApprovedBy) updates[P(`students/${studentKey}/admissionApprovedBy`)] = entry.approvedBy || actorEmail();
+
+      updates[P(`years/${year}/students/${studentKey}`)] = true;
+      if (className) {
+        const enrollmentPayload = {
+          className,
+          classLevel: className,
+          admissionNumber: admissionNumber || existing.admissionNumber || studentKey,
+          academicYear: Number(year),
+          status: 'active',
+          setBy: 'admission_history_repair',
+          at: firebase.database.ServerValue.TIMESTAMP
+        };
+        updates[P(`enrollments/${year}/${studentKey}`)] = enrollmentPayload;
+        updates[P(`years/${year}/enrollments/${studentKey}`)] = enrollmentPayload;
+      }
+    }
+
+    if (Object.keys(updates).length) {
+      await db.ref().update(updates);
+      if (window.SomapFinance?._clearFinanceCaches) window.SomapFinance._clearFinanceCaches();
+      console.info(`Approvals: repaired ${approvedAdmissions.length} approved admission roster record(s).`);
+    }
+  }
+
   async function loadHistorySnapshot() {
     const selectedYear = String(state.selectedYear || getContextYear());
     let snapshot = await sref(`approvalsHistory/${selectedYear}`).once('value');
@@ -1683,6 +1789,9 @@
     entries.sort((a, b) => Number(b.approvedAt || b.datePaid || 0) - Number(a.approvedAt || a.datePaid || 0));
 
     state.historyEntries = entries;
+    repairApprovedAdmissionRecords(entries).catch((err) => {
+      console.warn('Approvals: admission roster repair failed', err?.message || err);
+    });
     buildHistoryMonthOptionsForYear();
     renderHistory();
   }
