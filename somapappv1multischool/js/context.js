@@ -13,10 +13,13 @@
   function setSchoolId(id) {
     if (!id) return;
     localStorage.setItem(STORAGE_KEY, id);
-    // Also keep meta in sync if present
+    // Keep cached meta in sync with the school actually being switched to.
+    // A stale meta object left over from a previously selected school must
+    // never be allowed to leak its id forward once the id itself changes.
     try {
-      const meta = getSchool() || {};
-      if (!meta.id) {
+      const stored = localStorage.getItem(STORAGE_META_KEY);
+      const parsed = stored ? JSON.parse(stored) : null;
+      if (!parsed || parsed.id !== id) {
         localStorage.setItem(STORAGE_META_KEY, JSON.stringify({ id }));
       }
     } catch (_) { /* ignore */ }
@@ -36,16 +39,19 @@
   }
 
   function getSchool() {
+    const id = getSchoolId();
+    // Only trust the cached meta object when it actually matches the
+    // authoritative school id — otherwise it's a leftover from a previously
+    // selected school and would mislabel records written under the new one.
     try {
       const stored = localStorage.getItem(STORAGE_META_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (parsed && parsed.id) return parsed;
+        if (parsed && parsed.id === id) return parsed;
       }
     } catch (err) {
       console.warn('Failed to read school meta', err);
     }
-    const id = getSchoolId();
     return id ? { id, name: id === DEFAULT_SCHOOL_ID ? 'Socrates School' : undefined } : null;
   }
 
