@@ -192,6 +192,11 @@
               <label for="admissionNumber" class="block text-sm text-gray-600">Admission Number (Auto-generated)</label>
               <input type="text" id="admissionNumber" name="admissionNumber" readonly class="border p-2 rounded w-full bg-gray-100"/>
             </div>
+            <div id="dateOfRegistrationWrap">
+              <label for="dateOfRegistration" class="block text-sm text-gray-600">Date of Registration (when the student actually joined) *</label>
+              <input type="date" id="dateOfRegistration" name="dateOfRegistration" class="border p-2 rounded w-full"/>
+              <p class="hint mt-1">If this student joined earlier than today (e.g. mid-year transfer), set the real join date here — it stays fixed even if the paperwork is entered later.</p>
+            </div>
             <div>
               <label for="feePerYear" class="block text-sm text-gray-600">Fee Per Year (Tsh) *</label>
               <input type="number" id="feePerYear" name="feePerYear" placeholder="e.g., 600000" required class="border p-2 rounded w-full"/>
@@ -503,7 +508,22 @@
 
   function openModal() {
     modal.style.display = 'block';
+    applyDateOfRegistrationRules();
     checkFormValidity();
+  }
+
+  // Date of Registration only applies to non-Socrates schools — Socrates keeps
+  // its existing automatic (approval-date) behavior untouched.
+  function applyDateOfRegistrationRules() {
+    const wrap = document.getElementById('dateOfRegistrationWrap');
+    const input = document.getElementById('dateOfRegistration');
+    if (!wrap || !input) return;
+    const socrates = isSocratesSchool(schoolId);
+    wrap.classList.toggle('hidden', socrates);
+    input.required = !socrates;
+    if (!socrates && !editingKey && !input.value) {
+      input.value = toDateInput(Date.now());
+    }
   }
 
   function syncFormSchoolFields() {
@@ -817,7 +837,8 @@
     'firstName', 'lastName', 'gender', 'dob',
     'schoolName', 'classLevel', 'academicYear', 'boardingStatus',
     'primaryParentName', 'primaryParentContact', 'residentialAddress',
-    'feePerYear', 'paymentPlan'
+    'feePerYear', 'paymentPlan',
+    ...(isSocratesSchool(schoolId) ? [] : ['dateOfRegistration'])
   ];
   const requiredCreateOnlyFields = [
     'joiningFeeAmount', 'joiningFeeReference', 'joiningFeeReceivedBy'
@@ -981,6 +1002,8 @@
         gender: fd.get('gender'),
         dob: fd.get('dob'),
         admissionNumber: fd.get('admissionNumber') || `AUTO-${Date.now()}`,
+        dateOfRegistration: !isSocratesSchool(schoolId) ? (fd.get('dateOfRegistration') || '') : '',
+        dateRegistered: !isSocratesSchool(schoolId) ? (fd.get('dateOfRegistration') || '') : '',
         pupilId: fd.get('pupilId') || '',
         birthCertNumber: fd.get('birthCertNumber') || '',
         religion: fd.get('religion') || '',
@@ -1105,6 +1128,20 @@
           const keyToUpdate = editingKey;
           // Use existing student data URLs as defaults
           const existing = editingStudent || {};
+          // Keep createdAt/registeredAt in sync with a corrected Date of
+          // Registration — the "Date of Registration" shown in studentlist.html
+          // reads createdAt/registeredAt first, so without this an edited date
+          // would silently keep showing the old value. Socrates untouched.
+          if (!isSocratesSchool(schoolId)) {
+            const manualDateStr = String(studentData.dateOfRegistration || studentData.dateRegistered || '').trim();
+            if (manualDateStr) {
+              const manualMs = new Date(`${manualDateStr}T00:00:00`).getTime();
+              if (Number.isFinite(manualMs)) {
+                studentData.createdAt = manualMs;
+                studentData.registeredAt = manualMs;
+              }
+            }
+          }
           console.log('Updating student, checking files for key:', keyToUpdate); // Debug log
           studentData.passportPhotoUrl = await uploadMaybe("passportPhoto", "passport", keyToUpdate, existing.passportPhotoUrl || null);
           studentData.birthCertUrl = await uploadMaybe("birthCertUpload", "birthCert", keyToUpdate, existing.birthCertUrl || null);
@@ -2021,6 +2058,9 @@
         const el = document.getElementById(k);
         if (el) el.value = s[k] || '';
       });
+
+      const dorEl = document.getElementById('dateOfRegistration');
+      if (dorEl) dorEl.value = toDateInput(s.dateOfRegistration || s.dateRegistered || '');
 
       // Joining fee fields (if available)
       const joining = s.joiningFormPayment || s.joiningFormPaymentDraft || {};

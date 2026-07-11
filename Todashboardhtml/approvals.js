@@ -1387,11 +1387,18 @@
     const serverNow = firebase.database.ServerValue.TIMESTAMP;
     const registrationDate = new Date(approvedAt).toISOString().slice(0, 10);
 
+    // Non-Socrates schools collect the real join date on the admission form
+    // (it may differ from today's approval date, e.g. a backdated transfer).
+    // Socrates keeps its original approval-date-based behavior untouched.
+    const manualJoinDateStr = trimText(studentData.dateOfRegistration || studentData.dateRegistered || '');
+    const manualJoinMs = manualJoinDateStr ? new Date(`${manualJoinDateStr}T00:00:00`).getTime() : null;
+    const useManualJoinDate = !isSocratesSchool() && Number.isFinite(manualJoinMs);
+
     const studentPayload = {
-      createdAt: studentData.createdAt || serverNow,
-      registeredAt: studentData.registeredAt || approvedAt,
-      dateRegistered: studentData.dateRegistered || registrationDate,
-      dateOfRegistration: studentData.dateOfRegistration || registrationDate,
+      createdAt: useManualJoinDate ? manualJoinMs : (studentData.createdAt || serverNow),
+      registeredAt: useManualJoinDate ? manualJoinMs : (studentData.registeredAt || approvedAt),
+      dateRegistered: useManualJoinDate ? manualJoinDateStr : (studentData.dateRegistered || registrationDate),
+      dateOfRegistration: useManualJoinDate ? manualJoinDateStr : (studentData.dateOfRegistration || registrationDate),
       status: studentData.status || 'active',
       admissionApprovedAt: approvedAt,
       admissionApprovedBy: record.approvedBy || actorEmail(),
