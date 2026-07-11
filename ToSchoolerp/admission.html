@@ -732,8 +732,18 @@
       return override.className || override.classLevel;
     }
     const anchor = anchorEnrollments[studentKey] || {};
+    const hasAnchor = anchor && typeof anchor === 'object' && Object.keys(anchor).length > 0;
     const baseClass = anchor.className || anchor.classLevel || fallbackClass || '';
-    const delta = Number(targetYear) - SOMAP_DEFAULT_YEAR;
+    let delta = 0;
+    if (hasAnchor) {
+      delta = Number(targetYear) - SOMAP_DEFAULT_YEAR;
+    } else {
+      const student = cachedStudentsById.get(studentKey);
+      const registrationYear = getStudentYear(student);
+      if (Number.isFinite(registrationYear) && Number.isFinite(Number(targetYear))) {
+        delta = Number(targetYear) - registrationYear;
+      }
+    }
     return shiftClass(baseClass, delta);
   }
 
@@ -1129,13 +1139,24 @@
     const workingYear = getWorkingYear();
     const allowLegacy = shouldUseLegacyFallback(workingYear);
     const hasIndex = yearStudentIndex && Object.keys(yearStudentIndex).length > 0;
+    const mergeByKey = (...lists) => {
+      const map = new Map();
+      lists.flat().forEach((rec) => {
+        if (!rec || !rec.key) return;
+        map.set(rec.key, { ...(map.get(rec.key) || {}), ...rec });
+      });
+      return Array.from(map.values());
+    };
+    const eligibleScoped = allStudents.filter((s) => belongsToWorkingYear(s, workingYear));
+    const eligibleLegacy = allowLegacy ? legacyStudents.filter((s) => belongsToWorkingYear(s, workingYear)) : [];
     if (hasIndex) {
       const scopedInYear = allStudents.filter((s) => yearStudentIndex[s.key]);
-      cachedStudents = allowLegacy ? scopedInYear.concat(legacyStudents) : scopedInYear;
+      const legacyInYear = allowLegacy ? legacyStudents.filter((s) => yearStudentIndex[s.key]) : [];
+      cachedStudents = mergeByKey(scopedInYear, legacyInYear, eligibleScoped, eligibleLegacy);
     } else if (allowLegacy) {
-      cachedStudents = allStudents.concat(legacyStudents).filter((s) => belongsToWorkingYear(s, workingYear));
+      cachedStudents = mergeByKey(eligibleScoped, eligibleLegacy);
     } else {
-      cachedStudents = allStudents.filter((s) => belongsToWorkingYear(s, workingYear));
+      cachedStudents = eligibleScoped;
     }
     cachedStudents.forEach((rec) => cachedStudentsById.set(rec.key, rec));
   }
