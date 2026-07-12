@@ -2699,43 +2699,17 @@
         };
       }
 
-      function waitForDashboardModule(name, timeoutMs = 5000) {
-        const startedAt = Date.now();
-        return new Promise((resolve, reject) => {
-          const check = () => {
-            if (window[name]) {
-              resolve(window[name]);
-              return;
-            }
-            if (Date.now() - startedAt >= timeoutMs) {
-              reject(new Error(`${name} did not load`));
-              return;
-            }
-            setTimeout(check, 100);
-          };
-          check();
-        });
-      }
-
       async function refreshDashboard(role, className) {
+        if (!window.SomapFinance) return;
         currentRole = role || currentRole || "admin";
         currentClassScope = className || currentClassScope || "";
         const year = getSelectedYear();
         updateYearHint();
         try {
-          const SomapFinance = await waitForDashboardModule("SomapFinance");
-          const rosterPromise = SomapFinance.getFinanceRoster(year);
-          const paymentsPromise = SomapFinance.listRecentPayments(year, 6);
-          const totalsPromise = SomapFinance.loadSchoolTotals(year);
-          totalsPromise
-            .then((schoolTotals) => renderFinanceStats(schoolTotals, year))
-            .catch((err) => console.warn("Finance stats could not load", err));
-          const [sharedRoster, payments] = await Promise.all([
-            rosterPromise,
-            paymentsPromise.catch((err) => {
-              console.warn("Recent payments could not load", err);
-              return [];
-            }),
+          const [sharedRoster, payments, schoolTotals] = await Promise.all([
+            window.SomapFinance.getFinanceRoster(year),
+            window.SomapFinance.listRecentPayments(year, 6),
+            window.SomapFinance.loadSchoolTotals(year),
           ]);
           const scopedRosterRows =
             currentRole === "teacher" && currentClassScope
@@ -2755,17 +2729,15 @@
             primaryParentContact:
               row.parentContact || row.rawStudent?.primaryParentContact || "",
           }));
-          renderStudentSnapshot(roster);
+          await renderFinanceStats(schoolTotals, year);
+          await renderStudentSnapshot(roster);
+          await renderAttendanceSummary(roster, year);
+          await loadWorkerSnapshot(year);
+          await refreshRemedialModule(roster, year);
           renderRecentActivitiesFromPayments(
             payments,
             new Set(scopedRosterRows.map((row) => row.id))
           );
-          await Promise.allSettled([
-            totalsPromise,
-            renderAttendanceSummary(roster, year),
-            loadWorkerSnapshot(year),
-            refreshRemedialModule(roster, year),
-          ]);
         } catch (error) {
           console.error("Error loading dashboard:", error);
           Swal.fire(
@@ -2780,6 +2752,7 @@
         const due = Number(totals?.due || 0);
         const collected = Number(totals?.collected || 0);
         const outstanding = Number(totals?.outstanding || 0);
+        const expensesTotal = await window.SomapFinance.loadExpensesTotal(year);
         document.getElementById("total-due").innerHTML = formatTsh(due);
         document.getElementById("total-collected").innerHTML = formatTsh(
           collected
@@ -2788,15 +2761,11 @@
           outstanding
         );
         document.getElementById("total-expenses").innerHTML =
-          'Loading... <small class="text-xs text-slate-200">Expenses</small>';
-        document.getElementById("net-balance").innerHTML = formatTsh(collected);
-        updateFeeChart(collected, due);
-        const expensesTotal = await window.SomapFinance.loadExpensesTotal(year);
-        document.getElementById("total-expenses").innerHTML =
           formatTsh(expensesTotal);
         document.getElementById("net-balance").innerHTML = formatTsh(
           collected - expensesTotal
         );
+        updateFeeChart(collected, due);
       }
 
       function renderStudentSnapshot(students) {
@@ -2868,15 +2837,11 @@
 
       async function loadWorkerSnapshot(year) {
         const { workerMonthKey, workerDayKey } = buildDateKeys(year);
-        const [scopedWorkersSnap, legacyWorkersSnap, scopedAttendanceSnap] = await Promise.all([
-          schoolRef(`years/${year}/workers`).once("value").catch(() => null),
-          schoolRef("workers").once("value").catch(() => null),
-          schoolRef(`years/${year}/workerAttendance`).once("value").catch(() => null),
+        const [workersSnap, attendanceSnap] = await Promise.all([
+          schoolRef("workers").once("value"),
+          schoolRef("attendance").once("value"),
         ]);
-        const scopedWorkers = scopedWorkersSnap?.val() || {};
-        const workers = Object.keys(scopedWorkers).length
-          ? scopedWorkers
-          : legacyWorkersSnap?.val() || {};
+        const workers = workersSnap.val() || {};
         const totalWorkers = Object.values(workers).filter(
           (w) => w?.profile?.active !== false
         ).length;
@@ -2889,11 +2854,7 @@
           if (gender.startsWith("m")) male++;
           else if (gender.startsWith("f")) female++;
         });
-        let attendance = scopedAttendanceSnap?.val() || {};
-        if (!Object.keys(attendance).length) {
-          const legacyAttendanceSnap = await db.ref("attendance").once("value").catch(() => null);
-          attendance = legacyAttendanceSnap?.val() || {};
-        }
+        const attendance = attendanceSnap.val() || {};
         let present = 0;
         Object.values(attendance).forEach((record) => {
           const monthBucket = record?.[workerMonthKey];
