@@ -762,6 +762,45 @@
         grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
         gap: 0.75rem;
       }
+      .remedial-favor-popup {
+        border: 1px solid rgba(251, 191, 36, 0.35);
+        background: linear-gradient(180deg, #fff7ed 0%, #ffffff 58%, #f8fafc 100%);
+        color: #0f172a;
+      }
+      .remedial-favor-popup .swal2-title {
+        color: #7c2d12;
+      }
+      .remedial-favor-form {
+        color: #1e293b;
+      }
+      .remedial-favor-form label {
+        color: #334155;
+        font-weight: 800;
+      }
+      .remedial-favor-form .swal2-input,
+      .remedial-favor-form .swal2-select,
+      .remedial-favor-form .swal2-textarea {
+        width: 100%;
+        margin: 0.25rem 0 0;
+        border: 1px solid #cbd5e1;
+        border-radius: 0.7rem;
+        background: #ffffff;
+        color: #0f172a;
+        box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
+      }
+      .remedial-favor-form .swal2-input:focus,
+      .remedial-favor-form .swal2-select:focus,
+      .remedial-favor-form .swal2-textarea:focus {
+        border-color: #f59e0b;
+        box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.18);
+      }
+      .remedial-favor-note {
+        border-radius: 0.75rem;
+        background: #fffbeb;
+        color: #92400e;
+        border: 1px solid #fde68a;
+        padding: 0.7rem 0.85rem;
+      }
     </style>
 
     <script>
@@ -2660,17 +2699,43 @@
         };
       }
 
+      function waitForDashboardModule(name, timeoutMs = 5000) {
+        const startedAt = Date.now();
+        return new Promise((resolve, reject) => {
+          const check = () => {
+            if (window[name]) {
+              resolve(window[name]);
+              return;
+            }
+            if (Date.now() - startedAt >= timeoutMs) {
+              reject(new Error(`${name} did not load`));
+              return;
+            }
+            setTimeout(check, 100);
+          };
+          check();
+        });
+      }
+
       async function refreshDashboard(role, className) {
-        if (!window.SomapFinance) return;
         currentRole = role || currentRole || "admin";
         currentClassScope = className || currentClassScope || "";
         const year = getSelectedYear();
         updateYearHint();
         try {
-          const [sharedRoster, payments, schoolTotals] = await Promise.all([
-            window.SomapFinance.getFinanceRoster(year),
-            window.SomapFinance.listRecentPayments(year, 6),
-            window.SomapFinance.loadSchoolTotals(year),
+          const SomapFinance = await waitForDashboardModule("SomapFinance");
+          const rosterPromise = SomapFinance.getFinanceRoster(year);
+          const paymentsPromise = SomapFinance.listRecentPayments(year, 6);
+          const totalsPromise = SomapFinance.loadSchoolTotals(year);
+          totalsPromise
+            .then((schoolTotals) => renderFinanceStats(schoolTotals, year))
+            .catch((err) => console.warn("Finance stats could not load", err));
+          const [sharedRoster, payments] = await Promise.all([
+            rosterPromise,
+            paymentsPromise.catch((err) => {
+              console.warn("Recent payments could not load", err);
+              return [];
+            }),
           ]);
           const scopedRosterRows =
             currentRole === "teacher" && currentClassScope
@@ -2690,15 +2755,17 @@
             primaryParentContact:
               row.parentContact || row.rawStudent?.primaryParentContact || "",
           }));
-          await renderFinanceStats(schoolTotals, year);
-          await renderStudentSnapshot(roster);
-          await renderAttendanceSummary(roster, year);
-          await loadWorkerSnapshot(year);
-          await refreshRemedialModule(roster, year);
+          renderStudentSnapshot(roster);
           renderRecentActivitiesFromPayments(
             payments,
             new Set(scopedRosterRows.map((row) => row.id))
           );
+          await Promise.allSettled([
+            totalsPromise,
+            renderAttendanceSummary(roster, year),
+            loadWorkerSnapshot(year),
+            refreshRemedialModule(roster, year),
+          ]);
         } catch (error) {
           console.error("Error loading dashboard:", error);
           Swal.fire(
@@ -2713,7 +2780,6 @@
         const due = Number(totals?.due || 0);
         const collected = Number(totals?.collected || 0);
         const outstanding = Number(totals?.outstanding || 0);
-        const expensesTotal = await window.SomapFinance.loadExpensesTotal(year);
         document.getElementById("total-due").innerHTML = formatTsh(due);
         document.getElementById("total-collected").innerHTML = formatTsh(
           collected
@@ -2722,11 +2788,15 @@
           outstanding
         );
         document.getElementById("total-expenses").innerHTML =
+          'Loading... <small class="text-xs text-slate-200">Expenses</small>';
+        document.getElementById("net-balance").innerHTML = formatTsh(collected);
+        updateFeeChart(collected, due);
+        const expensesTotal = await window.SomapFinance.loadExpensesTotal(year);
+        document.getElementById("total-expenses").innerHTML =
           formatTsh(expensesTotal);
         document.getElementById("net-balance").innerHTML = formatTsh(
           collected - expensesTotal
         );
-        updateFeeChart(collected, due);
       }
 
       function renderStudentSnapshot(students) {
@@ -2798,11 +2868,15 @@
 
       async function loadWorkerSnapshot(year) {
         const { workerMonthKey, workerDayKey } = buildDateKeys(year);
-        const [workersSnap, attendanceSnap] = await Promise.all([
-          schoolRef("workers").once("value"),
-          schoolRef("attendance").once("value"),
+        const [scopedWorkersSnap, legacyWorkersSnap, scopedAttendanceSnap] = await Promise.all([
+          schoolRef(`years/${year}/workers`).once("value").catch(() => null),
+          schoolRef("workers").once("value").catch(() => null),
+          schoolRef(`years/${year}/workerAttendance`).once("value").catch(() => null),
         ]);
-        const workers = workersSnap.val() || {};
+        const scopedWorkers = scopedWorkersSnap?.val() || {};
+        const workers = Object.keys(scopedWorkers).length
+          ? scopedWorkers
+          : legacyWorkersSnap?.val() || {};
         const totalWorkers = Object.values(workers).filter(
           (w) => w?.profile?.active !== false
         ).length;
@@ -2815,7 +2889,11 @@
           if (gender.startsWith("m")) male++;
           else if (gender.startsWith("f")) female++;
         });
-        const attendance = attendanceSnap.val() || {};
+        let attendance = scopedAttendanceSnap?.val() || {};
+        if (!Object.keys(attendance).length) {
+          const legacyAttendanceSnap = await db.ref("attendance").once("value").catch(() => null);
+          attendance = legacyAttendanceSnap?.val() || {};
+        }
         let present = 0;
         Object.values(attendance).forEach((record) => {
           const monthBucket = record?.[workerMonthKey];
@@ -3332,7 +3410,7 @@
         const picked = await Swal.fire({
           title: `Special Favor - ${remedialEsc(r.name)}`,
           html:
-            `<div class="text-left text-slate-200">` +
+            `<div class="remedial-favor-form text-left">` +
             `<label class="block text-xs mb-1">Reduced price per month</label>` +
             `<input id="remConcessionAmount" class="swal2-input" type="number" min="0" step="100" placeholder="Example: 15000" value="${current?.monthlyPrice || ""}" />` +
             `<label class="block text-xs mt-3 mb-1">Starts from</label>` +
@@ -3341,8 +3419,11 @@
             `<select id="remConcessionEnd" class="swal2-select">${monthOptions(current?.endMonth || "08")}</select>` +
             `<label class="block text-xs mt-3 mb-1">Reason</label>` +
             `<textarea id="remConcessionReason" class="swal2-textarea" placeholder="Reason for the special favor">${remedialEsc(current?.reason || "")}</textarea>` +
-            `<p class="text-xs text-slate-400 mt-2">This changes only this child. Standard price remains ${formatTsh(remedialState.settings.monthlyPrice)}.</p>` +
+            `<p class="remedial-favor-note text-xs mt-3">This changes only this child. Standard price remains ${formatTsh(remedialState.settings.monthlyPrice)}.</p>` +
             `</div>`,
+          customClass: {
+            popup: "remedial-favor-popup",
+          },
           showCancelButton: true,
           showDenyButton: !!current,
           confirmButtonText: "Save Favor",
