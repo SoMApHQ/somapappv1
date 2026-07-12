@@ -2699,60 +2699,83 @@
         };
       }
 
+      function logDashboardLoadError(label, error) {
+        console.warn(`[Dashboard] ${label} failed`, error);
+      }
+
       async function refreshDashboard(role, className) {
         if (!window.SomapFinance) return;
         currentRole = role || currentRole || "admin";
         currentClassScope = className || currentClassScope || "";
         const year = getSelectedYear();
         updateYearHint();
-        try {
-          const [sharedRoster, payments, schoolTotals] = await Promise.all([
-            window.SomapFinance.getFinanceRoster(year),
-            window.SomapFinance.listRecentPayments(year, 6),
-            window.SomapFinance.loadSchoolTotals(year),
-          ]);
-          const scopedRosterRows =
-            currentRole === "teacher" && currentClassScope
-              ? sharedRoster.filter(
-                  (row) =>
-                    L(row.classLevel || row.className || "") ===
-                    L(currentClassScope)
-                )
-              : sharedRoster;
-          const roster = scopedRosterRows.map((row) => ({
-            ...(row.rawStudent || {}),
-            id: row.id,
-            admissionNumber: row.admissionNumber,
-            classLevel: row.classLevel,
-            className: row.classLevel,
-            gender: row.gender,
-            primaryParentContact:
-              row.parentContact || row.rawStudent?.primaryParentContact || "",
-          }));
-          await renderFinanceStats(schoolTotals, year);
-          await renderStudentSnapshot(roster);
-          await renderAttendanceSummary(roster, year);
-          await loadWorkerSnapshot(year);
-          await refreshRemedialModule(roster, year);
-          renderRecentActivitiesFromPayments(
-            payments,
-            new Set(scopedRosterRows.map((row) => row.id))
-          );
-        } catch (error) {
-          console.error("Error loading dashboard:", error);
-          Swal.fire(
-            "Error",
-            "Failed to load dashboard data: " + error.message,
-            "error"
-          );
-        }
+        const rosterPromise = window.SomapFinance.getFinanceRoster(year);
+        const paymentsPromise = window.SomapFinance.listRecentPayments(year, 6);
+        const totalsPromise = window.SomapFinance.loadSchoolTotals(year);
+
+        totalsPromise
+          .then((schoolTotals) => renderFinanceStats(schoolTotals, year))
+          .catch((error) => logDashboardLoadError("finance stats", error));
+
+        rosterPromise
+          .then((sharedRoster) => {
+            const scopedRosterRows =
+              currentRole === "teacher" && currentClassScope
+                ? sharedRoster.filter(
+                    (row) =>
+                      L(row.classLevel || row.className || "") ===
+                      L(currentClassScope)
+                  )
+                : sharedRoster;
+            const roster = scopedRosterRows.map((row) => ({
+              ...(row.rawStudent || {}),
+              id: row.id,
+              admissionNumber: row.admissionNumber,
+              classLevel: row.classLevel,
+              className: row.classLevel,
+              gender: row.gender,
+              primaryParentContact:
+                row.parentContact ||
+                row.rawStudent?.primaryParentContact ||
+                "",
+            }));
+            renderStudentSnapshot(roster);
+            renderAttendanceSummary(roster, year).catch((error) =>
+              logDashboardLoadError("student attendance summary", error)
+            );
+            refreshRemedialModule(roster, year).catch((error) =>
+              logDashboardLoadError("remedial module", error)
+            );
+            return { roster, scopedRosterRows };
+          })
+          .catch((error) => logDashboardLoadError("student roster", error));
+
+        loadWorkerSnapshot(year).catch((error) =>
+          logDashboardLoadError("worker snapshot", error)
+        );
+
+        Promise.all([paymentsPromise, rosterPromise])
+          .then(([payments, sharedRoster]) => {
+            const scopedRosterRows =
+              currentRole === "teacher" && currentClassScope
+                ? sharedRoster.filter(
+                    (row) =>
+                      L(row.classLevel || row.className || "") ===
+                      L(currentClassScope)
+                  )
+                : sharedRoster;
+            renderRecentActivitiesFromPayments(
+              payments,
+              new Set(scopedRosterRows.map((row) => row.id))
+            );
+          })
+          .catch((error) => logDashboardLoadError("recent payments", error));
       }
 
       async function renderFinanceStats(totals, year) {
         const due = Number(totals?.due || 0);
         const collected = Number(totals?.collected || 0);
         const outstanding = Number(totals?.outstanding || 0);
-        const expensesTotal = await window.SomapFinance.loadExpensesTotal(year);
         document.getElementById("total-due").innerHTML = formatTsh(due);
         document.getElementById("total-collected").innerHTML = formatTsh(
           collected
@@ -2760,12 +2783,17 @@
         document.getElementById("total-outstanding").innerHTML = formatTsh(
           outstanding
         );
-        document.getElementById("total-expenses").innerHTML =
-          formatTsh(expensesTotal);
-        document.getElementById("net-balance").innerHTML = formatTsh(
-          collected - expensesTotal
-        );
         updateFeeChart(collected, due);
+        window.SomapFinance
+          .loadExpensesTotal(year)
+          .then((expensesTotal) => {
+            document.getElementById("total-expenses").innerHTML =
+              formatTsh(expensesTotal);
+            document.getElementById("net-balance").innerHTML = formatTsh(
+              collected - expensesTotal
+            );
+          })
+          .catch((error) => logDashboardLoadError("expenses total", error));
       }
 
       function renderStudentSnapshot(students) {
@@ -2837,30 +2865,53 @@
 
       async function loadWorkerSnapshot(year) {
         const { workerMonthKey, workerDayKey } = buildDateKeys(year);
-        const [workersSnap, attendanceSnap] = await Promise.all([
-          schoolRef("workers").once("value"),
-          schoolRef("attendance").once("value"),
-        ]);
-        const workers = workersSnap.val() || {};
-        const totalWorkers = Object.values(workers).filter(
-          (w) => w?.profile?.active !== false
-        ).length;
+        let workersSnap = await schoolRef(`years/${year}/workers`).once(
+          "value"
+        );
+        let workers = workersSnap.val() || {};
+        if (!Object.keys(workers).length) {
+          workersSnap = await schoolRef("workers").once("value");
+          workers = workersSnap.val() || {};
+        }
+        const activeWorkers = Object.entries(workers).filter(
+          ([, w]) => w?.profile?.active !== false
+        );
+        const totalWorkers = activeWorkers.length;
         let male = 0,
           female = 0;
-        Object.values(workers).forEach((worker) => {
+        activeWorkers.forEach(([, worker]) => {
           const gender = String(worker?.profile?.gender || worker.gender || "")
             .trim()
             .toLowerCase();
           if (gender.startsWith("m")) male++;
           else if (gender.startsWith("f")) female++;
         });
-        const attendance = attendanceSnap.val() || {};
         let present = 0;
-        Object.values(attendance).forEach((record) => {
-          const monthBucket = record?.[workerMonthKey];
-          const dayEntry = monthBucket?.[workerDayKey];
-          if (dayEntry?.checkInTs) present++;
-        });
+        const readDay = (workerId, primaryOnly) =>
+          schoolRef(
+            `years/${year}/workerAttendance/${workerId}/${workerMonthKey}/${workerDayKey}`
+          )
+            .once("value")
+            .then((snap) => {
+              const record = snap.val();
+              if (record || primaryOnly) return record;
+              return schoolRef(
+                `attendance/${workerId}/${workerMonthKey}/${workerDayKey}`
+              )
+                .once("value")
+                .then((legacySnap) => legacySnap.val());
+            })
+            .catch(() => null);
+        const workerIds = activeWorkers.map(([id]) => id).filter(Boolean);
+        for (let index = 0; index < workerIds.length; index += 25) {
+          const batch = workerIds.slice(index, index + 25);
+          const records = await Promise.all(
+            batch.map((workerId) => readDay(workerId, false))
+          );
+          records.forEach((record) => {
+            if (record?.checkInTs) present++;
+          });
+        }
         const absent = Math.max(0, totalWorkers - present);
         document.getElementById("workers-total-count").textContent =
           totalWorkers;
