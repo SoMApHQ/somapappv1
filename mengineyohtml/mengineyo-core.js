@@ -332,6 +332,52 @@ const ME = (() => {
 
   const HEALTH_TYPES  = ['Sickness','Injury','Vaccination','Deworming','Pregnancy check','Routine check','Treatment','Death report'];
 
+  function normalizeSpecies(value) {
+    const raw = String(value || '').trim();
+    const key = raw.toLowerCase();
+    if (key === 'cattle' || key === 'cow' || key === 'cows') return 'Cattle';
+    if (key === 'goat' || key === 'goats') return 'Goat';
+    if (key === 'sheep') return 'Sheep';
+    if (key === 'chicken' || key === 'chickens') return 'Chicken';
+    if (key === 'pig' || key === 'pigs') return 'Pig';
+    return raw || 'Other';
+  }
+
+  function normalizeStatus(value) {
+    const key = String(value || 'active').trim().toLowerCase();
+    if (key === 'dead/missing' || key === 'dead or missing') return 'missing';
+    return ANIMAL_STATUS.includes(key) ? key : 'active';
+  }
+
+  function normalizeAnimalRecord(value, id) {
+    const rec = (value && typeof value === 'object') ? value : {};
+    return Object.assign({}, rec, {
+      id: rec.id || id || null,
+      species: normalizeSpecies(rec.species),
+      status: normalizeStatus(rec.status),
+    });
+  }
+
+  function snapshotToAnimals(snapshot) {
+    const animals = [];
+    if (!snapshot) return animals;
+    snapshot.forEach(ch => {
+      const value = ch.val();
+      if (!value || typeof value !== 'object') return;
+      if (value.species || value.animalId || value.name || value.sex || value.status) {
+        animals.push(normalizeAnimalRecord(value, ch.key));
+        return;
+      }
+      Object.keys(value).forEach(nestedKey => {
+        const nested = value[nestedKey];
+        if (nested && typeof nested === 'object') {
+          animals.push(normalizeAnimalRecord(Object.assign({ species: ch.key }, nested), nestedKey));
+        }
+      });
+    });
+    return animals;
+  }
+
   // ── Public API ────────────────────────────────────────────
   return {
     CURRENCY_MAP, getCurrency, formatMoney,
@@ -349,5 +395,6 @@ const ME = (() => {
     COUNTRIES, ACTIVITIES, SPECIES,
     ANIMAL_STATUS, PREG_STATUS, MILK_STATUS, CONFIRM_STATUS,
     INCOME_CATS, EXPENSE_CATS, HEALTH_TYPES,
+    normalizeSpecies, normalizeStatus, normalizeAnimalRecord, snapshotToAnimals,
   };
 })();
