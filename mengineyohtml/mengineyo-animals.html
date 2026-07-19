@@ -212,9 +212,44 @@
 
     let allAnimals = [];
 
+    function normalizeSpeciesLocal(value) {
+      if (ME.normalizeSpecies) return ME.normalizeSpecies(value);
+      const key = String(value || '').trim().toLowerCase();
+      if (['cattle','cow','cows'].includes(key)) return 'Cattle';
+      if (['goat','goats'].includes(key)) return 'Goat';
+      if (key === 'sheep') return 'Sheep';
+      if (['chicken','chickens'].includes(key)) return 'Chicken';
+      if (['pig','pigs'].includes(key)) return 'Pig';
+      return value || 'Other';
+    }
+
+    function normalizeStatusLocal(value) {
+      const key = String(value || 'active').trim().toLowerCase();
+      return ['active','sold','dead','missing','transferred','deleted'].includes(key) ? key : 'active';
+    }
+
+    function animalsFromSnapshot(snap) {
+      if (ME.snapshotToAnimals) return ME.snapshotToAnimals(snap);
+      const animals = [];
+      snap.forEach(ch => {
+        const value = ch.val() || {};
+        if (value.species || value.animalId || value.name || value.sex || value.status) {
+          animals.push({ id: ch.key, ...value, species: normalizeSpeciesLocal(value.species), status: normalizeStatusLocal(value.status) });
+          return;
+        }
+        Object.keys(value).forEach(nestedKey => {
+          const nested = value[nestedKey];
+          if (nested && typeof nested === 'object') {
+            animals.push({ id: nestedKey, species: normalizeSpeciesLocal(ch.key), ...nested, status: normalizeStatusLocal(nested.status) });
+          }
+        });
+      });
+      return animals;
+    }
+
     function loadAnimals() {
       ME.meRef(session.projectId, 'animals').on('value', snap => {
-        allAnimals = ME.snapshotToAnimals(snap);
+        allAnimals = animalsFromSnapshot(snap);
         // Sort: active first, then by createdAt desc
         allAnimals.sort((a, b) => {
           if (a.status === 'active' && b.status !== 'active') return -1;
@@ -242,8 +277,8 @@
       const sp  = document.getElementById('filterSpecies').value;
       const st  = document.getElementById('filterStatus').value;
       const filtered = allAnimals.filter(a =>
-        (!sp || ME.normalizeSpecies(a.species) === sp) &&
-        (!st || ME.normalizeStatus(a.status) === st)
+        (!sp || normalizeSpeciesLocal(a.species) === sp) &&
+        (!st || normalizeStatusLocal(a.status) === st)
       );
       renderAnimals(filtered);
     }
@@ -350,7 +385,7 @@
 
     async function saveAnimal() {
       const editId  = document.getElementById('editAnimalId').value;
-      const species = ME.normalizeSpecies(document.getElementById('aSpecies').value);
+      const species = normalizeSpeciesLocal(document.getElementById('aSpecies').value);
       const sex     = document.getElementById('aSex').value;
       const acqBy   = document.getElementById('aAcquiredBy').value;
 
@@ -388,7 +423,7 @@
           pregnancyStatus: document.getElementById('aPregnancy').value || null,
           expectedBirthDate: document.getElementById('aExpectedBirth').value || null,
           milkStatus: document.getElementById('aMilkStatus').value || null,
-          status: ME.normalizeStatus(document.getElementById('aStatus').value),
+          status: normalizeStatusLocal(document.getElementById('aStatus').value),
           notes: document.getElementById('aNotes').value.trim() || null,
           ...(photoUrl ? { photoUrl } : {}),
           ...ME.updateMeta(),

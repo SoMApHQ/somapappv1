@@ -114,6 +114,41 @@
     let currentReport = null;
     let reportData    = [];
 
+    function normalizeSpeciesLocal(value) {
+      if (ME.normalizeSpecies) return ME.normalizeSpecies(value);
+      const key = String(value || '').trim().toLowerCase();
+      if (['cattle','cow','cows'].includes(key)) return 'Cattle';
+      if (['goat','goats'].includes(key)) return 'Goat';
+      if (key === 'sheep') return 'Sheep';
+      if (['chicken','chickens'].includes(key)) return 'Chicken';
+      if (['pig','pigs'].includes(key)) return 'Pig';
+      return value || 'Other';
+    }
+
+    function normalizeStatusLocal(value) {
+      const key = String(value || 'active').trim().toLowerCase();
+      return ['active','sold','dead','missing','transferred','deleted'].includes(key) ? key : 'active';
+    }
+
+    function animalsFromSnapshot(snap) {
+      if (ME.snapshotToAnimals) return ME.snapshotToAnimals(snap);
+      const animals = [];
+      snap.forEach(ch => {
+        const value = ch.val() || {};
+        if (value.species || value.animalId || value.name || value.sex || value.status) {
+          animals.push({ id: ch.key, ...value, species: normalizeSpeciesLocal(value.species), status: normalizeStatusLocal(value.status) });
+          return;
+        }
+        Object.keys(value).forEach(nestedKey => {
+          const nested = value[nestedKey];
+          if (nested && typeof nested === 'object') {
+            animals.push({ id: nestedKey, species: normalizeSpeciesLocal(ch.key), ...nested, status: normalizeStatusLocal(nested.status) });
+          }
+        });
+      });
+      return animals;
+    }
+
     // Set defaults
     const now = new Date();
     const monthStr = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0');
@@ -202,7 +237,7 @@
 
     async function reportAnimalStock(month) {
       const snap = await ME.meRef(session.projectId, 'animals').once('value');
-      const all = ME.snapshotToAnimals(snap);
+      const all = animalsFromSnapshot(snap);
       const rows = all.map(a => [a.animalId||a.id, a.name||'-', a.species||'-', a.sex||'-', a.breed||'-', a.pregnancyStatus||'-', a.milkStatus||'-', a.status||'-', ME.fmtDate(a.dateAcquired||a.createdAt)]);
       const active = all.filter(a=>a.status==='active').length;
       const sold   = all.filter(a=>a.status==='sold').length;
@@ -215,7 +250,7 @@
     async function reportPregnancy(month) {
       const snap = await ME.meRef(session.projectId, 'animals').once('value');
       const rows = [];
-      ME.snapshotToAnimals(snap).forEach(a => {
+      animalsFromSnapshot(snap).forEach(a => {
         if (['Suspected pregnant','Confirmed pregnant'].includes(a.pregnancyStatus)) {
           rows.push([a.name||a.animalId||a.id, a.species||'-', a.pregnancyStatus, a.expectedBirthDate||'-', a.status||'-']);
         }
@@ -280,7 +315,7 @@
       // Animals without photos
       const animalSnap = await ME.meRef(session.projectId, 'animals').once('value');
       let noPhoto = 0, noPurchasePrice = 0, noSource = 0;
-      ME.snapshotToAnimals(animalSnap).forEach(a => {
+      animalsFromSnapshot(animalSnap).forEach(a => {
         if (a.status === 'active') {
           if (!a.photoUrl) noPhoto++;
           if (!a.purchasePrice && a.acquiredBy === 'Bought') noPurchasePrice++;
