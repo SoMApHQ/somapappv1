@@ -14,6 +14,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="../firebase.js"></script>
   <script src="../shared/academic-class-utils.js"></script>
+  <script src="../shared/teacher-assignment-utils.js"></script>
   <script src="../shared/school_calendar.js"></script>
   <script src="../shared/payroll_core.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
@@ -428,6 +429,9 @@
       todayKey: todayYMD().replace(/-/g, ''),
       workerId: '',
       profile: null,
+      profileVerified: false,
+      profileSource: '',
+      profileYear: '',
       teacherConfig: null,
       teacherConfigYear: '',
       teacherConfigLoaded: false,
@@ -441,6 +445,7 @@
     const PUBLIC_IP_ENDPOINT = 'https://api.ipify.org';
 
     let db = null;
+    let attendanceRenderVersion = 0;
 
     const DAY_START = '07:30';
     const DAY_END = '16:00';
@@ -678,10 +683,16 @@
 
       const systemYear = String(new Date().getFullYear());
       let snap = null;
+      let profileSource = '';
+      let profileYear = '';
 
       // 1) Primary: years/{systemYear}/workers/{workerId} (school-scoped via SOMAP.P)
       try {
         snap = await schoolRef(`years/${systemYear}/workers/${state.workerId}`).once('value');
+        if (snap.exists()) {
+          profileSource = 'current-year-worker-profile';
+          profileYear = systemYear;
+        }
       } catch (err) {
         if (!isPermissionDenied(err)) {
           throw err;
@@ -697,6 +708,8 @@
             const altSnap = await schoolRef(`years/${selectedYear}/workers/${state.workerId}`).once('value');
             if (altSnap.exists()) {
               snap = altSnap;
+              profileSource = 'selected-year-worker-profile';
+              profileYear = selectedYear;
             }
           } catch (err) {
             if (!isPermissionDenied(err)) {
@@ -713,6 +726,8 @@
           const legacySnap = await db.ref(`workers/${state.workerId}`).once('value');
           if (legacySnap.exists()) {
             snap = legacySnap;
+            profileSource = 'legacy-worker-profile';
+            profileYear = '';
           }
         } catch (err) {
           if (!isPermissionDenied(err)) {
@@ -730,6 +745,21 @@
       const raw = snap.val() || {};
       const nested = raw.profile || {};
       state.profile = Object.keys(nested).length ? nested : raw;
+      state.profileVerified = profileSource === 'current-year-worker-profile' && profileYear === systemYear;
+      state.profileSource = profileSource;
+      state.profileYear = profileYear;
+      const verifiedRole = String(state.profile.role || state.profile.designation || '').trim();
+      if (verifiedRole) {
+        sessionStorage.setItem('role', verifiedRole);
+        localStorage.setItem('role', verifiedRole);
+        sessionStorage.setItem('somap_role', verifiedRole);
+        localStorage.setItem('somap_role', verifiedRole);
+      }
+      if (!isVerifiedTeachingRole()) {
+        state.teacherConfig = null;
+        state.teacherConfigLoaded = false;
+        state.teacherConfigYear = '';
+      }
       if (state.profile.active === false) {
         const exitDate = state.profile.exitDate || raw.employment?.exitDate || '';
         toast(`Ajira hii ilifungwa${exitDate ? ` tarehe ${exitDate}` : ''}. Attendance hairuhusiwi.`, 'error');
@@ -899,6 +929,17 @@
         sessionStorage.getItem('role') ||
         localStorage.getItem('role') || ''
       );
+    }
+
+    function isVerifiedTeachingRole() {
+      if (!state.profileVerified) return false;
+      const role = normalizeRoleKey(state.profile?.role || state.profile?.designation || '');
+      return role === 'teacher' ||
+        role === 'academic_teacher' ||
+        role === 'headteacher' ||
+        role === 'head_teacher' ||
+        role === 'assistant_headteacher' ||
+        role === 'assistant_head_teacher';
     }
 
     function getPostCheckinReturnTarget() {
@@ -1488,6 +1529,7 @@
     }
 
     const ClassUtils = window.SomapAcademicClassUtils || {};
+    const AssignmentUtils = window.SomapTeacherAssignmentUtils || {};
 
     function normalizeSubjectName(value) {
       if (ClassUtils.normalizeSubjectName) return ClassUtils.normalizeSubjectName(value);
@@ -1509,7 +1551,52 @@
     }
 
     function subjectMatches(left, right) {
+      if (AssignmentUtils.normalizeAssignmentSubject) {
+        return AssignmentUtils.normalizeAssignmentSubject(left).toLowerCase() === AssignmentUtils.normalizeAssignmentSubject(right).toLowerCase();
+      }
       return normalizeSubjectName(left).toLowerCase() === normalizeSubjectName(right).toLowerCase();
+    }
+
+    function buildLessonInstanceKey(lesson) {
+      if (AssignmentUtils.buildLessonInstanceKey) return AssignmentUtils.buildLessonInstanceKey(lesson);
+      return [
+        lesson?.year || lesson?.academicYear || '',
+        lesson?.date || '',
+        lesson?.groupId || lesson?.timetableGroupId || '',
+        normalizeClassKey(lesson?.className || lesson?.class || ''),
+        normalizeSubjectName(lesson?.subject || lesson?.subjectName || '').toLowerCase(),
+        lesson?.slotId || lesson?.timetableSlotId || '',
+        lesson?.teacherId || state.workerId || ''
+      ].map((part) => String(part || '').trim()).join('|');
+    }
+
+    function teacherHasActiveAssignment(teacherConfig, lesson, dateYmd) {
+      if (!teacherConfig) return false;
+      if (AssignmentUtils.isTeacherAssignedOnDate) {
+        return AssignmentUtils.isTeacherAssignedOnDate(teacherConfig, lesson.className, lesson.subject, dateYmd);
+      }
+      return (teacherConfig.classSubjectMappings || []).some((mapping) => {
+        const subjects = [
+          ...(mapping.subjects || []),
+          ...((mapping.streams || []).flatMap((stream) => stream.subjects || []))
+        ];
+        if (!subjects.some((subject) => subjectMatches(subject, lesson.subject))) return false;
+        const aliases = collectClassAliases(mapping.class, (mapping.streams || []).map((stream) => stream?.name));
+        return aliases.some((alias) => classesEquivalent(alias, lesson.className));
+      });
+    }
+
+    async function writeTeacherGateDiagnostics(year, dateYmd, payload) {
+      if (!year || !dateYmd || !state.workerId) return;
+      try {
+        await schoolRef(`years/${year}/teacherGateDiagnostics/${dateYmd}/${state.workerId}`).update({
+          ...payload,
+          checkedAt: firebase.database.ServerValue.TIMESTAMP,
+          workerRole: state.profile?.role || '',
+        });
+      } catch (error) {
+        console.warn('Teacher gate diagnostics write failed', error);
+      }
     }
 
     function collectClassAliases(...values) {
@@ -1556,7 +1643,9 @@
     function dedupeLessons(lessons) {
       const seen = new Set();
       return (lessons || []).filter((lesson) => {
-        const key = [
+        const key = lesson.lessonInstanceKey || [
+          String(lesson.date || '').trim(),
+          String(lesson.groupId || '').trim(),
           normalizeClassKey(lesson.className),
           String(lesson.subject || '').trim().toLowerCase(),
           String(lesson.slotId || lesson.start || '').trim()
@@ -1577,8 +1666,11 @@
         missingPlans: [],
         isWeekend: false,
         dayName: '',
-        timetableSource: ''
+        timetableSource: '',
+        staleTimetableAssignments: []
       };
+
+      if (!isVerifiedTeachingRole()) return result;
 
       const now = new Date();
       const nairobiNow = new Date(now.toLocaleString('en-US', { timeZone: 'Africa/Nairobi' }));
@@ -1591,16 +1683,13 @@
       const todayDate = todayYMD(now); // YYYY-MM-DD
 
       // 1. Load teacher config (still needed for scheme checking)
-      let teacherConfig = null;
-      try {
-        const configSnap = await schoolRef(`years/${year}/teachers_config/${state.workerId}`).once('value');
-        teacherConfig = configSnap.val();
-      } catch (err) {
-        console.warn('Teacher config load failed:', err);
-      }
+      const teacherConfig = await loadTeacherConfig(year);
 
+      const activeAssignments = AssignmentUtils.getAssignmentsActiveOnDate
+        ? AssignmentUtils.getAssignmentsActiveOnDate(teacherConfig, todayDate)
+        : [];
       const classSubjectMappings = teacherConfig?.classSubjectMappings || [];
-      if (!classSubjectMappings.length) {
+      if (!classSubjectMappings.length || (AssignmentUtils.getAssignmentsActiveOnDate && !activeAssignments.length)) {
         result.noTimetableSetup = true;
         result.ready = false;
         return result;
@@ -1620,15 +1709,20 @@
         const normalizedMissingKeys = new Set();
         const normalizedMissingSchemes = [];
 
-        for (const mapping of classSubjectMappings) {
-          const cls = mapping.class || mapping.className || '';
-          const streams = (mapping.streams || []).filter((stream) => stream && stream.name);
-          const classAliases = collectClassAliases(cls, streams.map((stream) => stream.name));
-          const subjects = Array.from(new Set([
-            ...(mapping.subjects || []),
-            ...streams.flatMap((stream) => stream.subjects || [])
-          ].map(normalizeSubjectName).filter(Boolean)));
-          const displayClass = getBaseClassName(cls || classAliases[0] || '') || cls || classAliases[0] || '';
+        const schemeAssignments = activeAssignments.length
+          ? activeAssignments
+          : classSubjectMappings.flatMap((mapping) => {
+              const streams = (mapping.streams || []).filter((stream) => stream && stream.name);
+              if (streams.length) {
+                return streams.flatMap((stream) => (stream.subjects || mapping.subjects || []).map((subject) => ({ className: stream.name, baseClass: mapping.class, subject })));
+              }
+              return (mapping.subjects || []).map((subject) => ({ className: mapping.class, baseClass: mapping.class, subject }));
+            });
+
+        for (const assignment of schemeAssignments) {
+          const classAliases = collectClassAliases(assignment.className, assignment.baseClass, assignment.streamName);
+          const subjects = [assignment.subject].map(normalizeSubjectName).filter(Boolean);
+          const displayClass = assignment.className || assignment.baseClass || '';
 
           for (const subj of subjects) {
             const hasScheme = schemeEntries.some((entry) => {
@@ -1717,14 +1811,26 @@
                   start: slotInfo.start || '',
                   end: slotInfo.end || '',
                   slotLabel: slotInfo.label || slotId,
-                  groupId
+                  groupId,
+                  teacherId: state.workerId,
+                  date: todayDate,
+                  year
                 });
               }
             }
           }
         }
 
-        result.todayLessons = dedupeLessons(timetableLessons);
+        const activeLessons = [];
+        timetableLessons.forEach((lesson) => {
+          const withKey = { ...lesson, lessonInstanceKey: buildLessonInstanceKey(lesson) };
+          if (teacherHasActiveAssignment(teacherConfig, lesson, todayDate)) {
+            activeLessons.push(withKey);
+          } else {
+            result.staleTimetableAssignments.push({ ...withKey, reason: 'staleTimetableAssignment' });
+          }
+        });
+        result.todayLessons = dedupeLessons(activeLessons);
 
         // C. Check lesson plans for each lesson today
         if (result.todayLessons.length > 0) {
@@ -1752,11 +1858,11 @@
               if (!classMatch) return false;
 
               // Subject match
-              const pSubj = String(p.subject || p.subjectName || '').toLowerCase().trim();
-              const lSubj = String(lesson.subject || '').toLowerCase().trim();
-              if (!(pSubj === lSubj || pSubj.includes(lSubj) || lSubj.includes(pSubj))) return false;
+              if (!subjectMatches(p.subject || p.subjectName || '', lesson.subject || '')) return false;
 
               // Slot match: exact for new plans that carry timetableSlotId; legacy fallback otherwise
+              const planLessonKey = String(p.lessonInstanceKey || '').trim();
+              if (planLessonKey && lesson.lessonInstanceKey) return planLessonKey === lesson.lessonInstanceKey;
               const planSlotId = String(p.timetableSlotId || '').trim();
               if (planSlotId && lesson.slotId) {
                 return planSlotId === lesson.slotId;
@@ -1768,6 +1874,15 @@
               result.missingPlans.push(lesson);
             }
           }
+        }
+        if (result.staleTimetableAssignments.length || result.missingPlans.length || result.todayLessons.length) {
+          await writeTeacherGateDiagnostics(year, todayDate, {
+            staleTimetableAssignments: result.staleTimetableAssignments,
+            timetableSource: result.timetableSource,
+            assignmentRevision: teacherConfig?.assignmentRevision || 0,
+            missingPlans: result.missingPlans,
+            matchedPlans: result.todayLessons.filter((lesson) => !result.missingPlans.includes(lesson))
+          });
         }
       }
 
@@ -1800,6 +1915,7 @@
     }
 
     function lessonPlanUrlForLesson(lesson, dateYmd, year) {
+      const lessonKey = lesson.lessonInstanceKey || buildLessonInstanceKey({ ...lesson, date: dateYmd, year, teacherId: state.workerId });
       const qp = new URLSearchParams({
         school: state.schoolId || '',
         year: year || state.year || '',
@@ -1810,7 +1926,8 @@
         slotLabel: lesson.slotLabel || '',
         start: lesson.start || '',
         end: lesson.end || '',
-        groupId: lesson.groupId || ''
+        groupId: lesson.groupId || '',
+        lessonKey
       });
       return `Toworkertaskshtml/lessonplan.html?${qp.toString()}`;
     }
@@ -1821,7 +1938,8 @@
     }
 
     function isFinalLessonPlanRecord(plan) {
-      return plan?.isFinal === true || String(plan?.lessonPlanStatus || '').toLowerCase() === 'final';
+      const status = String(plan?.lessonPlanStatus || '').toLowerCase();
+      return plan?.isFinal === true || status === 'final' || status === 'final_attendance_pending' || plan?.isPedagogicallyComplete === true;
     }
 
     function lessonPlanMatchesTimetableLesson(plan, lesson) {
@@ -1836,19 +1954,25 @@
         lessonClassAliases.some((alias) => classesEquivalent(alias, planClass));
       if (!classMatch) return false;
 
-      const planSubject = String(plan?.subject || plan?.subjectName || '').toLowerCase().trim();
-      const lessonSubject = String(lesson.subject || '').toLowerCase().trim();
-      if (!(planSubject === lessonSubject || planSubject.includes(lessonSubject) || lessonSubject.includes(planSubject))) {
-        return false;
-      }
+      if (!subjectMatches(plan?.subject || plan?.subjectName || '', lesson.subject || '')) return false;
 
+      const planLessonKey = String(plan?.lessonInstanceKey || '').trim();
+      if (planLessonKey && lesson.lessonInstanceKey) return planLessonKey === lesson.lessonInstanceKey;
       const planSlotId = String(plan?.timetableSlotId || '').trim();
       if (planSlotId && lesson.slotId) return planSlotId === lesson.slotId;
+      const planGroupId = String(plan?.timetableGroupId || '').trim();
+      if (planGroupId && lesson.groupId && planGroupId !== lesson.groupId) return false;
       return true;
     }
 
     async function loadTeacherTimetableLessonsForDate(year, dateYmd) {
-      const result = { lessons: [], isWeekend: false, noTimetableForWeek: false, timetableSource: '' };
+      const result = { lessons: [], staleTimetableAssignments: [], isWeekend: false, noTimetableForWeek: false, timetableSource: '' };
+      if (!isVerifiedTeachingRole()) return result;
+      const teacherConfig = await loadTeacherConfig(year);
+      const activeAssignments = AssignmentUtils.getAssignmentsActiveOnDate
+        ? AssignmentUtils.getAssignmentsActiveOnDate(teacherConfig, dateYmd)
+        : [];
+      if (!teacherConfig || (AssignmentUtils.getAssignmentsActiveOnDate && !activeAssignments.length)) return result;
       const date = new Date(`${dateYmd}T00:00:00`);
       if (Number.isNaN(date.getTime())) return result;
       const dayIndex = date.getDay();
@@ -1920,13 +2044,31 @@
               start: slotInfo.start || '',
               end: slotInfo.end || '',
               slotLabel: slotInfo.label || slotId,
-              groupId
+              groupId,
+              teacherId: state.workerId,
+              date: dateYmd,
+              year
             });
           });
         });
       });
 
-      result.lessons = dedupeLessons(lessons);
+      const activeLessons = [];
+      lessons.forEach((lesson) => {
+        const withKey = { ...lesson, lessonInstanceKey: buildLessonInstanceKey(lesson) };
+        if (teacherHasActiveAssignment(teacherConfig, lesson, dateYmd)) activeLessons.push(withKey);
+        else result.staleTimetableAssignments.push({ ...withKey, reason: 'staleTimetableAssignment' });
+      });
+      result.lessons = dedupeLessons(activeLessons);
+      if (result.staleTimetableAssignments.length || result.lessons.length) {
+        await writeTeacherGateDiagnostics(year, dateYmd, {
+          staleTimetableAssignments: result.staleTimetableAssignments,
+          timetableSource: result.timetableSource,
+          assignmentRevision: teacherConfig?.assignmentRevision || 0,
+          missingPlans: [],
+          matchedPlans: []
+        });
+      }
       return result;
     }
 
@@ -1960,7 +2102,7 @@
     }
 
     async function validateTeacherLessonFinalizationCheckout(year, dayKey) {
-      if (!getCurrentRoleKey().includes('teacher')) return { valid: true };
+      if (!isVerifiedTeachingRole()) return { valid: true };
       const dateYmd = dateFromDayKey(dayKey);
       if (!dateYmd) return { valid: true };
       const result = await getUnfinalizedTeacherLessons(year, dateYmd, { onlyEnded: true });
@@ -1996,7 +2138,7 @@
     }
 
     async function checkPreviousTeacherLessonFinalization(referenceTs = localTs()) {
-      if (!getCurrentRoleKey().includes('teacher')) return { blocked: false };
+      if (!isVerifiedTeachingRole()) return { blocked: false };
       const referenceDate = new Date(referenceTs);
       for (let delta = 1; delta <= 14; delta += 1) {
         const date = new Date(referenceDate.getTime() - delta * 86400000);
@@ -3164,7 +3306,17 @@
       }
     }
 
+    function chooseAttendanceRecord(existing, next) {
+      if (!existing) return next;
+      const existingHasTimes = !!(existing.record?.checkInTs || existing.record?.checkOutTs);
+      const nextHasTimes = !!(next.record?.checkInTs || next.record?.checkOutTs);
+      if (next.source !== 'legacy' && existing.source === 'legacy') return next;
+      if (nextHasTimes && !existingHasTimes) return next;
+      return existing;
+    }
+
     async function renderTable() {
+      const version = ++attendanceRenderVersion;
       const now = new Date();
       const monthText = now.toLocaleString('sw-TZ', {
         timeZone: 'Africa/Nairobi',
@@ -3179,13 +3331,20 @@
         year: 'numeric'
       });
       monthLabel.textContent = `${monthText} • Leo: ${todayText}`;
-      attendanceTable.innerHTML = '';
-      const { snap, source } = await scopedOrSocratesLegacy(
-        scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}`),
-        `attendance/${state.workerId}/${state.monthKey}`
-      );
-      const data = snap.val() || {};
-      const dayKeys = Object.keys(data).sort();
+      const [scopedSnap, legacySnap] = await Promise.all([
+        schoolRef(scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}`)).once('value').catch(() => ({ val: () => ({}) })),
+        db.ref(`attendance/${state.workerId}/${state.monthKey}`).once('value').catch(() => ({ val: () => ({}) }))
+      ]);
+      const recordsByDay = new Map();
+      Object.entries(legacySnap.val() || {}).forEach(([dayKey, record]) => {
+        const canonical = String(dayKey || '').replace(/[^0-9]/g, '');
+        if (/^\d{8}$/.test(canonical)) recordsByDay.set(canonical, chooseAttendanceRecord(recordsByDay.get(canonical), { record: record || {}, source: 'legacy' }));
+      });
+      Object.entries(scopedSnap.val() || {}).forEach(([dayKey, record]) => {
+        const canonical = String(dayKey || '').replace(/[^0-9]/g, '');
+        if (/^\d{8}$/.test(canonical)) recordsByDay.set(canonical, chooseAttendanceRecord(recordsByDay.get(canonical), { record: record || {}, source: 'scoped' }));
+      });
+      const dayKeys = Array.from(recordsByDay.keys()).sort();
       const isAdmin = isHeadTeacher();
 
       // Show/hide the admin action column header
@@ -3193,8 +3352,11 @@
         el.style.display = isAdmin ? '' : 'none';
       });
 
+      const fragment = document.createDocumentFragment();
       dayKeys.forEach(dayKey => {
-        const record = data[dayKey] || {};
+        const entry = recordsByDay.get(dayKey) || {};
+        const record = entry.record || {};
+        const source = entry.source || 'scoped';
         const row = document.createElement('tr');
         const inStatus = statusFromLegacy(record, 'in');
         const outStatus = statusFromLegacy(record, 'out');
@@ -3215,31 +3377,39 @@
         if (isAdmin) {
           row.querySelector('.del-att-btn')?.addEventListener('click', () => deleteAttendanceRecord(dayKey, source));
         }
-        attendanceTable.appendChild(row);
+        fragment.appendChild(row);
       });
+      if (version !== attendanceRenderVersion) return;
+      attendanceTable.replaceChildren(fragment);
     }
 
     async function renderStats() {
       const summaryPromise = getSummaryRef()
         .then((ref) => ref.once('value'))
         .catch(() => ({ val: () => ({}) }));
-      const [{ snap: attendanceSnap }, { snap: penaltiesSnap }, summarySnap] = await Promise.all([
-        scopedOrSocratesLegacy(
-          scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}`),
-          `attendance/${state.workerId}/${state.monthKey}`
-        ),
+      const [scopedAttendanceSnap, legacyAttendanceSnap, { snap: penaltiesSnap }, summarySnap] = await Promise.all([
+        schoolRef(scopedPath(`workerAttendance/${state.workerId}/${state.monthKey}`)).once('value').catch(() => ({ val: () => ({}) })),
+        db.ref(`attendance/${state.workerId}/${state.monthKey}`).once('value').catch(() => ({ val: () => ({}) })),
         scopedOrSocratesLegacy(
           scopedPath(`workers_penalties_ledger/${state.workerId}/${state.monthKey}`),
           `penalties_ledger/${state.workerId}/${state.monthKey}`
         ),
         summaryPromise
       ]);
-      const attendance = attendanceSnap.val() || {};
+      const recordsByDay = new Map();
+      Object.entries(legacyAttendanceSnap.val() || {}).forEach(([dayKey, record]) => {
+        const canonical = String(dayKey || '').replace(/[^0-9]/g, '');
+        if (/^\d{8}$/.test(canonical)) recordsByDay.set(canonical, chooseAttendanceRecord(recordsByDay.get(canonical), { record: record || {}, source: 'legacy' }));
+      });
+      Object.entries(scopedAttendanceSnap.val() || {}).forEach(([dayKey, record]) => {
+        const canonical = String(dayKey || '').replace(/[^0-9]/g, '');
+        if (/^\d{8}$/.test(canonical)) recordsByDay.set(canonical, chooseAttendanceRecord(recordsByDay.get(canonical), { record: record || {}, source: 'scoped' }));
+      });
       const summary = summarySnap.val() || {};
       let daysPresent = 0;
       let late = 0;
       let early = 0;
-      Object.values(attendance).forEach((record) => {
+      Array.from(recordsByDay.values()).forEach(({ record }) => {
         if (record.checkInTs) daysPresent += 1;
         if (record.lateMinutes > 0) late += 1;
         if (record.earlyMinutes > 0) early += 1;

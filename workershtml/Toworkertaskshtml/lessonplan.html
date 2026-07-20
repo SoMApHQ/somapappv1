@@ -10,6 +10,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
   <script src="../../shared/academic-class-utils.js"></script>
+  <script src="../../shared/teacher-assignment-utils.js"></script>
   <script src="../../shared/finance_math.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -870,18 +871,19 @@
       const slotLabel = params.get('slotLabel') || '';
       const start = params.get('start') || '';
       const end = params.get('end') || '';
+      const lessonKey = params.get('lessonKey') || '';
 
       // Store slot metadata in sessionStorage so the save handler can embed it in every new plan
-      if (slotId || groupId) {
+      if (slotId || groupId || lessonKey) {
         try {
-          sessionStorage.setItem('somap_lp_tt_meta', JSON.stringify({ groupId, slotId, slotLabel, start, end }));
+          sessionStorage.setItem('somap_lp_tt_meta', JSON.stringify({ groupId, slotId, slotLabel, start, end, lessonKey }));
         } catch (_) {}
       } else {
         // Clear stale metadata when opening the page without slot params
         try { sessionStorage.removeItem('somap_lp_tt_meta'); } catch (_) {}
       }
 
-      return { classParam, subjectParam, dateParam, slotId, slotLabel, start, end, groupId };
+      return { classParam, subjectParam, dateParam, slotId, slotLabel, start, end, groupId, lessonKey };
     }
     const _lpUrlPrefill = applyLessonPlanUrlParams();
 
@@ -918,6 +920,29 @@
     let activeLessonPlanDraftKey = '';
     let schoolLogoDataUrlPromise = null;
     let activeTimetableLessonSlot = null;
+    let routeLockedTimetableSlot = null;
+    let latestAttendanceLookup = null;
+    const AssignmentUtils = window.SomapTeacherAssignmentUtils || {};
+    if (_lpUrlPrefill?.slotId || _lpUrlPrefill?.groupId || _lpUrlPrefill?.lessonKey) {
+      routeLockedTimetableSlot = {
+        groupId: _lpUrlPrefill.groupId || '',
+        slotId: _lpUrlPrefill.slotId || '',
+        slotLabel: _lpUrlPrefill.slotLabel || '',
+        start: _lpUrlPrefill.start || '',
+        end: _lpUrlPrefill.end || '',
+        lessonInstanceKey: _lpUrlPrefill.lessonKey || ''
+      };
+    }
+
+    function maybeClearRouteLockedTimetableSlot() {
+      if (!routeLockedTimetableSlot) return;
+      const classChanged = _lpUrlPrefill.classParam && planClass?.value && planClass.value.toLowerCase() !== _lpUrlPrefill.classParam.toLowerCase();
+      const subjectChanged = _lpUrlPrefill.subjectParam && planSubject?.value && planSubject.value.toLowerCase() !== _lpUrlPrefill.subjectParam.toLowerCase();
+      const dateChanged = _lpUrlPrefill.dateParam && planDate?.value && planDate.value !== _lpUrlPrefill.dateParam;
+      if (classChanged || subjectChanged || dateChanged) {
+        routeLockedTimetableSlot = null;
+      }
+    }
 
     // UI Elements
     const teacherName = document.getElementById('teacherName');
@@ -1215,6 +1240,7 @@
         term: compactTextBlock(plan.term || fallback.term || ''),
         week: String(plan.week || fallback.week || ''),
         date,
+        lessonInstanceKey: plan.lessonInstanceKey || fallback.lessonInstanceKey || '',
         timetableGroupId: plan.timetableGroupId || fallback.timetableGroupId || '',
         timetableSlotId: plan.timetableSlotId || fallback.timetableSlotId || '',
         timetableSlotLabel: plan.timetableSlotLabel || fallback.timetableSlotLabel || '',
@@ -1233,12 +1259,16 @@
         homeworkSourceMeta: plan.homeworkSourceMeta || null,
         reflection: plan.reflection || '',
         lessonPlanStatus: plan.lessonPlanStatus || (plan.isFinal ? 'final' : 'preparation_draft'),
+        isPedagogicallyComplete: plan.isPedagogicallyComplete === true || plan.lessonPlanStatus === 'final_attendance_pending',
         isFinal: plan.isFinal === true || plan.lessonPlanStatus === 'final',
+        attendanceSyncStatus: plan.attendanceSyncStatus || '',
+        attendanceSourcePath: plan.attendanceSourcePath || '',
+        attendanceTriedPaths: Array.isArray(plan.attendanceTriedPaths) ? plan.attendanceTriedPaths : [],
         finalizedAt: plan.finalizedAt || null,
         draftSavedAt: plan.draftSavedAt || null,
         totals: {
           totalStudents: Number(plan?.totals?.totalStudents || plan.totalStudents || 0) || 0,
-          present: Number(plan?.totals?.present || plan.studentsPresent || 0) || 0,
+          present: plan?.totals?.present == null || plan?.totals?.present === '' ? null : (Number(plan?.totals?.present || plan.studentsPresent || 0) || 0),
           presentBoys: Number(plan?.totals?.presentBoys || 0) || 0,
           presentGirls: Number(plan?.totals?.presentGirls || 0) || 0,
           absentBoys: Number(plan?.totals?.absentBoys || 0) || 0,
@@ -1492,14 +1522,30 @@
           slotId: match.slotId || '',
           slotLabel: match.slotLabel || '',
           start: match.start || '',
-          end: match.end || ''
+          end: match.end || '',
+          lessonKey: match.lessonInstanceKey || ''
         }));
       } catch (_) {}
       setTimetableSlotStatus(`Scheduled from saved timetable: ${timeLabel}${duration ? ` (${duration} minutes)` : ''}.`, 'success');
       updateLessonFinalizationControls();
     }
 
-    async function findSavedTimetableLessonSlot({ year, termKey, className, subject, date }) {
+    function buildRouteLessonKey(meta) {
+      if (AssignmentUtils.buildLessonInstanceKey) {
+        return AssignmentUtils.buildLessonInstanceKey({
+          year: meta.year,
+          date: meta.date,
+          groupId: meta.groupId,
+          className: meta.className,
+          subject: meta.subject,
+          slotId: meta.slotId,
+          teacherId: workerId
+        });
+      }
+      return [meta.year, meta.date, meta.groupId, String(meta.className || '').toLowerCase(), String(meta.subject || '').toLowerCase(), meta.slotId, workerId].join('|');
+    }
+
+    async function findSavedTimetableLessonSlot({ year, termKey, className, subject, date, preferredGroupId = '', preferredSlotId = '', preferredLessonKey = '' }) {
       const dayName = getLessonDayName(date);
       if (!year || !termKey || !className || !subject || !dayName) return { status: 'missing-selection' };
 
@@ -1508,6 +1554,7 @@
       const groups = Object.entries(generatedByGroup || {}).filter(([, payload]) => payload && typeof payload === 'object');
       if (!groups.length) return { status: 'no-timetable', dayName };
 
+      const matches = [];
       for (const [groupId, payload] of groups) {
         const grid = payload.grid || {};
         const classKey = Object.keys(grid).find((key) => classMatchesLessonPlan(key, className));
@@ -1524,7 +1571,7 @@
           const start = slot.start || cell.start || '';
           const end = slot.end || cell.end || '';
           const slotLabel = slot.label || cell.slotLabel || cell.label || '';
-          return {
+          const match = {
             status: 'matched',
             groupId,
             className: classKey,
@@ -1536,9 +1583,26 @@
             subject: cell.subject || subject,
             teacherId: cell.teacherId || ''
           };
+          match.lessonInstanceKey = buildRouteLessonKey({ year, date, groupId, className: classKey, subject: match.subject, slotId });
+          matches.push(match);
         }
       }
 
+      if (preferredLessonKey) {
+        const preferred = matches.find((match) => String(match.lessonInstanceKey || '') === String(preferredLessonKey));
+        if (preferred) return preferred;
+        return { status: 'preferred-not-found', dayName, matches };
+      }
+      if (preferredGroupId || preferredSlotId) {
+        const preferred = matches.find((match) => (
+          (!preferredGroupId || String(match.groupId) === String(preferredGroupId)) &&
+          (!preferredSlotId || String(match.slotId) === String(preferredSlotId))
+        ));
+        if (preferred) return preferred;
+        return { status: 'preferred-not-found', dayName, matches };
+      }
+      if (matches.length === 1) return matches[0];
+      if (matches.length > 1) return { status: 'multiple-matches', dayName, matches };
       return { status: 'no-match', dayName };
     }
 
@@ -1556,12 +1620,30 @@
 
       setTimetableSlotStatus('Checking the saved general timetable...', 'neutral');
       try {
-        const result = await findSavedTimetableLessonSlot({ year, termKey, className, subject, date });
+        const locked = routeLockedTimetableSlot || {};
+        const result = await findSavedTimetableLessonSlot({
+          year,
+          termKey,
+          className,
+          subject,
+          date,
+          preferredGroupId: locked.groupId || '',
+          preferredSlotId: locked.slotId || '',
+          preferredLessonKey: locked.lessonInstanceKey || ''
+        });
         if (result.status === 'matched') {
           applyTimetableLessonSlot(result);
           return result;
         }
         clearTimetableLessonSlot('');
+        if (result.status === 'multiple-matches') {
+          setTimetableSlotStatus('More than one timetable period matches this class and subject. Open the exact lesson from attendance so the correct period is selected.', 'warning');
+          return null;
+        }
+        if (result.status === 'preferred-not-found') {
+          setTimetableSlotStatus('The timetable period from the attendance link was not found. Ask management to regenerate or reopen the exact missing lesson from attendance.', 'error');
+          return null;
+        }
         if (result.status === 'no-timetable') {
           setTimetableSlotStatus(`No saved timetable was found for ${termLabelFromKey(termKey)} ${year}. Ask management to save the general timetable first.`, 'error');
         } else {
@@ -2990,6 +3072,7 @@
           ];
       
       let node = null;
+      let sourcePath = '';
       
       for(const p of tryPaths){
         try {
@@ -2997,6 +3080,7 @@
           const val = snap && snap.val ? snap.val() : null;
           if (val && typeof val === 'object' && Object.keys(val).length > 0){ 
             node = val; 
+            sourcePath = p;
             console.log(`Found attendance at path: ${p}`);
             break; 
           }
@@ -3010,6 +3094,8 @@
         console.log(`No attendance data found for ${cls} on ${dateStr}`);
         return {
           recorded: false,
+          sourcePath: '',
+          triedPaths: tryPaths,
           present: 0,
           absent: 0,
           boysP: 0,
@@ -3050,7 +3136,7 @@
             else if (student.gender === 'girls') derived.girlsA += 1;
           }
         });
-        return { ...derived, recorded: true };
+        return { ...derived, recorded: true, sourcePath, triedPaths: tryPaths };
       }
 
       const pb = summary.boysP || 0;
@@ -3060,7 +3146,7 @@
       
       console.log(`Attendance counts - Present: ${pb+pg} (♂${pb} ♀${pg}), Absent: ${ab+ag} (♂${ab} ♀${ag})`);
       
-      return { ...summary, recorded: true };
+      return { ...summary, recorded: true, sourcePath, triedPaths: tryPaths };
     }
 
     // ========== AUTO-FILL LOGIC ==========
@@ -3113,12 +3199,13 @@
         if (dateInp && dateInp.value){
           if(statNote) statNote.textContent = 'Loading attendance data...';
           const att = await loadAttendanceCounts(year, chosenClass, dateInp.value, maps.students||{}, classRoster);
+          latestAttendanceLookup = att;
           console.log('Attendance data:', att);
           if (!att.recorded) {
             if (presentInp) presentInp.value = '';
             [pbEl,pgEl,abEl,agEl].forEach(el=>{ if(el) el.value = ''; });
             [statPB,statPG,statAB,statAG].forEach(el=>{ if(el) el.textContent = '--'; });
-            if (statNote) statNote.textContent = `Total: ${total || 0} students. Present and absent will appear after attendance is taken for ${dateInp.value}.`;
+            if (statNote) statNote.textContent = `Attendance not yet recorded. Total: ${total || 0} students. Present and absent will appear after attendance is taken for ${dateInp.value}.`;
           } else {
             const presentTotal = att.present || 0;
             const attTotal = (att.present || 0) + (att.absent || 0);
@@ -3136,7 +3223,7 @@
             if (statPG) statPG.textContent = att.girlsP || 0;
             if (statAB) statAB.textContent = absentBoys;
             if (statAG) statAG.textContent = absentGirls;
-            if (statNote) statNote.textContent = `Auto from attendance: ${dateInp.value} (${presentTotal} present, ${absentTotal} absent)`;
+            if (statNote) statNote.textContent = `Attendance found and synchronised: ${dateInp.value} (${presentTotal} present, ${absentTotal} absent)`;
           }
         } else {
           if (presentInp) presentInp.value = '';
@@ -3162,7 +3249,11 @@
     // Wire change listeners
     ['planClass', 'planDate'].forEach((id) => {
       const el = document.getElementById(id);
-      if (el) el.addEventListener('change', recomputeForSelection);
+      if (el) el.addEventListener('change', () => {
+        maybeClearRouteLockedTimetableSlot();
+        updatePlanSubjectOptions();
+        recomputeForSelection();
+      });
     });
     if (planDate && planDayOfWeek) {
       planDate.addEventListener('change', () => {
@@ -3175,6 +3266,7 @@
     ['planSubject', 'planTerm'].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.addEventListener('change', () => {
+        maybeClearRouteLockedTimetableSlot();
         refreshTimetableLessonSlot();
         loadSchemeGuidance({ force: true });
         maybeSyncHomeworkFromNotes({ force: false });
@@ -3405,6 +3497,9 @@
           }
         }
       }
+      if (typeof updatePlanSubjectOptions === 'function') {
+        updatePlanSubjectOptions({ retainSubject: subjectParam || '' });
+      }
 
       // Set subject
       if (subjectParam && planSubject) {
@@ -3438,7 +3533,8 @@
           end,
           className: classParam || '',
           subject: subjectParam || '',
-          dayName: dateParam ? getLessonDayName(dateParam) : ''
+          dayName: dateParam ? getLessonDayName(dateParam) : '',
+          lessonInstanceKey: _lpUrlPrefill.lessonKey || ''
         });
       }
 
@@ -3448,6 +3544,26 @@
     }
 
     // Populate select dropdowns
+    function updatePlanSubjectOptions({ retainSubject = '' } = {}) {
+      if (!planSubject) return;
+      const selectedBefore = retainSubject || planSubject.value || '';
+      const dateYmd = planDate?.value || new Date().toISOString().slice(0, 10);
+      const className = planClass?.value || '';
+      const assigned = AssignmentUtils.getAssignedSubjectsForClass
+        ? AssignmentUtils.getAssignedSubjectsForClass(teacherConfig || {}, className, dateYmd)
+        : [];
+      const subjects = assigned.length ? assigned : [];
+      while (planSubject.options.length > 1) planSubject.remove(1);
+      subjects.forEach((subject) => planSubject.add(new Option(subject, subject)));
+      if (selectedBefore && !Array.from(planSubject.options).some((option) => option.value.toLowerCase() === selectedBefore.toLowerCase())) {
+        planSubject.add(new Option(selectedBefore, selectedBefore));
+      }
+      if (selectedBefore) {
+        const option = Array.from(planSubject.options).find((opt) => opt.value.toLowerCase() === selectedBefore.toLowerCase());
+        if (option) planSubject.value = option.value;
+      }
+    }
+
     function populateSelects() {
       const normalizedConfig = ClassUtils.normalizeTeacherConfig
         ? ClassUtils.normalizeTeacherConfig(teacherConfig || {})
@@ -3475,10 +3591,9 @@
 
       subjects.forEach(subject => {
         const opt1 = new Option(subject, subject);
-        const opt2 = new Option(subject, subject);
         filterSubject.add(opt1);
-        planSubject.add(opt2);
       });
+      updatePlanSubjectOptions();
     }
 
     // Load lesson plans (year-aware)
@@ -3907,11 +4022,6 @@ ${plan.reflection || 'N/A'}
 
       const isFinalSave = canFinalizeLessonNow();
       if (isFinalSave) {
-        if (!String(document.getElementById('studentsPresent').value || '').trim()) {
-          toast('Take class attendance first. Present and absent totals are required before final saving.', 'warning');
-          document.getElementById('studentsPresent').focus();
-          return;
-        }
         const finalRequired = ['planAssessment', 'planConclusion', 'planReflection'];
         for (const id of finalRequired) {
           const el = document.getElementById(id);
@@ -3955,8 +4065,20 @@ ${plan.reflection || 'N/A'}
         slotId: activeTimetableLessonSlot?.slotId || _ttMeta.slotId || '',
         slotLabel: activeTimetableLessonSlot?.slotLabel || _ttMeta.slotLabel || '',
         start: activeTimetableLessonSlot?.start || _ttMeta.start || '',
-        end: activeTimetableLessonSlot?.end || _ttMeta.end || ''
+        end: activeTimetableLessonSlot?.end || _ttMeta.end || '',
+        lessonKey: activeTimetableLessonSlot?.lessonInstanceKey || _ttMeta.lessonKey || ''
       };
+      const lessonInstanceKey = resolvedSlotMeta.lessonKey || buildRouteLessonKey({
+        year: saveYear,
+        date: dateVal,
+        groupId: resolvedSlotMeta.groupId,
+        className: document.getElementById('planClass').value,
+        subject: document.getElementById('planSubject').value,
+        slotId: resolvedSlotMeta.slotId
+      });
+      const attendanceRecorded = !!latestAttendanceLookup?.recorded;
+      const attendancePending = isFinalSave && !String(document.getElementById('studentsPresent').value || '').trim();
+      const finalStatus = attendancePending ? 'final_attendance_pending' : 'final';
 
       const planData = {
         id: editingPlanId || '',
@@ -3976,11 +4098,13 @@ ${plan.reflection || 'N/A'}
         date: dateVal,
         dayName: (() => { try { const d = new Date(dateVal + 'T00:00:00'); return ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d.getDay()] || ''; } catch(_) { return ''; } })(),
         // Timetable slot metadata (for exact matching in attendance check)
+        lessonInstanceKey,
         timetableGroupId: resolvedSlotMeta.groupId,
         timetableSlotId: resolvedSlotMeta.slotId,
         timetableSlotLabel: resolvedSlotMeta.slotLabel,
         startTime: resolvedSlotMeta.start,
         endTime: resolvedSlotMeta.end,
+        assignmentRevisionAtSave: Number(teacherConfig?.assignmentRevision || 0),
         totals: {
           totalStudents: parseInt(document.getElementById('totalStudents').value),
           present: document.getElementById('studentsPresent').value === '' ? null : parseInt(document.getElementById('studentsPresent').value),
@@ -4002,9 +4126,13 @@ ${plan.reflection || 'N/A'}
         homeworkSourceMeta: lessonHomeworkSourceMeta || null,
         reflection: document.getElementById('planReflection').value || '',
         coverageStatus: planCoverageStatus.value || 'started',
-        lessonPlanStatus: isFinalSave ? 'final' : 'preparation_draft',
-        isFinal: isFinalSave,
-        finalizedAt: isFinalSave ? firebase.database.ServerValue.TIMESTAMP : (existingPlan?.finalizedAt || null),
+        lessonPlanStatus: isFinalSave ? finalStatus : 'preparation_draft',
+        isPedagogicallyComplete: isFinalSave,
+        isFinal: isFinalSave && !attendancePending,
+        attendanceSyncStatus: isFinalSave ? (attendanceRecorded && !attendancePending ? 'synced' : 'pending') : (existingPlan?.attendanceSyncStatus || ''),
+        attendanceSourcePath: latestAttendanceLookup?.sourcePath || '',
+        attendanceTriedPaths: latestAttendanceLookup?.triedPaths || [],
+        finalizedAt: isFinalSave && !attendancePending ? firebase.database.ServerValue.TIMESTAMP : (existingPlan?.finalizedAt || null),
         draftSavedAt: !isFinalSave ? firebase.database.ServerValue.TIMESTAMP : (existingPlan?.draftSavedAt || null),
         schemeTracking: schemeValidation.tracking,
         recordedBy: currentTeacherName,
@@ -4028,11 +4156,43 @@ ${plan.reflection || 'N/A'}
           } else {
             await db.ref(`${basePath}/${saveYear}/${cls}/${date}/${editingPlanId}`).update(planData);
           }
-          toast(isFinalSave ? 'Final lesson plan updated successfully!' : 'Preparation draft updated. Come back after the lesson to finalize it.', 'success');
+          if (attendancePending) {
+            await schoolRef(`years/${saveYear}/attendanceReconciliation/${date}/${workerId}/${lessonInstanceKey}`).update({
+              workerId: String(workerId || ''),
+              className: cls,
+              subject: planData.subject,
+              lessonInstanceKey,
+              lessonPlanId: editingPlanId,
+              date,
+              status: 'pending',
+              createdAt: existingPlan?.createdAt || firebase.database.ServerValue.TIMESTAMP,
+              updatedAt: firebase.database.ServerValue.TIMESTAMP
+            });
+          } else if (isFinalSave) {
+            await schoolRef(`years/${saveYear}/attendanceReconciliation/${date}/${workerId}/${lessonInstanceKey}`).update({
+              status: 'resolved',
+              resolvedAt: firebase.database.ServerValue.TIMESTAMP,
+              lessonPlanId: editingPlanId
+            }).catch(() => null);
+          }
+          toast(attendancePending ? 'Complete - Attendance Pending. The lesson plan is saved and attendance reconciliation was opened.' : (isFinalSave ? 'Final lesson plan updated successfully!' : 'Preparation draft updated. Come back after the lesson to finalize it.'), 'success');
         } else {
           const recRef = db.ref(`${basePath}/${saveYear}/${cls}/${date}`).push();
-          await recRef.set({ ...planData, id: recRef.key });
-          toast(isFinalSave ? 'Final lesson plan saved successfully!' : 'Preparation draft saved. Come back after the lesson to finalize it.', 'success');
+          const savedPlan = { ...planData, id: recRef.key };
+          await recRef.set(savedPlan);
+          if (attendancePending) {
+            await schoolRef(`years/${saveYear}/attendanceReconciliation/${date}/${workerId}/${lessonInstanceKey}`).set({
+              workerId: String(workerId || ''),
+              className: cls,
+              subject: planData.subject,
+              lessonInstanceKey,
+              lessonPlanId: recRef.key,
+              date,
+              status: 'pending',
+              createdAt: firebase.database.ServerValue.TIMESTAMP
+            });
+          }
+          toast(attendancePending ? 'Complete - Attendance Pending. The lesson plan is saved and attendance reconciliation was opened.' : (isFinalSave ? 'Final lesson plan saved successfully!' : 'Preparation draft saved. Come back after the lesson to finalize it.'), 'success');
         }
 
         editingPlanId = null;
@@ -4213,7 +4373,9 @@ ${plan.reflection || 'N/A'}
         const scheduledTime = getPlanScheduledTimeLabel(plan);
         const schemeStatus = plan.schemeTracking?.scheduleLabel || 'Scheme not linked';
         const coverage = plan.coverageStatus || 'started';
-        const planStatus = plan.isFinal || plan.lessonPlanStatus === 'final' ? 'Final saved' : 'Preparation draft';
+        const planStatus = plan.lessonPlanStatus === 'final_attendance_pending'
+          ? 'Complete - Attendance Pending'
+          : (plan.isFinal || plan.lessonPlanStatus === 'final' ? 'Final saved' : 'Preparation draft');
         return `
           <div class="plan-card">
             <div class="plan-header">
