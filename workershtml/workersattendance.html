@@ -817,11 +817,72 @@
       return { fullNames, phones };
     }
 
+    function normalizeTeacherMappings(config) {
+      const mappings = config?.classSubjectMappings;
+      if (Array.isArray(mappings)) return mappings.filter(Boolean);
+      if (mappings && typeof mappings === 'object') return Object.values(mappings).filter(Boolean);
+      return [];
+    }
+
     function teacherConfigHasAssignments(config) {
-      return Array.isArray(config?.classSubjectMappings) && config.classSubjectMappings.some((mapping) => {
+      if (!config || typeof config !== 'object') return false;
+      const mappings = normalizeTeacherMappings(config);
+      const hasMappings = mappings.some((mapping) => {
         if ((mapping?.subjects || []).length) return true;
         return (mapping?.streams || []).some((stream) => (stream?.subjects || []).length);
       });
+      if (hasMappings) return true;
+      if (Array.isArray(config.classes) && config.classes.length && Array.isArray(config.subjects) && config.subjects.length) return true;
+      if (config.assignmentHistory && typeof config.assignmentHistory === 'object') {
+        return Object.values(config.assignmentHistory).some((assignment) => assignment && assignment.active !== false && assignment.className && assignment.subject);
+      }
+      return false;
+    }
+
+    function hydrateTeacherConfigShape(config) {
+      if (!config || typeof config !== 'object') return null;
+      const mappings = normalizeTeacherMappings(config);
+      if (mappings.length) return { ...config, classSubjectMappings: mappings };
+      const classes = Array.isArray(config.classes) ? config.classes.filter(Boolean) : [];
+      const subjects = Array.isArray(config.subjects) ? config.subjects.filter(Boolean) : [];
+      if (classes.length && subjects.length) {
+        return {
+          ...config,
+          classSubjectMappings: classes.map((className) => ({ class: className, subjects: subjects.slice(), streams: [] }))
+        };
+      }
+      return config;
+    }
+
+    function readCachedTeacherConfig(year) {
+      const keys = [`somap_teacherConfigCache_${year}`, 'somap_teacherConfigCache'];
+      for (const key of keys) {
+        let cached = null;
+        try {
+          cached = JSON.parse(localStorage.getItem(key) || 'null');
+        } catch (error) {
+          console.warn('Cached teacher config parse failed', error);
+          continue;
+        }
+        if (!cached || String(cached.year || '') !== String(year || '')) continue;
+        if (cached.schoolId && state.schoolId && cached.schoolId !== state.schoolId) continue;
+        const { fullNames } = currentWorkerIdentityHints();
+        const cachedName = compactIdentity(cached.workerName || cached.config?.teacherName || cached.config?.fullName || '');
+        if (cachedName && fullNames.length && !fullNames.includes(cachedName)) continue;
+        const config = hydrateTeacherConfigShape(cached.config);
+        if (!teacherConfigHasAssignments(config)) continue;
+        const cachedWorkerId = String(cached.workerId || '').trim();
+        if (cachedWorkerId) {
+          state.workerId = cachedWorkerId;
+          localStorage.setItem('workerId', cachedWorkerId);
+          sessionStorage.setItem('workerId', cachedWorkerId);
+          localStorage.setItem('teacherWorkerId', cachedWorkerId);
+          sessionStorage.setItem('teacherWorkerId', cachedWorkerId);
+        }
+        console.info('Recovered teacher config for attendance from Teacher Dashboard cache.');
+        return config;
+      }
+      return null;
     }
 
     async function findWorkerIdByIdentity(year) {
@@ -875,7 +936,7 @@
         );
         snap = configSnapResult.snap;
       }
-      const config = snap && snap.exists() ? snap.val() || null : null;
+      const config = hydrateTeacherConfigShape(snap && snap.exists() ? snap.val() || null : null);
       if (!teacherConfigHasAssignments(config)) return null;
       if (targetWorkerId !== state.workerId) {
         state.workerId = targetWorkerId;
@@ -916,6 +977,10 @@
         if (!teacherConfigHasAssignments(state.teacherConfig)) {
           const recovered = await findTeacherConfigByIdentity(targetYear);
           if (recovered) state.teacherConfig = recovered;
+        }
+        if (!teacherConfigHasAssignments(state.teacherConfig)) {
+          const cached = readCachedTeacherConfig(targetYear);
+          if (cached) state.teacherConfig = cached;
         }
       } catch (error) {
         console.warn('Teacher config load failed', error);
@@ -1692,7 +1757,7 @@
       if (AssignmentUtils.isTeacherAssignedOnDate) {
         return AssignmentUtils.isTeacherAssignedOnDate(teacherConfig, lesson.className, lesson.subject, dateYmd);
       }
-      return (teacherConfig.classSubjectMappings || []).some((mapping) => {
+      return normalizeTeacherMappings(teacherConfig).some((mapping) => {
         const subjects = [
           ...(mapping.subjects || []),
           ...((mapping.streams || []).flatMap((stream) => stream.subjects || []))
@@ -1800,12 +1865,12 @@
       const todayDate = todayYMD(now); // YYYY-MM-DD
 
       // 1. Load teacher config (still needed for scheme checking)
-      const teacherConfig = await loadTeacherConfig(year);
+      const teacherConfig = hydrateTeacherConfigShape(await loadTeacherConfig(year));
 
       const activeAssignments = AssignmentUtils.getAssignmentsActiveOnDate
         ? AssignmentUtils.getAssignmentsActiveOnDate(teacherConfig, todayDate)
         : [];
-      const classSubjectMappings = teacherConfig?.classSubjectMappings || [];
+      const classSubjectMappings = normalizeTeacherMappings(teacherConfig);
       if (!classSubjectMappings.length) {
         result.noTimetableSetup = true;
         result.ready = false;
