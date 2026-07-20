@@ -788,6 +788,91 @@
       updateWifiStatus();
     }
 
+    function compactIdentity(value) {
+      return String(value || '').toUpperCase().replace(/\s+/g, ' ').trim();
+    }
+
+    function currentWorkerIdentityHints() {
+      const p = state.profile || {};
+      const fullName = compactIdentity(
+        p.fullNameUpper ||
+        p.fullName ||
+        [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' ') ||
+        sessionStorage.getItem('fullNameUpper') ||
+        sessionStorage.getItem('somap_workerName') ||
+        localStorage.getItem('fullNameUpper') ||
+        localStorage.getItem('somap_workerName')
+      );
+      const phone = String(
+        p.phone ||
+        p.phoneNumber ||
+        sessionStorage.getItem('somap_workerPhone') ||
+        localStorage.getItem('somap_workerPhone') ||
+        ''
+      ).replace(/\D/g, '');
+      return { fullName, phone };
+    }
+
+    function teacherConfigHasAssignments(config) {
+      return Array.isArray(config?.classSubjectMappings) && config.classSubjectMappings.some((mapping) => {
+        if ((mapping?.subjects || []).length) return true;
+        return (mapping?.streams || []).some((stream) => (stream?.subjects || []).length);
+      });
+    }
+
+    async function findWorkerIdByIdentity(year) {
+      const { fullName, phone } = currentWorkerIdentityHints();
+      if (!fullName && !phone) return '';
+      const candidates = [
+        () => schoolRef(`years/${year}/workers`).once('value'),
+        () => db.ref('workers').once('value')
+      ];
+      for (const read of candidates) {
+        let snap = null;
+        try {
+          snap = await read();
+        } catch (error) {
+          console.warn('Worker identity lookup failed', error);
+          continue;
+        }
+        let found = '';
+        snap?.forEach?.((child) => {
+          if (found) return;
+          const raw = child.val() || {};
+          const profile = raw.profile || raw || {};
+          const candidateName = compactIdentity(
+            profile.fullNameUpper ||
+            profile.fullName ||
+            [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ')
+          );
+          const candidatePhone = String(profile.phone || profile.phoneNumber || '').replace(/\D/g, '');
+          if ((fullName && candidateName && candidateName === fullName) || (phone && candidatePhone && candidatePhone === phone)) {
+            found = child.key;
+          }
+        });
+        if (found) return found;
+      }
+      return '';
+    }
+
+    async function findTeacherConfigByIdentity(year) {
+      const foundWorkerId = await findWorkerIdByIdentity(year);
+      if (!foundWorkerId || foundWorkerId === state.workerId) return null;
+      const { snap } = await scopedOrSocratesLegacy(
+        `years/${year}/teachers_config/${foundWorkerId}`,
+        `teachers_config/${foundWorkerId}`
+      );
+      if (!snap?.exists?.()) return null;
+      const config = snap.val() || null;
+      if (!teacherConfigHasAssignments(config)) return null;
+      state.workerId = foundWorkerId;
+      localStorage.setItem('workerId', foundWorkerId);
+      sessionStorage.setItem('workerId', foundWorkerId);
+      state.teacherConfigLoaded = false;
+      console.info('Recovered attendance workerId from worker identity for teacher config:', foundWorkerId);
+      return config;
+    }
+
     async function loadTeacherConfig(year = state.year || String(new Date().getFullYear())) {
       const targetYear = String(year || '');
       if (state.teacherConfigLoaded && state.teacherConfigYear === targetYear) {
@@ -812,6 +897,10 @@
           snap = configSnapResult.snap;
         }
         state.teacherConfig = snap && snap.exists() ? snap.val() || null : null;
+        if (!teacherConfigHasAssignments(state.teacherConfig)) {
+          const recovered = await findTeacherConfigByIdentity(targetYear);
+          if (recovered) state.teacherConfig = recovered;
+        }
       } catch (error) {
         console.warn('Teacher config load failed', error);
         state.teacherConfig = null;
@@ -2757,6 +2846,9 @@
         }
         const roleContext = await resolveAttendanceRoleContext(systemYear);
         const todayCalendarStatus = await resolveWorkerCalendarStatus(ymd, systemYear);
+        if (isVerifiedTeachingRole()) {
+          await loadTeacherConfig(systemYear);
+        }
 
         if (todayCalendarStatus?.blockWorkerAttendance) {
           applyWorkerCalendarBanner(todayCalendarStatus);
