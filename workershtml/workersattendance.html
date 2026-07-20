@@ -792,25 +792,29 @@
       return String(value || '').toUpperCase().replace(/\s+/g, ' ').trim();
     }
 
+    function uniqueNonEmpty(values) {
+      return Array.from(new Set((values || []).map((value) => String(value || '').trim()).filter(Boolean)));
+    }
+
     function currentWorkerIdentityHints() {
       const p = state.profile || {};
-      const fullName = compactIdentity(
+      const fullNames = uniqueNonEmpty([
         p.fullNameUpper ||
         p.fullName ||
-        [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' ') ||
+        [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' '),
         sessionStorage.getItem('fullNameUpper') ||
-        sessionStorage.getItem('somap_workerName') ||
+        sessionStorage.getItem('somap_workerName'),
         localStorage.getItem('fullNameUpper') ||
         localStorage.getItem('somap_workerName')
-      );
-      const phone = String(
+      ].map(compactIdentity));
+      const phones = uniqueNonEmpty([
         p.phone ||
-        p.phoneNumber ||
+        p.phoneNumber,
         sessionStorage.getItem('somap_workerPhone') ||
         localStorage.getItem('somap_workerPhone') ||
         ''
-      ).replace(/\D/g, '');
-      return { fullName, phone };
+      ].map((value) => String(value || '').replace(/\D/g, '')));
+      return { fullNames, phones };
     }
 
     function teacherConfigHasAssignments(config) {
@@ -821,8 +825,8 @@
     }
 
     async function findWorkerIdByIdentity(year) {
-      const { fullName, phone } = currentWorkerIdentityHints();
-      if (!fullName && !phone) return '';
+      const { fullNames, phones } = currentWorkerIdentityHints();
+      if (!fullNames.length && !phones.length) return '';
       const candidates = [
         () => schoolRef(`years/${year}/workers`).once('value'),
         () => db.ref('workers').once('value')
@@ -846,7 +850,7 @@
             [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ')
           );
           const candidatePhone = String(profile.phone || profile.phoneNumber || '').replace(/\D/g, '');
-          if ((fullName && candidateName && candidateName === fullName) || (phone && candidatePhone && candidatePhone === phone)) {
+          if ((candidateName && fullNames.includes(candidateName)) || (candidatePhone && phones.includes(candidatePhone))) {
             found = child.key;
           }
         });
@@ -855,22 +859,39 @@
       return '';
     }
 
+    async function tryTeacherConfigForWorkerId(year, workerId) {
+      const targetWorkerId = String(workerId || '').trim();
+      if (!targetWorkerId) return null;
+      let configSnapResult = await scopedOrSocratesLegacy(
+        `years/${year}/teachers_config/${targetWorkerId}`,
+        `teachers_config/${targetWorkerId}`
+      );
+      let snap = configSnapResult.snap;
+      if ((!snap || !snap.exists()) && Number.isFinite(Number(year))) {
+        const previousYear = String(Number(year) - 1);
+        configSnapResult = await scopedOrSocratesLegacy(
+          `years/${previousYear}/teachers_config/${targetWorkerId}`,
+          `teachers_config/${targetWorkerId}`
+        );
+        snap = configSnapResult.snap;
+      }
+      const config = snap && snap.exists() ? snap.val() || null : null;
+      if (!teacherConfigHasAssignments(config)) return null;
+      if (targetWorkerId !== state.workerId) {
+        state.workerId = targetWorkerId;
+        localStorage.setItem('workerId', targetWorkerId);
+        sessionStorage.setItem('workerId', targetWorkerId);
+        sessionStorage.setItem('teacherWorkerId', targetWorkerId);
+        state.teacherConfigLoaded = false;
+        console.info('Recovered attendance workerId from teacher config candidate:', targetWorkerId);
+      }
+      return config;
+    }
+
     async function findTeacherConfigByIdentity(year) {
       const foundWorkerId = await findWorkerIdByIdentity(year);
       if (!foundWorkerId || foundWorkerId === state.workerId) return null;
-      const { snap } = await scopedOrSocratesLegacy(
-        `years/${year}/teachers_config/${foundWorkerId}`,
-        `teachers_config/${foundWorkerId}`
-      );
-      if (!snap?.exists?.()) return null;
-      const config = snap.val() || null;
-      if (!teacherConfigHasAssignments(config)) return null;
-      state.workerId = foundWorkerId;
-      localStorage.setItem('workerId', foundWorkerId);
-      sessionStorage.setItem('workerId', foundWorkerId);
-      state.teacherConfigLoaded = false;
-      console.info('Recovered attendance workerId from worker identity for teacher config:', foundWorkerId);
-      return config;
+      return tryTeacherConfigForWorkerId(year, foundWorkerId);
     }
 
     async function loadTeacherConfig(year = state.year || String(new Date().getFullYear())) {
@@ -883,20 +904,15 @@
       state.teacherConfig = null;
       if (!state.workerId || !targetYear) return null;
       try {
-        let configSnapResult = await scopedOrSocratesLegacy(
-          `years/${targetYear}/teachers_config/${state.workerId}`,
-          `teachers_config/${state.workerId}`
-        );
-        let snap = configSnapResult.snap;
-        if ((!snap || !snap.exists()) && Number.isFinite(Number(targetYear))) {
-          const previousYear = String(Number(targetYear) - 1);
-          configSnapResult = await scopedOrSocratesLegacy(
-            `years/${previousYear}/teachers_config/${state.workerId}`,
-            `teachers_config/${state.workerId}`
-          );
-          snap = configSnapResult.snap;
+        const candidateWorkerIds = uniqueNonEmpty([
+          state.workerId,
+          sessionStorage.getItem('teacherWorkerId'),
+          localStorage.getItem('teacherWorkerId')
+        ]);
+        for (const candidateWorkerId of candidateWorkerIds) {
+          state.teacherConfig = await tryTeacherConfigForWorkerId(targetYear, candidateWorkerId);
+          if (state.teacherConfig) break;
         }
-        state.teacherConfig = snap && snap.exists() ? snap.val() || null : null;
         if (!teacherConfigHasAssignments(state.teacherConfig)) {
           const recovered = await findTeacherConfigByIdentity(targetYear);
           if (recovered) state.teacherConfig = recovered;
@@ -2382,7 +2398,7 @@
               <strong style="color:#fbbf24;">🗓️ Jedwali la Wiki Hii Halijatayarishwa</strong>
               <p style="margin:6px 0 0;color:var(--muted);font-size:0.9rem;">Jedwali la masaa la wiki hii bado halijahifadhiwa kwenye mfumo. Huwezi kufanya check-in mpaka jedwali liwe tayari. Tafadhali wasiliana na Academic Teacher au Head Teacher watengeneze jedwali la wiki hii.</p>
             </div>`;
-        } else if (result.todayLessons.length === 0) {
+        } else if (!result.noTimetableSetup && result.todayLessons.length === 0) {
           sections += `
             <div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.4);border-radius:10px;padding:12px;margin-top:10px;">
               <strong style="color:#c7d2fe;">🗓️ Jedwali la Leo (${todaySwName})</strong>
