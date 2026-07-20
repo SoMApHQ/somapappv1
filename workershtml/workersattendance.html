@@ -885,9 +885,11 @@
       return null;
     }
 
-    async function findWorkerIdByIdentity(year) {
+    async function findWorkerIdsByIdentity(year) {
       const { fullNames, phones } = currentWorkerIdentityHints();
-      if (!fullNames.length && !phones.length) return '';
+      if (!fullNames.length && !phones.length) return [];
+      const foundIds = [];
+      const seen = new Set();
       const candidates = [
         () => schoolRef(`years/${year}/workers`).once('value'),
         () => db.ref('workers').once('value')
@@ -900,9 +902,7 @@
           console.warn('Worker identity lookup failed', error);
           continue;
         }
-        let found = '';
         snap?.forEach?.((child) => {
-          if (found) return;
           const raw = child.val() || {};
           const profile = raw.profile || raw || {};
           const candidateName = compactIdentity(
@@ -912,12 +912,15 @@
           );
           const candidatePhone = String(profile.phone || profile.phoneNumber || '').replace(/\D/g, '');
           if ((candidateName && fullNames.includes(candidateName)) || (candidatePhone && phones.includes(candidatePhone))) {
-            found = child.key;
+            const id = String(child.key || '').trim();
+            if (id && !seen.has(id)) {
+              seen.add(id);
+              foundIds.push(id);
+            }
           }
         });
-        if (found) return found;
       }
-      return '';
+      return foundIds;
     }
 
     async function tryTeacherConfigForWorkerId(year, workerId) {
@@ -950,9 +953,12 @@
     }
 
     async function findTeacherConfigByIdentity(year) {
-      const foundWorkerId = await findWorkerIdByIdentity(year);
-      if (!foundWorkerId || foundWorkerId === state.workerId) return null;
-      return tryTeacherConfigForWorkerId(year, foundWorkerId);
+      const foundWorkerIds = await findWorkerIdsByIdentity(year);
+      for (const foundWorkerId of foundWorkerIds) {
+        const config = await tryTeacherConfigForWorkerId(year, foundWorkerId);
+        if (config) return config;
+      }
+      return null;
     }
 
     async function loadTeacherConfig(year = state.year || String(new Date().getFullYear())) {

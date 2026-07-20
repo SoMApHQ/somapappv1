@@ -1532,25 +1532,6 @@
       return normalized;
     }
 
-    function cacheTeacherConfigForAttendance(config) {
-      if (!config || !currentWorkerId || !currentYear) return;
-      const cache = {
-        workerId: currentWorkerId,
-        workerName: buildWorkerSnapshot().name || workerProfile?.fullNameUpper || '',
-        year: String(currentYear),
-        schoolId: school?.id || '',
-        cachedAt: Date.now(),
-        config
-      };
-      try {
-        localStorage.setItem(`somap_teacherConfigCache_${currentYear}`, JSON.stringify(cache));
-        localStorage.setItem('somap_teacherConfigCache', JSON.stringify(cache));
-        rememberTeacherWorkerId(currentWorkerId);
-      } catch (error) {
-        console.warn('Failed to cache teacher config for attendance', error);
-      }
-    }
-
     function getYear() {
       return window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear();
     }
@@ -1675,6 +1656,47 @@
       let allTeacherConfigsCache = {};
       let workerNameCache = new Map();
       let workerEmploymentCache = new Map();
+      let workerPhoneCache = new Map();
+
+      function configHasTeachingSetup(config) {
+        const mappings = Array.isArray(config?.classSubjectMappings)
+          ? config.classSubjectMappings
+          : (config?.classSubjectMappings && typeof config.classSubjectMappings === 'object' ? Object.values(config.classSubjectMappings) : []);
+        if (mappings.some((mapping) => (mapping?.subjects || []).length || (mapping?.streams || []).some((stream) => (stream?.subjects || []).length))) return true;
+        if (Array.isArray(config?.classes) && config.classes.length && Array.isArray(config?.subjects) && config.subjects.length) return true;
+        return false;
+      }
+
+      function compactIdentity(value) {
+        return String(value || '').toUpperCase().replace(/\s+/g, ' ').trim();
+      }
+
+      function profileFullName(profile = {}) {
+        return compactIdentity(
+          profile.fullNameUpper ||
+          profile.fullName ||
+          [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ')
+        );
+      }
+
+      function cacheTeacherConfigForAttendance(config) {
+        if (!config || !currentWorkerId || !currentYear) return;
+        const cache = {
+          workerId: currentWorkerId,
+          workerName: buildWorkerSnapshot().name || workerProfile?.fullNameUpper || '',
+          year: String(currentYear),
+          schoolId: school?.id || '',
+          cachedAt: Date.now(),
+          config
+        };
+        try {
+          localStorage.setItem(`somap_teacherConfigCache_${currentYear}`, JSON.stringify(cache));
+          localStorage.setItem('somap_teacherConfigCache', JSON.stringify(cache));
+          rememberTeacherWorkerId(currentWorkerId);
+        } catch (error) {
+          console.warn('Failed to cache teacher config for attendance', error);
+        }
+      }
 
       function toggleSetupReminder(show) {
         if (!setupReminder) return;
@@ -2334,6 +2356,7 @@
       async function loadWorkerNameCacheForYear(year) {
         workerNameCache = new Map();
         workerEmploymentCache = new Map();
+        workerPhoneCache = new Map();
         try {
           const snap = await scopedOrSocratesLegacy(`years/${year}/workers`, 'workers');
           snap.forEach((child) => {
@@ -2346,6 +2369,8 @@
             if (fullName) {
               workerNameCache.set(child.key, fullName);
             }
+            const phone = String(profile.phone || profile.phoneNumber || '').replace(/\D/g, '');
+            if (phone) workerPhoneCache.set(child.key, phone);
             workerEmploymentCache.set(child.key, {
               active: profile.active !== false,
               status: profile.employmentStatus || child.val()?.employment?.status || 'active',
@@ -2365,6 +2390,44 @@
           console.warn('Failed to load teacher configs', error);
           allTeacherConfigsCache = {};
         }
+      }
+
+      async function findTeacherConfigByIdentity(year) {
+        const profileName = profileFullName(workerProfile);
+        const storedName = compactIdentity(localStorage.getItem('somap_workerName') || sessionStorage.getItem('somap_workerName') || '');
+        const names = new Set([profileName, storedName].filter(Boolean));
+        const profilePhone = String(workerProfile?.phone || workerProfile?.phoneNumber || '').replace(/\D/g, '');
+        const storedPhone = String(localStorage.getItem('somap_workerPhone') || sessionStorage.getItem('somap_workerPhone') || '').replace(/\D/g, '');
+        const phones = new Set([profilePhone, storedPhone].filter(Boolean));
+        if (!names.size && !phones.size) return null;
+
+        async function scan(configs = {}) {
+          for (const [workerId, config] of Object.entries(configs || {})) {
+            if (!configHasTeachingSetup(config)) continue;
+            const configName = compactIdentity(config?.teacherName || config?.fullName || config?.name || '');
+            const workerName = compactIdentity(workerNameCache.get(workerId) || '');
+            const workerPhone = String(workerPhoneCache.get(workerId) || '').replace(/\D/g, '');
+            const nameMatch = (configName && names.has(configName)) || (workerName && names.has(workerName));
+            const phoneMatch = workerPhone && phones.has(workerPhone);
+            if (nameMatch || phoneMatch) return { workerId, config };
+          }
+          return null;
+        }
+
+        let found = await scan(allTeacherConfigsCache);
+        if (found) return found;
+
+        if (Number.isFinite(Number(year))) {
+          const previousYear = String(Number(year) - 1);
+          try {
+            const prevSnap = await scopedOrSocratesLegacy(`years/${previousYear}/teachers_config`, 'teachers_config');
+            found = await scan(prevSnap.exists() ? (prevSnap.val() || {}) : {});
+            if (found) return found;
+          } catch (error) {
+            console.warn('Previous-year teacher config identity lookup failed', error);
+          }
+        }
+        return null;
       }
 
       async function loadSharedClassStreamsForYear(year) {
@@ -3978,8 +4041,19 @@
           currentWorkerSnapshot = buildWorkerSnapshot();
           const initials = `${(workerProfile.firstName || 'T').charAt(0)}${(workerProfile.lastName || 'T').charAt(0)}`.toUpperCase();
           if (userAvatar) userAvatar.textContent = initials;
-          if (configSnap.exists() && configSnap.val().setupCompleted) {
-            teacherConfig = configSnap.val();
+          let primaryConfig = configSnap.exists() ? configSnap.val() : null;
+          if (!configHasTeachingSetup(primaryConfig) && !configHasTeachingSetup(fallbackConfig)) {
+            const recovered = await findTeacherConfigByIdentity(currentYear);
+            if (recovered?.config) {
+              currentWorkerId = recovered.workerId;
+              rememberTeacherWorkerId(currentWorkerId);
+              primaryConfig = recovered.config;
+              fallbackConfig = null;
+              console.info('Recovered Teacher Dashboard config by identity:', currentWorkerId);
+            }
+          }
+          if (primaryConfig && primaryConfig.setupCompleted) {
+            teacherConfig = primaryConfig;
             cacheTeacherConfigForAttendance(teacherConfig);
             try {
               await persistSubjectCatalogFromMappings(teacherConfig.classSubjectMappings || []);
@@ -3990,8 +4064,8 @@
             teacherRole.textContent = teacherConfig.teacherType || inferTeacherTypeFromProfile(workerProfile);
             localStorage.setItem('somap_role', teacherConfig.teacherType || '');
             loadDashboard();
-          } else if ((configSnap.exists() && !configSnap.val().setupCompleted) || fallbackConfig) {
-            teacherConfig = configSnap.exists() ? configSnap.val() : fallbackConfig;
+          } else if ((primaryConfig && !primaryConfig.setupCompleted) || fallbackConfig) {
+            teacherConfig = primaryConfig || fallbackConfig;
             cacheTeacherConfigForAttendance(teacherConfig);
             if (teacherConfig.teacherType) {
               localStorage.setItem('somap_role', teacherConfig.teacherType);
