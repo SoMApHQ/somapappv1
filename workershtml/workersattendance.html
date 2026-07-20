@@ -961,6 +961,82 @@
       return null;
     }
 
+    async function readWorkerIdentityMap(year) {
+      const workersById = new Map();
+      const candidates = [
+        () => schoolRef(`years/${year}/workers`).once('value'),
+        () => db.ref('workers').once('value')
+      ];
+      for (const read of candidates) {
+        let snap = null;
+        try {
+          snap = await read();
+        } catch (error) {
+          console.warn('Worker identity map load failed', error);
+          continue;
+        }
+        snap?.forEach?.((child) => {
+          const raw = child.val() || {};
+          const profile = raw.profile || raw || {};
+          const name = compactIdentity(
+            profile.fullNameUpper ||
+            profile.fullName ||
+            [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' ')
+          );
+          const phone = String(profile.phone || profile.phoneNumber || '').replace(/\D/g, '');
+          workersById.set(String(child.key || '').trim(), { name, phone });
+        });
+      }
+      return workersById;
+    }
+
+    async function findTeacherConfigByConfigIdentity(year) {
+      const { fullNames, phones } = currentWorkerIdentityHints();
+      if (!fullNames.length && !phones.length) return null;
+      const workersById = await readWorkerIdentityMap(year);
+      const yearsToScan = [String(year || '')];
+      if (Number.isFinite(Number(year))) yearsToScan.push(String(Number(year) - 1));
+      for (const scanYear of uniqueNonEmpty(yearsToScan)) {
+        const reads = [
+          () => schoolRef(`years/${scanYear}/teachers_config`).once('value'),
+          () => db.ref('teachers_config').once('value')
+        ];
+        for (const read of reads) {
+          let snap = null;
+          try {
+            snap = await read();
+          } catch (error) {
+            console.warn('Teacher config collection identity lookup failed', error);
+            continue;
+          }
+          let found = null;
+          snap?.forEach?.((child) => {
+            if (found) return;
+            const workerId = String(child.key || '').trim();
+            const config = hydrateTeacherConfigShape(child.val() || null);
+            if (!teacherConfigHasAssignments(config)) return;
+            const workerIdentity = workersById.get(workerId) || {};
+            const configName = compactIdentity(config?.teacherName || config?.fullName || config?.name || '');
+            const configPhone = String(config?.phone || config?.phoneNumber || '').replace(/\D/g, '');
+            const nameMatch = (workerIdentity.name && fullNames.includes(workerIdentity.name)) || (configName && fullNames.includes(configName));
+            const phoneMatch = (workerIdentity.phone && phones.includes(workerIdentity.phone)) || (configPhone && phones.includes(configPhone));
+            if (nameMatch || phoneMatch) found = { workerId, config };
+          });
+          if (found) {
+            state.workerId = found.workerId;
+            localStorage.setItem('workerId', found.workerId);
+            sessionStorage.setItem('workerId', found.workerId);
+            localStorage.setItem('teacherWorkerId', found.workerId);
+            sessionStorage.setItem('teacherWorkerId', found.workerId);
+            state.teacherConfigLoaded = false;
+            console.info('Recovered attendance teacher config by scanning teachers_config:', found.workerId);
+            return found.config;
+          }
+        }
+      }
+      return null;
+    }
+
     async function loadTeacherConfig(year = state.year || String(new Date().getFullYear())) {
       const targetYear = String(year || '');
       if (state.teacherConfigLoaded && state.teacherConfigYear === targetYear) {
@@ -969,7 +1045,7 @@
       state.teacherConfigLoaded = true;
       state.teacherConfigYear = targetYear;
       state.teacherConfig = null;
-      if (!state.workerId || !targetYear) return null;
+      if (!targetYear) return null;
       try {
         const candidateWorkerIds = uniqueNonEmpty([
           state.workerId,
@@ -983,6 +1059,10 @@
         if (!teacherConfigHasAssignments(state.teacherConfig)) {
           const recovered = await findTeacherConfigByIdentity(targetYear);
           if (recovered) state.teacherConfig = recovered;
+        }
+        if (!teacherConfigHasAssignments(state.teacherConfig)) {
+          const recoveredByConfig = await findTeacherConfigByConfigIdentity(targetYear);
+          if (recoveredByConfig) state.teacherConfig = recoveredByConfig;
         }
         if (!teacherConfigHasAssignments(state.teacherConfig)) {
           const cached = readCachedTeacherConfig(targetYear);
