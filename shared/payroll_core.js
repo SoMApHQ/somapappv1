@@ -63,6 +63,10 @@
     const active = rows.filter(event => {
       const status = cleanText(event?.reviewStatus).toLowerCase();
       return !['cancelled', 'dismissed'].includes(status);
+    }).sort((a, b) => {
+      const ad = cleanText(a?.date || a?.createdAt || '');
+      const bd = cleanText(b?.date || b?.createdAt || '');
+      return ad.localeCompare(bd);
     });
     const lateEvents = active.filter(event => event?.eventType === 'late');
     const noSignInEvents = active.filter(event => event?.eventType === 'no_sign_in');
@@ -83,6 +87,38 @@
     const uncappedDeduction = lateDeduction + noSignInDeduction + otherResponsibilityDeductions;
     const originalAllowance = money(allowance) || RESPONSIBILITY_ALLOWANCE;
     const totalResponsibilityDeduction = Math.min(originalAllowance, uncappedDeduction);
+    const lateOverrideMode = lateEvents.some(event => event?.deductionOverride != null);
+    const deductionEvents = [];
+    let lateIndex = 0;
+    active.forEach(event => {
+      let amount = 0;
+      let label = cleanText(event?.eventLabel || event?.label);
+      if (event?.eventType === 'late') {
+        lateIndex += 1;
+        label = label || `Late coming #${lateIndex}`;
+        amount = lateOverrideMode
+          ? money(event.deductionOverride ?? event.deductionAmount)
+          : lateIndex <= 3 ? 0 : lateIndex === 4 ? 1000 : 500;
+      } else if (event?.eventType === 'no_sign_in') {
+        label = label || 'No sign-in recorded';
+        amount = money(event.deductionOverride ?? event.deductionAmount ?? 2000);
+      } else if (event?.eventType === 'manual_adjustment') {
+        label = label || 'Manual responsibility adjustment';
+        amount = money(event.deductionOverride ?? event.deductionAmount);
+      } else {
+        return;
+      }
+      deductionEvents.push({
+        date: cleanText(event.date),
+        eventType: cleanText(event.eventType),
+        label,
+        reason: cleanText(event.permissionReason || event.reason || event.note || event.details),
+        workerResponse: cleanText(event.rejectionReason || event.workerLetter),
+        reviewStatus: cleanText(event.reviewStatus || 'approved'),
+        resolution: cleanText(event.resolution),
+        deductionAmount: amount
+      });
+    });
     const disputed = active.some(event => event?.workerRejected === true || cleanText(event?.reviewStatus).toLowerCase() === 'pending_review');
     return {
       allowance: originalAllowance,
@@ -97,6 +133,7 @@
       remainingResponsibilityAllowance: Math.max(0, originalAllowance - totalResponsibilityDeduction),
       capped: uncappedDeduction > originalAllowance,
       finalReviewRequired: uncappedDeduction >= originalAllowance,
+      deductionEvents,
       protectedEvents,
       status: disputed ? 'pending_review' : totalResponsibilityDeduction > 0 ? 'deducted' : lateCount > 0 ? 'warning_only' : 'intact'
     };
