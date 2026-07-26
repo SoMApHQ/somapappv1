@@ -115,6 +115,7 @@
             </button>
             <button class="btn secondary" id="exportPdfBtn">Download PDF</button>
             <button class="btn success" onclick="exportToExcel()">Export Excel</button>
+            <button class="btn success" onclick="exportTransportSmsDebtExcel()">SMS Debt Excel</button>
             <button class="btn" onclick="refreshData()">Refresh</button>
           </div>
         </div>
@@ -704,6 +705,25 @@
         return fallback;
       }
 
+      function getTransportParentContact(student, enrollment = {}) {
+        return student?.primaryParentContact
+          || student?.parentPhone
+          || student?.guardianPhone
+          || student?.motherPhone
+          || student?.fatherPhone
+          || student?.emergencyPhone
+          || enrollment?.primaryParentContact
+          || enrollment?.parentContact
+          || enrollment?.parentPhone
+          || enrollment?.guardianPhone
+          || '';
+      }
+
+      function toExcelPhoneNumber(contact) {
+        const rawPhone = String(contact || '').replace(/\D/g, '');
+        return rawPhone ? Number(rawPhone) : contact;
+      }
+
       const toast = document.getElementById("toast");
       const yearSelect = document.getElementById("yearSelect");
       const classFilter = document.getElementById("classFilter");
@@ -1136,7 +1156,7 @@
               <td>${student.admissionNumber || 'N/A'}</td>
               <td>${fullName}${debtWarning ? '<br>' + debtWarning : ''}</td>
               <td>${shiftedClass}</td>
-              <td>${student.primaryParentContact || 'N/A'}</td>
+              <td>${getTransportParentContact(student, enrollment) || 'N/A'}</td>
               <td>${startDateDisplay}</td>
               <td>${enrollment.amStop || '&mdash;'}</td>
               <td>${enrollment.pmStop || '&mdash;'}</td>
@@ -1887,7 +1907,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             'Admission No': student.admissionNumber || studentId,
             'Full Name': fullName,
             'Class': shiftedClass,
-            'Parent Contact': student.primaryParentContact || '',
+            'Parent Contact': getTransportParentContact(student, enrollment),
             'Transport Start Date': transportStatus.startDateDisplay,
             'Route (Morning)': enrollment.amStop || enrollment.morningRouteId || '',
             'Route (Evening)': enrollment.pmStop || enrollment.eveningRouteId || '',
@@ -1937,6 +1957,46 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         showToast('Export successful!');
       }
 
+      async function exportTransportSmsDebtExcel() {
+        const yearNum = Number(state.year);
+        const multipliers = cachedMultipliers[yearNum] || (await TransportPricing.loadYearMultipliers(yearNum));
+        if (!cachedMultipliers[yearNum]) cachedMultipliers[yearNum] = multipliers;
+
+        const debtorRows = await Promise.all(Object.entries(state.transportEnrollments).map(async ([studentId, enrollment]) => {
+          const student = getStudentForTransport(studentId, enrollment);
+          const payments = Object.values(state.transportPayments[studentId] || {});
+          const transportStatus = await calculateTransportStatus(enrollment, payments, multipliers, studentId);
+          const debt = Number(transportStatus.debt) || 0;
+          if (debt <= 0) return null;
+
+          const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim();
+          const parentContact = getTransportParentContact(student, enrollment);
+          return [toExcelPhoneNumber(parentContact), fullName || student.admissionNumber || studentId, debt];
+        }));
+
+        const rows = debtorRows
+          .filter(Boolean)
+          .sort((a, b) => Number(b[2] || 0) - Number(a[2] || 0));
+
+        if (!rows.length) {
+          showToast('No transport debtors found for SMS export', 'ok');
+          return;
+        }
+
+        const ws = XLSX.utils.aoa_to_sheet([['Number', 'Name', 'Debt'], ...rows]);
+        const range = XLSX.utils.decode_range(ws['!ref']);
+        for (let row = 1; row <= range.e.r; row++) {
+          const cell = ws[XLSX.utils.encode_cell({ r: row, c: 0 })];
+          if (cell && typeof cell.v === 'number') { cell.t = 'n'; delete cell.w; }
+        }
+        ws['!cols'] = [{ wch: 16 }, { wch: 28 }, { wch: 14 }];
+
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'SMS Debt');
+        XLSX.writeFile(wb, `transport_sms_debt_${state.year}_${Date.now()}.xlsx`);
+        showToast('SMS debt Excel downloaded');
+      }
+
       async function exportToPDF() {
         const yearNum = Number(state.year);
         const multipliers = cachedMultipliers[yearNum] || (await TransportPricing.loadYearMultipliers(yearNum));
@@ -1956,7 +2016,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             student.admissionNumber || studentId,
             fullName,
             shiftedClass,
-            student.primaryParentContact || '',
+            getTransportParentContact(student, enrollment),
             transportStatus.startDateDisplay,
             enrollment.amStop || '',
             enrollment.pmStop || '',
@@ -3505,7 +3565,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               <td>${student.admissionNumber || 'N/A'}</td>
               <td>${fullName}</td>
               <td>${student.classLevel || '&mdash;'}</td>
-              <td>${student.primaryParentContact || 'N/A'}</td>
+              <td>${getTransportParentContact(student, assign) || 'N/A'}</td>
               <td>${startDisplay}</td>
               <td>${morningRoute}</td>
               <td>${eveningRoute}</td>
