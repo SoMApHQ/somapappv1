@@ -649,11 +649,47 @@
         return normalizeDateInput(null);
       }
 
+      function resolveEndDate(enrollment) {
+        if (!enrollment) return '';
+        const raw = enrollment.endDate || enrollment.stopDate || enrollment.stoppedAtDate || enrollment.transportEndDate || '';
+        return raw ? normalizeDateInput(raw) : '';
+      }
+
       function formatStartDateDisplay(value) {
         if (!value) return 'N/A';
         const date = new Date(value);
         if (Number.isNaN(date.getTime())) return String(value);
         return date.toLocaleDateString('en-GB');
+      }
+
+      function formatDebtTillMonth(value) {
+        if (!value) return 'N/A';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value);
+        return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      }
+
+      function getStudentRegistrationYear(stu) {
+        const ts = stu?.timestamp ?? stu?.createdAt;
+        if (ts && Number.isFinite(Number(ts))) return new Date(Number(ts)).getFullYear();
+        return BASE_YEAR;
+      }
+
+      function resolveStudentClassForTransportYear(student) {
+        const baseClass = student?._resolvedClass || student?.classLevel || student?.className || '';
+        if (baseClass === 'GRADUATED') return 'GRADUATED';
+        const regYear = getStudentRegistrationYear(student);
+        const delta = Number(state.year) - Number(regYear || BASE_YEAR);
+        return shiftClass(baseClass, Number.isFinite(delta) ? delta : 0) || baseClass;
+      }
+
+      function pruneGraduatedTransportStudents() {
+        Object.entries(state.students || {}).forEach(([id, student]) => {
+          if (resolveStudentClassForTransportYear(student) !== 'GRADUATED') return;
+          delete state.students[id];
+          delete state.transportEnrollments[id];
+          delete state.transportPayments[id];
+        });
       }
 
       // Phone normalization
@@ -844,6 +880,7 @@
           ? (await calculateBaseMonthlyFee(amStop, pmStop, year, selectedMonth))
           : getTransportBaseMonthlyFee(enrollment);
         const startDateIso = resolveStartDate(enrollment);
+        const endDateIso = resolveEndDate(enrollment);
         const hasExplicitStart = Boolean(enrollment?.startDate || enrollment?.start_date || enrollment?.startTimestamp || enrollment?.start_time);
 
         const paymentsArray = Array.isArray(payments) ? payments : Object.values(payments || {});
@@ -858,6 +895,7 @@
           amStop,
           pmStop,
           startDate: startDateIso,
+          endDate: endDateIso,
           payments: approvedPayments,
           multipliers,
         });
@@ -912,6 +950,7 @@
               pmStop,
               baseMonthlyFee,
               startDate: startDateIso,
+              endDate: endDateIso,
               multipliers,
             }) || 0
           );
@@ -933,7 +972,9 @@
           monthlyFee: baseMonthlyFee, // Base fee for table display (e.g., 35,500)
           currentMonthExpected, // Month-specific fee with multiplier for KPIs
           startDateIso,
+          endDateIso,
           startDateDisplay: hasExplicitStart ? formatStartDateDisplay(startDateIso) : 'N/A',
+          debtTillMonth: formatDebtTillMonth(endDateIso || `${year}-${String(Math.max(...unpaidMonthsWithAmounts.map(m => m.month), 1)).padStart(2, '0')}-01`),
         };
 
         // Cache the result
@@ -1222,14 +1263,16 @@
         const focusedMonth = getFocusedMonth();
         const focusedMonthLabel = MONTH_NAMES[focusedMonth] || ('Month ' + focusedMonth);
         const enrollmentStart = resolveStartDate(enrollment);
+        const enrollmentEnd = resolveEndDate(enrollment);
 
         try {
           const assignSnap = await scopedOrSocratesLegacy(`years/${year}/transportAssignments/${studentId}`, `transportAssignments/${year}/${studentId}`);
           const assign = assignSnap.val();
           
-          if (assign && assign.status === 'Using') {
+          if (assign && (assign.status === 'Using' || String(assign.status || '').toLowerCase() === 'stopped')) {
             baseMonthlyFee = getTransportBaseMonthlyFee(assign) || getTransportBaseMonthlyFee(enrollment);
             const startDate = normalizeDateInput(assign.startDate || enrollmentStart, Number(year));
+            const endDate = resolveEndDate(assign) || enrollmentEnd;
         const hasAssignedStart = Boolean(assign?.startDate || assign?.start_date || assign?.startTimestamp || assign?.start_time);
             
             currentMonthLabel = focusedMonthLabel;
@@ -1240,6 +1283,7 @@
               pmStop: assign?.pmStop || enrollment?.pmStop,
               baseMonthlyFee,
               startDate,
+              endDate,
               multipliers // Pass year-specific multipliers
             }));
             
@@ -1249,6 +1293,7 @@
               pmStop: assign?.pmStop || enrollment?.pmStop,
               baseMonthlyFee,
               startDate,
+              endDate,
               payments,
               multipliers // Pass year-specific multipliers
             });
@@ -1261,7 +1306,9 @@
               totalPaid: ledger.totals.paid,
               unpaidMonths: ledger.months.filter(m => m.status === 'UNPAID' || m.status === 'PARTIAL').map(m => MONTH_NAMES[m.month]).join(', ') || 'None',
               startDateIso: startDate,
+              endDateIso: endDate,
               startDateDisplay: formatStartDateDisplay(startDate),
+              debtTillMonth: formatDebtTillMonth(endDate || `${year}-${String(Math.max(...ledger.months.filter(m => m.balance > 0).map(m => m.month), 1)).padStart(2, '0')}-01`),
             };
           } else {
             status = await calculateTransportStatus(enrollment, payments, multipliers);
@@ -1274,6 +1321,7 @@
               pmStop: enrollment?.pmStop,
               baseMonthlyFee,
               startDate: enrollmentStart,
+              endDate: enrollmentEnd,
               multipliers // Pass year-specific multipliers
             }) || status.currentMonthExpected || status.monthlyFee);
           }
@@ -1289,6 +1337,7 @@
             pmStop: enrollment?.pmStop,
             baseMonthlyFee,
             startDate: enrollmentStart,
+            endDate: enrollmentEnd,
             multipliers // Pass year-specific multipliers
           }) || status.currentMonthExpected || status.monthlyFee);
         }
@@ -1303,6 +1352,7 @@
             <div><strong>Total Debt:</strong> <span style="color: var(--accent-danger);">${formatCurrency(status.debt)}</span></div>
             <div><strong>Unpaid Months:</strong> ${status.unpaidMonths}</div>
             <div><strong>Transport Start:</strong> ${status.startDateDisplay || formatStartDateDisplay(enrollmentStart)}</div>
+            ${status.endDateIso ? `<div><strong>Transport Stopped:</strong> ${formatStartDateDisplay(status.endDateIso)}</div>` : ''}
           </div>
         `;
         // Set current month as default using focused context
@@ -1688,7 +1738,8 @@
           ? (await calculateBaseMonthlyFee(amStop, pmStop, year, getFocusedMonth()))
           : getTransportBaseMonthlyFee(enrollment);
         const startDate = resolveStartDate(enrollment);
-        const ledger = await TransportPricing.buildLedger({ year, baseMonthlyFee, amStop, pmStop, startDate, payments, multipliers });
+        const endDate = resolveEndDate(enrollment);
+        const ledger = await TransportPricing.buildLedger({ year, baseMonthlyFee, amStop, pmStop, startDate, endDate, payments, multipliers });
         paymentScheduleLedger = ledger;
         paymentScheduleStudent = student;
         paymentScheduleStudentId = studentId;
@@ -1971,7 +2022,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
 
           const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim();
           const parentContact = getTransportParentContact(student, enrollment);
-          return [toExcelPhoneNumber(parentContact), fullName || student.admissionNumber || studentId, debt];
+          const tillMonth = transportStatus.debtTillMonth || formatDebtTillMonth(resolveEndDate(enrollment));
+          return [toExcelPhoneNumber(parentContact), fullName || student.admissionNumber || studentId, debt, tillMonth];
         }));
 
         const rows = debtorRows
@@ -1983,13 +2035,13 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           return;
         }
 
-        const ws = XLSX.utils.aoa_to_sheet([['Number', 'Name', 'Debt'], ...rows]);
+        const ws = XLSX.utils.aoa_to_sheet([['Number', 'Name', 'Debt', 'TILL MONTH'], ...rows]);
         const range = XLSX.utils.decode_range(ws['!ref']);
         for (let row = 1; row <= range.e.r; row++) {
           const cell = ws[XLSX.utils.encode_cell({ r: row, c: 0 })];
           if (cell && typeof cell.v === 'number') { cell.t = 'n'; delete cell.w; }
         }
-        ws['!cols'] = [{ wch: 16 }, { wch: 28 }, { wch: 14 }];
+        ws['!cols'] = [{ wch: 16 }, { wch: 28 }, { wch: 14 }, { wch: 16 }];
 
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'SMS Debt');
@@ -2679,7 +2731,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           }
 
           Object.entries(assignments).forEach(([studentId, assignRecord]) => {
-            if (!assignRecord || assignRecord.status !== 'Using') {
+            const stopped = String(assignRecord?.status || '').toLowerCase() === 'stopped';
+            if (!assignRecord || (assignRecord.status !== 'Using' && !stopped)) {
               if (state.transportEnrollments[studentId]) {
                 delete state.transportEnrollments[studentId];
               }
@@ -2712,6 +2765,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               baseMonthlyFee: assignRecord.baseMonthlyFee || assignRecord.monthlyFee || existing.baseMonthlyFee || existing.monthlyFee,
               monthlyFee: assignRecord.monthlyFee || assignRecord.baseMonthlyFee || existing.monthlyFee || existing.baseMonthlyFee,
               startDate: assignRecord.startDate || existing.startDate,
+              endDate: assignRecord.endDate || assignRecord.stoppedAtDate || existing.endDate || existing.stoppedAtDate || null,
+              status: stopped ? 'Stopped' : 'Using',
               morningVehicle: morningVehicle || existing.morningVehicle,
               eveningVehicle: eveningVehicle || existing.eveningVehicle,
             };
@@ -2831,6 +2886,17 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               state.students[id] = buildFallbackStudent(id, state.transportEnrollments[id] || {});
             }
           });
+          pruneGraduatedTransportStudents();
+          const activeStudentIds = Object.keys(state.transportEnrollments);
+          if (activeStudentIds.length === 0) {
+            state.transportPayments = {};
+            state.expenses = {};
+            renderKPIs();
+            renderPaymentsTable();
+            renderExpensesTable();
+            showToast('No non-graduated students on transport for this year', 'ok');
+            return;
+          }
 
           // STEP 3: Load payments ONLY for transport students (year-scoped ledgers primary)
           showToast('Loading payments...', 'ok');
@@ -3198,7 +3264,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           }
 
           let effectiveAssign = assignment;
-          if ((!effectiveAssign || effectiveAssign.status !== 'Using') && enrollment) {
+          if ((!effectiveAssign || (effectiveAssign.status !== 'Using' && String(effectiveAssign.status || '').toLowerCase() !== 'stopped')) && enrollment) {
             const amStop = enrollment.amStop || enrollment.morningRouteId || enrollment.route || '';
             const pmStop = enrollment.pmStop || enrollment.eveningRouteId || enrollment.stopName || '';
             const baseMonthlyFee = getTransportBaseMonthlyFee(enrollment);
@@ -3210,6 +3276,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               baseMonthlyFee,
               monthlyFee: enrollment.monthlyFee || enrollment.baseMonthlyFee || baseMonthlyFee,
               startDate: enrollment.startDate || enrollment.start_date || enrollment.dateRegistered || null,
+              endDate: enrollment.endDate || enrollment.stoppedAtDate || null,
             };
           }
 
@@ -3241,7 +3308,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             readDirectRecord(`years/${y}/transportRegistry/${idTry}`, `transportRegistry/${y}/${idTry}`),
           ]);
           const registryEnrollment = normalizeRegistryRecord(registryRaw);
-          const assignmentUsing = assignment && assignment.status === 'Using' ? assignment : null;
+          const assignmentUsing = assignment && (assignment.status === 'Using' || String(assignment.status || '').toLowerCase() === 'stopped') ? assignment : null;
           const enrollment = enrollmentRaw || registryEnrollment;
           if (assignmentUsing || enrollment) {
             const mergedEnrollment = assignmentUsing ? {
@@ -3252,6 +3319,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               baseMonthlyFee: assignmentUsing.baseMonthlyFee || assignmentUsing.monthlyFee || enrollment?.baseMonthlyFee || enrollment?.monthlyFee,
               monthlyFee: assignmentUsing.monthlyFee || assignmentUsing.baseMonthlyFee || enrollment?.monthlyFee || enrollment?.baseMonthlyFee,
               startDate: assignmentUsing.startDate || assignmentUsing.start_date || enrollment?.startDate || enrollment?.start_date,
+              endDate: assignmentUsing.endDate || assignmentUsing.stoppedAtDate || enrollment?.endDate || enrollment?.stoppedAtDate || null,
             } : enrollment;
             return await finishSingleStudentContext({
               transportId: idTry,
@@ -3308,7 +3376,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           }
         });
         Object.entries(assignments).forEach(([id, assignRecord]) => {
-          if (!assignRecord || assignRecord.status !== 'Using') {
+          const stopped = String(assignRecord?.status || '').toLowerCase() === 'stopped';
+          if (!assignRecord || (assignRecord.status !== 'Using' && !stopped)) {
             if (mergedTransport[id]) delete mergedTransport[id];
             return;
           }
@@ -3321,6 +3390,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             baseMonthlyFee: assignRecord.baseMonthlyFee || assignRecord.monthlyFee || existing.baseMonthlyFee || existing.monthlyFee,
             monthlyFee: assignRecord.monthlyFee || assignRecord.baseMonthlyFee || existing.monthlyFee || existing.baseMonthlyFee,
             startDate: assignRecord.startDate || assignRecord.start_date || existing.startDate || existing.start_date,
+            endDate: assignRecord.endDate || assignRecord.stoppedAtDate || existing.endDate || existing.stoppedAtDate || null,
+            status: stopped ? 'Stopped' : 'Using',
           };
         });
 
@@ -3408,17 +3479,18 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         }
 
         let effectiveAssign = assignment;
-        if ((!effectiveAssign || effectiveAssign.status !== 'Using') && enrollment) {
+        if ((!effectiveAssign || (effectiveAssign.status !== 'Using' && String(effectiveAssign.status || '').toLowerCase() !== 'stopped')) && enrollment) {
           const amStop = enrollment.amStop || enrollment.morningRouteId || enrollment.route || '';
           const pmStop = enrollment.pmStop || enrollment.eveningRouteId || enrollment.stopName || '';
           const baseMonthlyFee = getTransportBaseMonthlyFee(enrollment);
           effectiveAssign = {
-            status: 'Using',
+            status: String(enrollment.status || '').toLowerCase() === 'stopped' ? 'Stopped' : 'Using',
             amStop,
             pmStop,
             baseMonthlyFee,
             monthlyFee: enrollment.monthlyFee || enrollment.baseMonthlyFee || baseMonthlyFee,
             startDate: enrollment.startDate || enrollment.start_date || enrollment.dateRegistered || null,
+            endDate: enrollment.endDate || enrollment.stoppedAtDate || null,
           };
         }
 
@@ -3465,14 +3537,14 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         const { assign, payments, schoolFeePaid, student, resolvedTransportId } = await loadTransportContextStrict(year, studentId);
         const effectiveStudentId = resolvedTransportId || studentId;
         state.currentPaymentStudentId = effectiveStudentId;
-        if (assign && assign.status === 'Using') {
+        if (assign && (assign.status === 'Using' || String(assign.status || '').toLowerCase() === 'stopped')) {
           state.transportEnrollments[effectiveStudentId] = { ...assign, amStop: assign.amStop || assign.morningRouteId, pmStop: assign.pmStop || assign.eveningRouteId };
         }
         state.students[effectiveStudentId] = student;
         state.transportPayments[effectiveStudentId] = payments;
         renderIdentityStrict(student);
         // If no year-scoped assignment, attempt to render using legacy enrollment data
-        if (!assign || assign.status !== 'Using'){
+        if (!assign || (assign.status !== 'Using' && String(assign.status || '').toLowerCase() !== 'stopped')){
           if (!state.transportEnrollments[effectiveStudentId]) {
             renderNoDataStrict(`No transport assignment for ${year}.`);
             return;
@@ -3495,12 +3567,14 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           ? await calculateBaseMonthlyFee(amStop, pmStop, Number(year), getFocusedMonth())
           : getTransportBaseMonthlyFee(assign);
         const startDate = normalizeDateInput((assign && (assign.startDate || assign.start_date || assign.startTimestamp || assign.start_time)) || `${year}-01-01`, Number(year));
+        const endDate = resolveEndDate(assign);
         const ledger = await TransportPricing.buildLedger({ 
           year: Number(year), 
           amStop,
           pmStop,
           baseMonthlyFee: base, 
           startDate, 
+          endDate,
           payments, 
           multipliers 
         });
@@ -3514,6 +3588,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           pmStop,
           baseMonthlyFee: base, 
           startDate, 
+          endDate,
           multipliers 
         });
         const startDisplay = hasAssignedStart ? formatStartDateDisplay(startDate) : 'N/A';

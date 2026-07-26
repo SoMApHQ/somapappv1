@@ -170,6 +170,13 @@
           <input type="date" id="transportStartDate" required />
         </div>
 
+        <div class="card mt-2" id="stopDateSection" style="display: none;">
+          <h3 style="margin-top: 0;">Stop Date</h3>
+          <label for="transportEndDate">Stop Date (last day student uses transport)</label>
+          <input type="date" id="transportEndDate" />
+          <small style="color: var(--text-muted); display:block; margin-top:.5rem;">Leave empty while the student is still using transport.</small>
+        </div>
+
         <div class="card mt-2" id="farePreview" style="display: none;">
           <h3 style="margin-top: 0;">Monthly Fee Preview</h3>
           <div id="fareBreakdown" style="font-size: 0.875rem; line-height: 1.8;"></div>
@@ -200,6 +207,26 @@
         <div class="flex mt-2" style="justify-content: flex-end; gap: 1rem;">
           <button class="btn secondary" id="cancelAssign">Cancel</button>
           <button class="btn success" id="saveTransportAssign">💾 Save Assignment</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="transportStopModal" class="modal hidden">
+      <div class="modal-content">
+        <div class="flex space center mb-2">
+          <h2 style="margin: 0;">Stop Transport</h2>
+          <button class="btn secondary" id="closeTransportStop">Close</button>
+        </div>
+        <div style="margin-bottom: 1rem; padding: 1rem; background: rgba(239, 68, 68, 0.1); border-radius: 12px; border: 1px solid rgba(239, 68, 68, 0.2);">
+          <p id="stopStudentInfo" style="margin: 0; color: var(--text-secondary);"></p>
+        </div>
+        <label for="stopTransportDate">Last day using transport *</label>
+        <input type="date" id="stopTransportDate" required />
+        <label for="stopTransportReason" style="margin-top: 1rem;">Reason / notes</label>
+        <input type="text" id="stopTransportReason" placeholder="e.g. Parent stopped transport in May" />
+        <div class="flex mt-2" style="justify-content: flex-end; gap: 1rem;">
+          <button class="btn secondary" id="cancelStopTransport">Cancel</button>
+          <button class="btn danger" id="saveStopTransport">Stop Transport</button>
         </div>
       </div>
     </div>
@@ -382,6 +409,7 @@
         transportPayments: {},
         financeData: {},
         currentAssignStudentId: null,
+        currentStopStudentId: null,
         drivers: [],
         routeVehicleValidation: {}, // Track which routes have vehicles assigned
       };
@@ -407,6 +435,11 @@
       const assignMorningDrop = document.getElementById("assignMorningDrop");
       const assignEveningDrop = document.getElementById("assignEveningDrop");
       const saveTransportAssign = document.getElementById("saveTransportAssign");
+      const transportStopModal = document.getElementById("transportStopModal");
+      const closeTransportStop = document.getElementById("closeTransportStop");
+      const stopTransportDate = document.getElementById("stopTransportDate");
+      const stopTransportReason = document.getElementById("stopTransportReason");
+      const saveStopTransport = document.getElementById("saveStopTransport");
 
       // Utility Functions
       function showToast(message, tone = "ok") {
@@ -432,6 +465,37 @@
         if (!timestamp) return 'N/A';
         const date = new Date(timestamp);
         return date.toLocaleDateString('en-GB');
+      }
+
+      function normalizeDateInput(raw, fallbackYear = Number(state.year)) {
+        if (raw === null || raw === undefined || raw === '') return '';
+        if (typeof raw === 'number') {
+          const d = new Date(raw);
+          if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+        }
+        const text = String(raw).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+        if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(text)) {
+          const [dd, mm, yy] = text.split('/').map(Number);
+          const date = new Date(yy, mm - 1, dd);
+          if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10);
+        }
+        const tryDate = new Date(text);
+        if (!Number.isNaN(tryDate.getTime())) return tryDate.toISOString().slice(0, 10);
+        return `${Number(fallbackYear) || new Date().getFullYear()}-01-01`;
+      }
+
+      function resolveEndDate(enrollment) {
+        return normalizeDateInput(enrollment?.endDate || enrollment?.stopDate || enrollment?.stoppedAtDate || enrollment?.transportEndDate || '');
+      }
+
+      function isTransportCurrentlyUsing(enrollment, assignment) {
+        const record = assignment || enrollment || {};
+        if (!record) return false;
+        if (String(record.status || '').toLowerCase() === 'stopped') return false;
+        const endDate = resolveEndDate(record);
+        if (!endDate) return String(record.status || 'Using') === 'Using' || !!enrollment;
+        return endDate >= new Date().toISOString().slice(0, 10);
       }
 
       // Update current date display
@@ -487,7 +551,9 @@
       // Render KPI Cards
       function renderKpis() {
         const totalStudents = Object.keys(state.students || {}).length;
-        const studentsOnTransport = Object.keys(state.transportEnrollments || {}).length;
+        const studentsOnTransport = Object.entries(state.transportEnrollments || {})
+          .filter(([studentId, enrollment]) => isTransportCurrentlyUsing(enrollment, state.transportAssignments?.[studentId]))
+          .length;
         const notOnTransport = totalStudents > 0 ? totalStudents - studentsOnTransport : '—';
 
         // Calculate financial KPIs (matching transportpayments.html logic)
@@ -501,12 +567,14 @@
         
         Object.entries(enrollments).forEach(([studentId, enrollment]) => {
           if (!enrollment) return;
+          const endDate = resolveEndDate(enrollment);
+          const endMonth = endDate ? Number(String(endDate).slice(5, 7)) : null;
           
           const amStop = enrollment.amStop || '';
           const pmStop = enrollment.pmStop || '';
           
           // Current month expected (with multiplier) - for "Expected This Month" KPI
-          const currentMonthExpected = TransportPricing.expectedForMonth(amStop, pmStop, state.month);
+          const currentMonthExpected = endMonth && state.month > endMonth ? 0 : TransportPricing.expectedForMonth(amStop, pmStop, state.month);
           expectedThisMonth += currentMonthExpected;
 
           // Calculate total expected and total paid across ALL months (like transportpayments.html)
@@ -517,6 +585,7 @@
           const paymentsArray = Array.isArray(studentPayments) ? studentPayments : Object.values(studentPayments || {});
           
           for (let month = 1; month <= 12; month++) {
+            if (endMonth && month > endMonth) continue;
             const monthlyExpected = TransportPricing.expectedForMonth(amStop, pmStop, month);
             totalExpected += monthlyExpected;
             
@@ -709,9 +778,8 @@
             const enrollment = state.transportEnrollments[id];
             const assignments = state.transportAssignments || {};
             const assignment = assignments[id];
-            const isUsingTransport = assignment
-              ? assignment.status === 'Using'
-              : !!enrollment;
+            const isUsingTransport = isTransportCurrentlyUsing(enrollment, assignment);
+            const isStoppedTransport = !!(enrollment || assignment) && !isUsingTransport;
 
             // Get finance data (year-scoped via SomapFinance when available)
             const financeData = state.financeData[id] || {};
@@ -720,12 +788,17 @@
             const debt = Math.max(0, feeTotal - paidAmount);
             const debtTill = financeData.debtTill || '—';
 
-            const statusBadge = isUsingTransport 
+            const endDate = resolveEndDate(assignment || enrollment);
+            const statusBadge = isUsingTransport
               ? '<span class="chip ok">Using</span>'
-              : '<span class="chip warn">Not Using</span>';
+              : (isStoppedTransport
+                ? `<span class="chip warn">Stopped${endDate ? ` ${formatDate(endDate)}` : ''}</span>`
+                : '<span class="chip warn">Not Using</span>');
 
             const actionBtn = isUsingTransport
-              ? `<button class="btn secondary" onclick="editTransportAssignment('${id}')">Edit</button>`
+              ? `<button class="btn secondary" onclick="editTransportAssignment('${id}')">Edit</button><button class="btn danger" onclick="openStopTransport('${id}')">Stop</button>`
+              : isStoppedTransport
+              ? `<button class="btn secondary" onclick="editTransportAssignment('${id}')">Edit</button><button class="btn success" onclick="assignTransport('${id}')">Assign Again</button>`
               : `<button class="btn success" onclick="assignTransport('${id}')">Assign Transport</button>`;
 
             return `
@@ -860,6 +933,9 @@
         document.getElementById('dropOffSection').style.display = 'none';
         document.getElementById('farePreview').style.display = 'none';
         document.getElementById('vehicleAssignSection').style.display = 'none';
+        document.getElementById('stopDateSection').style.display = 'none';
+        const endDateInput = document.getElementById('transportEndDate');
+        if (endDateInput) endDateInput.value = '';
         state.routeVehicleValidation = {};
 
         // Reset save button
@@ -882,6 +958,11 @@
           assignPeriod.value = enrollment.period || '';
           assignMorningDrop.value = enrollment.amStop || '';
           assignEveningDrop.value = enrollment.pmStop || '';
+          const startDateInput = document.getElementById('transportStartDate');
+          if (startDateInput) startDateInput.value = normalizeDateInput(enrollment.startDate || enrollment.start_date || '') || `${state.year}-01-01`;
+          const endDateInput = document.getElementById('transportEndDate');
+          if (endDateInput) endDateInput.value = resolveEndDate(enrollment);
+          document.getElementById('stopDateSection').style.display = 'block';
           // Trigger period handler to show drop sections and init searchable
           assignPeriod.dispatchEvent(new Event('change'));
           // Re-init searchable with existing values (period handler may have reset them)
@@ -932,6 +1013,7 @@
         // reveal start date when period/routes selected
         const hasAny = assignMorningDrop.value || assignEveningDrop.value;
         document.getElementById('startDateSection').style.display = hasAny ? 'block' : 'none';
+        document.getElementById('stopDateSection').style.display = hasAny ? 'block' : 'none';
         updateSaveButtonState();
       });
 
@@ -939,12 +1021,14 @@
         await calculateFare();
         const hasAny = assignMorningDrop.value || assignEveningDrop.value;
         document.getElementById('startDateSection').style.display = hasAny ? 'block' : 'none';
+        document.getElementById('stopDateSection').style.display = hasAny ? 'block' : 'none';
         updateSaveButtonState();
       });
       assignEveningDrop.addEventListener('change', async () => {
         await calculateFare();
         const hasAny = assignMorningDrop.value || assignEveningDrop.value;
         document.getElementById('startDateSection').style.display = hasAny ? 'block' : 'none';
+        document.getElementById('stopDateSection').style.display = hasAny ? 'block' : 'none';
         updateSaveButtonState();
       });
 
@@ -1160,6 +1244,7 @@
         const morningRoute = assignMorningDrop.value;
         const eveningRoute = assignEveningDrop.value;
         const startDate = (document.getElementById('transportStartDate') || {}).value;
+        const endDate = (document.getElementById('transportEndDate') || {}).value;
 
         // Basic validation
         if (!period || (!morningRoute && !eveningRoute)) {
@@ -1169,6 +1254,10 @@
 
         if (!startDate) {
           showToast('Please select Start Date', 'bad');
+          return;
+        }
+        if (endDate && endDate < startDate) {
+          showToast('Stop Date cannot be before Start Date', 'bad');
           return;
         }
 
@@ -1224,6 +1313,9 @@
             eveningVehicle: eveningRoute ? routeVehicleMap[eveningRoute] : null,
             updatedAt: Date.now(),
             updatedBy: state.user.uid,
+            startDate,
+            endDate: endDate || null,
+            status: endDate ? 'Stopped' : 'Using',
           };
 
           await schoolRef(`years/${state.year}/transportEnrollments/${studentId}`).set(enrollment);
@@ -1233,7 +1325,7 @@
           const baseEveningFee = TransportPricing.priceForStop(eveningRoute || '');
           const baseMonthlyFee = baseMorningFee + baseEveningFee;
           const assignPayload = {
-            status: 'Using',
+            status: endDate ? 'Stopped' : 'Using',
             morningRouteId: morningRoute || '',
             eveningRouteId: eveningRoute || '',
             morningVehicle: morningRoute ? routeVehicleMap[morningRoute] : null,
@@ -1242,6 +1334,9 @@
             baseEveningFee,
             baseMonthlyFee,
             startDate: startDate,
+            endDate: endDate || null,
+            stoppedAtDate: endDate || null,
+            stoppedAt: endDate ? Date.now() : null,
             dateRegistered: Date.now(),
             parentContact: state.students[studentId]?.primaryParentContact || '',
             className: state.students[studentId]?.classLevel || '',
@@ -1272,6 +1367,59 @@
         }
       });
 
+      function openStopTransport(studentId) {
+        state.currentStopStudentId = studentId;
+        const student = state.students[studentId] || {};
+        const enrollment = state.transportEnrollments[studentId] || {};
+        const assignment = state.transportAssignments[studentId] || {};
+        const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim();
+        document.getElementById('stopStudentInfo').textContent = `${fullName || assignment.fullName || studentId} - ${student.admissionNumber || assignment.admissionNo || studentId}`;
+        stopTransportDate.value = resolveEndDate(assignment) || resolveEndDate(enrollment) || new Date().toISOString().slice(0, 10);
+        stopTransportReason.value = assignment.stopReason || enrollment.stopReason || '';
+        transportStopModal.classList.remove('hidden');
+      }
+
+      saveStopTransport.addEventListener('click', async () => {
+        const studentId = state.currentStopStudentId;
+        const endDate = stopTransportDate.value;
+        if (!studentId) return;
+        if (!endDate) {
+          showToast('Please select the last transport date', 'bad');
+          return;
+        }
+        const existing = state.transportEnrollments[studentId] || {};
+        const existingAssign = state.transportAssignments[studentId] || {};
+        const startDate = normalizeDateInput(existingAssign.startDate || existing.startDate || `${state.year}-01-01`);
+        if (startDate && endDate < startDate) {
+          showToast('Stop date cannot be before start date', 'bad');
+          return;
+        }
+        const stopPatch = {
+          status: 'Stopped',
+          endDate,
+          stoppedAtDate: endDate,
+          stoppedAt: Date.now(),
+          stopReason: stopTransportReason.value || '',
+          updatedAt: Date.now(),
+          updatedBy: state.user?.uid || 'unknown',
+        };
+        try {
+          await Promise.all([
+            schoolRef(`years/${state.year}/transportAssignments/${studentId}`).update(stopPatch),
+            schoolRef(`years/${state.year}/transportEnrollments/${studentId}`).update(stopPatch),
+          ]);
+          state.transportAssignments[studentId] = { ...existingAssign, ...stopPatch };
+          state.transportEnrollments[studentId] = { ...existing, ...stopPatch };
+          transportStopModal.classList.add('hidden');
+          showToast('Transport stopped. Debt will calculate only until the stop month.');
+          renderStudentsTable();
+          renderKpis();
+        } catch (error) {
+          console.error('Could not stop transport:', error);
+          showToast('Failed to stop transport', 'bad');
+        }
+      });
+
       closeTransportAssign.addEventListener('click', () => {
         transportAssignModal.classList.add('hidden');
       });
@@ -1279,6 +1427,8 @@
       document.getElementById('cancelAssign').addEventListener('click', () => {
         transportAssignModal.classList.add('hidden');
       });
+      closeTransportStop?.addEventListener('click', () => transportStopModal.classList.add('hidden'));
+      document.getElementById('cancelStopTransport')?.addEventListener('click', () => transportStopModal.classList.add('hidden'));
 
       // Cache for drivers (rarely changes)
       let driversCache = null;
@@ -1354,7 +1504,8 @@
           });
 
           Object.entries(assignments).forEach(([studentId, assignRecord]) => {
-            if (!assignRecord || assignRecord.status !== 'Using') {
+            const stopped = String(assignRecord?.status || '').toLowerCase() === 'stopped';
+            if (!assignRecord || (assignRecord.status !== 'Using' && !stopped)) {
               // If a student exists in legacy but is marked not using in assignments, remove.
               if (state.transportEnrollments[studentId]) {
                 delete state.transportEnrollments[studentId];
@@ -1375,6 +1526,8 @@
               period: assignRecord.period || existing.period || period,
               baseMonthlyFee: assignRecord.baseMonthlyFee || existing.baseMonthlyFee,
               startDate: assignRecord.startDate || existing.startDate,
+              endDate: assignRecord.endDate || assignRecord.stoppedAtDate || existing.endDate || existing.stoppedAtDate || null,
+              status: stopped ? 'Stopped' : 'Using',
             };
           });
           

@@ -7,7 +7,7 @@
 
   // Unmultiplied baseMonthlyFee = sum(morning+evening) before month multiplier
   // Now supports date-aware pricing via amStop/pmStop OR legacy baseMonthlyFee
-  async function dueForMonth({year, month, baseMonthlyFee, amStop, pmStop, startDate, multipliers}){
+  async function dueForMonth({year, month, baseMonthlyFee, amStop, pmStop, startDate, endDate, multipliers}){
     // If stops provided, compute base fee for that month using priceHistory
     let base = baseMonthlyFee;
     if (amStop || pmStop) {
@@ -22,18 +22,29 @@
 
     const dim = daysInMonth(year, month);
     const start = startDate ? parseYMD(startDate) : {y:year,m:1,d:1};
+    const end = endDate ? parseYMD(endDate) : null;
 
     if (year < start.y) return 0;
     if (year === start.y && month < start.m) return 0;
+    if (end) {
+      if (year > end.y) return 0;
+      if (year === end.y && month > end.m) return 0;
+    }
 
     if (year === start.y && month === start.m){
-      const activeDays = Math.max(0, dim - (start.d - 1));
+      const activeFrom = Math.max(1, start.d || 1);
+      const activeTo = (end && year === end.y && month === end.m) ? Math.min(dim, end.d || dim) : dim;
+      const activeDays = Math.max(0, activeTo - activeFrom + 1);
+      return (base * mult) * (activeDays / dim);
+    }
+    if (end && year === end.y && month === end.m) {
+      const activeDays = Math.max(0, Math.min(dim, end.d || dim));
       return (base * mult) * (activeDays / dim);
     }
     return base * mult;
   }
 
-  async function buildLedger({year, baseMonthlyFee, amStop, pmStop, startDate, payments, multipliers}){
+  async function buildLedger({year, baseMonthlyFee, amStop, pmStop, startDate, endDate, payments, multipliers}){
     const approvedPayments = Array.isArray(payments) ? payments : Object.values(payments || {});
     const totalPaidInput = approvedPayments.reduce((sum, p) => {
       const amount = Number(p?.amount || p?.paidAmount || p?.value || 0);
@@ -42,7 +53,7 @@
 
     const monthNumbers = Array.from({ length: 12 }, (_, i) => i + 1);
     const dues = await Promise.all(
-      monthNumbers.map((m) => dueForMonth({ year, month: m, baseMonthlyFee, amStop, pmStop, startDate, multipliers }))
+      monthNumbers.map((m) => dueForMonth({ year, month: m, baseMonthlyFee, amStop, pmStop, startDate, endDate, multipliers }))
     );
 
     // Business rule: approved amount covers oldest unpaid month(s) first.
