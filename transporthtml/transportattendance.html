@@ -1200,6 +1200,33 @@
         return "transport/" + state.context.school + "/" + state.context.year + "/attendance_summary/" + vehicleId + "/" + studentId;
       }
 
+      function transportStopUpdates(studentId, ymd, note) {
+        const school = state.context.school;
+        const year = state.context.year;
+        const patch = {
+          status: "Stopped",
+          endDate: ymd,
+          stoppedAtDate: ymd,
+          stoppedAt: Date.now(),
+          stopReason: note || "QUIT USING",
+          stoppedFromAttendance: true,
+          updatedAt: Date.now(),
+          updatedBy: state.user ? state.user.uid : "unknown"
+        };
+        const updates = {};
+        function addPatch(basePath) {
+          Object.keys(patch).forEach(function(key) {
+            updates[basePath + "/" + key] = patch[key];
+          });
+        }
+        addPatch("schools/" + school + "/years/" + year + "/transportAssignments/" + studentId);
+        addPatch("schools/" + school + "/years/" + year + "/transportEnrollments/" + studentId);
+        if (isSocratesAlias()) {
+          addPatch("transportAssignments/" + year + "/" + studentId);
+        }
+        return updates;
+      }
+
       async function markPresent(studentId) {
         if (!canUse() || !studentId) return;
         const vehicleId = vehicleSelect.value;
@@ -1275,10 +1302,15 @@
           const value = snap.val() || {};
           const nextCount = Number(value.consecutive_absent_days || 0) + 1;
           await summaryRef.update({ consecutive_absent_days: nextCount });
+          if (reasonCode === "QUIT USING") {
+            await firebase.database().ref().update(transportStopUpdates(studentId, ymd, note));
+            delete state.allEnrollments[studentId];
+            state.assignments = state.assignments.filter(function(st) { return st.studentId !== studentId; });
+          }
           state.attendanceMap[studentId] = record;
           state.summaryMap[studentId] = { ...value, consecutive_absent_days: nextCount };
           render();
-          showToast("Marked absent", "bad");
+          showToast(reasonCode === "QUIT USING" ? "Marked absent and stopped transport from " + ymd : "Marked absent", "bad");
         } catch (err) {
           console.error(err);
           showToast("Could not mark absent", "bad");
