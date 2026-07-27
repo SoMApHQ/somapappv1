@@ -256,6 +256,11 @@
         <div id="historyStartDateInfo" style="padding: 1rem; background: rgba(59, 130, 246, 0.1); border-radius: 12px; margin-bottom: 1rem; display: none;">
           <strong>Transport Start Date:</strong> <span id="historyStartDateValue">-</span>
         </div>
+        <div id="historyStopDateInfo" style="padding: 1rem; background: rgba(239, 68, 68, 0.1); border-radius: 12px; margin-bottom: 1rem; display: none;">
+          <strong>Transport Stopped:</strong> <span id="historyStopDateValue">-</span>
+          <div id="historyStopReasonValue" style="margin-top: .35rem; color: var(--text-secondary);"></div>
+          <div style="margin-top: .35rem; color: var(--text-secondary);">Transport debt is calculated only up to this date, with the stop month prorated by days used.</div>
+        </div>
         <div class="flex mb-2" style="flex-wrap: wrap; gap: 0.5rem;">
           <button type="button" class="btn" id="openPaymentScheduleBtn" title="View and download year payment schedule for parent">
             &#128196; Taarifa ya Malipo (Payment Schedule)
@@ -1178,6 +1183,7 @@
           const selectedMonth = getFocusedMonth();
           const selectedMonthName = MONTH_NAMES[selectedMonth] || 'Current';
           const startDateDisplay = transportStatus.startDateDisplay || 'N/A';
+          const stopDateDisplay = transportStatus.endDateIso ? formatStartDateDisplay(transportStatus.endDateIso) : '';
           const baseFeeDisplay = formatCurrency(transportStatus.monthlyFee);
           const currentMonthDue = transportStatus.currentMonthExpected;
           
@@ -1198,7 +1204,7 @@
               <td>${fullName}${debtWarning ? '<br>' + debtWarning : ''}</td>
               <td>${shiftedClass}</td>
               <td>${getTransportParentContact(student, enrollment) || 'N/A'}</td>
-              <td>${startDateDisplay}</td>
+              <td>${startDateDisplay}${stopDateDisplay ? `<br><span style="font-size: 0.72rem; color: var(--accent-danger);">Stopped: ${stopDateDisplay}</span>` : ''}</td>
               <td>${enrollment.amStop || '&mdash;'}</td>
               <td>${enrollment.pmStop || '&mdash;'}</td>
               <td style="font-size: 0.85rem;">${driverDisplay}</td>
@@ -1530,11 +1536,11 @@
         state.currentHistoryStudentId = studentId;
         const student = getStudentForTransport(studentId, state.transportEnrollments[studentId]);
         
-        // Load transport assignment to get start date
+        // Load transport assignment to get start/stop date
         const year = String(state.year);
         try {
           const assignSnap = await scopedOrSocratesLegacy(`years/${year}/transportAssignments/${studentId}`, `transportAssignments/${year}/${studentId}`);
-          const assign = assignSnap.val();
+          const assign = assignSnap.val() || state.transportEnrollments[studentId] || {};
           const rawStart = assign?.startDate || assign?.start_date || assign?.startTimestamp || assign?.start_time;
           if (rawStart) {
             const normalized = normalizeDateInput(rawStart, Number(year));
@@ -1543,9 +1549,19 @@
           } else {
             document.getElementById('historyStartDateInfo').style.display = 'none';
           }
+          const stopDate = resolveEndDate(assign);
+          if (stopDate) {
+            document.getElementById('historyStopDateValue').textContent = `${formatStartDateDisplay(stopDate)} (${formatDebtTillMonth(stopDate)})`;
+            const reason = assign.stopReason || assign.reason || '';
+            document.getElementById('historyStopReasonValue').textContent = reason ? `Reason: ${reason}` : '';
+            document.getElementById('historyStopDateInfo').style.display = 'block';
+          } else {
+            document.getElementById('historyStopDateInfo').style.display = 'none';
+          }
         } catch (err) {
-          console.warn('Error loading start date:', err);
+          console.warn('Error loading start/stop date:', err);
           document.getElementById('historyStartDateInfo').style.display = 'none';
+          document.getElementById('historyStopDateInfo').style.display = 'none';
         }
         
         let payments = state.transportPayments[studentId] || {};
@@ -3592,6 +3608,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           multipliers 
         });
         const startDisplay = hasAssignedStart ? formatStartDateDisplay(startDate) : 'N/A';
+        const stopDisplay = endDate ? formatStartDateDisplay(endDate) : '';
 
         // Debt only includes months already due: due date is 3rd of same month; paying on/from 3rd is late.
         const now = new Date();
@@ -3641,7 +3658,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               <td>${fullName}</td>
               <td>${student.classLevel || '&mdash;'}</td>
               <td>${getTransportParentContact(student, assign) || 'N/A'}</td>
-              <td>${startDisplay}</td>
+              <td>${startDisplay}${stopDisplay ? `<br><span style="font-size: 0.72rem; color: var(--accent-danger);">Stopped: ${stopDisplay}</span>` : ''}</td>
               <td>${morningRoute}</td>
               <td>${eveningRoute}</td>
               <td style="font-size: 0.85rem;">${driverDisplay}</td>

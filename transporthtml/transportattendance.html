@@ -484,6 +484,11 @@
         <label><input type="radio" name="absReason" value="QUIT USING"/> QUIT USING</label>
         <label><input type="radio" name="absReason" value="OTHER"/> OTHER</label>
       </div>
+      <div id="quitUsingDateWrap" style="display:none; margin-top: 0.85rem;">
+        <label for="quitUsingDate" class="muted">Last day the child used transport</label>
+        <input id="quitUsingDate" type="date" />
+        <p class="muted" style="margin: 0.4rem 0 0;">Debt is calculated only up to this date. If the child stopped before May started, choose the last day of April.</p>
+      </div>
       <label for="absNote" class="muted">Optional note</label>
       <textarea id="absNote" placeholder="Add a short note (optional)"></textarea>
       <div class="modal-actions">
@@ -529,6 +534,8 @@
       const reasonOk = document.getElementById("reasonOk");
       const reasonCancel = document.getElementById("reasonCancel");
       const absNote = document.getElementById("absNote");
+      const quitUsingDateWrap = document.getElementById("quitUsingDateWrap");
+      const quitUsingDate = document.getElementById("quitUsingDate");
 
       const now = new Date();
       const hasDateOverride = urlParams.has("month") || urlParams.has("day");
@@ -598,6 +605,31 @@
       function currentYmd() {
         const ctx = state.context;
         return String(ctx.year) + "-" + String(ctx.month).padStart(2, "0") + "-" + String(ctx.day).padStart(2, "0");
+      }
+
+      function resolveStopDateForRecord(record) {
+        const raw = record && (record.endDate || record.stopDate || record.stoppedAtDate || record.transportEndDate);
+        if (!raw) return "";
+        if (typeof raw === "number") {
+          const d = new Date(raw);
+          return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+        }
+        const text = String(raw).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+        const d = new Date(text);
+        return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+      }
+
+      function isActiveForAttendanceDate(record) {
+        const stopDate = resolveStopDateForRecord(record);
+        return !stopDate || currentYmd() <= stopDate;
+      }
+
+      function updateQuitUsingFields() {
+        const selected = modalBackdrop.querySelector("input[name='absReason']:checked");
+        const isQuit = selected && selected.value === "QUIT USING";
+        quitUsingDateWrap.style.display = isQuit ? "block" : "none";
+        if (isQuit && !quitUsingDate.value) quitUsingDate.value = currentYmd();
       }
 
       function updateSelectedDateLabel() {
@@ -955,7 +987,12 @@
 
         Object.keys(assignments).forEach(function(studentId) {
           const assign = assignments[studentId];
-          if (assign && assign.status !== "Using") {
+          const stopped = assign && String(assign.status || "").toLowerCase() === "stopped";
+          if (assign && assign.status !== "Using" && !stopped) {
+            delete enrollments[studentId];
+            return;
+          }
+          if (stopped && !isActiveForAttendanceDate(assign)) {
             delete enrollments[studentId];
             return;
           }
@@ -973,7 +1010,9 @@
             amStop: amStop,
             pmStop: pmStop,
             morningVehicleId: mvId,
-            eveningVehicleId: evId
+            eveningVehicleId: evId,
+            endDate: assign.endDate || assign.stoppedAtDate || existing.endDate || existing.stoppedAtDate || "",
+            status: stopped ? "Stopped" : "Using"
           };
         });
 
@@ -1258,10 +1297,12 @@
       function openReasonModal(studentId) {
         state.pendingAbsence = { studentId: studentId };
         absNote.value = "";
+        quitUsingDate.value = currentYmd();
         const defaultRadio = modalBackdrop.querySelector("input[name='absReason'][value='SICK']");
         if (defaultRadio) {
           defaultRadio.checked = true;
         }
+        updateQuitUsingFields();
         modalBackdrop.style.display = "flex";
       }
 
@@ -1274,6 +1315,9 @@
         if (event.target === modalBackdrop) {
           closeReasonModal();
         }
+      });
+      modalBackdrop.querySelectorAll("input[name='absReason']").forEach(function(radio) {
+        radio.addEventListener("change", updateQuitUsingFields);
       });
 
       async function markAbsentConfirmed() {
@@ -1288,6 +1332,11 @@
         const selected = modalBackdrop.querySelector("input[name='absReason']:checked");
         const reasonCode = selected ? selected.value : "OTHER";
         const note = absNote.value.trim();
+        const stopDate = reasonCode === "QUIT USING" ? (quitUsingDate.value || ymd) : ymd;
+        if (reasonCode === "QUIT USING" && !quitUsingDate.value) {
+          showToast("Choose the last day the child used transport", "bad");
+          return;
+        }
         const record = {
           status: "absent",
           reason: note ? reasonCode + " - " + note : reasonCode,
@@ -1303,14 +1352,14 @@
           const nextCount = Number(value.consecutive_absent_days || 0) + 1;
           await summaryRef.update({ consecutive_absent_days: nextCount });
           if (reasonCode === "QUIT USING") {
-            await firebase.database().ref().update(transportStopUpdates(studentId, ymd, note));
+            await firebase.database().ref().update(transportStopUpdates(studentId, stopDate, note));
             delete state.allEnrollments[studentId];
             state.assignments = state.assignments.filter(function(st) { return st.studentId !== studentId; });
           }
           state.attendanceMap[studentId] = record;
           state.summaryMap[studentId] = { ...value, consecutive_absent_days: nextCount };
           render();
-          showToast(reasonCode === "QUIT USING" ? "Marked absent and stopped transport from " + ymd : "Marked absent", "bad");
+          showToast(reasonCode === "QUIT USING" ? "Marked absent and stopped transport from " + stopDate : "Marked absent", "bad");
         } catch (err) {
           console.error(err);
           showToast("Could not mark absent", "bad");
