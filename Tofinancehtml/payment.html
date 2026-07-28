@@ -161,8 +161,8 @@
       // ---- helpers ----
       const fmt = (n) => (Number(n) || 0).toLocaleString();
       const nowTS = () => Date.now();
-      function ymdToTS(academicYear, m, d, endOfDay = false) {
-        const y = (m === 12) ? (Number(academicYear) - 1) : Number(academicYear);
+      function ymdToTS(academicYear, m, d, endOfDay = false, calendarYear = false) {
+        const y = (!calendarYear && m === 12) ? (Number(academicYear) - 1) : Number(academicYear);
         return endOfDay
           ? new Date(y, m - 1, d, 23, 59, 59, 999).getTime()
           : new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
@@ -488,20 +488,20 @@
           : new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
       }
 
-      function resolveWindowTimestamp(row, key, fallbackPair, endOfDay) {
+      function resolveWindowTimestamp(row, key, fallbackPair, endOfDay, calendarYear = false) {
         const direct = row?.[key] ?? row?.[`${key}Date`];
         const fullTS = parseFullDate(direct, endOfDay);
         if (fullTS != null) return fullTS;
         const pair = resolveWindowPair(row, key, fallbackPair);
-        return toAcademicTS(pair, endOfDay);
+        return toAcademicTS(pair, endOfDay, calendarYear);
       }
-      function toAcademicTS(pair, endOfDay) {
+      function toAcademicTS(pair, endOfDay, calendarYear = false) {
         let [month, day] = Array.isArray(pair) ? pair : [1, 1];
         month = Number(month);
         day = Number(day);
         if (!Number.isFinite(month) || month <= 0 || month > 12) month = 1;
         if (!Number.isFinite(day) || day <= 0 || day > 31) day = endOfDay ? 10 : 1;
-        return ymdToTS(targetYear, month, day, endOfDay);
+        return ymdToTS(targetYear, month, day, endOfDay, calendarYear);
       }
 
       async function buildSchedule(student, classDefaults, override) {
@@ -603,6 +603,8 @@
           return buildLegacySchedule(student);
         }
 
+        const breakdownIsMonthly = isMonthlyPlanName(breakdown?.planId, breakdown?.planName, student?.paymentPlan) ||
+          rows.some((row) => String(row?.label || '').includes('Monthly:'));
         const items = rows.map((row, idx) => {
           const fallback = fallbackWindow(config, idx) || { from: [1, 1], to: [1, 10] };
           const fromPair = resolveWindowPair(row, 'from', fallback.from);
@@ -612,8 +614,8 @@
           return {
             label,
             amount,
-            fromTS: resolveWindowTimestamp(row, 'from', fromPair, false),
-            toTS: resolveWindowTimestamp(row, 'to', toPair, true),
+            fromTS: resolveWindowTimestamp(row, 'from', fromPair, false, breakdownIsMonthly),
+            toTS: resolveWindowTimestamp(row, 'to', toPair, true, breakdownIsMonthly),
             paidAllocated: 0,
             status: 'Pending',
             weight: Number(row.weight || 0),

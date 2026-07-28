@@ -658,12 +658,7 @@ export async function resolveEffectiveInstallments(studentId, className, options
   }
 
   const totalAfter = sumValues(prepared, (row) => row.amount || 0);
-  if (prepared.length) {
-    const diffTotal = targetFee - totalAfter;
-    prepared[prepared.length - 1].amount = (prepared[prepared.length - 1].amount || 0) + diffTotal;
-  }
-
-  const resolvedFee = targetFee;
+  const resolvedFee = fee > 0 ? fee : totalAfter;
   const finalPlanName = planName || planId || '';
 
   return {

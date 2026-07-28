@@ -610,7 +610,7 @@
     if (endOfDay) return new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
     return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
   }
-  function parseScheduleTS(raw, endOfDay = false, academicYear = Number(financeYear)) {
+  function parseScheduleTS(raw, endOfDay = false, academicYear = Number(financeYear), options = {}) {
     if (raw == null) return 0;
 
     const toBoundary = (y, m, d) => endOfDay
@@ -625,7 +625,7 @@
       const m = Number(raw[0]);
       const d = Number(raw[1]);
       if (Number.isFinite(m) && Number.isFinite(d) && m >= 1 && m <= 12 && d >= 1 && d <= 31 && Number.isFinite(academicYear)) {
-        const y = m === 12 ? academicYear - 1 : academicYear;
+        const y = (!options.calendarYear && m === 12) ? academicYear - 1 : academicYear;
         return toBoundary(y, m, d);
       }
       return 0;
@@ -652,7 +652,7 @@
       const d = Number(mdyMatch[2]);
       let y = Number(mdyMatch[3]);
       if (!Number.isFinite(y) && Number.isFinite(academicYear)) {
-        y = (m === 12) ? academicYear - 1 : academicYear;
+        y = (!options.calendarYear && m === 12) ? academicYear - 1 : academicYear;
       }
       if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
         return toBoundary(y, m, d);
@@ -1035,12 +1035,15 @@
       const rawExplicit = student._planSchedule.map(s => Math.max(0, Number(s?.amount) || 0));
       const explicitSum = rawExplicit.reduce((a, b) => a + b, 0);
       const hasExplicitAmounts = rawExplicit.some(a => a > 0) && explicitSum > 0;
+      const planName = String(student.paymentPlan || '').toLowerCase();
+      const isMonthlyPlan = planName.includes('monthly') || planName.includes('monthyl') || planName.includes('mwezi') ||
+        student._planSchedule.some(s => String(s.label || '').includes('Monthly:'));
 
       let amounts = [];
       if (hasExplicitAmounts) {
-        // Use plan's explicit amounts, but scale to baseFee if it was built for a different class fee.
+        // Monthly plans are exact saved rules; installment plans may be scaled to the student's fee.
         amounts = rawExplicit.slice();
-        if (baseFee > 0) {
+        if (!isMonthlyPlan && baseFee > 0) {
           const tolerance = Math.max(100, Math.round(baseFee * 0.01));
           if (Math.abs(explicitSum - baseFee) > tolerance) {
             const ratio = baseFee / explicitSum;
@@ -1065,12 +1068,9 @@
         else amounts = [carryAmount];
       }
 
-      const planName = String(student.paymentPlan || '').toLowerCase();
-      const isMonthlyPlan = planName.includes('monthly') || planName.includes('monthyl') || planName.includes('mwezi') ||
-        student._planSchedule.some(s => String(s.label || '').includes('Monthly:'));
-
       const sc = student._planSchedule.map((s, i) => {
-        let toTS = parseScheduleTS(s.to, true, academicYear);
+        const dateOptions = { calendarYear: isMonthlyPlan };
+        let toTS = parseScheduleTS(s.to, true, academicYear, dateOptions);
         if (isMonthlyPlan && toTS > 0) {
           const d = new Date(toTS);
           const day = d.getDate();
@@ -1081,7 +1081,7 @@
         return {
           key: (s && (s.id || s.key)) ? (s.id || s.key) : `inst${i + 1}`,
           label: s.label || `Inst ${i + 1}`,
-          fromTS: parseScheduleTS(s.from, false, academicYear),
+          fromTS: parseScheduleTS(s.from, false, academicYear, dateOptions),
           toTS,
           amount: Math.max(0, Number(amounts[i] || 0)),
           carryComponent: 0,

@@ -110,6 +110,31 @@
     };
   }
   function dateFromYMD(y, m, d){ return new Date(y, m - 1, d).getTime(); }
+  function planScheduleTS(raw, academicYear, endOfDay, calendarYear){
+    if (raw == null) return 0;
+    const boundary = (y, m, d) => endOfDay
+      ? new Date(y, m - 1, d, 23, 59, 59, 999).getTime()
+      : new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+    if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+    if (Array.isArray(raw) && raw.length >= 2) {
+      const m = Number(raw[0]);
+      const d = Number(raw[1]);
+      const y = (!calendarYear && m === 12) ? Number(academicYear) - 1 : Number(academicYear);
+      return boundary(y, m, d);
+    }
+    const value = String(raw).trim();
+    const full = value.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+    if (full) return boundary(Number(full[1]), Number(full[2]), Number(full[3]));
+    const md = value.match(/^(\d{1,2})[/-](\d{1,2})$/);
+    if (md) {
+      const m = Number(md[1]);
+      const d = Number(md[2]);
+      const y = (!calendarYear && m === 12) ? Number(academicYear) - 1 : Number(academicYear);
+      return boundary(y, m, d);
+    }
+    const ts = Date.parse(value);
+    return Number.isFinite(ts) ? ts : 0;
+  }
   function isPast(ts){ return Date.now() > ts; }
   function apportion(total, weights){
     if (!Array.isArray(weights) || !weights.length) return [];
@@ -306,16 +331,18 @@
     if (Array.isArray(student._planSchedule) && student._planSchedule.length) {
       const baseFee = Math.max(0, Math.round(Number(student.baseFee ?? (student.feePerYear - (student.carryAmount || 0))) || 0));
       const carryAmount = Math.max(0, Number(student.carryAmount || 0));
-      const weights = student._planSchedule.map((s) => Math.max(0, Number(s.weight) || 0));
-      const amounts = apportion(baseFee, weights);
-      if (carryAmount > 0) {
-        if (amounts.length) amounts[0] += carryAmount; else amounts.push(carryAmount);
-      }
       const planName = String(student.paymentPlan || '').toLowerCase();
       const isMonthlyPlan = planName.includes('monthly') || planName.includes('mwezi') ||
         student._planSchedule.some((s) => String(s.label || '').includes('Monthly:'));
+      const explicitAmounts = student._planSchedule.map((s) => Math.max(0, Math.round(Number(s.amount) || 0)));
+      const hasExplicitAmounts = explicitAmounts.some((amount) => amount > 0);
+      const weights = student._planSchedule.map((s) => Math.max(0, Number(s.weight) || 0));
+      let amounts = hasExplicitAmounts ? explicitAmounts : apportion(baseFee, weights);
+      if (carryAmount > 0) {
+        if (amounts.length) amounts[0] += carryAmount; else amounts.push(carryAmount);
+      }
       const sc = student._planSchedule.map((s, i) => {
-        let toTS = s.to ? new Date(s.to).getTime() : 0;
+        let toTS = planScheduleTS(s.to, y, true, isMonthlyPlan);
         if (isMonthlyPlan && toTS > 0 && !Number.isNaN(toTS)) {
           const d = new Date(toTS);
           if (d.getDate() !== 10) {
@@ -325,7 +352,7 @@
         return {
           key: `inst${i + 1}`,
           label: s.label || `Inst ${i + 1}`,
-          fromTS: s.from ? new Date(s.from).getTime() : 0,
+          fromTS: planScheduleTS(s.from, y, false, isMonthlyPlan),
           toTS,
           amount: Math.max(0, amounts[i] || 0),
           paidAllocated: 0,
