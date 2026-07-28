@@ -50,9 +50,23 @@
     if (!Number.isFinite(monthlyAmount) || monthlyAmount <= 0) return Array.isArray(plan.schedule) ? plan.schedule : [];
     const fromDay = Math.max(1, Math.min(28, Number(rule.dueDayStart || rule.fromDay || 1)));
     const windowLength = Math.max(1, Math.min(28, Number(rule.windowLengthDays || rule.windowLen || 10)));
-    const doubleMonths = Array.isArray(rule.doubleMonths) ? rule.doubleMonths.map(Number) : [];
-    const excludedMonths = Array.isArray(rule.excludedMonths) ? rule.excludedMonths.map(Number) : [];
     const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const monthFromRow = (row) => {
+      const text = String(row?.label || '').toLowerCase();
+      const labelIndex = monthLabels.findIndex((label) => text.includes(label.toLowerCase()));
+      if (labelIndex >= 0) return labelIndex + 1;
+      const match = String(row?.from || row?.start || '').match(/^(\d{1,2})[/-]/);
+      return match ? Number(match[1]) : 0;
+    };
+    const fallbackByMonth = new Map((Array.isArray(plan.schedule) ? plan.schedule : [])
+      .map((row) => [monthFromRow(row), row])
+      .filter(([month]) => month >= 1 && month <= 12));
+    const doubleMonths = Array.isArray(rule.doubleMonths) && rule.doubleMonths.length > 0
+      ? rule.doubleMonths.map(Number)
+      : Array.from(fallbackByMonth.entries()).filter(([, row]) => Number(row?.amount || 0) > monthlyAmount).map(([month]) => month);
+    const excludedMonths = Array.isArray(rule.excludedMonths) && rule.excludedMonths.length > 0
+      ? rule.excludedMonths.map(Number)
+      : monthLabels.map((_, idx) => idx + 1).filter((month) => !fallbackByMonth.has(month) || Number(fallbackByMonth.get(month)?.amount || 0) <= 0);
     const pad = (num) => String(num).padStart(2, '0');
     return monthLabels.flatMap((label, idx) => {
       const month = idx + 1;

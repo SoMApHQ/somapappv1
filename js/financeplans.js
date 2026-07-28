@@ -483,9 +483,28 @@ function buildMonthlyScheduleFromRule(plan = {}, fallbackRows = []) {
 
   const fromDay = Math.max(1, Math.min(28, coerceNumber(rule.dueDayStart ?? rule.fromDay ?? 1, 1)));
   const windowLength = Math.max(1, Math.min(28, coerceNumber(rule.windowLengthDays ?? rule.windowLen ?? 10, 10)));
-  const doubleMonths = Array.isArray(rule.doubleMonths) ? rule.doubleMonths.map(Number).filter(Number.isFinite) : [];
-  const excludedMonths = Array.isArray(rule.excludedMonths) ? rule.excludedMonths.map(Number).filter(Number.isFinite) : [];
   const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const monthFromRow = (row) => {
+    const text = String(row?.label || '').toLowerCase();
+    const labelIndex = monthLabels.findIndex((label) => text.includes(label.toLowerCase()));
+    if (labelIndex >= 0) return labelIndex + 1;
+    const match = String(row?.from || row?.start || '').match(/^(\d{1,2})[/-]/);
+    return match ? Number(match[1]) : 0;
+  };
+  const fallbackByMonth = new Map((Array.isArray(fallbackRows) ? fallbackRows : [])
+    .map((row) => [monthFromRow(row), row])
+    .filter(([month]) => month >= 1 && month <= 12));
+  const hasRuleDoubles = Array.isArray(rule.doubleMonths) && rule.doubleMonths.length > 0;
+  const hasRuleExcluded = Array.isArray(rule.excludedMonths) && rule.excludedMonths.length > 0;
+  const doubleMonths = hasRuleDoubles
+    ? rule.doubleMonths.map(Number).filter(Number.isFinite)
+    : Array.from(fallbackByMonth.entries())
+      .filter(([, row]) => coerceNumber(row?.amount, 0) > monthlyAmount)
+      .map(([month]) => month);
+  const excludedMonths = hasRuleExcluded
+    ? rule.excludedMonths.map(Number).filter(Number.isFinite)
+    : monthLabels.map((_, idx) => idx + 1)
+      .filter((month) => !fallbackByMonth.has(month) || coerceNumber(fallbackByMonth.get(month)?.amount, 0) <= 0);
   const pad = (num) => String(num).padStart(2, '0');
 
   return monthLabels.flatMap((label, index) => {
