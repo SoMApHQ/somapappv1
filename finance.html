@@ -353,7 +353,7 @@
   function canonClass(name) {
     const n = norm(name);
     if (!n) return '';
-    if (n === 'pre unit' || n === 'preunit' || n === 'pre-unit' || n === 'pre unit class') return 'Pre Unit Class';
+    if (n === 'pre unit' || n === 'preunit' || n === 'pre-unit' || n === 'pre unit class' || n === 'preunit class' || n === 'pre-unit class') return 'Pre Unit Class';
     if (n === 'baby' || n === 'baby class') return 'Baby Class';
     if (n === 'middle' || n === 'middle class') return 'Middle Class';
     const m = n.match(/^class\s*(\d+)$/);
@@ -369,6 +369,13 @@
     if (j < 0) return 'PRE-ADMISSION';
     if (j >= CLASS_ORDER.length) return 'GRADUATED';
     return CLASS_ORDER[j];
+  }
+  function getClassConfigByCanon(classes = {}, className) {
+    const canonical = canonClass(className);
+    if (!canonical || !classes || typeof classes !== 'object') return {};
+    if (classes[canonical]) return classes[canonical] || {};
+    const match = Object.entries(classes).find(([key]) => canonClass(key) === canonical);
+    return match ? (match[1] || {}) : {};
   }
 
   function resolveFinanceSchoolId() {
@@ -455,7 +462,7 @@
   const detailsModal = document.getElementById('detailsModal');
   const closeDetailsModal = document.getElementById('closeDetailsModal');
   const detailsContent = document.getElementById('detailsContent');
-  const CLASS_FILTERS = ['All Classes','Baby Class','Middle Class','Pre Unit','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
+  const CLASS_FILTERS = ['All Classes','Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
   const classFilter = document.getElementById('classFilter');
   const showOnlyDebtorsBtn = document.getElementById('showOnlyDebtors');
   const yearHint = document.getElementById('financeYearLabel');
@@ -510,7 +517,7 @@
         if (!id || cachedStudents[id]) return;
         const raw = row.rawStudent || {};
         const nameParts = String(row.fullName || '').trim().split(/\s+/).filter(Boolean);
-        const classLevel = row.classLevel || row.className || raw.classLevel || raw.className || '';
+        const classLevel = canonClass(row.classLevel || row.className || raw.classLevel || raw.className || '');
         const fee = Math.max(0, Number(row.fee ?? raw.feePerYear ?? raw.feeDue ?? 0) || 0);
         cachedStudents[id] = {
           ...raw,
@@ -546,7 +553,7 @@
 
   function populateClassFilterDropdown() {
     if (!classFilter) return;
-    const currentValue = classFilter.value || '';
+    const currentValue = canonClass(classFilter.value || '');
     classFilter.innerHTML = '';
     CLASS_FILTERS.forEach((label, idx) => {
       const option = document.createElement('option');
@@ -1468,7 +1475,7 @@ function buildFinanceStudents(
         }
       }
       const classLevel = shiftClass(baseClass, delta);
-      const classDefaults = classFees[classLevel] || classFees[baseClass] || {};
+      const classDefaults = getClassConfigByCanon(classFees, classLevel) || getClassConfigByCanon(classFees, baseClass) || {};
       const resolvedPlanId = override.planId || classDefaults.defaultPlanId || null;
       const resolvedPlan = resolvedPlanId ? plans[resolvedPlanId] : null;
       const classDefaultPlanId = classDefaults.defaultPlanId || classDefaults.defaultPlan || '';
@@ -1631,7 +1638,7 @@ function buildFinanceStudents(
       const classLevel = hasTargetEnroll
         ? canonClass(enrollment.className || enrollment.classLevel || baseClass)
         : shiftClass(baseClass, delta);
-      const classDefaults = classFees[classLevel] || classFees[baseClass] || {};
+      const classDefaults = getClassConfigByCanon(classFees, classLevel) || getClassConfigByCanon(classFees, baseClass) || {};
       const baseFee = Math.max(0, Math.round(
         Number(
           base.feePerYear ??
@@ -2031,11 +2038,11 @@ function buildFinanceStudents(
     tbody.innerHTML = '';
     let totalDue = 0, totalCollected = 0;
     let shown = 0;
-    const filterClass = classFilter.value;
+    const filterClass = canonClass(classFilter.value);
     const isParentScope = parentCtx.enabled;
 
     Object.entries(cachedStudents).forEach(([id, student]) => {
-      if (filterClass && student.classLevel !== filterClass) return;
+      if (filterClass && canonClass(student.classLevel) !== filterClass) return;
       if (!isParentScope && student.isGraduated) return;
 
       let fin = computeStudentFinancials(student);
@@ -2294,13 +2301,13 @@ function buildFinanceStudents(
 
     const due = Number(dueEl?.dataset.amount || 0);
     const deductFromMain = Number(cashbookSummary?.deductFromMain || 0);
-    const adjustedCollected = Math.max(0, Number(baseCollectedFromFees || 0) - deductFromMain);
-    const adjustedOutstanding = Math.max(0, due - adjustedCollected);
-    const adjustedNet = adjustedCollected;
+    const collected = Math.max(0, Number(baseCollectedFromFees || 0));
+    const adjustedOutstanding = Math.max(0, due - collected);
+    const adjustedNet = collected - deductFromMain;
 
     if (collectedEl) {
-      collectedEl.textContent = fmt(adjustedCollected);
-      collectedEl.dataset.amount = String(adjustedCollected);
+      collectedEl.textContent = fmt(collected);
+      collectedEl.dataset.amount = String(collected);
     }
     if (outstandingEl) {
       outstandingEl.textContent = fmt(adjustedOutstanding);
@@ -2815,9 +2822,9 @@ function buildFinanceStudents(
 
   function _gatherBreakdown() {
     const sheets = [];
-    const filterClass = classFilter.value;
+    const filterClass = canonClass(classFilter.value);
     Object.entries(cachedStudents).forEach(([id, s]) => {
-      if (filterClass && s.classLevel !== filterClass) return;
+      if (filterClass && canonClass(s.classLevel) !== filterClass) return;
       const fin = computeStudentFinancials(s);
       const fullName = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim();
       const rows = [['Period', 'Expected', 'Allocated Paid', 'Remaining', 'Status', 'Window']];
@@ -3115,11 +3122,11 @@ function buildFinanceStudents(
   }
 
   async function downloadBulkDebtLettersPDF() {
-    const filterClass = classFilter?.value || '';
+    const filterClass = canonClass(classFilter?.value || '');
     const debtorStudents = [];
     Object.entries(cachedStudents || {}).forEach(([id, s]) => {
       if (s.isGraduated) return;
-      if (filterClass && s.classLevel !== filterClass) return;
+      if (filterClass && canonClass(s.classLevel) !== filterClass) return;
       const fin = computeStudentFinancials(s);
       if (Number(fin.periodDebtValue || 0) > 0) debtorStudents.push(id);
     });
@@ -3831,7 +3838,7 @@ function buildFinanceStudents(
 </script>
 
 <script>
-/** SoMAp v2.1 — Carry-Forward Debts (2025→)
+/** SoMAp v2.1 - Carry-Forward Debts (2025+)
  *  Non-invasive decorator for finance.html
  *  - Adds previous-year (>=2025) unpaid balance to current year's Fee (year)
  *  - Exposes data-carry-forward for payment.html (iframe) to pick for January

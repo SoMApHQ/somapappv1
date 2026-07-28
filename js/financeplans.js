@@ -10,7 +10,7 @@
 
 export const SOMAP_ALLOWED_YEARS = Array.from({ length: 20 }, (_, i) => 2023 + i); // 2023..2042
 export const SOMAP_DEFAULT_YEAR = 2025;
-export const CLASSES_FULL = ['Baby Class','Middle Class','Pre Unit','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
+export const CLASSES_FULL = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
 
 const financeCache = new Map(); // year -> { data } or { promise }
 
@@ -99,12 +99,25 @@ function normalizeKey(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function canonClassName(value) {
+  const normalized = normalizeKey(value);
+  if (!normalized) return '';
+  if (['pre unit', 'preunit', 'pre-unit', 'pre unit class', 'preunit class', 'pre-unit class'].includes(normalized)) {
+    return 'Pre Unit Class';
+  }
+  if (normalized === 'baby' || normalized === 'baby class') return 'Baby Class';
+  if (normalized === 'middle' || normalized === 'middle class') return 'Middle Class';
+  const classMatch = normalized.match(/^class\s*(\d+)$/);
+  if (classMatch) return `Class ${classMatch[1]}`;
+  return String(value || '').trim();
+}
+
 function findClassConfig(classes = {}, className) {
   if (!className) return null;
   if (classes[className]) return classes[className];
-  const target = normalizeKey(className);
+  const target = normalizeKey(canonClassName(className));
   for (const [name, cfg] of Object.entries(classes)) {
-    if (normalizeKey(name) === target) return cfg;
+    if (normalizeKey(canonClassName(name)) === target) return cfg;
   }
   return null;
 }
@@ -234,11 +247,12 @@ async function ensureFinanceData(year = getSelectedYear()) {
 
         const normalizedClasses = {};
         Object.entries(classesVal).forEach(([name, cfg]) => {
+          const canonicalName = canonClassName(name) || name;
           if (!cfg || typeof cfg !== 'object') {
-            normalizedClasses[name] = cfg;
+            normalizedClasses[canonicalName] = cfg;
             return;
           }
-          const next = { ...cfg };
+          const next = { ...(normalizedClasses[canonicalName] || {}), ...cfg };
           if (next.feePerYear === undefined) {
             if (next.fee !== undefined) next.feePerYear = coerceNumber(next.fee, 0);
             else if (next.yearFee !== undefined) next.feePerYear = coerceNumber(next.yearFee, 0);
@@ -246,7 +260,7 @@ async function ensureFinanceData(year = getSelectedYear()) {
             next.feePerYear = coerceNumber(next.feePerYear, 0);
           }
           if (!next.defaultPlanId && next.defaultPlan) next.defaultPlanId = next.defaultPlan;
-          normalizedClasses[name] = next;
+          normalizedClasses[canonicalName] = next;
         });
 
         const normalizedPlans = {};
@@ -869,14 +883,14 @@ export async function resolveClassForYearSimple(studentId, targetYear) {
     const targetSnap = await db.ref(`enrollments/${targetY}/${studentId}`).once('value').catch(() => null);
     const targetRec = targetSnap?.val();
     if (targetRec && (targetRec.className || targetRec.classLevel)) {
-      return targetRec.className || targetRec.classLevel || '';
+      return canonClassName(targetRec.className || targetRec.classLevel || '');
     }
     
     // Fall back to anchor year and compute progression
     const anchorSnap = await db.ref(`enrollments/${anchorY}/${studentId}`).once('value').catch(() => null);
     const anchor = anchorSnap?.val() || {};
     
-    const base = anchor.className || anchor.classLevel || 'Baby Class';
+    const base = canonClassName(anchor.className || anchor.classLevel || 'Baby Class');
     const L = (s) => String(s || '').trim().toLowerCase();
     const i = CLASSES_FULL.findIndex(c => L(c) === L(base));
     
