@@ -28,6 +28,10 @@
     const key = L(label);
     return CLASS_ALIASES[key] || label;
   };
+  const isMonthlyPlanName = (...values) => values.some((value) => {
+    const text = String(value || '').toLowerCase();
+    return text.includes('monthly') || text.includes('mwezi') || text.includes('malipo kwa mwezi');
+  });
 
   const shiftClassFallback = (baseClass, deltaYears) => {
     const normalizedBase = normalizeClassLabel(baseClass);
@@ -751,8 +755,9 @@ function buildFinanceStudents(
       const hasPlanOverride = Boolean(override.planId) &&
         (!classDefaultPlanId || String(override.planId) !== String(classDefaultPlanId));
 
-      const isMonthlyPlan = resolvedPlan?.schedule && Array.isArray(resolvedPlan.schedule) &&
-        resolvedPlan.schedule.some((row) => String(row.label || '').includes('Monthly:'));
+      const isMonthlyPlan = isMonthlyPlanName(resolvedPlanId, resolvedPlan?.name, override.planName, override.paymentPlan) ||
+        (resolvedPlan?.schedule && Array.isArray(resolvedPlan.schedule) &&
+          resolvedPlan.schedule.some((row) => String(row.label || '').includes('Monthly:')));
 
       let paymentPlan =
         (resolvedPlan && resolvedPlan.name) ||
@@ -872,7 +877,7 @@ function buildFinanceStudents(
         isGraduated: classLevel === 'GRADUATED',
       };
 
-      if (Array.isArray(override.customSchedule) && override.customSchedule.length) {
+      if (!isMonthlyPlan && Array.isArray(override.customSchedule) && override.customSchedule.length) {
         record._customSchedule = override.customSchedule;
       } else if (resolvedPlan && Array.isArray(resolvedPlan.schedule)) {
         record._planSchedule = resolvedPlan.schedule;

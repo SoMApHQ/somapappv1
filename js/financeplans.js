@@ -100,6 +100,13 @@ function normalizeKey(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function isMonthlyPlanName(...values) {
+  return values.some((value) => {
+    const text = String(value || '').toLowerCase();
+    return text.includes('monthly') || text.includes('mwezi') || text.includes('malipo kwa mwezi');
+  });
+}
+
 function canonClassName(value) {
   const normalized = normalizeKey(value);
   if (!normalized) return '';
@@ -514,7 +521,8 @@ export async function resolveEffectiveInstallments(studentId, className, options
   let source = 'PLAN';
 
   const customRows = await getStudentCustomSched(studentId, { year });
-  if (Array.isArray(customRows) && customRows.length) {
+  const planLooksMonthly = isMonthlyPlanName(planId, planName);
+  if (!planLooksMonthly && Array.isArray(customRows) && customRows.length) {
     rows = customRows.map(parseScheduleRow);
     source = 'CUSTOM';
     if (!planName) planName = 'Custom Schedule';
