@@ -205,7 +205,7 @@
           <h1 class="text-2xl md:text-3xl font-semibold tracking-tight">Payments & Installments Console</h1>
           <p class="text-sm text-slate-300 max-w-2xl">
             Manage per-class school fees, reusable installment templates, and student-specific overrides for any academic year.
-            All updates save instantly to Firebase once you confirm.
+            All changes are queued for approval before they update Finance.
           </p>
         </div>
         <div class="glass-panel-light flex flex-wrap items-center gap-3 min-w-[240px]">
@@ -516,10 +516,59 @@
     const pathFees = (y) => `feesStructure/${y}`;
     const pathOverrides = (y) => `studentOverrides/${y}`;
     const pathHistory = (y) => `financeConfigHistory/${y}`;
+    const pathFinance = (y) => `finance/${y}`;
 
     const reader = (path) => db.ref(path).once('value').then((snap) => snap.val());
     const writer = (path, payload) => db.ref(path).set(payload);
     const updater = (path, payload) => db.ref(path).update(payload);
+
+    function opSet(path, value) {
+      return { op: 'set', path, value: value === undefined ? null : value };
+    }
+    function opUpdate(path, value) {
+      return { op: 'update', path, value: value || {} };
+    }
+    function historyEntry(year, category, id, action, before, after) {
+      return { year: String(year), category, id, action, before: before ?? null, after: after ?? null };
+    }
+    async function queueFinanceConfigChange(change = {}) {
+      if (!db) throw new Error('Firebase database not initialized.');
+      const operations = Array.isArray(change.operations) ? change.operations.filter((op) => op && op.path) : [];
+      if (!operations.length) throw new Error('No config changes to queue.');
+      const year = String(change.year || state.year || window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR);
+      const approvalRef = db.ref('approvalsPending').push();
+      const approvalId = approvalRef.key;
+      const target = change.target || change.className || change.studentName || change.studentId || 'Finance Config';
+      const summary = change.summary || change.action || 'Finance configuration change';
+      await approvalRef.set({
+        approvalId,
+        sourceModule: 'financeconfig',
+        source: 'Finance Config',
+        status: 'pending',
+        forYear: Number(year),
+        academicYear: Number(year),
+        financeYear: Number(year),
+        createdAt: now(),
+        datePaid: now(),
+        recordedBy: currentUser(),
+        studentName: target,
+        studentAdm: change.studentAdm || change.studentId || '',
+        className: change.className || '',
+        parentContact: '',
+        amountPaidNow: Number(change.amountPaidNow || 0),
+        paymentMethod: 'Config Change',
+        configTarget: target,
+        configSummary: summary,
+        notes: change.notes || summary,
+        modulePayload: {
+          configAction: change.action || summary,
+          operations,
+          historyEntries: Array.isArray(change.historyEntries) ? change.historyEntries : []
+        }
+      });
+      toast('Config change submitted for approval.', 'warn');
+      return approvalId;
+    }
 
     async function writeHistory(year, category, id, action, before, after) {
       const entry = {
@@ -926,7 +975,7 @@
           <div class="flex items-start justify-between">
             <div>
               <h3 class="text-lg font-semibold text-slate-100">${className}</h3>
-              <p class="text-xs text-slate-400">Academic year ${year}. Changes apply immediately.</p>
+              <p class="text-xs text-slate-400">Academic year ${year}. Changes require approval before applying.</p>
             </div>
             <button class="text-slate-400 hover:text-slate-100" onclick="(${closeModal.toString()})();"><i class="fa-solid fa-xmark text-lg"></i></button>
           </div>
@@ -958,12 +1007,7 @@
         const path = `${pathFees(year)}/${className}`;
         const before = await reader(path) || {};
         
-        // Use unified service to write class defaults
         try {
-          await window.financePlansService.setClassFeePerYear(className, feePerYear, { by: currentUser() });
-          await window.financePlansService.setClassDefaultPlanId(className, defaultPlanId, { by: currentUser() });
-          
-          // Also update old structure for backward compatibility
           const payload = {
             ...before,
             feePerYear,
@@ -973,14 +1017,30 @@
             updatedAt: now(),
             updatedBy: currentUser()
           };
-          await writer(path, payload);
-          await writeHistory(year, 'classes', className, before ? 'update' : 'create', before, payload);
+          await queueFinanceConfigChange({
+            year,
+            action: before && Object.keys(before).length ? 'class:update' : 'class:create',
+            target: className,
+            className,
+            summary: `${className}: fee ${fmtMoney(feePerYear)}, default plan ${defaultPlanId}`,
+            operations: [
+              opUpdate(`${pathFinance(year)}/classes/${className}`, {
+                feePerYear,
+                defaultPlanId,
+                updatedAt: now(),
+                updatedBy: currentUser()
+              }),
+              opSet(path, payload)
+            ],
+            historyEntries: [
+              historyEntry(year, 'classes', className, before && Object.keys(before).length ? 'update' : 'create', before, payload)
+            ]
+          });
           closeModal();
-          toast('Class saved');
           await refreshAll();
         } catch (err) {
-          console.error('Error saving class:', err);
-          toast('Error saving class', 'error');
+          console.error('Error queueing class change:', err);
+          toast('Error submitting class change', 'error');
         }
       });
     }
@@ -1045,10 +1105,16 @@
           createdAt: now(),
           createdBy: currentUser()
         };
-        await ref.set(payload);
-        await writeHistory(year, 'installments', `${className}::${id}`, 'create', null, payload);
+        await queueFinanceConfigChange({
+          year,
+          action: 'installment:create',
+          target: `${className} / ${label}`,
+          className,
+          summary: `${className}: add installment ${label} (${fmtMoney(amount)})`,
+          operations: [opSet(`${path}/${id}`, payload)],
+          historyEntries: [historyEntry(year, 'installments', `${className}::${id}`, 'create', null, payload)]
+        });
         closeModal();
-        toast('Installment added');
         await refreshAll();
       });
     }
@@ -1125,10 +1191,16 @@
           updatedAt: now(),
           updatedBy: currentUser()
         };
-        await writer(path, payload);
-        await writeHistory(year, 'installments', `${className}::${instId}`, 'update', before, payload);
+        await queueFinanceConfigChange({
+          year,
+          action: 'installment:update',
+          target: `${className} / ${label}`,
+          className,
+          summary: `${className}: update installment ${label} (${fmtMoney(amount)})`,
+          operations: [opSet(path, payload)],
+          historyEntries: [historyEntry(year, 'installments', `${className}::${instId}`, 'update', before, payload)]
+        });
         closeModal();
-        toast('Installment updated');
         await refreshAll();
       });
     }
@@ -1139,9 +1211,15 @@
       const before = await reader(path) || {};
       const nextActive = before.active === false;
       const payload = { ...before, active: nextActive, updatedAt: now(), updatedBy: currentUser() };
-      await writer(path, payload);
-      await writeHistory(year, 'installments', `${className}::${instId}`, nextActive ? 'activate' : 'deactivate', before, payload);
-      toast(nextActive ? 'Installment activated' : 'Installment paused');
+      await queueFinanceConfigChange({
+        year,
+        action: nextActive ? 'installment:activate' : 'installment:deactivate',
+        target: `${className} / ${before.label || instId}`,
+        className,
+        summary: `${className}: ${nextActive ? 'activate' : 'pause'} installment ${before.label || instId}`,
+        operations: [opSet(path, payload)],
+        historyEntries: [historyEntry(year, 'installments', `${className}::${instId}`, nextActive ? 'activate' : 'deactivate', before, payload)]
+      });
       await refreshAll();
     }
 
@@ -1149,9 +1227,15 @@
       const year = state.year;
       const path = `${pathFees(year)}/${className}/installments/${instId}`;
       const before = await reader(path) || {};
-      await writer(path, null);
-      await writeHistory(year, 'installments', `${className}::${instId}`, 'delete', before, null);
-      toast('Installment deleted', 'warn');
+      await queueFinanceConfigChange({
+        year,
+        action: 'installment:delete',
+        target: `${className} / ${before.label || instId}`,
+        className,
+        summary: `${className}: delete installment ${before.label || instId}`,
+        operations: [opSet(path, null)],
+        historyEntries: [historyEntry(year, 'installments', `${className}::${instId}`, 'delete', before, null)]
+      });
       await refreshAll();
     }
 
@@ -1171,9 +1255,15 @@
       const before = await reader(path) || {};
       const nextActive = before.active === false;
       const payload = { ...before, active: nextActive, updatedAt: now(), updatedBy: currentUser() };
-      await writer(path, payload);
-      await writeHistory(year, 'classes', className, nextActive ? 'activate' : 'deactivate', before, payload);
-      toast(nextActive ? 'Class activated' : 'Class paused');
+      await queueFinanceConfigChange({
+        year,
+        action: nextActive ? 'class:activate' : 'class:deactivate',
+        target: className,
+        className,
+        summary: `${className}: ${nextActive ? 'activate' : 'pause'} class fee config`,
+        operations: [opSet(path, payload)],
+        historyEntries: [historyEntry(year, 'classes', className, nextActive ? 'activate' : 'deactivate', before, payload)]
+      });
       await refreshAll();
     }
 
@@ -1182,9 +1272,18 @@
       if (!confirm(`Remove ${className} for ${year}? This only affects this year.`)) return;
       const path = `${pathFees(year)}/${className}`;
       const before = await reader(path) || {};
-      await writer(path, null);
-      await writeHistory(year, 'classes', className, 'delete', before, null);
-      toast('Class removed', 'warn');
+      await queueFinanceConfigChange({
+        year,
+        action: 'class:delete',
+        target: className,
+        className,
+        summary: `${className}: remove class fee config for ${year}`,
+        operations: [
+          opSet(path, null),
+          opSet(`${pathFinance(year)}/classes/${className}`, null)
+        ],
+        historyEntries: [historyEntry(year, 'classes', className, 'delete', before, null)]
+      });
       await refreshAll();
     }
 
@@ -1261,18 +1360,23 @@
           id = state.plans[name] ? `${DEFAULT_PLAN_ID}-${Date.now()}` : name.toLowerCase().replace(/\s+/g, '-');
         }
         
-        // Use unified service to write plan
         try {
-          await window.financePlansService.upsertPlan(id, payload);
-          // Also write to old structure for backward compatibility
-          await writer(`${pathPlans(year)}/${id}`, payload);
-          await writeHistory(year, 'plans', id, planId ? 'update' : 'create', planId ? existing : null, payload);
+          await queueFinanceConfigChange({
+            year,
+            action: planId ? 'plan:update' : 'plan:create',
+            target: id,
+            summary: `${planId ? 'Update' : 'Create'} plan ${id}`,
+            operations: [
+              opSet(`${pathFinance(year)}/plans/${id}`, payload),
+              opSet(`${pathPlans(year)}/${id}`, payload)
+            ],
+            historyEntries: [historyEntry(year, 'plans', id, planId ? 'update' : 'create', planId ? existing : null, payload)]
+          });
           closeModal();
-          toast('Plan saved');
           await refreshAll();
         } catch (err) {
-          console.error('Error saving plan:', err);
-          toast('Error saving plan', 'error');
+          console.error('Error queueing plan change:', err);
+          toast('Error submitting plan change', 'error');
         }
       });
     }
@@ -1282,9 +1386,17 @@
       const path = `${pathPlans(year)}/${planId}`;
       const before = await reader(path) || {};
       const payload = { ...before, isActive: activate, updatedAt: now(), updatedBy: currentUser() };
-      await writer(path, payload);
-      await writeHistory(year, 'plans', planId, activate ? 'activate' : 'deactivate', before, payload);
-      toast(activate ? 'Plan activated' : 'Plan paused');
+      await queueFinanceConfigChange({
+        year,
+        action: activate ? 'plan:activate' : 'plan:deactivate',
+        target: planId,
+        summary: `${activate ? 'Activate' : 'Pause'} plan ${planId}`,
+        operations: [
+          opSet(path, payload),
+          opSet(`${pathFinance(year)}/plans/${planId}`, payload)
+        ],
+        historyEntries: [historyEntry(year, 'plans', planId, activate ? 'activate' : 'deactivate', before, payload)]
+      });
       await refreshAll();
     }
 
@@ -1398,9 +1510,23 @@
           };
         }
       });
-      await writer(pathFees(targetYear), payload);
-      await writeHistory(targetYear, 'classes', '_bulk_import_', 'import', { sourceYear, includeAmounts }, { classes: Object.keys(payload).length });
-      toast(`Imported ${Object.keys(payload).length} classes`);
+      const financeClassOps = Object.entries(payload).map(([cls, cfg]) => opUpdate(`${pathFinance(targetYear)}/classes/${cls}`, {
+        feePerYear: Number(cfg?.feePerYear || 0),
+        defaultPlanId: cfg?.defaultPlanId || cfg?.defaultPlan || DEFAULT_PLAN_ID,
+        updatedAt: now(),
+        updatedBy: currentUser()
+      }));
+      await queueFinanceConfigChange({
+        year: targetYear,
+        action: 'classes:import',
+        target: `Class import ${sourceYear} to ${targetYear}`,
+        summary: `Import ${Object.keys(payload).length} class configs from ${sourceYear} to ${targetYear}`,
+        operations: [
+          opSet(pathFees(targetYear), payload),
+          ...financeClassOps
+        ],
+        historyEntries: [historyEntry(targetYear, 'classes', '_bulk_import_', 'import', { sourceYear, includeAmounts }, { classes: Object.keys(payload).length })]
+      });
       await refreshAll();
     }
 
@@ -1674,11 +1800,22 @@
       const path = `${pathOverrides(year)}/${studentId}`;
       const before = await reader(path) || {};
       const merged = { ...before, ...payload, updatedAt: now(), updatedBy: currentUser() };
-      await writer(path, merged);
-      await writeHistory(year, 'overrides', studentId, 'update', before, merged);
+      await queueFinanceConfigChange({
+        year,
+        action: options.action || 'student-override:update',
+        target: options.studentName || studentId,
+        studentId,
+        studentAdm: studentId,
+        summary: options.summary || `Update student override ${studentId}`,
+        operations: [
+          ...(Array.isArray(options.extraOperations) ? options.extraOperations : []),
+          opSet(path, merged)
+        ],
+        historyEntries: [historyEntry(year, 'overrides', studentId, 'update', before, merged)]
+      });
       if (!options.silent) {
         const message = options.toastMessage || 'Override saved';
-        toast(message);
+        toast(`${message} - pending approval`, 'warn');
       }
       const q = $('#studentQuery').value;
       renderOverrides(q);
@@ -1688,9 +1825,21 @@
       const year = state.year;
       const path = `${pathOverrides(year)}/${studentId}`;
       const before = await reader(path) || {};
-      await writer(path, null);
-      await writeHistory(year, 'overrides', studentId, 'delete', before, null);
-      toast('Override cleared', 'warn');
+      await queueFinanceConfigChange({
+        year,
+        action: 'student-override:clear',
+        target: studentId,
+        studentId,
+        studentAdm: studentId,
+        summary: `Clear all overrides for ${studentId}`,
+        operations: [
+          opSet(`${pathFinance(year)}/studentFees/${studentId}`, null),
+          opSet(`${pathFinance(year)}/studentPlans/${studentId}`, null),
+          opSet(`${pathFinance(year)}/studentCustomSchedules/${studentId}`, null),
+          opSet(path, null)
+        ],
+        historyEntries: [historyEntry(year, 'overrides', studentId, 'delete', before, null)]
+      });
       const q = $('#studentQuery').value;
       renderOverrides(q);
     }
@@ -1712,15 +1861,34 @@
         const before = await reader(path) || {};
         const updated = { ...before };
         delete updated.feePerYear;
-        await writer(path, updated);
-        await writeHistory(year, 'overrides', studentId, 'update', before, updated);
-        toast('Fee override cleared');
+        await queueFinanceConfigChange({
+          year,
+          action: 'student-fee:clear',
+          target: studentId,
+          studentId,
+          studentAdm: studentId,
+          summary: `Clear fee override for ${studentId}`,
+          operations: [
+            opSet(`${pathFinance(year)}/studentFees/${studentId}`, null),
+            opSet(path, updated)
+          ],
+          historyEntries: [historyEntry(year, 'overrides', studentId, 'update', before, updated)]
+        });
       } else {
         const fee = Math.max(0, Number(value) || 0);
-        // Use unified service
-        await window.financePlansService.setStudentFee(studentId, fee, { by: currentUser() });
-        // Also update old structure
-        await setStudentOverride(studentId, { feePerYear: fee }, { toastMessage: 'Fee override saved' });
+        await setStudentOverride(studentId, { feePerYear: fee }, {
+          toastMessage: 'Fee override saved',
+          summary: `Set fee override for ${studentId}: ${fmtMoney(fee)}`,
+          action: 'student-fee:set',
+          extraOperations: [
+            opSet(`${pathFinance(year)}/studentFees/${studentId}`, {
+              feePerYear: fee,
+              locked: true,
+              updatedAt: now(),
+              updatedBy: currentUser()
+            })
+          ]
+        });
       }
       const q = $('#studentQuery').value;
       renderOverrides(q);
@@ -1754,21 +1922,39 @@
         delete updated.planId;
         delete updated.planName;
         delete updated.paymentPlan;
-        await writer(path, updated);
-        await writeHistory(year, 'overrides', studentId, 'update', before, updated);
-        toast('Plan override cleared');
+        await queueFinanceConfigChange({
+          year,
+          action: 'student-plan:clear',
+          target: studentId,
+          studentId,
+          studentAdm: studentId,
+          summary: `Clear plan override for ${studentId}`,
+          operations: [
+            opSet(`${pathFinance(year)}/studentPlans/${studentId}`, null),
+            opSet(path, updated)
+          ],
+          historyEntries: [historyEntry(year, 'overrides', studentId, 'update', before, updated)]
+        });
       } else {
         const id = pick.trim();
         if (!id) return;
-        // Use unified service
-        await window.financePlansService.assignStudentPlan(studentId, id, { by: currentUser() });
-        // Also update old structure
         const plan = state.plans[id] || await window.financePlansService.getPlan(id);
         const planName = plan?.name || id;
         await setStudentOverride(
           studentId,
           { planId: id, planName, paymentPlan: planName },
-          { toastMessage: 'Plan override saved' }
+          {
+            toastMessage: 'Plan override saved',
+            summary: `Set plan override for ${studentId}: ${planName}`,
+            action: 'student-plan:set',
+            extraOperations: [
+              opSet(`${pathFinance(year)}/studentPlans/${studentId}`, {
+                planId: id,
+                updatedAt: now(),
+                updatedBy: currentUser()
+              })
+            ]
+          }
         );
       }
       const q = $('#studentQuery').value;
@@ -1904,22 +2090,45 @@
         });
         
         if (rows.length === 0) {
-          // Clear custom schedule
-          await window.financePlansService.setCustomSchedule(studentId, [], 'Cleared', { by: currentUser() });
           const path = `${pathOverrides(year)}/${studentId}`;
           const before = await reader(path) || {};
           const updated = { ...before };
           delete updated.customSchedule;
-          await writer(path, updated);
-          await writeHistory(year, 'overrides', studentId, 'update', before, updated);
-          toast('Custom schedule cleared successfully');
+          await queueFinanceConfigChange({
+            year,
+            action: 'student-schedule:clear',
+            target: studentId,
+            studentId,
+            studentAdm: studentId,
+            summary: `Clear custom schedule for ${studentId}`,
+            operations: [
+              opSet(`${pathFinance(year)}/studentCustomSchedules/${studentId}`, {
+                rows: [],
+                note: 'Cleared',
+                updatedAt: now(),
+                updatedBy: currentUser()
+              }),
+              opSet(path, updated)
+            ],
+            historyEntries: [historyEntry(year, 'overrides', studentId, 'update', before, updated)]
+          });
         } else {
-          // Save custom schedule
-          await window.financePlansService.setCustomSchedule(studentId, rows, 'Custom schedule', { by: currentUser() });
           await setStudentOverride(
             studentId,
             { customSchedule: rows },
-            { toastMessage: 'Custom schedule saved successfully' }
+            {
+              toastMessage: 'Custom schedule saved successfully',
+              summary: `Set custom schedule for ${studentId}: ${rows.length} row(s)`,
+              action: 'student-schedule:set',
+              extraOperations: [
+                opSet(`${pathFinance(year)}/studentCustomSchedules/${studentId}`, {
+                  rows,
+                  note: 'Custom schedule',
+                  updatedAt: now(),
+                  updatedBy: currentUser()
+                })
+              ]
+            }
           );
         }
         closeModal();
@@ -2203,7 +2412,6 @@
       const year = state.year || window.somapYearContext?.getSelectedYear() || SOMAP_DEFAULT_YEAR;
       
       try {
-        // Save plan blueprint
         const payload = {
           name: planName,
           isActive: true,
@@ -2211,34 +2419,67 @@
           updatedAt: Date.now(),
           updatedBy: currentUser()
         };
-        
-        await window.financePlansService.upsertPlan(planId, payload, { year });
-        await writer(`${pathPlans(year)}/${planId}`, payload);
+        const operations = [
+          opSet(`${pathFinance(year)}/plans/${planId}`, payload),
+          opSet(`${pathPlans(year)}/${planId}`, payload)
+        ];
+        const historyEntries = [
+          historyEntry(year, 'plans', planId, 'monthly-plan', null, payload)
+        ];
+        const summaries = [`Save monthly plan ${planId}`];
         
         if (MP_STATE.attachTo === 'class' && elAssignClass?.checked && MP_STATE.className) {
-          // Calculate total fee from monthly schedule
           const totalFee = rows.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
-          // Update class with monthly plan and total fee
-          await window.financePlansService.upsertClassFeeAndPlan(MP_STATE.className, totalFee, planId, { year, by: currentUser() });
-          // Also update the old structure
           const classPath = `${pathFees(year)}/${MP_STATE.className}`;
           const classData = await reader(classPath) || {};
-          await writer(classPath, {
+          const classPayload = {
             ...classData,
             feePerYear: totalFee,
             defaultPlanId: planId,
             defaultPlan: planId,
             updatedAt: Date.now(),
             updatedBy: currentUser()
-          });
+          };
+          operations.push(
+            opUpdate(`${pathFinance(year)}/classes/${MP_STATE.className}`, {
+              feePerYear: totalFee,
+              defaultPlanId: planId,
+              updatedAt: Date.now(),
+              updatedBy: currentUser()
+            }),
+            opSet(classPath, classPayload)
+          );
+          historyEntries.push(historyEntry(year, 'classes', MP_STATE.className, 'monthly-plan', classData, classPayload));
+          summaries.push(`assign to ${MP_STATE.className}`);
         }
         
         if (applyToStudent && MP_STATE.studentId) {
-          await window.financePlansService.setStudentPlanOverride(MP_STATE.studentId, planId, { year, by: currentUser() });
-          await setStudentOverride(MP_STATE.studentId, { planId, planName, paymentPlan: planName }, { silent: true });
+          const overridePath = `${pathOverrides(year)}/${MP_STATE.studentId}`;
+          const before = await reader(overridePath) || {};
+          const merged = { ...before, planId, planName, paymentPlan: planName, updatedAt: now(), updatedBy: currentUser() };
+          operations.push(
+            opSet(`${pathFinance(year)}/studentPlans/${MP_STATE.studentId}`, {
+              planId,
+              updatedAt: now(),
+              updatedBy: currentUser()
+            }),
+            opSet(overridePath, merged)
+          );
+          historyEntries.push(historyEntry(year, 'overrides', MP_STATE.studentId, 'monthly-plan', before, merged));
+          summaries.push(`apply to student ${MP_STATE.studentId}`);
         }
-        
-        toast('Monthly plan saved.');
+
+        await queueFinanceConfigChange({
+          year,
+          action: 'monthly-plan:save',
+          target: MP_STATE.className || MP_STATE.studentId || planId,
+          className: MP_STATE.className || '',
+          studentId: MP_STATE.studentId || '',
+          studentAdm: MP_STATE.studentId || '',
+          summary: summaries.join('; '),
+          operations,
+          historyEntries
+        });
         
         closeMonthlyPlanModal();
         

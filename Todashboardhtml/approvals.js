@@ -43,6 +43,7 @@
   const scopedRef = (subPath) => firebase.database().ref(scopedPath(subPath));
   const MODULE_LABELS = {
     finance: 'School Fees',
+    financeconfig: 'Finance Config',
     transport: 'Transport',
     prefonefinance: 'Preform One',
     graduation: 'Graduation',
@@ -84,6 +85,12 @@
         approved: document.getElementById('finance-approved'),
         balance: document.getElementById('finance-balance'),
         pending: document.getElementById('finance-pending-count'),
+      },
+      financeconfig: {
+        required: null,
+        approved: null,
+        balance: null,
+        pending: document.getElementById('finance-config-pending-count'),
       },
       transport: {
         required: document.getElementById('transport-required'),
@@ -136,6 +143,7 @@
     historyFilterMonth: '',
     summary: {
       finance: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
+      financeconfig: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       transport: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       prefonefinance: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       graduation: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
@@ -724,7 +732,7 @@
       tr.innerHTML = `
         <td>${formatDate(row.datePaid || row.createdAt)}</td>
         <td>
-          <div class="font-semibold text-slate-100">${row.studentName || '--'}</div>
+          <div class="font-semibold text-slate-100">${row.studentName || row.configTarget || '--'}</div>
           <div class="text-xs text-slate-400">${row.studentAdm || ''}</div>
         </td>
         <td>${row.className || '--'}</td>
@@ -732,7 +740,7 @@
         <td>
           <span class="pill pill-pending">${MODULE_LABELS[row.sourceModule] || row.sourceModule}</span>
         </td>
-        <td class="font-semibold text-emerald-200">${formatCurrency(row.amountPaidNow)}</td>
+        <td class="font-semibold text-emerald-200">${row.sourceModule === 'financeconfig' ? (row.configSummary || 'Config change') : formatCurrency(row.amountPaidNow)}</td>
         <td>${row.recordedBy || '--'}</td>
         <td>
           <span class="pill pill-pending">${(row.status || 'pending').toUpperCase()}</span>
@@ -872,7 +880,15 @@
       }
     }
 
-    const dataRows = [
+    const isConfig = viewModel.sourceModule === 'financeconfig';
+    const dataRows = isConfig ? [
+      { label: 'Config Target', value: viewModel.configTarget || viewModel.studentName || '--' },
+      { label: 'Class / Student', value: viewModel.className || viewModel.studentAdm || '--' },
+      { label: 'Source Module', value: MODULE_LABELS[viewModel.sourceModule] || viewModel.sourceModule },
+      { label: 'Requested By', value: viewModel.recordedBy || '--' },
+      { label: 'Requested At', value: formatDate(viewModel.datePaid || viewModel.createdAt) },
+      { label: 'Change Summary', value: viewModel.configSummary || viewModel.notes || '--' },
+    ] : [
       { label: 'Student', value: `${viewModel.studentName || '--'} (${viewModel.studentAdm || '--'})` },
       { label: 'Class', value: viewModel.className || '--' },
       { label: 'Parent Contact', value: viewModel.parentContact || '--' },
@@ -927,6 +943,7 @@
   function buildModuleReminder(sourceModule) {
     const reminder = {
       finance: 'Verify the student ledger in finance.html before approving.',
+      financeconfig: 'Review the requested finance configuration change carefully. Approval will update fee structures, plans, or student overrides.',
       transport: 'Check transport payments module to confirm the month and amount.',
       prefonefinance: 'Cross-check Preform One finance records before approval.',
       graduation: 'Check graduation dashboard to ensure totals align.',
@@ -999,8 +1016,11 @@
 
     Swal.fire({
       icon: 'question',
-      title: 'Approve payment?',
-      html: `<p class="text-slate-600">You are about to approve <strong>${formatCurrency(record.amountPaidNow)}</strong> for <strong>${record.studentName || record.studentAdm}</strong>.</p>
+      title: record.sourceModule === 'financeconfig' ? 'Approve finance config change?' : 'Approve payment?',
+      html: record.sourceModule === 'financeconfig'
+        ? `<p class="text-slate-600">You are about to approve <strong>${record.configSummary || 'a finance configuration change'}</strong>.</p>
+             <p class="mt-2 text-sm text-slate-500">The system will apply the queued config writes and archive the approval.</p>`
+        : `<p class="text-slate-600">You are about to approve <strong>${formatCurrency(record.amountPaidNow)}</strong> for <strong>${record.studentName || record.studentAdm}</strong>.</p>
              <p class="mt-2 text-sm text-slate-500">The system will write this payment to <strong>${MODULE_LABELS[record.sourceModule] || record.sourceModule}</strong> and archive the approval.</p>`,
       showCancelButton: true,
       confirmButtonColor: '#22c55e',
@@ -1305,6 +1325,9 @@
           case 'finance':
             await commitFinancePayment(record, targetYear);
             break;
+          case 'financeconfig':
+            await commitFinanceConfig(record, targetYear);
+            break;
           case 'transport':
             await commitTransportPayment(record);
             break;
@@ -1328,7 +1351,7 @@
         }
       }
       await moveApprovalToHistory(record, 'approved');
-      toast('Student approved. Payment saved.', 'success');
+      toast(record.sourceModule === 'financeconfig' ? 'Finance config approved and applied.' : 'Student approved. Payment saved.', 'success');
       hideDetailModal();
     } catch (err) {
       if (financeLock?.committed && financeLock?.fingerprintKey) {
@@ -1495,6 +1518,60 @@
       status: 'approved',
       approvedAt: record.approvedAt,
     });
+  }
+
+  async function commitFinanceConfig(record, targetYear) {
+    if (record.sourceModule !== 'financeconfig') return;
+    const payload = record.modulePayload || {};
+    const operations = Array.isArray(payload.operations) ? payload.operations : [];
+    if (!operations.length) throw new Error('Missing finance config operations.');
+
+    const updates = {};
+    const approvalMeta = {
+      approvedAt: record.approvedAt || Date.now(),
+      approvedBy: record.approvedBy || actorEmail(),
+      approvalId: record.approvalId || '',
+    };
+    const isAllowedFinanceConfigPath = (path) => (
+      /^feesStructure\/20\d{2}(\/|$)/.test(path) ||
+      /^installmentPlans\/20\d{2}(\/|$)/.test(path) ||
+      /^studentOverrides\/20\d{2}(\/|$)/.test(path) ||
+      /^finance\/20\d{2}\/(classes|plans|studentFees|studentPlans|studentCustomSchedules)(\/|$)/.test(path)
+    );
+
+    operations.forEach((operation) => {
+      const path = normalizePath(operation?.path || '');
+      if (!path) return;
+      if (!isAllowedFinanceConfigPath(path)) {
+        throw new Error(`Blocked unsafe finance config path: ${path}`);
+      }
+      if (operation.op === 'update') {
+        Object.entries(operation.value || {}).forEach(([key, value]) => {
+          updates[P(`${path}/${key}`)] = value;
+        });
+      } else {
+        updates[P(path)] = operation.value === undefined ? null : operation.value;
+      }
+    });
+
+    const historyEntries = Array.isArray(payload.historyEntries) ? payload.historyEntries : [];
+    historyEntries.forEach((entry) => {
+      const year = String(entry.year || record.forYear || targetYear || state.selectedYear || getContextYear());
+      const category = normalizePath(entry.category || 'config');
+      const id = normalizePath(entry.id || record.approvalId || 'change');
+      const histRef = sref(`financeConfigHistory/${year}/${category}/${id}`).push();
+      updates[P(`financeConfigHistory/${year}/${category}/${id}/${histRef.key}`)] = {
+        action: entry.action || payload.configAction || 'approve',
+        before: entry.before ?? null,
+        after: entry.after ?? null,
+        requestedAt: record.createdAt || null,
+        requestedBy: record.recordedBy || '',
+        ...approvalMeta,
+      };
+    });
+
+    if (!Object.keys(updates).length) throw new Error('No finance config updates to apply.');
+    await db.ref().update(updates);
   }
 
   async function commitTransportPayment(record) {
@@ -1913,7 +1990,9 @@
       state.summary[module].pendingCount = data.count;
       const pendEl = els.summary[module]?.pending;
       if (pendEl) {
-        pendEl.textContent = data.count ? `${data.count} Pending (${formatCurrency(data.amount)})` : 'All Clear';
+        pendEl.textContent = data.count
+          ? (module === 'financeconfig' ? `${data.count} Pending` : `${data.count} Pending (${formatCurrency(data.amount)})`)
+          : 'All Clear';
       }
     });
   }
