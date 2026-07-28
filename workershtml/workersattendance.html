@@ -1210,6 +1210,282 @@
         role === 'assistant_head_teacher';
     }
 
+    function compactPersonName(value) {
+      return String(value || '').toUpperCase().replace(/\s+/g, ' ').trim();
+    }
+
+    function phoneDigits(value) {
+      return String(value || '').replace(/\D/g, '');
+    }
+
+    function localPhoneDigits(value) {
+      const digits = phoneDigits(value);
+      if (digits.startsWith('255')) return digits.slice(3);
+      if (digits.startsWith('0')) return digits.slice(1);
+      return digits;
+    }
+
+    function currentTeacherIdentity() {
+      const profile = state.profile || {};
+      return {
+        workerId: String(state.workerId || '').trim(),
+        names: uniqueNonEmpty([
+          profile.fullNameUpper,
+          profile.fullName,
+          [profile.firstName, profile.middleName, profile.lastName].filter(Boolean).join(' '),
+          sessionStorage.getItem('fullNameUpper'),
+          sessionStorage.getItem('somap_workerName'),
+          localStorage.getItem('fullNameUpper'),
+          localStorage.getItem('somap_workerName'),
+          getWorkerName()
+        ].map(compactPersonName)),
+        phones: uniqueNonEmpty([
+          profile.phone,
+          profile.phoneNumber,
+          sessionStorage.getItem('somap_workerPhone'),
+          localStorage.getItem('somap_workerPhone')
+        ].map(localPhoneDigits))
+      };
+    }
+
+    function personMatchesCurrentTeacher(person, identity = currentTeacherIdentity()) {
+      if (!person || typeof person !== 'object') return false;
+      const personWorkerId = String(person.workerId || person.id || '').trim();
+      if (identity.workerId && personWorkerId && personWorkerId === identity.workerId) return true;
+      const personName = compactPersonName(person.name || person.fullName || person.fullNameUpper || '');
+      if (personName && identity.names.includes(personName)) return true;
+      const personPhone = localPhoneDigits(person.phoneRaw || person.phone || person.phoneNumber || '');
+      return Boolean(personPhone && identity.phones.includes(personPhone));
+    }
+
+    function normalizeClassForTeacher(value) {
+      if (window.SomapClassTeachers?.normalizeClassDisplay) {
+        return window.SomapClassTeachers.normalizeClassDisplay(value);
+      }
+      return String(value || '').trim();
+    }
+
+    function normalizeClassKeyForTeacher(value) {
+      if (window.SomapClassTeachers?.normalizeClassKey) {
+        return window.SomapClassTeachers.normalizeClassKey(value);
+      }
+      return normalizeClassForTeacher(value).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    }
+
+    function normalizeStreamKeyForTeacher(value) {
+      if (window.SomapClassTeachers?.normalizeStreamKey) {
+        return window.SomapClassTeachers.normalizeStreamKey(value);
+      }
+      const cleaned = String(value || '').replace(/^stream\b/i, '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      return cleaned || '__all__';
+    }
+
+    function streamLabelForTeacher(value) {
+      if (window.SomapClassTeachers?.streamDisplay) {
+        return window.SomapClassTeachers.streamDisplay(value);
+      }
+      const cleaned = String(value || '').replace(/^stream\b/i, '').trim();
+      return cleaned ? cleaned.toUpperCase() : 'All Streams';
+    }
+
+    async function resolveCurrentClassTeacherAssignments(year) {
+      if (!isVerifiedTeachingRole()) return [];
+      const identity = currentTeacherIdentity();
+      const reads = [
+        schoolRef(`years/${year}/classTeacherAssignments`).once('value').catch(() => null)
+      ];
+      if (state.legacyFriendly) {
+        reads.push(db.ref(`years/${year}/classTeacherAssignments`).once('value').catch(() => null));
+      }
+      const snaps = await Promise.all(reads);
+      const raw = snaps.reduce((merged, snap) => ({ ...merged, ...(snap?.val?.() || {}) }), {});
+      const normalized = window.SomapClassTeachers?.normalizeAssignmentsMap
+        ? window.SomapClassTeachers.normalizeAssignmentsMap(raw)
+        : raw;
+      const rows = [];
+      Object.values(normalized || {}).forEach((classBucket) => {
+        Object.values(classBucket || {}).forEach((assignment) => {
+          if (!assignment || !personMatchesCurrentTeacher(assignment.classTeacher, identity)) return;
+          const className = normalizeClassForTeacher(assignment.className);
+          if (!className) return;
+          rows.push({
+            className,
+            classKey: normalizeClassKeyForTeacher(className),
+            stream: assignment.stream || '',
+            streamKey: normalizeStreamKeyForTeacher(assignment.stream || ''),
+            teacherName: assignment.classTeacher?.name || getWorkerName()
+          });
+        });
+      });
+      const seen = new Set();
+      return rows.filter((row) => {
+        const key = `${row.classKey}|${row.streamKey}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    function studentStreamValue(student) {
+      return student?.stream || student?.streamName || student?.section || student?.classStream || '';
+    }
+
+    function preferSavedContact(...values) {
+      return values.map((value) => String(value || '').trim()).find((value) => value && value !== '-') || '-';
+    }
+
+    function debtorBelongsToTeacherAssignment(debtor, assignment) {
+      if (!assignment) return false;
+      const debtorClassKey = normalizeClassKeyForTeacher(debtor.classLevel || debtor.className || '');
+      if (!debtorClassKey || debtorClassKey !== assignment.classKey) return false;
+      const allKey = window.SomapClassTeachers?.STREAM_ALL || '__all__';
+      if (!assignment.streamKey || assignment.streamKey === allKey) return true;
+      const debtorStreamKey = normalizeStreamKeyForTeacher(debtor.stream || debtor.streamName || '');
+      return debtorStreamKey === assignment.streamKey;
+    }
+
+    function classTeacherDebtPdfStyles() {
+      return `
+        <style>
+          * { box-sizing: border-box; }
+          body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #102033; background: #ffffff; }
+          .ct-page { padding: 10mm; }
+          .ct-header { display: flex; align-items: center; gap: 12px; border-bottom: 3px solid #0ea5e9; padding-bottom: 10px; }
+          .ct-logo { width: 58px; height: 58px; object-fit: contain; }
+          .ct-title { margin: 0; font-size: 22px; color: #0f172a; }
+          .ct-subtitle { margin: 3px 0 0; color: #475569; font-size: 12px; }
+          .ct-alert { margin: 12px 0; padding: 9px 11px; border-left: 5px solid #dc2626; background: #fef2f2; color: #7f1d1d; font-weight: 700; }
+          .ct-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+          .ct-card { border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px; background: #f8fafc; }
+          .ct-card span { display: block; color: #64748b; font-size: 9px; text-transform: uppercase; font-weight: 700; }
+          .ct-card strong { display: block; margin-top: 3px; color: #0f172a; font-size: 14px; }
+          table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+          th { background: #0f766e; color: #ffffff; text-align: left; font-size: 10px; padding: 7px 6px; }
+          td { border-bottom: 1px solid #dbe3ee; font-size: 10px; padding: 6px; vertical-align: top; }
+          tr:nth-child(even) td { background: #f8fafc; }
+          .ct-money { color: #b91c1c; font-weight: 800; white-space: nowrap; }
+          .ct-footer { margin-top: 12px; color: #64748b; font-size: 9px; display: flex; justify-content: space-between; border-top: 1px solid #cbd5e1; padding-top: 7px; }
+        </style>
+      `;
+    }
+
+    function buildClassTeacherDebtPdfHtml({ assignments, debtors, year, generatedAt }) {
+      const logoSrc = document.getElementById('school-logo-display')?.getAttribute('src') || '../images/somap-logo.png';
+      const teacherName = assignments[0]?.teacherName || getWorkerName();
+      const classLabels = assignments.map((assignment) => `${assignment.className} (${streamLabelForTeacher(assignment.stream)})`).join(', ');
+      const totalDebt = debtors.reduce((sum, row) => sum + Number(row.debtAmount || 0), 0);
+      const totalBalance = debtors.reduce((sum, row) => sum + Number(row.balance || 0), 0);
+      const rowsHtml = debtors.length
+        ? debtors.map((row, index) => `
+            <tr>
+              <td>${index + 1}</td>
+              <td>${escapeHtml(row.name)}</td>
+              <td>${escapeHtml(row.classLevel || '-')}</td>
+              <td>${escapeHtml(row.stream || '-')}</td>
+              <td>${escapeHtml(row.phone || '-')}</td>
+              <td>${escapeHtml(row.debtTill || '-')}</td>
+              <td class="ct-money">TZS ${Number(row.debtAmount || 0).toLocaleString('en-US')}</td>
+              <td class="ct-money">TZS ${Number(row.balance || 0).toLocaleString('en-US')}</td>
+            </tr>
+          `).join('')
+        : '<tr><td colspan="8" style="text-align:center;color:#047857;font-weight:700;padding:18px;">No current debtors for this assigned class.</td></tr>';
+      return `
+        <!doctype html>
+        <html>
+        <head><meta charset="utf-8">${classTeacherDebtPdfStyles()}</head>
+        <body>
+          <main class="ct-page">
+            <header class="ct-header">
+              <img class="ct-logo" src="${escapeHtml(logoSrc)}" alt="SoMAp logo">
+              <div>
+                <h1 class="ct-title">Socrates SoMAp - Class Debt Attendance List</h1>
+                <p class="ct-subtitle">${escapeHtml(state.schoolName || 'Socrates School')} | Academic Year ${escapeHtml(year)} | Generated ${escapeHtml(generatedAt)}</p>
+                <p class="ct-subtitle">Class Teacher: ${escapeHtml(teacherName)} | Class: ${escapeHtml(classLabels)}</p>
+              </div>
+            </header>
+            <div class="ct-alert">Students listed here have current Debt till amounts and should be sent home for fee follow-up before entering class.</div>
+            <section class="ct-cards">
+              <div class="ct-card"><span>Debtors</span><strong>${debtors.length}</strong></div>
+              <div class="ct-card"><span>Current Debt</span><strong>TZS ${totalDebt.toLocaleString('en-US')}</strong></div>
+              <div class="ct-card"><span>Class Balance</span><strong>TZS ${totalBalance.toLocaleString('en-US')}</strong></div>
+              <div class="ct-card"><span>Date</span><strong>${escapeHtml(generatedAt.split(',')[0] || generatedAt)}</strong></div>
+            </section>
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Student</th>
+                  <th>Class</th>
+                  <th>Stream</th>
+                  <th>Parent Contact</th>
+                  <th>Debt Till</th>
+                  <th>Debt</th>
+                  <th>Balance</th>
+                </tr>
+              </thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+            <footer class="ct-footer">
+              <span>SoMAp Workers Attendance auto-download</span>
+              <span>${escapeHtml(state.today || '')}</span>
+            </footer>
+          </main>
+        </body>
+        </html>
+      `;
+    }
+
+    async function downloadClassTeacherDebtPdfAfterCheckin(year) {
+      if (!window.html2pdf || !window.SomapFinance || !isVerifiedTeachingRole()) return;
+      const assignments = await resolveCurrentClassTeacherAssignments(year);
+      if (!assignments.length) return;
+      const debtors = await buildCurrentDebtDebtors(year);
+      const roster = await window.SomapFinance.getFinanceRoster(year).catch(() => []);
+      const rosterById = new Map((roster || []).map((row) => [String(row.studentId || row.id || ''), row]));
+      const filtered = debtors
+        .map((debtor) => {
+          const rosterRow = rosterById.get(String(debtor.studentId || '')) || {};
+          return {
+            ...debtor,
+            stream: studentStreamValue(rosterRow.rawStudent || {}) || studentStreamValue(rosterRow) || studentStreamValue(debtor),
+            phone: preferSavedContact(debtor.phone, rosterRow.parentContact),
+            classLevel: debtor.classLevel || rosterRow.classLevel || '-',
+          };
+        })
+        .filter((debtor) => assignments.some((assignment) => debtorBelongsToTeacherAssignment(debtor, assignment)))
+        .sort((a, b) => {
+          const classSort = String(a.classLevel || '').localeCompare(String(b.classLevel || ''));
+          if (classSort) return classSort;
+          return Number(b.debtAmount || 0) - Number(a.debtAmount || 0);
+        });
+      const generatedAt = new Date().toLocaleString('en-GB', {
+        timeZone: 'Africa/Nairobi',
+        weekday: 'short',
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      const host = document.createElement('div');
+      host.style.cssText = 'position:fixed;left:-10000px;top:0;width:1120px;background:#fff;z-index:-1;';
+      host.innerHTML = buildClassTeacherDebtPdfHtml({ assignments, debtors: filtered, year, generatedAt });
+      document.body.appendChild(host);
+      const classPart = assignments.map((item) => item.className.replace(/[^a-z0-9]+/gi, '_')).join('_').slice(0, 60) || 'class';
+      try {
+        await window.html2pdf().set({
+          margin: 5,
+          filename: `class_teacher_debt_${classPart}_${year}_${state.todayKey}.pdf`,
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' }
+        }).from(host).save();
+        toast(`Class teacher debt PDF downloaded: ${filtered.length} student(s).`, 'success', 6500);
+      } finally {
+        host.remove();
+      }
+    }
+
     function getPostCheckinReturnTarget() {
       const params = new URLSearchParams(window.location.search || '');
       const raw =
@@ -3437,6 +3713,9 @@
               : 'Check-in successful. Waiting for headteacher approval.',
             'success'
           );
+          downloadClassTeacherDebtPdfAfterCheckin(systemYear).catch((error) => {
+            console.warn('Class teacher debt PDF auto-download skipped', error);
+          });
         } else {
           toast('Check-out successful. Waiting for headteacher approval.', 'success');
         }
