@@ -1390,55 +1390,50 @@
           `).join('')
         : '<tr><td colspan="8" style="text-align:center;color:#047857;font-weight:700;padding:18px;">No current debtors for this assigned class.</td></tr>';
       return `
-        <!doctype html>
-        <html>
-        <head><meta charset="utf-8">${classTeacherDebtPdfStyles()}</head>
-        <body>
-          <main class="ct-page">
-            <header class="ct-header">
-              <img class="ct-logo" src="${escapeHtml(logoSrc)}" alt="SoMAp logo">
-              <div>
-                <h1 class="ct-title">Socrates SoMAp - Class Debt Attendance List</h1>
-                <p class="ct-subtitle">${escapeHtml(state.schoolName || 'Socrates School')} | Academic Year ${escapeHtml(year)} | Generated ${escapeHtml(generatedAt)}</p>
-                <p class="ct-subtitle">Class Teacher: ${escapeHtml(teacherName)} | Class: ${escapeHtml(classLabels)}</p>
-              </div>
-            </header>
-            <div class="ct-alert">Students listed here have current Debt till amounts and should be sent home for fee follow-up before entering class.</div>
-            <section class="ct-cards">
-              <div class="ct-card"><span>Debtors</span><strong>${debtors.length}</strong></div>
-              <div class="ct-card"><span>Current Debt</span><strong>TZS ${totalDebt.toLocaleString('en-US')}</strong></div>
-              <div class="ct-card"><span>Class Balance</span><strong>TZS ${totalBalance.toLocaleString('en-US')}</strong></div>
-              <div class="ct-card"><span>Date</span><strong>${escapeHtml(generatedAt.split(',')[0] || generatedAt)}</strong></div>
-            </section>
-            <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Student</th>
-                  <th>Class</th>
-                  <th>Stream</th>
-                  <th>Parent Contact</th>
-                  <th>Debt Till</th>
-                  <th>Debt</th>
-                  <th>Balance</th>
-                </tr>
-              </thead>
-              <tbody>${rowsHtml}</tbody>
-            </table>
-            <footer class="ct-footer">
-              <span>SoMAp Workers Attendance auto-download</span>
-              <span>${escapeHtml(state.today || '')}</span>
-            </footer>
-          </main>
-        </body>
-        </html>
+        ${classTeacherDebtPdfStyles()}
+        <main class="ct-page">
+          <header class="ct-header">
+            <img class="ct-logo" src="${escapeHtml(logoSrc)}" alt="SoMAp logo">
+            <div>
+              <h1 class="ct-title">Socrates SoMAp - Class Debt Attendance List</h1>
+              <p class="ct-subtitle">${escapeHtml(state.schoolName || 'Socrates School')} | Academic Year ${escapeHtml(year)} | Generated ${escapeHtml(generatedAt)}</p>
+              <p class="ct-subtitle">Class Teacher: ${escapeHtml(teacherName)} | Class: ${escapeHtml(classLabels)}</p>
+            </div>
+          </header>
+          <div class="ct-alert">Students listed here have current Debt till amounts and should be sent home for fee follow-up before entering class.</div>
+          <section class="ct-cards">
+            <div class="ct-card"><span>Debtors</span><strong>${debtors.length}</strong></div>
+            <div class="ct-card"><span>Current Debt</span><strong>TZS ${totalDebt.toLocaleString('en-US')}</strong></div>
+            <div class="ct-card"><span>Class Balance</span><strong>TZS ${totalBalance.toLocaleString('en-US')}</strong></div>
+            <div class="ct-card"><span>Date</span><strong>${escapeHtml(generatedAt.split(',')[0] || generatedAt)}</strong></div>
+          </section>
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Student</th>
+                <th>Class</th>
+                <th>Stream</th>
+                <th>Parent Contact</th>
+                <th>Debt Till</th>
+                <th>Debt</th>
+                <th>Balance</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+          <footer class="ct-footer">
+            <span>SoMAp Workers Attendance auto-download</span>
+            <span>${escapeHtml(state.today || '')}</span>
+          </footer>
+        </main>
       `;
     }
 
-    async function downloadClassTeacherDebtPdfAfterCheckin(year) {
-      if (!window.html2pdf || !window.SomapFinance || !isVerifiedTeachingRole()) return;
+    async function prepareClassTeacherDebtDownload(year) {
+      if (!window.html2pdf || !window.SomapFinance || !isVerifiedTeachingRole()) return null;
       const assignments = await resolveCurrentClassTeacherAssignments(year);
-      if (!assignments.length) return;
+      if (!assignments.length) return null;
       const debtors = await buildCurrentDebtDebtors(year);
       const roster = await window.SomapFinance.getFinanceRoster(year).catch(() => []);
       const rosterById = new Map((roster || []).map((row) => [String(row.studentId || row.id || ''), row]));
@@ -1467,23 +1462,71 @@
         hour: '2-digit',
         minute: '2-digit'
       });
-      const host = document.createElement('div');
-      host.style.cssText = 'position:fixed;left:-10000px;top:0;width:1120px;background:#fff;z-index:-1;';
-      host.innerHTML = buildClassTeacherDebtPdfHtml({ assignments, debtors: filtered, year, generatedAt });
-      document.body.appendChild(host);
       const classPart = assignments.map((item) => item.className.replace(/[^a-z0-9]+/gi, '_')).join('_').slice(0, 60) || 'class';
-      try {
-        await window.html2pdf().set({
-          margin: 5,
-          filename: `class_teacher_debt_${classPart}_${year}_${state.todayKey}.pdf`,
-          image: { type: 'jpeg', quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true },
-          jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' }
-        }).from(host).save();
-        toast(`Class teacher debt PDF downloaded: ${filtered.length} student(s).`, 'success', 6500);
-      } finally {
-        host.remove();
-      }
+      return {
+        assignments,
+        debtors: filtered,
+        generatedAt,
+        filename: `class_teacher_debt_${classPart}_${year}_${state.todayKey}.pdf`,
+        year
+      };
+    }
+
+    async function downloadClassTeacherDebtPdfFromElement(sourceEl, downloadData) {
+      if (!sourceEl || !downloadData) return;
+      await window.html2pdf().set({
+        margin: 5,
+        filename: downloadData.filename,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' }
+      }).from(sourceEl).save();
+    }
+
+    async function promptClassTeacherDebtDownloadAfterCheckin(year) {
+      const downloadData = await prepareClassTeacherDebtDownload(year);
+      if (!downloadData) return false;
+      return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'mini-modal-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(69,10,10,.94);z-index:13000;display:grid;place-items:center;padding:14px;overflow:auto;';
+        overlay.innerHTML = `
+          <section class="mini-modal-card" role="dialog" aria-modal="true" style="width:min(1180px,100%);max-height:94vh;overflow:auto;background:#fff7ed;color:#111827;border:3px solid #dc2626;border-radius:18px;padding:14px;box-shadow:0 30px 90px rgba(0,0,0,.5);">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+              <div>
+                <div style="display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;background:#dc2626;color:#fff;font-weight:900;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;">Class Teacher Debt List Required</div>
+                <h2 style="margin:8px 0 2px;color:#7f1d1d;font-size:1.25rem;">Download debts of your class</h2>
+                <p style="margin:0;color:#7c2d12;font-weight:700;">Click the red button to download the current Debt till list before continuing.</p>
+              </div>
+              <button type="button" class="workers-btn" data-action="download-class-debts" style="background:linear-gradient(135deg,#dc2626,#f97316);color:#fff;box-shadow:0 12px 28px rgba(220,38,38,.35);">Download Debts of Your Class</button>
+            </div>
+            <div style="background:#fff;border:1px solid #fed7aa;border-radius:10px;overflow:auto;">
+              <div class="ct-pdf-source" style="width:1120px;max-width:none;background:#fff;">
+                ${buildClassTeacherDebtPdfHtml(downloadData)}
+              </div>
+            </div>
+          </section>
+        `;
+        document.body.appendChild(overlay);
+        const button = overlay.querySelector('[data-action="download-class-debts"]');
+        const sourceEl = overlay.querySelector('.ct-pdf-source');
+        button?.addEventListener('click', async () => {
+          const originalText = button.textContent;
+          button.disabled = true;
+          button.textContent = 'Preparing PDF...';
+          try {
+            await downloadClassTeacherDebtPdfFromElement(sourceEl, downloadData);
+            toast(`Class teacher debt PDF downloaded: ${downloadData.debtors.length} student(s).`, 'success', 6500);
+            overlay.remove();
+            resolve(true);
+          } catch (error) {
+            console.warn('Class teacher debt PDF download failed', error);
+            toast('PDF haijapakuliwa. Bonyeza tena Download Debts of Your Class.', 'error', 6500);
+            button.disabled = false;
+            button.textContent = originalText;
+          }
+        });
+      });
     }
 
     function getPostCheckinReturnTarget() {
@@ -3713,8 +3756,9 @@
               : 'Check-in successful. Waiting for headteacher approval.',
             'success'
           );
-          downloadClassTeacherDebtPdfAfterCheckin(systemYear).catch((error) => {
-            console.warn('Class teacher debt PDF auto-download skipped', error);
+          await promptClassTeacherDebtDownloadAfterCheckin(systemYear).catch((error) => {
+            console.warn('Class teacher debt PDF prompt skipped', error);
+            return false;
           });
         } else {
           toast('Check-out successful. Waiting for headteacher approval.', 'success');
