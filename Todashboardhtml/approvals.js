@@ -155,6 +155,7 @@
     pendingRefreshTimer: null,
     summariesInFlight: null,
     summariesLoadedYear: '',
+    summaryRefreshToken: 0,
     loadInFlight: null,
     hasFirstLoadCompleted: false,
   };
@@ -460,6 +461,12 @@
     buildHistoryMonthOptionsForYear();
     renderHistory();
     schedulePendingRebuild();
+    if (changed) {
+      setTimeout(() => {
+        loadHistorySnapshot().catch((err) => console.warn('Approvals: history refresh failed', err));
+        loadSummaries().catch((err) => console.warn('Approvals: summary refresh failed', err));
+      }, 80);
+    }
     return changed;
   }
 
@@ -492,6 +499,12 @@
       setTimeout(() => node.remove(), 360);
     }, duration);
   }
+
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const withTimeout = (promise, ms, fallbackValue = null) => Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(fallbackValue), ms)),
+  ]);
 
   async function guardAccess(user) {
     if (!user) {
@@ -619,15 +632,9 @@
     if (showForegroundLoader) showLoader(true);
     else showLoader(false);
 
-    const withTimeout = (promise, ms, fallbackValue) => Promise.race([
-      promise,
-      new Promise((resolve) => setTimeout(() => resolve(fallbackValue), ms)),
-    ]);
-
-    state.loadInFlight = Promise.all([
-      watchPendingApprovals(),
-      withTimeout(loadHistorySnapshot(), 6000, null),
-    ]).catch((err) => {
+    state.loadInFlight = Promise.resolve()
+      .then(() => watchPendingApprovals())
+      .catch((err) => {
       console.error('Approvals: data load failed', err);
       toast(err?.message || 'Failed to refresh approvals data', 'danger');
     }).finally(() => {
@@ -636,9 +643,16 @@
       state.loadInFlight = null;
     });
 
-    loadSummaries().catch((err) => {
-      console.warn('Approvals: summary refresh failed', err);
-    });
+    setTimeout(() => {
+      withTimeout(loadHistorySnapshot(), 3500, null).catch((err) => {
+        console.warn('Approvals: history refresh failed', err);
+      });
+    }, showForegroundLoader ? 250 : 0);
+    setTimeout(() => {
+      loadSummaries().catch((err) => {
+        console.warn('Approvals: summary refresh failed', err);
+      });
+    }, showForegroundLoader ? 500 : 60);
     return state.loadInFlight;
   }
 
@@ -2003,26 +2017,63 @@
       return state.summariesInFlight;
     }
     state.summariesLoadedYear = selectedYear;
-    state.summariesInFlight = Promise.all([
-      computeFinanceSummary(),
-      computeTransportSummary(),
-      computePrefoneSummary(),
-      computeGraduationSummary(),
-      computeFridaySummary(),
-      computeAdmissionSummary(),
-    ]).finally(() => {
+    const token = state.summaryRefreshToken + 1;
+    state.summaryRefreshToken = token;
+    const runIfFresh = async (fn, timeoutMs = 5000) => {
+      if (token !== state.summaryRefreshToken) return;
+      await withTimeout(fn(), timeoutMs, null).catch((err) => {
+        console.warn('Approvals: summary task failed', err);
+      });
+      await delay(120);
+    };
+    state.summariesInFlight = (async () => {
+      await runIfFresh(computeFinanceSummary, 7000);
+      await runIfFresh(computeTransportSummary, 4500);
+      await runIfFresh(computeGraduationSummary, 4500);
+      await runIfFresh(computeFridaySummary, 4500);
+      await runIfFresh(computeAdmissionSummary, 4500);
+      await runIfFresh(computePrefoneSummary, 4500);
+    })().finally(() => {
       state.summariesInFlight = null;
     });
     await state.summariesInFlight;
   }
 
+  async function readFinanceAggregateSummary(year) {
+    const paths = [
+      P(`financials/${year}/financeAggregates`),
+      scopedPath(`financials/${year}/financeAggregates`),
+    ];
+    for (const path of [...new Set(paths)]) {
+      try {
+        const snap = await withTimeout(db.ref(path).once('value'), 1200, null);
+        const raw = snap?.val?.();
+        if (!raw) continue;
+        const required = Number(raw.totalFeesExpected || raw.totalDue || 0);
+        const approved = Number(raw.totalFeesCollected || raw.totalCollected || 0);
+        const balance = Number(raw.totalFeesBalance || raw.totalOutstanding || Math.max(0, required - approved));
+        if (required > 0 || approved > 0 || balance > 0) {
+          return { required, approved, balance };
+        }
+      } catch (err) {
+        console.warn('Approvals: finance aggregate read failed', path, err);
+      }
+    }
+    return null;
+  }
+
   async function computeFinanceSummary() {
-    if (!window.SomapFinance) return;
-    const totals = await window.SomapFinance.loadSchoolTotals(state.selectedYear);
+    const cached = await readFinanceAggregateSummary(state.selectedYear);
+    if (cached) updateSummaryCard('finance', cached);
+    if (!window.SomapFinance || !window.SomapFinance.loadSchoolTotals) return;
+    const totals = await withTimeout(window.SomapFinance.loadSchoolTotals(state.selectedYear), cached ? 4500 : 6500, null);
+    if (!totals) return;
     const required = Number(totals?.due || 0);
     const approved = Number(totals?.collected || 0);
     const balance = Math.max(0, required - approved);
-    updateSummaryCard('finance', { required, approved, balance });
+    if (required > 0 || approved > 0 || balance > 0) {
+      updateSummaryCard('finance', { required, approved, balance });
+    }
   }
 
   function computeTransportStatus(enrollment = {}, payments = []) {

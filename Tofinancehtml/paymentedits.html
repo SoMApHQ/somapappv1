@@ -356,7 +356,8 @@
   <script>
     (function () {
     const SOMAP_ALLOWED_YEARS = Array.from({ length: 20 }, (_, i) => 2023 + i);
-    const SOMAP_DEFAULT_YEAR = 2025;
+    const SOMAP_ANCHOR_YEAR = 2025;
+    const SOMAP_DEFAULT_YEAR = new Date().getFullYear();
     const CLASS_ORDER = [
       'Baby Class',
       'Middle Class',
@@ -412,6 +413,27 @@
     const canonicalClass = (label) => CLASS_SYNONYMS[norm(label)] || label || '';
     const now = () => Date.now();
     const currentUser = () => window.currentUserId || 'admin';
+    function getDefaultConfigYear() {
+      const currentYear = String(SOMAP_DEFAULT_YEAR);
+      let stored = '';
+      let manual = '';
+      try {
+        stored = sessionStorage.getItem('somap_paymentedits_selected_year') || sessionStorage.getItem('somap_selected_year') || '';
+        manual = sessionStorage.getItem('somap_paymentedits_manual_year') || '';
+      } catch (_) {}
+      if (!stored) return currentYear;
+      if (!manual && Number(stored) < SOMAP_DEFAULT_YEAR) return currentYear;
+      return String(stored);
+    }
+    function rememberConfigYear(year, manual = false) {
+      const val = String(year || SOMAP_DEFAULT_YEAR);
+      try {
+        sessionStorage.setItem('somap_paymentedits_selected_year', val);
+        sessionStorage.setItem('somap_selected_year', val);
+        if (manual) sessionStorage.setItem('somap_paymentedits_manual_year', '1');
+      } catch (e) { console.warn(e); }
+      return val;
+    }
 
     function shiftClass(baseClass, deltaYears) {
       const canonical = canonicalClass(baseClass);
@@ -424,15 +446,15 @@
     }
 
     window.somapYearContext = window.somapYearContext || (function () {
-      let selected = String(sessionStorage.getItem('somap_selected_year') || SOMAP_DEFAULT_YEAR);
+      let selected = rememberConfigYear(getDefaultConfigYear(), false);
       const listeners = new Set();
       return {
         getSelectedYear() { return selected; },
-        setSelectedYear(y) {
+        setSelectedYear(y, options = {}) {
           const val = String(y);
           if (val === selected) return;
           selected = val;
-          try { sessionStorage.setItem('somap_selected_year', val); } catch (e) { console.warn(e); }
+          rememberConfigYear(val, options.manual !== false);
           listeners.forEach((fn) => { try { fn(val); } catch (err) { console.error(err); } });
         },
         onYearChanged(fn) { if (typeof fn === 'function') listeners.add(fn); }
@@ -449,7 +471,7 @@
       if (hint) hint.textContent = current;
       select.addEventListener('change', (ev) => {
         const chosen = String(ev.target.value);
-        window.somapYearContext.setSelectedYear(chosen);
+        window.somapYearContext.setSelectedYear(chosen, { manual: true });
         if (hint) hint.textContent = chosen;
       });
     })();
@@ -640,12 +662,12 @@
       let baseFees = fees;
       let basePlans = plans;
 
-      if (!Object.keys(fees).length && year !== String(SOMAP_DEFAULT_YEAR)) {
-        const base = await reader(pathFees(SOMAP_DEFAULT_YEAR));
+      if (!Object.keys(fees).length && year !== String(SOMAP_ANCHOR_YEAR)) {
+        const base = await reader(pathFees(SOMAP_ANCHOR_YEAR));
         baseFees = canonicalizeFees(base || {});
       }
-      if (!Object.keys(plans).length && year !== String(SOMAP_DEFAULT_YEAR)) {
-        const base = await reader(pathPlans(SOMAP_DEFAULT_YEAR));
+      if (!Object.keys(plans).length && year !== String(SOMAP_ANCHOR_YEAR)) {
+        const base = await reader(pathPlans(SOMAP_ANCHOR_YEAR));
         basePlans = base || {};
       }
 
@@ -677,7 +699,7 @@
             createdAt: base.createdAt || now(),
             updatedAt: now(),
             updatedBy: currentUser(),
-            seededFrom: base && Object.keys(base).length ? `clone-${SOMAP_DEFAULT_YEAR}` : 'default-template'
+            seededFrom: base && Object.keys(base).length ? `clone-${SOMAP_ANCHOR_YEAR}` : 'default-template'
           };
         } else {
           const patch = { ...existing };
@@ -720,7 +742,7 @@
     }
 
     const state = {
-      year: String(SOMAP_DEFAULT_YEAR),
+      year: getDefaultConfigYear(),
       fees: {},
       plans: {},
       studentsCache: []
@@ -1533,7 +1555,7 @@
     $('#btnImportThisYear').addEventListener('click', async () => {
       const year = state.year;
       const nearest = await findNearestSourceYear(year);
-      const srcYear = nearest || SOMAP_DEFAULT_YEAR;
+      const srcYear = nearest || SOMAP_ANCHOR_YEAR;
       const data = await reader(pathFees(srcYear)) || {};
       openModal(`
         <div class="space-y-4 text-sm">
@@ -2183,15 +2205,15 @@
     // Ensure year context is initialized before using service
     if (!window.somapYearContext) {
       window.somapYearContext = (function () {
-        let selected = String(sessionStorage.getItem('somap_selected_year') || SOMAP_DEFAULT_YEAR);
+        let selected = rememberConfigYear(getDefaultConfigYear(), false);
         const listeners = new Set();
         return {
           getSelectedYear() { return selected; },
-          setSelectedYear(y) {
+          setSelectedYear(y, options = {}) {
             const val = String(y);
             if (val === selected) return;
             selected = val;
-            try { sessionStorage.setItem('somap_selected_year', val); } catch (e) { console.warn(e); }
+            rememberConfigYear(val, options.manual !== false);
             listeners.forEach((fn) => { try { fn(val); } catch (err) { console.error(err); } });
           },
           onYearChanged(fn) { if (typeof fn === 'function') listeners.add(fn); }
@@ -2508,7 +2530,7 @@
           if (hint) hint.textContent = current;
           select.addEventListener('change', (ev) => {
             const chosen = String(ev.target.value);
-            window.somapYearContext.setSelectedYear(chosen);
+            window.somapYearContext.setSelectedYear(chosen, { manual: true });
             if (hint) hint.textContent = chosen;
           });
         }

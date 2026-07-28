@@ -9,7 +9,8 @@
  */
 
 export const SOMAP_ALLOWED_YEARS = Array.from({ length: 20 }, (_, i) => 2023 + i); // 2023..2042
-export const SOMAP_DEFAULT_YEAR = 2025;
+export const SOMAP_ANCHOR_YEAR = 2025;
+export const SOMAP_DEFAULT_YEAR = new Date().getFullYear();
 export const CLASSES_FULL = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
 
 const financeCache = new Map(); // year -> { data } or { promise }
@@ -875,7 +876,7 @@ export async function resolveClassForYearSimple(studentId, targetYear) {
   const db = getFirebaseDB();
   if (!db) return '';
   
-  const anchorY = 2025;
+  const anchorY = SOMAP_ANCHOR_YEAR;
   const targetY = Number(targetYear) || anchorY;
   
   try {
@@ -911,6 +912,7 @@ export async function resolveClassForYearSimple(studentId, targetYear) {
 
 export const financePlansService = {
   SOMAP_ALLOWED_YEARS,
+  SOMAP_ANCHOR_YEAR,
   SOMAP_DEFAULT_YEAR,
   CLASSES_FULL,
   db,
