@@ -2317,6 +2317,8 @@
     async function openMonthlyPlanModal({ attachTo, className = null, studentId = null, studentName = null }) {
       MP_STATE = { attachTo, className, studentId, studentName };
       const year = state.year || window.somapYearContext?.getSelectedYear() || SOMAP_DEFAULT_YEAR;
+      let currentPlan = null;
+      let currentPlanId = '';
       
       if (ctx) {
         let hint = attachTo === 'class'
@@ -2329,6 +2331,8 @@
             const overridePlanId = await window.financePlansService.getStudentPlan(studentId);
             const effectivePlanId = overridePlanId || classPlanId;
             const plan = effectivePlanId ? (state.plans[effectivePlanId] || await window.financePlansService.getPlan(effectivePlanId)) : null;
+            currentPlan = plan || null;
+            currentPlanId = effectivePlanId || '';
             const currentPlanName = plan?.name || effectivePlanId || 'Class default';
             hint += ` · Current effective plan: ${currentPlanName}`;
             const isMonthly = String(currentPlanName || '').toLowerCase().includes('monthly');
@@ -2338,16 +2342,33 @@
         ctx.textContent = hint;
       }
       
-      if (elPlanId) elPlanId.value = elPlanId.value || 'monthly-40k-standard';
-      if (elPlanName) elPlanName.value = elPlanName.value || 'Monthly (40k) — Standard';
-      if (elAmt) elAmt.value = elAmt.value || 40000;
-      if (elFrom) elFrom.value = elFrom.value || 1;
-      if (elLen) elLen.value = elLen.value || 10;
-      if (elAssignClass) elAssignClass.checked = (attachTo === 'class');
-      if (prevBox) prevBox.classList.add('hidden');
-      
       fillDoubleMonthChecks();
       fillExcludedMonthChecks();
+
+      const monthlyRule = currentPlan?.monthly || {};
+      const planText = `${currentPlanId} ${currentPlan?.name || ''}`;
+      const amountMatch = planText.match(/(\d+(?:\.\d+)?)\s*k/i);
+      const amountFromText = amountMatch ? parseAmountInput(`${amountMatch[1]}k`) : 0;
+      const doubleMonths = Array.isArray(monthlyRule.doubleMonths) ? monthlyRule.doubleMonths.map(Number) : [];
+      const excludedMonths = Array.isArray(monthlyRule.excludedMonths) ? monthlyRule.excludedMonths.map(Number) : [];
+
+      if (elPlanId) elPlanId.value = currentPlanId || 'monthly-50k-standard';
+      if (elPlanName) elPlanName.value = currentPlan?.name || 'Monthly (50k) - Standard';
+      if (elAmt) elAmt.value = monthlyRule.amount || monthlyRule.monthlyAmount || amountFromText || 50000;
+      if (elFrom) elFrom.value = monthlyRule.dueDayStart || monthlyRule.fromDay || 1;
+      if (elLen) elLen.value = monthlyRule.windowLengthDays || monthlyRule.windowLen || 10;
+      if (elDbl) {
+        elDbl.querySelectorAll('.mpDbl').forEach((input) => {
+          input.checked = doubleMonths.includes(Number(input.value));
+        });
+      }
+      if (elExcluded) {
+        elExcluded.querySelectorAll('.mpExcluded').forEach((input) => {
+          input.checked = excludedMonths.includes(Number(input.value));
+        });
+      }
+      if (elAssignClass) elAssignClass.checked = (attachTo === 'class');
+      if (prevBox) prevBox.classList.add('hidden');
       
       if (modal) {
         modal.style.display = 'flex';
@@ -2436,20 +2457,27 @@
         </table>
       `;
       prevBox.classList.remove('hidden');
-      return { planId, planName, rows };
+      return { planId, planName, rows, monthlyAmount, fromDay, winLen, dbl, excluded };
     }
 
     async function savePlan({ applyToStudent = false } = {}) {
       const preview = previewSchedule();
       if (!preview) return;
       
-      const { planId, planName, rows } = preview;
+      const { planId, planName, rows, monthlyAmount, fromDay, winLen, dbl, excluded } = preview;
       const year = state.year || window.somapYearContext?.getSelectedYear() || SOMAP_DEFAULT_YEAR;
       
       try {
         const payload = {
           name: planName,
           isActive: true,
+          monthly: {
+            amount: monthlyAmount,
+            dueDayStart: fromDay,
+            windowLengthDays: winLen,
+            doubleMonths: dbl,
+            excludedMonths: excluded
+          },
           schedule: rows,
           updatedAt: Date.now(),
           updatedBy: currentUser()

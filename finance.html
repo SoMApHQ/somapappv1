@@ -376,6 +376,41 @@
       return text.includes('monthly') || text.includes('mwezi') || text.includes('malipo kwa mwezi');
     });
   }
+  function parseMonthlyAmountFromText(...values) {
+    for (const value of values) {
+      const text = String(value || '').toLowerCase();
+      const match = text.match(/monthly[^0-9]*(\d+(?:\.\d+)?)\s*k|(\d+(?:\.\d+)?)\s*k[^0-9]*monthly|monthly[^0-9]*(\d{4,})/i);
+      if (!match) continue;
+      const raw = match[1] || match[2] || match[3];
+      const amount = Number(raw);
+      if (Number.isFinite(amount) && amount > 0) return amount < 1000 ? Math.round(amount * 1000) : Math.round(amount);
+    }
+    return 0;
+  }
+  function buildMonthlyScheduleFromRule(plan = {}, planId = '') {
+    const rule = plan.monthly && typeof plan.monthly === 'object' ? plan.monthly : {};
+    const monthlyAmount = Number(rule.amount || rule.monthlyAmount || 0) ||
+      parseMonthlyAmountFromText(planId, plan.id, plan.planId, plan.name, plan.title, plan.label);
+    if (!Number.isFinite(monthlyAmount) || monthlyAmount <= 0) return Array.isArray(plan.schedule) ? plan.schedule : [];
+    const fromDay = Math.max(1, Math.min(28, Number(rule.dueDayStart || rule.fromDay || 1)));
+    const windowLength = Math.max(1, Math.min(28, Number(rule.windowLengthDays || rule.windowLen || 10)));
+    const doubleMonths = Array.isArray(rule.doubleMonths) ? rule.doubleMonths.map(Number) : [];
+    const excludedMonths = Array.isArray(rule.excludedMonths) ? rule.excludedMonths.map(Number) : [];
+    const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const pad = (num) => String(num).padStart(2, '0');
+    return monthLabels.flatMap((label, idx) => {
+      const month = idx + 1;
+      if (excludedMonths.includes(month)) return [];
+      const toDay = Math.min(fromDay + windowLength - 1, 28);
+      return [{
+        label: `Monthly: ${label}`,
+        from: `${pad(month)}-${pad(fromDay)}`,
+        to: `${pad(month)}-${pad(toDay)}`,
+        amount: monthlyAmount * (doubleMonths.includes(month) ? 2 : 1),
+        weight: 1,
+      }];
+    });
+  }
   function getClassConfigByCanon(classes = {}, className) {
     const canonical = canonClass(className);
     if (!canonical || !classes || typeof classes !== 'object') return {};
@@ -1491,6 +1526,9 @@ function buildFinanceStudents(
       const isMonthlyPlan = isMonthlyPlanName(resolvedPlanId, resolvedPlan?.name, override.planName, override.paymentPlan) ||
         (resolvedPlan?.schedule && Array.isArray(resolvedPlan.schedule) &&
           resolvedPlan.schedule.some((row) => String(row.label || '').includes('Monthly:')));
+      const resolvedPlanSchedule = isMonthlyPlan && resolvedPlan
+        ? buildMonthlyScheduleFromRule(resolvedPlan, resolvedPlanId)
+        : (Array.isArray(resolvedPlan?.schedule) ? resolvedPlan.schedule : []);
 
       let paymentPlan =
         (resolvedPlan && resolvedPlan.name) ||
@@ -1517,8 +1555,8 @@ function buildFinanceStudents(
         base.feeDue ??
         base.requiredFee ??
         0;
-      if (isMonthlyPlan && (!baseFeeCandidate || baseFeeCandidate === 0) && resolvedPlan?.schedule) {
-        const totalFromSchedule = resolvedPlan.schedule.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
+      if (isMonthlyPlan && (!baseFeeCandidate || baseFeeCandidate === 0) && resolvedPlanSchedule.length) {
+        const totalFromSchedule = resolvedPlanSchedule.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
         if (totalFromSchedule > 0) baseFeeCandidate = totalFromSchedule;
       }
 
@@ -1613,8 +1651,8 @@ function buildFinanceStudents(
 
       if (!isMonthlyPlan && Array.isArray(override.customSchedule) && override.customSchedule.length) {
         record._customSchedule = override.customSchedule;
-      } else if (resolvedPlan && Array.isArray(resolvedPlan.schedule)) {
-        record._planSchedule = resolvedPlan.schedule;
+      } else if (resolvedPlanSchedule.length) {
+        record._planSchedule = resolvedPlanSchedule;
       }
       if (classDefaults && classDefaults.installments && typeof classDefaults.installments === 'object') {
         record._classInstallments = classDefaults.installments;

@@ -461,6 +461,48 @@ function parseScheduleRow(raw = {}) {
   return out;
 }
 
+function parseMonthlyAmountFromText(...values) {
+  for (const value of values) {
+    const text = String(value || '').toLowerCase();
+    const match = text.match(/monthly[^0-9]*(\d+(?:\.\d+)?)\s*k|(\d+(?:\.\d+)?)\s*k[^0-9]*monthly|monthly[^0-9]*(\d{4,})/i);
+    if (!match) continue;
+    const raw = match[1] || match[2] || match[3];
+    const amount = Number(raw);
+    if (Number.isFinite(amount) && amount > 0) {
+      return amount < 1000 ? Math.round(amount * 1000) : Math.round(amount);
+    }
+  }
+  return 0;
+}
+
+function buildMonthlyScheduleFromRule(plan = {}, fallbackRows = []) {
+  const rule = plan.monthly && typeof plan.monthly === 'object' ? plan.monthly : {};
+  const monthlyAmount = coerceNumber(rule.amount ?? rule.monthlyAmount, 0) ||
+    parseMonthlyAmountFromText(plan.id, plan.planId, plan.name, plan.title, plan.label);
+  if (monthlyAmount <= 0) return fallbackRows;
+
+  const fromDay = Math.max(1, Math.min(28, coerceNumber(rule.dueDayStart ?? rule.fromDay ?? 1, 1)));
+  const windowLength = Math.max(1, Math.min(28, coerceNumber(rule.windowLengthDays ?? rule.windowLen ?? 10, 10)));
+  const doubleMonths = Array.isArray(rule.doubleMonths) ? rule.doubleMonths.map(Number).filter(Number.isFinite) : [];
+  const excludedMonths = Array.isArray(rule.excludedMonths) ? rule.excludedMonths.map(Number).filter(Number.isFinite) : [];
+  const monthLabels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const pad = (num) => String(num).padStart(2, '0');
+
+  return monthLabels.flatMap((label, index) => {
+    const month = index + 1;
+    if (excludedMonths.includes(month)) return [];
+    const amount = monthlyAmount * (doubleMonths.includes(month) ? 2 : 1);
+    const toDay = Math.min(fromDay + windowLength - 1, 28);
+    return [{
+      label: `Monthly: ${label}`,
+      from: `${pad(month)}-${pad(fromDay)}`,
+      to: `${pad(month)}-${pad(toDay)}`,
+      amount,
+      weight: 1,
+    }];
+  });
+}
+
 function formatWindowFragment(value) {
   if (!value) return '';
   return String(value).trim().replace(/-/g, '/');
@@ -531,7 +573,10 @@ export async function resolveEffectiveInstallments(studentId, className, options
     const plan = await getPlan(planId, { year });
     if (plan) {
       let scheduleRows = [];
-      if (Array.isArray(plan.schedule)) {
+      if (planLooksMonthly) {
+        const fallback = Array.isArray(plan.schedule) ? plan.schedule.slice() : [];
+        scheduleRows = buildMonthlyScheduleFromRule({ ...plan, id: planId, planId }, fallback);
+      } else if (Array.isArray(plan.schedule)) {
         scheduleRows = plan.schedule.slice();
       } else if (plan.schedule && typeof plan.schedule === 'object') {
         const orderingKeys = ['order','index','sort','position','seq','sequence','weightIndex','liveOrder'];
