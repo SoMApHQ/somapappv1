@@ -676,7 +676,14 @@
 
       function getStudentRegistrationYear(stu) {
         const ts = stu?.timestamp ?? stu?.createdAt;
+        const explicitYear = Number(stu?.academicYear || stu?.admissionYear || stu?.admYear || stu?.year);
+        if (Number.isFinite(explicitYear)) return explicitYear;
         if (ts && Number.isFinite(Number(ts))) return new Date(Number(ts)).getFullYear();
+        const dateValue = stu?.registeredAt || stu?.regTimestamp || stu?.dateRegistered || stu?.dateOfRegistration;
+        if (dateValue) {
+          const parsed = Date.parse(String(dateValue));
+          if (Number.isFinite(parsed)) return new Date(parsed).getFullYear();
+        }
         return BASE_YEAR;
       }
 
@@ -758,6 +765,56 @@
           || enrollment?.parentPhone
           || enrollment?.guardianPhone
           || '';
+      }
+
+      function isDisplayableTransportStudent(student) {
+        if (!student || typeof student !== 'object' || student.__synthetic === true) return false;
+        const status = String(student.status || '').trim().toLowerCase();
+        if (student.deleted === true || student.isDeleted === true || student.archived === true ||
+            student.isArchived === true || student.removed === true || student.isRemoved === true ||
+            student.active === false || status === 'deleted' || status === 'archived' ||
+            status === 'removed' || status === 'shifted') return false;
+        const admission = String(student.admissionNumber || student.admissionNo || '').trim().toLowerCase();
+        const first = String(student.firstName || '').trim().toLowerCase();
+        const last = String(student.lastName || '').trim().toLowerCase();
+        if (!admission || admission === 'n/a' || admission === 'na') return false;
+        if (!first || first === 'n/a' || first === 'na') return false;
+        if (!last || last === 'n/a' || last === 'na') return false;
+        return resolveStudentClassForTransportYear(student) !== 'GRADUATED';
+      }
+
+      async function buildVisiblePaymentRows(multipliers, applyUiFilters = true) {
+        const filterClass = applyUiFilters ? classFilter.value : '';
+        const searchTerm = applyUiFilters ? searchInput.value.toLowerCase() : '';
+        const filterStatus = applyUiFilters ? statusFilter.value : '';
+        const rows = [];
+
+        for (const [studentId, enrollment] of Object.entries(state.transportEnrollments || {})) {
+          const student = getStudentForTransport(studentId, enrollment);
+          if (!isDisplayableTransportStudent(student)) continue;
+
+          const shiftedClass = resolveStudentClassForTransportYear(student);
+          const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim();
+          const matchesClass = !filterClass || shiftedClass === filterClass;
+          const matchesSearch = !searchTerm ||
+            fullName.toLowerCase().includes(searchTerm) ||
+            String(student.admissionNumber || '').toLowerCase().includes(searchTerm);
+          if (!matchesClass || !matchesSearch) continue;
+
+          const payments = Object.values(state.transportPayments[studentId] || {});
+          const transportStatus = await calculateTransportStatus(enrollment, payments, multipliers, studentId);
+          let matchesStatus = true;
+          if (filterStatus === 'paid') matchesStatus = transportStatus.debt === 0;
+          if (filterStatus === 'partial') matchesStatus = transportStatus.debt > 0 && transportStatus.totalPaid > 0;
+          if (filterStatus === 'unpaid') matchesStatus = transportStatus.totalPaid === 0;
+          const matchesDebtFilter = !applyUiFilters || !state.showDebtorsOnly || transportStatus.debt > 0;
+          if (!matchesStatus || !matchesDebtFilter) continue;
+
+          rows.push({ studentId, enrollment, student, shiftedClass, fullName, transportStatus });
+        }
+
+        rows.sort((a, b) => b.transportStatus.debt - a.transportStatus.debt);
+        return rows;
       }
 
       function toExcelPhoneNumber(contact) {
@@ -1008,7 +1065,9 @@
         if (!cachedMultipliers[year]) cachedMultipliers[year] = multipliers;
         
         // OPTIMIZATION: Process all students in parallel instead of sequentially with caching
-        const statusPromises = Object.entries(state.transportEnrollments).map(async ([studentId, enrollment]) => {
+        const statusPromises = Object.entries(state.transportEnrollments)
+          .filter(([studentId, enrollment]) => isDisplayableTransportStudent(getStudentForTransport(studentId, enrollment)))
+          .map(async ([studentId, enrollment]) => {
           const payments = Object.values(state.transportPayments[studentId] || {});
           return await calculateTransportStatus(enrollment, payments, multipliers, studentId);
         });
@@ -1066,7 +1125,6 @@
         const filterClass = classFilter.value;
         const searchTerm = searchInput.value.toLowerCase();
         const filterStatus = statusFilter.value;
-        const yearDelta = state.year - BASE_YEAR;
 
         // Show loading indicator
         if (loadingIndicator) {
@@ -1079,16 +1137,15 @@
         const multipliers = cachedMultipliers[year] || (await TransportPricing.loadYearMultipliers(year));
         if (!cachedMultipliers[year]) cachedMultipliers[year] = multipliers;
 
-        const allEntries = Object.entries(state.transportEnrollments);
+        const allEntries = Object.entries(state.transportEnrollments)
+          .filter(([studentId, enrollment]) => isDisplayableTransportStudent(getStudentForTransport(studentId, enrollment)));
         
         // OPTIMIZATION: Pre-filter students before expensive calculations
         const preFiltered = [];
         for (const [studentId, enrollment] of allEntries) {
           const student = getStudentForTransport(studentId, enrollment);
 
-          // Calculate class for selected year
-          const baseClass = student.classLevel || '';
-          const shiftedClass = shiftClass(baseClass, yearDelta);
+          const shiftedClass = resolveStudentClassForTransportYear(student);
           
           const matchesClass = !filterClass || shiftedClass === filterClass;
           const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.toLowerCase();
@@ -1177,9 +1234,7 @@
           const student = getStudentForTransport(studentId, enrollment);
           const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
           
-          const yearDelta = state.year - BASE_YEAR;
-          const baseClass = student.classLevel || '';
-          const shiftedClass = shiftClass(baseClass, yearDelta);
+          const shiftedClass = resolveStudentClassForTransportYear(student);
           const selectedMonth = getFocusedMonth();
           const selectedMonthName = MONTH_NAMES[selectedMonth] || 'Current';
           const startDateDisplay = transportStatus.startDateDisplay || 'N/A';
@@ -1958,14 +2013,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         const multipliers = cachedMultipliers[yearNum] || (await TransportPricing.loadYearMultipliers(yearNum));
         if (!cachedMultipliers[yearNum]) cachedMultipliers[yearNum] = multipliers;
         
-        const yearDelta = state.year - BASE_YEAR;
-        const data = await Promise.all(Object.entries(state.transportEnrollments).map(async ([studentId, enrollment]) => {
-          const student = getStudentForTransport(studentId, enrollment);
-          const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
-          const baseClass = student.classLevel || '';
-          const shiftedClass = shiftClass(baseClass, yearDelta);
-          const payments = Object.values(state.transportPayments[studentId] || {});
-          const transportStatus = await calculateTransportStatus(enrollment, payments, multipliers, studentId);
+        const visibleRows = await buildVisiblePaymentRows(multipliers, true);
+        const data = visibleRows.map(({ studentId, enrollment, student, shiftedClass, fullName, transportStatus }) => {
           const driverDisplay = getDriverDisplay(enrollment).replace('&mdash;', '');
           const unpaidDisp = transportStatus.unpaidMonthsDisplay ?? transportStatus.unpaidMonths;
           const totalYearFee = transportStatus.totalYearExpected ?? transportStatus.totalExpected;
@@ -1987,7 +2036,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             'Total Year Fee': totalYearFee,
             'Total Year Debt': totalYearDebt,
           };
-        }));
+        });
         
         const filteredData = data.filter(Boolean);
         let totalExpected = 0, totalPaid = 0, totalDebt = 0;
@@ -2029,18 +2078,15 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         const multipliers = cachedMultipliers[yearNum] || (await TransportPricing.loadYearMultipliers(yearNum));
         if (!cachedMultipliers[yearNum]) cachedMultipliers[yearNum] = multipliers;
 
-        const debtorRows = await Promise.all(Object.entries(state.transportEnrollments).map(async ([studentId, enrollment]) => {
-          const student = getStudentForTransport(studentId, enrollment);
-          const payments = Object.values(state.transportPayments[studentId] || {});
-          const transportStatus = await calculateTransportStatus(enrollment, payments, multipliers, studentId);
+        const visibleRows = await buildVisiblePaymentRows(multipliers, true);
+        const debtorRows = visibleRows.map(({ studentId, enrollment, student, fullName, transportStatus }) => {
           const debt = Number(transportStatus.debt) || 0;
           if (debt <= 0) return null;
 
-          const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim();
           const parentContact = getTransportParentContact(student, enrollment);
           const tillMonth = transportStatus.debtTillMonth || formatDebtTillMonth(resolveEndDate(enrollment));
           return [toExcelPhoneNumber(parentContact), fullName || student.admissionNumber || studentId, debt, tillMonth];
-        }));
+        });
 
         const rows = debtorRows
           .filter(Boolean)
@@ -2069,13 +2115,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         const yearNum = Number(state.year);
         const multipliers = cachedMultipliers[yearNum] || (await TransportPricing.loadYearMultipliers(yearNum));
         if (!cachedMultipliers[yearNum]) cachedMultipliers[yearNum] = multipliers;
-        const yearDelta = state.year - BASE_YEAR;
-        const rows = await Promise.all(Object.entries(state.transportEnrollments).map(async ([studentId, enrollment]) => {
-          const student = getStudentForTransport(studentId, enrollment);
-          const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
-          const shiftedClass = shiftClass(student.classLevel || '', yearDelta);
-          const payments = Object.values(state.transportPayments[studentId] || {});
-          const transportStatus = await calculateTransportStatus(enrollment, payments, multipliers, studentId);
+        const visibleRows = await buildVisiblePaymentRows(multipliers, true);
+        const rows = visibleRows.map(({ studentId, enrollment, student, shiftedClass, fullName, transportStatus }) => {
           const driverDisplay = getDriverDisplay(enrollment).replace('&mdash;', '');
           const unpaidDisp = transportStatus.unpaidMonthsDisplay ?? transportStatus.unpaidMonths;
           const totalYearFee = transportStatus.totalYearExpected ?? transportStatus.totalExpected;
@@ -2097,7 +2138,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             String(totalYearFee),
             String(totalYearDebt),
           ];
-        }));
+        });
         let totalExpected = 0, totalPaid = 0, totalDebt = 0, maxDebt = 0, maxDebtName = '', paidCount = 0;
         rows.forEach((r) => {
           const fee = Number(r[8]) || 0, paid = Number(r[9]) || 0, debt = Number(r[10]) || 0;
