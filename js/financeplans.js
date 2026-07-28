@@ -817,6 +817,9 @@ export async function getCustomSchedule(studentId, options = {}) {
   const db = getFirebaseDB();
   const snap = await db.ref(`${pathFinance(year)}/studentCustomSchedules/${studentId}`).once('value');
   let val = snap.val() || null;
+  if (snap.exists() && val && Array.isArray(val.rows) && !val.rows.length) {
+    return null;
+  }
   if (!val || !Array.isArray(val.rows) || !val.rows.length) {
     const legacySnap = await db.ref(withSchoolPrefix(`studentOverrides/${year}/${studentId}/customSchedule`)).once('value');
     const legacyVal = legacySnap.val();

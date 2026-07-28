@@ -553,6 +553,12 @@
     function historyEntry(year, category, id, action, before, after) {
       return { year: String(year), category, id, action, before: before ?? null, after: after ?? null };
     }
+    function isMonthlyPlanValue(...values) {
+      return values.some((value) => {
+        const text = String(value || '').toLowerCase();
+        return text.includes('monthly') || text.includes('mwezi') || text.includes('malipo kwa mwezi');
+      });
+    }
     async function queueFinanceConfigChange(change = {}) {
       if (!db) throw new Error('Firebase database not initialized.');
       const operations = Array.isArray(change.operations) ? change.operations.filter((op) => op && op.path) : [];
@@ -1962,19 +1968,23 @@
         if (!id) return;
         const plan = state.plans[id] || await window.financePlansService.getPlan(id);
         const planName = plan?.name || id;
+        const clearsCustomSchedule = isMonthlyPlanValue(id, planName);
+        const payload = { planId: id, planName, paymentPlan: planName };
+        if (clearsCustomSchedule) payload.customSchedule = null;
         await setStudentOverride(
           studentId,
-          { planId: id, planName, paymentPlan: planName },
+          payload,
           {
             toastMessage: 'Plan override saved',
-            summary: `Set plan override for ${studentId}: ${planName}`,
+            summary: `Set plan override for ${studentId}: ${planName}${clearsCustomSchedule ? '; clear custom installment schedule' : ''}`,
             action: 'student-plan:set',
             extraOperations: [
               opSet(`${pathFinance(year)}/studentPlans/${studentId}`, {
                 planId: id,
                 updatedAt: now(),
                 updatedBy: currentUser()
-              })
+              }),
+              ...(clearsCustomSchedule ? [opSet(`${pathFinance(year)}/studentCustomSchedules/${studentId}`, null)] : [])
             ]
           }
         );
@@ -2273,7 +2283,7 @@
       }
       
       if (saveBtn) {
-        saveBtn.onclick = () => savePlan({ applyToStudent: false });
+        saveBtn.onclick = () => savePlan({ applyToStudent: MP_STATE.attachTo === 'student' });
       }
       
       if (saveApplyBtn) {
@@ -2475,20 +2485,22 @@
           summaries.push(`assign to ${MP_STATE.className}`);
         }
         
-        if (applyToStudent && MP_STATE.studentId) {
+        if ((applyToStudent || MP_STATE.attachTo === 'student') && MP_STATE.studentId) {
           const overridePath = `${pathOverrides(year)}/${MP_STATE.studentId}`;
           const before = await reader(overridePath) || {};
           const merged = { ...before, planId, planName, paymentPlan: planName, updatedAt: now(), updatedBy: currentUser() };
+          delete merged.customSchedule;
           operations.push(
             opSet(`${pathFinance(year)}/studentPlans/${MP_STATE.studentId}`, {
               planId,
               updatedAt: now(),
               updatedBy: currentUser()
             }),
+            opSet(`${pathFinance(year)}/studentCustomSchedules/${MP_STATE.studentId}`, null),
             opSet(overridePath, merged)
           );
           historyEntries.push(historyEntry(year, 'overrides', MP_STATE.studentId, 'monthly-plan', before, merged));
-          summaries.push(`apply to student ${MP_STATE.studentId}`);
+          summaries.push(`apply to student ${MP_STATE.studentId}`, 'clear custom installment schedule');
         }
 
         await queueFinanceConfigChange({
