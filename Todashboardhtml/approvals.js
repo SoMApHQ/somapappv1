@@ -91,6 +91,7 @@
         approved: null,
         balance: null,
         pending: document.getElementById('finance-config-pending-count'),
+        list: document.getElementById('finance-config-pending-list'),
       },
       transport: {
         required: document.getElementById('transport-required'),
@@ -687,6 +688,7 @@
 
   function renderPendingTable() {
     if (!els.pendingBody) return;
+    renderFinanceConfigPendingList();
     if (!state.pendingList.length) {
       els.pendingBody.innerHTML = `
         <tr>
@@ -790,6 +792,32 @@
     els.pendingBody.appendChild(frag);
   }
 
+  function renderFinanceConfigPendingList() {
+    const listEl = els.summary.financeconfig?.list;
+    if (!listEl) return;
+    const selectedYear = state.selectedYear;
+    const rows = state.pendingList
+      .filter((row) => row.sourceModule === 'financeconfig')
+      .filter((row) => {
+        const recordYear = getRecordYearString(row);
+        return !recordYear || recordYear === selectedYear;
+      })
+      .slice(0, 5);
+    if (!rows.length) {
+      listEl.innerHTML = '<p class="text-slate-400">No config approvals waiting.</p>';
+      return;
+    }
+    listEl.innerHTML = rows.map((row) => {
+      const display = getConfigDisplay(row);
+      return `
+        <div class="rounded-xl border border-slate-500/25 bg-slate-950/30 px-3 py-2">
+          <p class="font-semibold text-slate-100">${display.studentName || 'Config change'}</p>
+          <p class="text-slate-400">${display.studentAdm || ''}${display.className ? ` · ${display.className}` : ''}</p>
+          <p class="mt-1 text-amber-100">${display.summary || 'Finance configuration change'}</p>
+        </div>`;
+    }).join('');
+  }
+
   async function ensureApprovalHasYear(record, targetYear) {
     if (!record || !db) return '';
     const pendingPath = resolvePendingRecordPath(record);
@@ -889,8 +917,8 @@
         id: studentKey,
         name,
         adm: student.admissionNumber || student.admissionNo || studentKey,
-        className: financeSnapshot?.classLevel || financeSnapshot?.className ||
-          enrollment.className || enrollment.classLevel || enrollment.class ||
+        className: enrollment.className || enrollment.classLevel || enrollment.class ||
+          financeSnapshot?.classLevel || financeSnapshot?.className ||
           student.classLevel || student.className || student.class || ''
       };
       cache.set(cacheKey, identity);
