@@ -569,6 +569,21 @@
         return text.includes('monthly') || text.includes('mwezi') || text.includes('malipo kwa mwezi');
       });
     }
+    async function getStudentApprovalIdentity(studentId, year = state.year) {
+      if (!studentId) return { id: '', name: '', adm: '', className: '' };
+      const student = await reader(`students/${studentId}`).catch(() => null) || {};
+      const name = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim();
+      let className = student.classLevel || student.className || student.class || '';
+      if (window.financePlansService?.resolveClassForYearSimple) {
+        className = await window.financePlansService.resolveClassForYearSimple(studentId, year).catch(() => className) || className;
+      }
+      return {
+        id: studentId,
+        name: name || student.fullName || student.name || studentId,
+        adm: student.admissionNumber || student.admissionNo || studentId,
+        className
+      };
+    }
     async function queueFinanceConfigChange(change = {}) {
       if (!db) throw new Error('Firebase database not initialized.');
       const operations = Array.isArray(change.operations) ? change.operations.filter((op) => op && op.path) : [];
@@ -576,8 +591,19 @@
       const year = String(change.year || state.year || window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR);
       const approvalRef = db.ref('approvalsPending').push();
       const approvalId = approvalRef.key;
-      const target = change.target || change.className || change.studentName || change.studentId || 'Finance Config';
-      const summary = change.summary || change.action || 'Finance configuration change';
+      const studentIdentity = change.studentId
+        ? await getStudentApprovalIdentity(change.studentId, year)
+        : { id: '', name: '', adm: '', className: '' };
+      const studentName = change.studentName || studentIdentity.name || '';
+      const studentAdm = change.studentAdm && change.studentAdm !== change.studentId
+        ? change.studentAdm
+        : (studentIdentity.adm || change.studentAdm || change.studentId || '');
+      const className = change.className || studentIdentity.className || '';
+      const target = studentName || className || change.target || change.studentId || 'Finance Config';
+      const rawSummary = change.summary || change.action || 'Finance configuration change';
+      const summary = change.studentId && studentName
+        ? String(rawSummary).replaceAll(change.studentId, `${studentName} (${studentAdm})`)
+        : rawSummary;
       await approvalRef.set({
         approvalId,
         sourceModule: 'financeconfig',
@@ -590,8 +616,9 @@
         datePaid: now(),
         recordedBy: currentUser(),
         studentName: target,
-        studentAdm: change.studentAdm || change.studentId || '',
-        className: change.className || '',
+        studentAdm,
+        studentId: change.studentId || '',
+        className,
         parentContact: '',
         amountPaidNow: Number(change.amountPaidNow || 0),
         paymentMethod: 'Config Change',
@@ -600,6 +627,10 @@
         notes: change.notes || summary,
         modulePayload: {
           configAction: change.action || summary,
+          studentId: change.studentId || '',
+          studentName: target,
+          studentAdm,
+          className,
           operations,
           historyEntries: Array.isArray(change.historyEntries) ? change.historyEntries : []
         }

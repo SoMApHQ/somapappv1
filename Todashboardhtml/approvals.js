@@ -432,7 +432,7 @@
 
   function rebuildPendingListFromState() {
     const flattened = flattenPendingTree(state.pending, state.selectedYear);
-    markPendingDuplicates(flattened).then((visibleRows) => {
+    markPendingDuplicates(flattened).then((visibleRows) => enrichFinanceConfigRows(visibleRows)).then((visibleRows) => {
       state.pendingList = visibleRows;
       renderPendingTable();
       recomputePendingSummaries();
@@ -704,9 +704,13 @@
     const selectedYear = state.selectedYear;
     const filtered = state.pendingList.filter((row) => {
       const matchesModule = !moduleFilter || row.sourceModule === moduleFilter;
+      const configDisplay = getConfigDisplay(row);
       const matchesSearch = !search
         || (row.studentName || '').toLowerCase().includes(search)
-        || (row.studentAdm || '').toLowerCase().includes(search);
+        || (row.studentAdm || '').toLowerCase().includes(search)
+        || (configDisplay.studentName || '').toLowerCase().includes(search)
+        || (configDisplay.studentAdm || '').toLowerCase().includes(search)
+        || (configDisplay.summary || '').toLowerCase().includes(search);
       let matchesMonth = true;
       if (monthFilter) {
         const stamp = Number(row.datePaid || row.createdAt || 0);
@@ -737,6 +741,8 @@
     filtered.forEach((row) => {
       const tr = document.createElement('tr');
       const rowYear = getRecordYearString(row);
+      const isConfig = row.sourceModule === 'financeconfig';
+      const configDisplay = getConfigDisplay(row);
       const queueAttempts = Number(row.queueAttempts) || 0;
       const queueBadge = queueAttempts
         ? `<div class="queued-count">Queued ${queueAttempts}×</div>`
@@ -746,15 +752,15 @@
       tr.innerHTML = `
         <td>${formatDate(row.datePaid || row.createdAt)}</td>
         <td>
-          <div class="font-semibold text-slate-100">${row.studentName || row.configTarget || '--'}</div>
-          <div class="text-xs text-slate-400">${row.studentAdm || ''}</div>
+          <div class="font-semibold text-slate-100">${isConfig ? configDisplay.studentName : (row.studentName || row.configTarget || '--')}</div>
+          <div class="text-xs text-slate-400">${isConfig ? configDisplay.studentAdm : (row.studentAdm || '')}</div>
         </td>
-        <td>${row.className || '--'}</td>
+        <td>${isConfig ? configDisplay.className : (row.className || '--')}</td>
         <td>${row.parentContact || '--'}</td>
         <td>
           <span class="pill pill-pending">${MODULE_LABELS[row.sourceModule] || row.sourceModule}</span>
         </td>
-        <td class="font-semibold text-emerald-200">${row.sourceModule === 'financeconfig' ? (row.configSummary || 'Config change') : formatCurrency(row.amountPaidNow)}</td>
+        <td class="font-semibold text-emerald-200">${isConfig ? configDisplay.summary : formatCurrency(row.amountPaidNow)}</td>
         <td>${row.recordedBy || '--'}</td>
         <td>
           <span class="pill pill-pending">${(row.status || 'pending').toUpperCase()}</span>
@@ -840,6 +846,77 @@
     || ''
   );
 
+  const looksLikeFirebaseKey = (value) => /^-[A-Za-z0-9_-]{10,}$/.test(String(value || '').trim());
+
+  function getConfigStudentKey(record) {
+    return record?.studentId ||
+      record?.modulePayload?.studentId ||
+      (looksLikeFirebaseKey(record?.studentAdm) ? record.studentAdm : '') ||
+      (looksLikeFirebaseKey(record?.configTarget) ? record.configTarget : '') ||
+      (looksLikeFirebaseKey(record?.studentName) ? record.studentName : '') ||
+      '';
+  }
+
+  async function enrichFinanceConfigRows(rows = []) {
+    const cache = new Map();
+    const resolveStudent = async (studentKey) => {
+      if (!studentKey) return null;
+      if (cache.has(studentKey)) return cache.get(studentKey);
+      const snap = await sref(`students/${studentKey}`).once('value').catch(() => null);
+      const student = snap?.val?.() || null;
+      if (!student) {
+        cache.set(studentKey, null);
+        return null;
+      }
+      const name = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim() ||
+        student.fullName || student.name || studentKey;
+      const identity = {
+        id: studentKey,
+        name,
+        adm: student.admissionNumber || student.admissionNo || studentKey,
+        className: student.classLevel || student.className || student.class || ''
+      };
+      cache.set(studentKey, identity);
+      return identity;
+    };
+
+    return Promise.all(rows.map(async (row) => {
+      if (row?.sourceModule !== 'financeconfig') return row;
+      const studentKey = getConfigStudentKey(row);
+      const identity = await resolveStudent(studentKey);
+      if (!identity) return row;
+      const summary = row.configSummary && studentKey
+        ? String(row.configSummary).replaceAll(studentKey, `${identity.name} (${identity.adm})`)
+        : row.configSummary;
+      return {
+        ...row,
+        studentId: row.studentId || studentKey,
+        studentName: (!row.studentName || looksLikeFirebaseKey(row.studentName)) ? identity.name : row.studentName,
+        studentAdm: (!row.studentAdm || looksLikeFirebaseKey(row.studentAdm)) ? identity.adm : row.studentAdm,
+        className: row.className || identity.className,
+        configTarget: (!row.configTarget || looksLikeFirebaseKey(row.configTarget)) ? identity.name : row.configTarget,
+        configSummary: summary,
+        modulePayload: {
+          ...(row.modulePayload || {}),
+          studentId: row.modulePayload?.studentId || studentKey,
+          studentName: row.modulePayload?.studentName || identity.name,
+          studentAdm: row.modulePayload?.studentAdm || identity.adm,
+          className: row.modulePayload?.className || identity.className,
+        }
+      };
+    }));
+  }
+
+  function getConfigDisplay(row = {}) {
+    const payload = row.modulePayload || {};
+    return {
+      studentName: row.studentName || payload.studentName || row.configTarget || '--',
+      studentAdm: row.studentAdm || payload.studentAdm || '',
+      className: row.className || payload.className || '--',
+      summary: row.configSummary || row.notes || payload.configAction || 'Finance configuration change',
+    };
+  }
+
   async function buildFinanceSnapshot(record) {
     if (!record || record.sourceModule !== 'finance') return null;
     if (!window.SomapFinance || typeof window.SomapFinance.loadStudentFinance !== 'function') return null;
@@ -895,13 +972,14 @@
     }
 
     const isConfig = viewModel.sourceModule === 'financeconfig';
+    const configDisplay = getConfigDisplay(viewModel);
     const dataRows = isConfig ? [
-      { label: 'Config Target', value: viewModel.configTarget || viewModel.studentName || '--' },
-      { label: 'Class / Student', value: viewModel.className || viewModel.studentAdm || '--' },
+      { label: 'Student', value: `${configDisplay.studentName || '--'} (${configDisplay.studentAdm || '--'})` },
+      { label: 'Class', value: configDisplay.className || '--' },
       { label: 'Source Module', value: MODULE_LABELS[viewModel.sourceModule] || viewModel.sourceModule },
       { label: 'Requested By', value: viewModel.recordedBy || '--' },
       { label: 'Requested At', value: formatDate(viewModel.datePaid || viewModel.createdAt) },
-      { label: 'Change Summary', value: viewModel.configSummary || viewModel.notes || '--' },
+      { label: 'Change Summary', value: configDisplay.summary || '--' },
     ] : [
       { label: 'Student', value: `${viewModel.studentName || '--'} (${viewModel.studentAdm || '--'})` },
       { label: 'Class', value: viewModel.className || '--' },
@@ -940,6 +1018,7 @@
         ${moduleMessage}
         ${metaHtml}
         ${notesHtml}
+        ${buildFinanceConfigPreview(viewModel)}
         ${buildLedgerPreview(viewModel)}
       </div>`;
 
@@ -992,6 +1071,49 @@
         </div>
       </div>`;
   }
+
+  function summarizeConfigValue(value) {
+    if (value == null) return '--';
+    if (typeof value !== 'object') return String(value);
+    const parts = [];
+    if (value.feePerYear !== undefined) parts.push(`Fee: ${formatCurrency(value.feePerYear)}`);
+    if (value.planName || value.paymentPlan || value.defaultPlanId || value.planId) {
+      parts.push(`Plan: ${value.planName || value.paymentPlan || value.defaultPlanId || value.planId}`);
+    }
+    if (Array.isArray(value.customSchedule)) parts.push(`Schedule: ${value.customSchedule.length} row(s)`);
+    if (value.customSchedule?.rows && Array.isArray(value.customSchedule.rows)) parts.push(`Schedule: ${value.customSchedule.rows.length} row(s)`);
+    if (value.monthly && typeof value.monthly === 'object') {
+      const doubles = Array.isArray(value.monthly.doubleMonths) ? value.monthly.doubleMonths.join(', ') || 'none' : 'none';
+      const excluded = Array.isArray(value.monthly.excludedMonths) ? value.monthly.excludedMonths.join(', ') || 'none' : 'none';
+      parts.push(`Monthly: ${formatCurrency(value.monthly.amount || 0)}, double months ${doubles}, no-pay months ${excluded}`);
+    }
+    if (Array.isArray(value.rows)) parts.push(`Rows: ${value.rows.length}`);
+    return parts.length ? parts.join(' | ') : JSON.stringify(value).slice(0, 220);
+  }
+
+  function buildFinanceConfigPreview(record) {
+    if (record?.sourceModule !== 'financeconfig') return '';
+    const entries = Array.isArray(record.modulePayload?.historyEntries) ? record.modulePayload.historyEntries : [];
+    if (!entries.length) return '';
+    const rows = entries.slice(0, 6).map((entry) => `
+      <tr>
+        <td class="border-b border-slate-700/40 px-3 py-2">${entry.action || 'change'}</td>
+        <td class="border-b border-slate-700/40 px-3 py-2 text-slate-300">${summarizeConfigValue(entry.before)}</td>
+        <td class="border-b border-slate-700/40 px-3 py-2 text-slate-100">${summarizeConfigValue(entry.after)}</td>
+      </tr>`).join('');
+    return `
+      <div class="rounded-2xl border border-slate-600/40 bg-slate-900/40">
+        <div class="border-b border-slate-600/40 px-4 py-3 text-xs uppercase tracking-[0.3em] text-slate-400/70">
+          Requested Change
+        </div>
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead><tr><th class="text-left">Action</th><th class="text-left">Before</th><th class="text-left">After</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
   function approveRecord(record) {
     state.selectedRecord = record;
     approveSelectedRecord();
@@ -1027,12 +1149,14 @@
   async function approveSelectedRecord() {
     const record = state.selectedRecord;
     if (!record) return;
+    const configDisplay = getConfigDisplay(record);
 
     Swal.fire({
       icon: 'question',
       title: record.sourceModule === 'financeconfig' ? 'Approve finance config change?' : 'Approve payment?',
       html: record.sourceModule === 'financeconfig'
-        ? `<p class="text-slate-600">You are about to approve <strong>${record.configSummary || 'a finance configuration change'}</strong>.</p>
+        ? `<p class="text-slate-600">You are about to approve <strong>${configDisplay.summary || 'a finance configuration change'}</strong>.</p>
+             <p class="mt-2 text-sm text-slate-500">Student: <strong>${configDisplay.studentName || '--'}</strong> (${configDisplay.studentAdm || '--'}), Class: <strong>${configDisplay.className || '--'}</strong>.</p>
              <p class="mt-2 text-sm text-slate-500">The system will apply the queued config writes and archive the approval.</p>`
         : `<p class="text-slate-600">You are about to approve <strong>${formatCurrency(record.amountPaidNow)}</strong> for <strong>${record.studentName || record.studentAdm}</strong>.</p>
              <p class="mt-2 text-sm text-slate-500">The system will write this payment to <strong>${MODULE_LABELS[record.sourceModule] || record.sourceModule}</strong> and archive the approval.</p>`,
