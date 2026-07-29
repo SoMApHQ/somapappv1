@@ -951,17 +951,24 @@ export async function resolveClassForYearSimple(studentId, targetYear) {
   
   try {
     // Try to get explicit enrollment for target year first
-    const targetSnap = await db.ref(`enrollments/${targetY}/${studentId}`).once('value').catch(() => null);
-    const targetRec = targetSnap?.val();
+    const targetSnap = await db.ref(withSchoolPrefix(`enrollments/${targetY}/${studentId}`)).once('value').catch(() => null);
+    const targetYearSnap = await db.ref(withSchoolPrefix(`years/${targetY}/enrollments/${studentId}`)).once('value').catch(() => null);
+    const targetRec = targetSnap?.val() || targetYearSnap?.val();
     if (targetRec && (targetRec.className || targetRec.classLevel)) {
       return canonClassName(targetRec.className || targetRec.classLevel || '');
     }
+
+    const studentSnap = await db.ref(withSchoolPrefix(`students/${studentId}`)).once('value').catch(() => null);
+    const student = studentSnap?.val() || {};
+    const baseStudentClass = student.classLevel || student.className || student.class || '';
+    if (baseStudentClass) return canonClassName(baseStudentClass);
     
     // Fall back to anchor year and compute progression
-    const anchorSnap = await db.ref(`enrollments/${anchorY}/${studentId}`).once('value').catch(() => null);
+    const anchorSnap = await db.ref(withSchoolPrefix(`enrollments/${anchorY}/${studentId}`)).once('value').catch(() => null);
     const anchor = anchorSnap?.val() || {};
+    if (!(anchor.className || anchor.classLevel)) return '';
     
-    const base = canonClassName(anchor.className || anchor.classLevel || 'Baby Class');
+    const base = canonClassName(anchor.className || anchor.classLevel || '');
     const L = (s) => String(s || '').trim().toLowerCase();
     const i = CLASSES_FULL.findIndex(c => L(c) === L(base));
     

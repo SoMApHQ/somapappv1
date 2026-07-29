@@ -863,49 +863,62 @@
 
   async function enrichFinanceConfigRows(rows = []) {
     const cache = new Map();
-    const resolveStudent = async (studentKey) => {
+    const resolveStudent = async (studentKey, year) => {
       if (!studentKey) return null;
-      if (cache.has(studentKey)) return cache.get(studentKey);
+      const cacheKey = `${studentKey}:${year || ''}`;
+      if (cache.has(cacheKey)) return cache.get(cacheKey);
       const snap = await sref(`students/${studentKey}`).once('value').catch(() => null);
       const student = snap?.val?.() || null;
       if (!student) {
-        cache.set(studentKey, null);
+        cache.set(cacheKey, null);
         return null;
       }
+      const enrollmentSnap = year
+        ? await sref(`enrollments/${year}/${studentKey}`).once('value').catch(() => null)
+        : null;
+      const yearEnrollmentSnap = year
+        ? await sref(`years/${year}/enrollments/${studentKey}`).once('value').catch(() => null)
+        : null;
+      const enrollment = enrollmentSnap?.val?.() || yearEnrollmentSnap?.val?.() || {};
+      const financeSnapshot = (year && window.SomapFinance?.loadStudentFinance)
+        ? await window.SomapFinance.loadStudentFinance(year, studentKey).catch(() => null)
+        : null;
       const name = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim() ||
         student.fullName || student.name || studentKey;
       const identity = {
         id: studentKey,
         name,
         adm: student.admissionNumber || student.admissionNo || studentKey,
-        className: student.classLevel || student.className || student.class || ''
+        className: financeSnapshot?.classLevel || financeSnapshot?.className ||
+          enrollment.className || enrollment.classLevel || enrollment.class ||
+          student.classLevel || student.className || student.class || ''
       };
-      cache.set(studentKey, identity);
+      cache.set(cacheKey, identity);
       return identity;
     };
 
     return Promise.all(rows.map(async (row) => {
       if (row?.sourceModule !== 'financeconfig') return row;
       const studentKey = getConfigStudentKey(row);
-      const identity = await resolveStudent(studentKey);
+      const identity = await resolveStudent(studentKey, getRecordYearString(row) || state.selectedYear || getContextYear());
       if (!identity) return row;
-      const summary = row.configSummary && studentKey
-        ? String(row.configSummary).replaceAll(studentKey, `${identity.name} (${identity.adm})`)
-        : row.configSummary;
+      let summary = row.configSummary || '';
+      if (summary && studentKey) summary = String(summary).replaceAll(studentKey, `${identity.name} (${identity.adm})`);
+      if (summary && row.studentName && row.studentName !== identity.name) summary = String(summary).replaceAll(row.studentName, identity.name);
       return {
         ...row,
         studentId: row.studentId || studentKey,
-        studentName: (!row.studentName || looksLikeFirebaseKey(row.studentName)) ? identity.name : row.studentName,
+        studentName: identity.name || row.studentName,
         studentAdm: (!row.studentAdm || looksLikeFirebaseKey(row.studentAdm)) ? identity.adm : row.studentAdm,
-        className: row.className || identity.className,
-        configTarget: (!row.configTarget || looksLikeFirebaseKey(row.configTarget)) ? identity.name : row.configTarget,
+        className: identity.className || row.className,
+        configTarget: identity.name || row.configTarget,
         configSummary: summary,
         modulePayload: {
           ...(row.modulePayload || {}),
           studentId: row.modulePayload?.studentId || studentKey,
           studentName: row.modulePayload?.studentName || identity.name,
           studentAdm: row.modulePayload?.studentAdm || identity.adm,
-          className: row.modulePayload?.className || identity.className,
+          className: identity.className || row.modulePayload?.className,
         }
       };
     }));
