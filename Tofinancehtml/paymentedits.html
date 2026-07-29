@@ -2319,6 +2319,7 @@
       const year = state.year || window.somapYearContext?.getSelectedYear() || SOMAP_DEFAULT_YEAR;
       let currentPlan = null;
       let currentPlanId = '';
+      let currentPlanIsStudentOverride = false;
       
       if (ctx) {
         let hint = attachTo === 'class'
@@ -2330,6 +2331,7 @@
             const classPlanId = studentClass ? await window.financePlansService.getClassDefaultPlanId(studentClass) : null;
             const overridePlanId = await window.financePlansService.getStudentPlan(studentId);
             const effectivePlanId = overridePlanId || classPlanId;
+            currentPlanIsStudentOverride = Boolean(overridePlanId);
             const plan = effectivePlanId ? (state.plans[effectivePlanId] || await window.financePlansService.getPlan(effectivePlanId)) : null;
             currentPlan = plan || null;
             currentPlanId = effectivePlanId || '';
@@ -2360,17 +2362,23 @@
       const fallbackByMonth = new Map((Array.isArray(currentPlan?.schedule) ? currentPlan.schedule : [])
         .map((row) => [monthFromRow(row), row])
         .filter(([month]) => month >= 1 && month <= 12));
-      const doubleMonths = Array.isArray(monthlyRule.doubleMonths) && monthlyRule.doubleMonths.length > 0
-        ? monthlyRule.doubleMonths.map(Number)
+      const hasSavedDoubleMonths = Object.prototype.hasOwnProperty.call(monthlyRule, 'doubleMonths');
+      const hasSavedExcludedMonths = Object.prototype.hasOwnProperty.call(monthlyRule, 'excludedMonths');
+      const doubleMonths = hasSavedDoubleMonths
+        ? (Array.isArray(monthlyRule.doubleMonths) ? monthlyRule.doubleMonths : []).map(Number)
         : Array.from(fallbackByMonth.entries())
           .filter(([, row]) => parseAmountInput(row?.amount) > inferredAmount)
           .map(([month]) => month);
-      const excludedMonths = Array.isArray(monthlyRule.excludedMonths) && monthlyRule.excludedMonths.length > 0
-        ? monthlyRule.excludedMonths.map(Number)
+      const excludedMonths = hasSavedExcludedMonths
+        ? (Array.isArray(monthlyRule.excludedMonths) ? monthlyRule.excludedMonths : []).map(Number)
         : MONTHS.map((_, idx) => idx + 1)
           .filter((month) => !fallbackByMonth.has(month) || parseAmountInput(fallbackByMonth.get(month)?.amount) <= 0);
 
-      if (elPlanId) elPlanId.value = currentPlanId || 'monthly-50k-standard';
+      const basePlanId = currentPlanId || 'monthly-50k-standard';
+      const studentScopedPlanId = MP_STATE.attachTo === 'student' && MP_STATE.studentId && !currentPlanIsStudentOverride
+        ? `${basePlanId}-${String(MP_STATE.studentId).trim().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase()}`
+        : basePlanId;
+      if (elPlanId) elPlanId.value = studentScopedPlanId;
       if (elPlanName) elPlanName.value = currentPlan?.name || 'Monthly (50k) - Standard';
       if (elAmt) elAmt.value = inferredAmount;
       if (elFrom) elFrom.value = monthlyRule.dueDayStart || monthlyRule.fromDay || 1;

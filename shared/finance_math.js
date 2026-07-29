@@ -61,11 +61,13 @@
     const fallbackByMonth = new Map((Array.isArray(plan.schedule) ? plan.schedule : [])
       .map((row) => [monthFromRow(row), row])
       .filter(([month]) => month >= 1 && month <= 12));
-    const doubleMonths = Array.isArray(rule.doubleMonths) && rule.doubleMonths.length > 0
-      ? rule.doubleMonths.map(Number)
+    const hasRuleDoubles = Object.prototype.hasOwnProperty.call(rule, 'doubleMonths');
+    const hasRuleExcluded = Object.prototype.hasOwnProperty.call(rule, 'excludedMonths');
+    const doubleMonths = hasRuleDoubles
+      ? (Array.isArray(rule.doubleMonths) ? rule.doubleMonths : []).map(Number)
       : Array.from(fallbackByMonth.entries()).filter(([, row]) => Number(row?.amount || 0) > monthlyAmount).map(([month]) => month);
-    const excludedMonths = Array.isArray(rule.excludedMonths) && rule.excludedMonths.length > 0
-      ? rule.excludedMonths.map(Number)
+    const excludedMonths = hasRuleExcluded
+      ? (Array.isArray(rule.excludedMonths) ? rule.excludedMonths : []).map(Number)
       : monthLabels.map((_, idx) => idx + 1).filter((month) => !fallbackByMonth.has(month) || Number(fallbackByMonth.get(month)?.amount || 0) <= 0);
     const pad = (num) => String(num).padStart(2, '0');
     return monthLabels.flatMap((label, idx) => {

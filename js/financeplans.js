@@ -494,15 +494,15 @@ function buildMonthlyScheduleFromRule(plan = {}, fallbackRows = []) {
   const fallbackByMonth = new Map((Array.isArray(fallbackRows) ? fallbackRows : [])
     .map((row) => [monthFromRow(row), row])
     .filter(([month]) => month >= 1 && month <= 12));
-  const hasRuleDoubles = Array.isArray(rule.doubleMonths) && rule.doubleMonths.length > 0;
-  const hasRuleExcluded = Array.isArray(rule.excludedMonths) && rule.excludedMonths.length > 0;
+  const hasRuleDoubles = Object.prototype.hasOwnProperty.call(rule, 'doubleMonths');
+  const hasRuleExcluded = Object.prototype.hasOwnProperty.call(rule, 'excludedMonths');
   const doubleMonths = hasRuleDoubles
-    ? rule.doubleMonths.map(Number).filter(Number.isFinite)
+    ? (Array.isArray(rule.doubleMonths) ? rule.doubleMonths : []).map(Number).filter(Number.isFinite)
     : Array.from(fallbackByMonth.entries())
       .filter(([, row]) => coerceNumber(row?.amount, 0) > monthlyAmount)
       .map(([month]) => month);
   const excludedMonths = hasRuleExcluded
-    ? rule.excludedMonths.map(Number).filter(Number.isFinite)
+    ? (Array.isArray(rule.excludedMonths) ? rule.excludedMonths : []).map(Number).filter(Number.isFinite)
     : monthLabels.map((_, idx) => idx + 1)
       .filter((month) => !fallbackByMonth.has(month) || coerceNumber(fallbackByMonth.get(month)?.amount, 0) <= 0);
   const pad = (num) => String(num).padStart(2, '0');
