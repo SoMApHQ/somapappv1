@@ -849,8 +849,12 @@
   const looksLikeFirebaseKey = (value) => /^-[A-Za-z0-9_-]{10,}$/.test(String(value || '').trim());
 
   function getConfigStudentKey(record) {
+    const operations = Array.isArray(record?.modulePayload?.operations) ? record.modulePayload.operations : [];
+    const operationStudentKey = operations.map((operation) => String(operation?.path || '').match(/(?:studentOverrides\/20\d{2}|finance\/20\d{2}\/(?:studentFees|studentPlans|studentCustomSchedules))\/([^/]+)/)?.[1])
+      .find((value) => value);
     return record?.studentId ||
       record?.modulePayload?.studentId ||
+      operationStudentKey ||
       (looksLikeFirebaseKey(record?.studentAdm) ? record.studentAdm : '') ||
       (looksLikeFirebaseKey(record?.configTarget) ? record.configTarget : '') ||
       (looksLikeFirebaseKey(record?.studentName) ? record.studentName : '') ||

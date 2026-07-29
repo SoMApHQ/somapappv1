@@ -540,7 +540,19 @@
     const pathHistory = (y) => `financeConfigHistory/${y}`;
     const pathFinance = (y) => `finance/${y}`;
 
+    function resolveSchoolId() {
+      const school = window.SOMAP?.getSchool?.();
+      return school?.id || window.currentSchoolId || localStorage.getItem('somap_school') || '';
+    }
+    function scopedDataPath(path) {
+      const clean = String(path || '').replace(/^\/+/, '');
+      if (window.SOMAP && typeof window.SOMAP.P === 'function') return window.SOMAP.P(clean);
+      const schoolId = resolveSchoolId();
+      if (!schoolId || schoolId === 'socrates-school' || schoolId === 'default') return clean;
+      return `schools/${schoolId}/${clean}`;
+    }
     const reader = (path) => db.ref(path).once('value').then((snap) => snap.val());
+    const scopedReader = (path) => db.ref(scopedDataPath(path)).once('value').then((snap) => snap.val());
     const writer = (path, payload) => db.ref(path).set(payload);
     const updater = (path, payload) => db.ref(path).update(payload);
 
@@ -571,7 +583,9 @@
     }
     async function getStudentApprovalIdentity(studentId, year = state.year) {
       if (!studentId) return { id: '', name: '', adm: '', className: '' };
-      const student = await reader(`students/${studentId}`).catch(() => null) || {};
+      const student = await scopedReader(`students/${studentId}`).catch(() => null) ||
+        await reader(`students/${studentId}`).catch(() => null) ||
+        {};
       const name = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim();
       let className = student.classLevel || student.className || student.class || '';
       if (window.financePlansService?.resolveClassForYearSimple) {
@@ -2624,22 +2638,18 @@
           summaries.push(`apply to student ${MP_STATE.studentId}`, 'clear custom installment schedule');
         }
 
-        if (MP_STATE.attachTo === 'student' && MP_STATE.studentId) {
-          await applyConfigOperationsNow(operations);
-          toast('Monthly plan saved and applied to student.', 'success');
-        } else {
-          await queueFinanceConfigChange({
-            year,
-            action: 'monthly-plan:save',
-            target: MP_STATE.className || MP_STATE.studentId || planId,
-            className: MP_STATE.className || '',
-            studentId: MP_STATE.studentId || '',
-            studentAdm: MP_STATE.studentId || '',
-            summary: summaries.join('; '),
-            operations,
-            historyEntries
-          });
-        }
+        await queueFinanceConfigChange({
+          year,
+          action: MP_STATE.attachTo === 'student' ? 'student-monthly-plan:set' : 'monthly-plan:save',
+          target: MP_STATE.studentName || MP_STATE.className || MP_STATE.studentId || planId,
+          className: MP_STATE.className || '',
+          studentName: MP_STATE.studentName || '',
+          studentId: MP_STATE.studentId || '',
+          studentAdm: MP_STATE.studentId || '',
+          summary: summaries.join('; '),
+          operations,
+          historyEntries
+        });
         
         closeMonthlyPlanModal();
         
