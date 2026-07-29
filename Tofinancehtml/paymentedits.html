@@ -550,6 +550,16 @@
     function opUpdate(path, value) {
       return { op: 'update', path, value: value || {} };
     }
+    async function applyConfigOperationsNow(operations = []) {
+      for (const operation of operations) {
+        if (!operation || !operation.path) continue;
+        if (operation.op === 'update') {
+          await updater(operation.path, operation.value || {});
+        } else {
+          await writer(operation.path, operation.value === undefined ? null : operation.value);
+        }
+      }
+    }
     function historyEntry(year, category, id, action, before, after) {
       return { year: String(year), category, id, action, before: before ?? null, after: after ?? null };
     }
@@ -2393,7 +2403,10 @@
         : [];
 
       const basePlanId = currentPlanId || 'monthly-50k-standard';
-      const studentScopedPlanId = MP_STATE.attachTo === 'student' && MP_STATE.studentId && !currentPlanIsStudentOverride
+      const hasCurrentStudentMonthConfig = currentPlanIsStudentOverride &&
+        monthlyRule.selectionSource === 'student-month-config' &&
+        String(monthlyRule.studentId || '') === String(studentId || '');
+      const studentScopedPlanId = MP_STATE.attachTo === 'student' && MP_STATE.studentId && !hasCurrentStudentMonthConfig
         ? `${basePlanId}-${String(MP_STATE.studentId).trim().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase()}`
         : basePlanId;
       if (elPlanId) elPlanId.value = studentScopedPlanId;
@@ -2580,17 +2593,22 @@
           summaries.push(`apply to student ${MP_STATE.studentId}`, 'clear custom installment schedule');
         }
 
-        await queueFinanceConfigChange({
-          year,
-          action: 'monthly-plan:save',
-          target: MP_STATE.className || MP_STATE.studentId || planId,
-          className: MP_STATE.className || '',
-          studentId: MP_STATE.studentId || '',
-          studentAdm: MP_STATE.studentId || '',
-          summary: summaries.join('; '),
-          operations,
-          historyEntries
-        });
+        if (MP_STATE.attachTo === 'student' && MP_STATE.studentId) {
+          await applyConfigOperationsNow(operations);
+          toast('Monthly plan saved and applied to student.', 'success');
+        } else {
+          await queueFinanceConfigChange({
+            year,
+            action: 'monthly-plan:save',
+            target: MP_STATE.className || MP_STATE.studentId || planId,
+            className: MP_STATE.className || '',
+            studentId: MP_STATE.studentId || '',
+            studentAdm: MP_STATE.studentId || '',
+            summary: summaries.join('; '),
+            operations,
+            historyEntries
+          });
+        }
         
         closeMonthlyPlanModal();
         
