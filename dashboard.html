@@ -2055,6 +2055,57 @@
               </ul>
             </div>
             <div class="card mt-3">
+              <h5>Class Emails</h5>
+              <p class="text-sm text-slate-300">
+                Add Google emails that open a specific class after this school is selected.
+              </p>
+              <form id="class-email-form" class="mt-3">
+                <div class="row grid">
+                  <div class="col-md-4">
+                    <input
+                      type="email"
+                      class="form-control mb-2"
+                      id="class-email-input"
+                      placeholder="teacherclass@gmail.com"
+                      required
+                    />
+                  </div>
+                  <div class="col-md-4">
+                    <select class="form-select mb-2" id="class-email-class" required>
+                      <option value="">Choose class</option>
+                      <option>Baby Class</option>
+                      <option>Middle Class</option>
+                      <option>Pre-Unit</option>
+                      <option>Class 1</option>
+                      <option>Class 1 AB</option>
+                      <option>Class 2</option>
+                      <option>Class 2 AB</option>
+                      <option>Class 3</option>
+                      <option>Class 4</option>
+                      <option>Class 5</option>
+                      <option>Class 6</option>
+                      <option>Class 7</option>
+                    </select>
+                  </div>
+                  <div class="col-md-4">
+                    <input
+                      type="text"
+                      class="form-control mb-2"
+                      id="class-email-name"
+                      placeholder="Display name (optional)"
+                    />
+                  </div>
+                </div>
+                <button type="submit" class="btn quick-action-btn">
+                  Save Class Email
+                </button>
+                <span id="class-email-status" class="ms-2 text-sm text-slate-300"></span>
+              </form>
+              <div id="class-email-list" class="mt-3">
+                <p class="text-sm text-slate-400">Loading class emails...</p>
+              </div>
+            </div>
+            <div class="card mt-3">
               <h5>Transport Hub · Bwalo la Usafiri</h5>
               <p>
                 Vehicle management, payments, fuel, maintenance — all transport
@@ -2163,6 +2214,237 @@
       function schoolRef(subPath) {
         return db.ref(SOMAP.P(subPath));
       }
+
+      const CLASS_EMAIL_LOGIN_PATH = currentSchool?.id
+        ? `schools/${currentSchool.id}/classEmailLogins`
+        : null;
+
+      function safeEmailKey(email) {
+        return String(email || "").trim().toLowerCase().replace(/\./g, "_");
+      }
+
+      function escapeClassEmailHtml(value) {
+        return String(value || "").replace(/[&<>"']/g, (char) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        }[char]));
+      }
+
+      function getSchoolDisplayName() {
+        return (
+          currentSchool?.name ||
+          currentSchool?.schoolName ||
+          currentSchool?.shortName ||
+          currentSchool?.code ||
+          currentSchool?.id ||
+          "School"
+        );
+      }
+
+      async function resolveSchoolDisplayName() {
+        const cached = getSchoolDisplayName();
+        if (cached && cached !== currentSchool?.id) return cached;
+        if (!currentSchool?.id) return cached;
+        try {
+          const metaSnap = await db.ref(`schools/${currentSchool.id}/meta`).once("value");
+          const meta = metaSnap.val() || {};
+          return (
+            meta.name ||
+            meta.schoolName ||
+            meta.shortName ||
+            currentSchool.id
+          );
+        } catch (error) {
+          console.warn("Could not resolve school display name", error);
+          return cached;
+        }
+      }
+
+      function setClassEmailStatus(message, tone = "muted") {
+        const el = document.getElementById("class-email-status");
+        if (!el) return;
+        const colors = {
+          success: "#86efac",
+          error: "#fca5a5",
+          muted: "#cbd5e1",
+        };
+        el.textContent = message || "";
+        el.style.color = colors[tone] || colors.muted;
+      }
+
+      function renderClassEmailLogins(logins) {
+        const listEl = document.getElementById("class-email-list");
+        if (!listEl) return;
+        const entries = Object.entries(logins || {}).sort((a, b) => {
+          const classA = String(a[1]?.class || "");
+          const classB = String(b[1]?.class || "");
+          return classA.localeCompare(classB) || String(a[1]?.email || "").localeCompare(String(b[1]?.email || ""));
+        });
+        if (!entries.length) {
+          listEl.innerHTML = '<p class="text-sm text-slate-400">No class emails saved for this school yet.</p>';
+          return;
+        }
+        listEl.innerHTML = `
+          <div class="row grid">
+            ${entries.map(([key, item]) => {
+              const active = item?.active !== false;
+              return `
+                <div class="col-md-4 mb-2">
+                  <div class="card" style="background:rgba(15,23,42,0.72);border:1px solid rgba(148,163,184,0.22);">
+                    <h5 style="margin-bottom:0.35rem;">${escapeClassEmailHtml(item?.class || "Class")}</h5>
+                    <p class="text-sm text-slate-200" style="word-break:break-word;">${escapeClassEmailHtml(item?.email || key)}</p>
+                    <p class="text-xs ${active ? "text-emerald-300" : "text-rose-300"}">${active ? "Active" : "Disabled"}</p>
+                    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.75rem;">
+                      <button type="button" class="btn quick-action-btn" data-class-email-action="toggle" data-key="${escapeClassEmailHtml(key)}" data-active="${active ? "1" : "0"}">${active ? "Disable" : "Enable"}</button>
+                      <button type="button" class="btn quick-action-btn secondary" data-class-email-action="edit" data-key="${escapeClassEmailHtml(key)}">Edit</button>
+                      <button type="button" class="btn quick-action-btn secondary" data-class-email-action="remove" data-key="${escapeClassEmailHtml(key)}">Remove</button>
+                    </div>
+                  </div>
+                </div>
+              `;
+            }).join("")}
+          </div>
+        `;
+      }
+
+      async function loadClassEmailLogins() {
+        const listEl = document.getElementById("class-email-list");
+        if (!listEl || !CLASS_EMAIL_LOGIN_PATH) return;
+        listEl.innerHTML = '<p class="text-sm text-slate-400">Loading class emails...</p>';
+        try {
+          const snap = await db.ref(CLASS_EMAIL_LOGIN_PATH).once("value");
+          renderClassEmailLogins(snap.val() || {});
+        } catch (error) {
+          console.error("Failed to load class email logins", error);
+          listEl.innerHTML = '<p class="text-sm text-rose-300">Failed to load class emails.</p>';
+        }
+      }
+
+      async function saveClassEmailLogin(event) {
+        event.preventDefault();
+        if (!CLASS_EMAIL_LOGIN_PATH || !currentSchool?.id) return;
+        const emailEl = document.getElementById("class-email-input");
+        const classEl = document.getElementById("class-email-class");
+        const nameEl = document.getElementById("class-email-name");
+        const email = String(emailEl?.value || "").trim().toLowerCase();
+        const className = String(classEl?.value || "").trim();
+        const displayName = String(nameEl?.value || "").trim();
+        const key = safeEmailKey(email);
+        if (!email || !email.includes("@") || !className || !key) {
+          setClassEmailStatus("Enter a valid email and class.", "error");
+          return;
+        }
+
+        const now = Date.now();
+        const schoolName = await resolveSchoolDisplayName();
+        const profile = {
+          email,
+          displayName: displayName || email.split("@")[0],
+          role: "teacher",
+          class: className,
+          classLevel: className,
+          streamClass: className,
+          schoolId: currentSchool.id,
+          schoolName,
+          active: true,
+          updatedAt: now,
+          updatedBy: auth.currentUser?.email || "admin",
+        };
+        const schoolRecord = {
+          ...profile,
+          safeEmail: key,
+          createdAt: now,
+        };
+
+        setClassEmailStatus("Saving...", "muted");
+        try {
+          const userSnap = await db.ref(`users/${key}`).once("value");
+          const existingUser = userSnap.val() || null;
+          if (
+            existingUser &&
+            existingUser.role &&
+            String(existingUser.role).toLowerCase() !== "teacher"
+          ) {
+            setClassEmailStatus("That email already belongs to a non-teacher account.", "error");
+            return;
+          }
+          const existingSnap = await db.ref(`${CLASS_EMAIL_LOGIN_PATH}/${key}`).once("value");
+          if (existingSnap.exists()) {
+            schoolRecord.createdAt = existingSnap.val()?.createdAt || now;
+          }
+          await db.ref().update({
+            [`users/${key}`]: profile,
+            [`${CLASS_EMAIL_LOGIN_PATH}/${key}`]: schoolRecord,
+          });
+          emailEl.value = "";
+          classEl.value = "";
+          if (nameEl) nameEl.value = "";
+          setClassEmailStatus("Saved. This Google email can now open that class.", "success");
+          loadClassEmailLogins();
+        } catch (error) {
+          console.error("Failed to save class email login", error);
+          setClassEmailStatus(error?.message || "Failed to save class email.", "error");
+        }
+      }
+
+      async function handleClassEmailAction(event) {
+        const btn = event.target.closest("[data-class-email-action]");
+        if (!btn || !CLASS_EMAIL_LOGIN_PATH) return;
+        const key = btn.getAttribute("data-key");
+        const action = btn.getAttribute("data-class-email-action");
+        if (!key) return;
+
+        try {
+          const recordSnap = await db.ref(`${CLASS_EMAIL_LOGIN_PATH}/${key}`).once("value");
+          const record = recordSnap.val() || {};
+          if (action === "edit") {
+            const emailEl = document.getElementById("class-email-input");
+            const classEl = document.getElementById("class-email-class");
+            const nameEl = document.getElementById("class-email-name");
+            if (emailEl) emailEl.value = record.email || "";
+            if (classEl) classEl.value = record.class || "";
+            if (nameEl) nameEl.value = record.displayName || "";
+            setClassEmailStatus("Edit the fields, then save.", "muted");
+            return;
+          }
+
+          if (action === "toggle") {
+            const nextActive = btn.getAttribute("data-active") !== "1";
+            await db.ref().update({
+              [`users/${key}/active`]: nextActive,
+              [`users/${key}/updatedAt`]: Date.now(),
+              [`${CLASS_EMAIL_LOGIN_PATH}/${key}/active`]: nextActive,
+              [`${CLASS_EMAIL_LOGIN_PATH}/${key}/updatedAt`]: Date.now(),
+            });
+            setClassEmailStatus(nextActive ? "Class email enabled." : "Class email disabled.", "success");
+            loadClassEmailLogins();
+            return;
+          }
+
+          if (action === "remove") {
+            const confirmed = window.confirm("Remove this class email from this school?");
+            if (!confirmed) return;
+            await db.ref().update({
+              [`users/${key}/active`]: false,
+              [`users/${key}/removedFromSchoolId`]: currentSchool.id,
+              [`users/${key}/updatedAt`]: Date.now(),
+              [`${CLASS_EMAIL_LOGIN_PATH}/${key}`]: null,
+            });
+            setClassEmailStatus("Removed from this school and disabled for login.", "success");
+            loadClassEmailLogins();
+          }
+        } catch (error) {
+          console.error("Class email action failed", error);
+          setClassEmailStatus(error?.message || "Class email action failed.", "error");
+        }
+      }
+
+      document.getElementById("class-email-form")?.addEventListener("submit", saveClassEmailLogin);
+      document.getElementById("class-email-list")?.addEventListener("click", handleClassEmailAction);
+      window.addEventListener("load", loadClassEmailLogins);
       async function loadVolunteerDashboard() {
         const year = getSelectedYear();
         try {
