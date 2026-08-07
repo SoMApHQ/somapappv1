@@ -17,6 +17,8 @@
   const YEAR_END = Math.max(2032, new Date().getFullYear() + 5);
   const YEARS = [];
   for (let year = YEAR_START; year <= YEAR_END; year += 1) YEARS.push(year);
+  const ROSTER_BASE_YEAR = 2025;
+  const CLASS_ORDER = ['Baby Class', 'Middle Class', 'Pre Unit Class', 'Class 1', 'Class 2', 'Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7'];
 
   const GRAD_EDIT_PASSWORD = 'REHEMam!';
 
@@ -97,10 +99,12 @@
     payments: {},
     paymentTotals: {},
     expenses: {},
+    vendors: {},
     certificates: {},
     galleries: {},
     audits: {},
     masterStudents: null,
+    rosterYear: null,
     totalPresentToday: null,
     filters: { search: '', classLevel: 'all' },
     watchers: [],
@@ -221,6 +225,141 @@
     return low;
   }
 
+  function normalizeClassName(className) {
+    const cls = toStr(className).trim().toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ');
+    if (!cls) return '';
+    if (cls.includes('baby')) return 'Baby Class';
+    if (cls.includes('middle')) return 'Middle Class';
+    if (cls.includes('pre unit') || cls.includes('preunit') || cls.includes('preparatory')) return 'Pre Unit Class';
+    const match = cls.match(/\b(class|grade|std|standard)\s*([1-7])\b/) || cls.match(/\b([1-7])\b/);
+    if (match) return `Class ${match[2] || match[1]}`;
+    if (cls === 'graduated') return 'GRADUATED';
+    if (cls === 'pre admission' || cls === 'pre-admission') return 'PRE-ADMISSION';
+    return toStr(className).trim();
+  }
+
+  function shiftClassForYear(baseClass, deltaYears) {
+    const normalized = normalizeClassName(baseClass);
+    const index = CLASS_ORDER.findIndex((item) => item.toLowerCase() === normalized.toLowerCase());
+    if (index < 0) return normalized || '';
+    const nextIndex = index + Number(deltaYears || 0);
+    if (nextIndex < 0) return 'PRE-ADMISSION';
+    if (nextIndex >= CLASS_ORDER.length) return 'GRADUATED';
+    return CLASS_ORDER[nextIndex];
+  }
+
+  function looksDeleted(student) {
+    const status = toStr(student?.status).trim().toLowerCase();
+    return Boolean(
+      student?.deleted === true ||
+      student?.isDeleted === true ||
+      student?.archived === true ||
+      student?.isArchived === true ||
+      student?.removed === true ||
+      student?.isRemoved === true ||
+      student?.active === false ||
+      ['deleted', 'archived', 'removed', 'shifted', 'graduated'].includes(status)
+    );
+  }
+
+  function toTimestampMs(value) {
+    if (value == null || value === '') return null;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      if (value > 1e12) return value;
+      if (value > 1e9) return value * 1000;
+      return value;
+    }
+    const text = toStr(value).trim();
+    if (/^\d{10,13}$/.test(text)) {
+      const numeric = Number(text);
+      return numeric > 1e12 ? numeric : numeric * 1000;
+    }
+    const parsed = Date.parse(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function getRegistrationYear(student) {
+    const explicit = Number(student?.academicYear || student?.admissionYear || student?.admYear || student?.year);
+    if (Number.isFinite(explicit) && explicit > 1900) return explicit;
+    const ms = toTimestampMs(
+      student?.timestamp ||
+      student?.createdAt ||
+      student?.registeredAt ||
+      student?.regTimestamp ||
+      student?.dateRegistered ||
+      student?.dateOfRegistration
+    );
+    if (!ms) return null;
+    const year = new Date(ms).getFullYear();
+    return Number.isFinite(year) ? year : null;
+  }
+
+  function belongsToYear(student, year) {
+    const selectedYear = Number(year);
+    if (!Number.isFinite(selectedYear)) return false;
+    const regYear = getRegistrationYear(student);
+    if (!regYear) return true;
+    return regYear >= Math.min(YEAR_START, ROSTER_BASE_YEAR) && regYear <= selectedYear;
+  }
+
+  function isCompleteMasterStudent(student) {
+    if (!student || typeof student !== 'object') return false;
+    if (looksDeleted(student)) return false;
+    const admission = toStr(student.admissionNumber || student.pupilId || student.admNo || student.admissionNo).trim();
+    const first = toStr(student.firstName).trim();
+    const last = toStr(student.lastName).trim();
+    const name = toStr([student.firstName, student.middleName, student.lastName].filter(Boolean).join(' ') || student.fullName || student.name).trim();
+    if (!admission || ['n/a', 'na'].includes(admission.toLowerCase())) return false;
+    if ((!first || !last) && (!name || ['student', 'n/a', 'na'].includes(name.toLowerCase()))) return false;
+    return true;
+  }
+
+  async function readObjectAt(path) {
+    try {
+      const snap = await db().ref(path).once('value');
+      return snap.val() || {};
+    } catch (err) {
+      console.warn(`GraduationSuite read failed: ${path}`, err?.message || err);
+      return {};
+    }
+  }
+
+  async function readMergedObject(paths) {
+    const unique = Array.from(new Set(paths.filter(Boolean)));
+    const parts = await Promise.all(unique.map(readObjectAt));
+    return Object.assign({}, ...parts);
+  }
+
+  function schoolPath(subPath) {
+    if (window.SOMAP?.P) return window.SOMAP.P(subPath);
+    const schoolId = window.currentSchoolId || localStorage.getItem('schoolId');
+    if (schoolId && schoolId !== 'socrates' && schoolId !== 'socrates-school') return `schools/${schoolId}/${subPath}`;
+    return '';
+  }
+
+  async function fetchYearEnrollments(year) {
+    const scoped = schoolPath(`enrollments/${year}`);
+    const scopedYear = schoolPath(`years/${year}/enrollments`);
+    return readMergedObject([
+      `enrollments/${year}`,
+      `years/${year}/enrollments`,
+      `schools/socrates-school/enrollments/${year}`,
+      `schools/socrates-school/years/${year}/enrollments`,
+      scoped,
+      scopedYear,
+    ]);
+  }
+
+  function resolveClassForStudentYear(studentKey, student, year, enrollments) {
+    const override = enrollments?.[studentKey] || enrollments?.[sanitizeKey(student?.admissionNumber || student?.admissionNo || studentKey)] || null;
+    const overrideClass = override?.className || override?.classLevel || override?.class || '';
+    if (overrideClass) return normalizeClassName(overrideClass);
+    const baseClass = student?.classLevel || student?.className || student?.class || student?.grade || student?.level || '';
+    const regYear = getRegistrationYear(student);
+    if (!regYear) return normalizeClassName(baseClass);
+    return shiftClassForYear(baseClass, Number(year) - regYear);
+  }
+
   function isGraduand(className) {
     return computeExpectedFee(className) > Number(state.meta?.feeOthers || 10000);
   }
@@ -323,6 +462,10 @@
 
     const expenseForm = $('#expenseForm');
     if (expenseForm) expenseForm.addEventListener('submit', handleExpenseSubmit);
+    const sellerInput = document.querySelector('input[name="seller"]');
+    if (sellerInput) {
+      sellerInput.addEventListener('change', () => showVendorDetails(sellerInput.value));
+    }
 
     const galleryForm = $('#galleryForm');
     if (galleryForm) galleryForm.addEventListener('submit', handleGallerySubmit);
@@ -430,6 +573,31 @@
     });
   }
 
+  function vendorKeyFromSeller(seller) {
+    return sanitizeKey(toStr(seller).trim().toLowerCase());
+  }
+
+  async function upsertVendorFromExpense(expenseId, payload) {
+    const seller = toStr(payload.seller).trim();
+    if (!seller) return;
+    const key = vendorKeyFromSeller(seller);
+    const vendorPayload = {
+      seller,
+      sellerPhone: toStr(payload.sellerPhone).trim(),
+      lastItem: toStr(payload.item).trim(),
+      lastExpenseId: expenseId,
+      lastYear: state.currentYear,
+      lastTotal: Number(payload.total || 0),
+      lastUsedBy: state.user?.email || 'unknown',
+      lastUsedAt: firebase.database.ServerValue.TIMESTAMP,
+      updatedAt: firebase.database.ServerValue.TIMESTAMP,
+    };
+    const updates = {};
+    updates[`graduation/vendors/${key}`] = vendorPayload;
+    updates[`graduation/${state.currentYear}/vendors/${key}`] = vendorPayload;
+    await db().ref().update(updates);
+  }
+
   async function ensureYearReady(year) {
     const normalized = normalizeYear(year);
     state.currentYear = normalized;
@@ -459,7 +627,8 @@
     const ref = db().ref(`graduation/${year}/students`);
     const snapshot = await ref.once('value');
     const existing = snapshot.val() || {};
-    const master = await fetchMasterStudents();
+    const master = await fetchMasterStudents(true, year);
+    const rosterKeys = new Set(master.map((student) => sanitizeKey(student.admissionNumber || student.__key)).filter(Boolean));
 
     const updates = {};
     let addedCount = 0;
@@ -494,9 +663,17 @@
       ensure('parentName', student.parentName, true);
       ensure('parentEmail', student.parentEmail, true);
       ensure('photoUrl', student.photoUrl || '', true);
+      ensure('registrationYear', student.registrationYear || '', true);
+      ensure('rosterSyncedYear', Number(year), true);
 
-      if (upsert.expectedFee === undefined || upsert.expectedFee === null) {
+      const expectedForClass = computeExpectedFee(upsert.class);
+      if (upsert.expectedFee === undefined || upsert.expectedFee === null || !existing[adm] || existing[adm]?.autoExpectedFee === true) {
+        upsert.expectedFee = expectedForClass;
+        upsert.autoExpectedFee = true;
+        changed = true;
+      } else if (upsert.expectedFee !== expectedForClass && upsert.autoExpectedFee !== false) {
         upsert.expectedFee = computeExpectedFee(upsert.class);
+        upsert.autoExpectedFee = true;
         changed = true;
       }
 
@@ -505,12 +682,30 @@
         upsert.isGraduand = graduandFlag;
         changed = true;
       }
+      if (upsert.inactive) {
+        upsert.inactive = false;
+        upsert.inactiveReason = null;
+        changed = true;
+      }
 
       if (changed) {
         updates[adm] = upsert;
       }
       if (!existing[adm]) addedCount += 1;
     });
+
+    if (master.length) {
+      Object.entries(existing).forEach(([adm, student]) => {
+        if (rosterKeys.has(adm)) return;
+        if (student?.inactive === true) return;
+        updates[adm] = {
+          ...student,
+          inactive: true,
+          inactiveReason: 'Not in active student list for this year',
+          excludedFromReportsAt: firebase.database.ServerValue.TIMESTAMP,
+        };
+      });
+    }
 
     if (Object.keys(updates).length) {
       await ref.update(updates);
@@ -524,26 +719,30 @@
         action: 'sync:students',
         refType: 'students',
         at: firebase.database.ServerValue.TIMESTAMP,
-        after: { added: addedCount, total: Object.keys(state.students).length },
+        after: { added: addedCount, total: getValidStudents().length, activeRoster: rosterKeys.size },
       });
     }
 
     return state.students;
   }
 
-  async function fetchMasterStudents(force = false) {
-    if (state.masterStudents && !force) return state.masterStudents;
+  async function fetchMasterStudents(force = false, year = state.currentYear) {
+    if (state.masterStudents && state.rosterYear === Number(year) && !force) return state.masterStudents;
     
     // Attempt fetch with timeout/fallback
     let obj = {};
+    let enrollments = {};
     try {
-      const ref = db().ref('students');
       // 10s timeout promise race
-      const snap = await Promise.race([
-        ref.once('value'),
+      const [studentsObj, yearEnrollments] = await Promise.race([
+        Promise.all([
+          readMergedObject(['students', 'schools/socrates-school/students', schoolPath('students')]),
+          fetchYearEnrollments(year),
+        ]),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Students fetch timeout')), 10000))
       ]);
-      obj = snap.val() || {};
+      obj = studentsObj || {};
+      enrollments = yearEnrollments || {};
     } catch (err) {
       console.warn('Master student fetch failed/timed out:', err);
       showToast('Could not sync latest student roster (network/timeout). Using local cache if available.', 'warn');
@@ -557,23 +756,26 @@
       const entry = val || {};
       entry.__key = key;
       entry.admissionNumber = entry.admissionNumber || entry.pupilId || entry.admNo || sanitizeKey(key);
-      entry.classLevel = entry.classLevel || entry.class || entry.grade || entry.level || '';
+      entry.classLevel = resolveClassForStudentYear(key, entry, year, enrollments);
       entry.fullName = [entry.firstName, entry.middleName, entry.lastName].filter(Boolean).join(' ') || entry.name || 'Student';
       entry.parentPhone = extractPrimaryPhone(entry);
       entry.parentName = extractPrimaryName(entry);
       entry.parentEmail = extractPrimaryEmail(entry);
       entry.photoUrl = entry.photoUrl || entry.passportPhotoUrl || entry.photo || '';
+      entry.registrationYear = getRegistrationYear(entry);
       entry.isGraduand = isGraduand(entry.classLevel);
       return entry;
     }).filter((entry) => {
       const hasName = toStr(entry.fullName).trim() && toStr(entry.fullName).trim().toLowerCase() !== 'student';
       const hasClass = toStr(entry.classLevel).trim();
-      return entry.admissionNumber && hasName && hasClass;
+      const className = normalizeClassName(entry.classLevel).toUpperCase();
+      return entry.admissionNumber && hasName && hasClass && isCompleteMasterStudent(entry) && belongsToYear(entry, year) && className !== 'GRADUATED' && className !== 'PRE-ADMISSION';
     });
     
     if (list.length) {
       list.sort((a, b) => a.fullName.localeCompare(b.fullName, 'en'));
       state.masterStudents = list;
+      state.rosterYear = Number(year);
     }
     return list;
   }
@@ -669,6 +871,7 @@
     });
     listen(`graduation/${year}/students`, (students) => {
       state.students = students;
+      populateClassFilter();
       populateStudentSelect();
       renderStudentTable();
       renderDashboardSummary();
@@ -692,6 +895,10 @@
       listen(`graduation/${year}/expenses`, (expenses) => {
         state.expenses = expenses;
         renderExpensesTable();
+      });
+      listen('graduation/vendors', (vendors) => {
+        state.vendors = vendors;
+        renderVendorDirectory();
       });
     }
     const needsAudits = document.querySelector('#auditBody');
@@ -733,6 +940,7 @@
     const updates = {};
     const year = state.currentYear;
     Object.entries(state.students || {}).forEach(([key, student]) => {
+      if (student?.inactive === true || isGhostStudent(student)) return;
       const paid = getPaidTotal(student);
       const expected = getExpectedFee(student);
       const balance = Math.max(0, expected - paid);
@@ -817,7 +1025,12 @@
   }
 
   function getValidStudents() {
-    return Object.values(state.students || {});
+    return Object.values(state.students || {}).filter((student) => {
+      if (!student || student.inactive === true) return false;
+      if (isGhostStudent(student)) return false;
+      const className = normalizeClassName(student.class || student.classLevel || student.className).toUpperCase();
+      return className !== 'GRADUATED' && className !== 'PRE-ADMISSION';
+    });
   }
 
   function getExpectedFee(student) {
@@ -856,7 +1069,7 @@
 
     const search = toStr(state.filters.search).toLowerCase();
     const classFilter = state.filters.classLevel;
-    const rows = Object.values(state.students || {});
+    const rows = getValidStudents();
     const filtered = rows.filter((student) => {
       const haystack = `${toStr(student.name)} ${toStr(student.admissionNo)} ${toStr(student.parentPhone)}`.toLowerCase();
       const matchesSearch = !search || haystack.includes(search);
@@ -929,6 +1142,21 @@
     }).join('');
   }
 
+  function populateClassFilter() {
+    const select = $('#classFilter');
+    if (!select) return;
+    const previous = select.value || 'all';
+    const classes = Array.from(new Set(getValidStudents().map((student) => toStr(student.class).trim()).filter(Boolean)))
+      .sort((a, b) => {
+        const ai = CLASS_ORDER.findIndex((item) => item.toLowerCase() === normalizeClassName(a).toLowerCase());
+        const bi = CLASS_ORDER.findIndex((item) => item.toLowerCase() === normalizeClassName(b).toLowerCase());
+        return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi) || a.localeCompare(b, 'en');
+      });
+    select.innerHTML = `<option value="all">All Classes</option>${classes.map((className) => `<option value="${className}">${className}</option>`).join('')}`;
+    select.value = classes.includes(previous) ? previous : 'all';
+    state.filters.classLevel = select.value;
+  }
+
   function populateStudentSelect() {
     const select = $('#paymentStudent');
     if (!select) return;
@@ -976,6 +1204,7 @@
           <td colspan="7" class="py-8 text-center text-slate-500">No expenses recorded yet. Attach proof for every outflow.</td>
         </tr>`;
       renderExpenseTotals();
+      renderVendorDirectory();
       return;
     }
     rows.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
@@ -990,7 +1219,12 @@
       return `
         <tr>
           <td>${toStr(expense.item)}</td>
-          <td>${toStr(expense.seller) || '--'}<div class="text-xs text-slate-400">${toStr(expense.sellerPhone) || ''}</div></td>
+          <td>
+            <button type="button" class="vendor-link text-left" data-vendor="${sanitizeKey(toStr(expense.seller).toLowerCase())}">
+              <span class="font-semibold">${toStr(expense.seller) || '--'}</span>
+              <span class="block text-xs text-slate-400">${toStr(expense.sellerPhone) || ''}</span>
+            </button>
+          </td>
           <td>${Number(expense.quantity || 0).toLocaleString('en-US')}</td>
           <td>${formatCurrency(expense.priceEach)}</td>
           <td>${formatCurrency(total)}</td>
@@ -999,13 +1233,14 @@
         </tr>`;
     }).join('');
     renderExpenseTotals();
+    renderVendorDirectory();
   }
 
   function renderExpenseTotals() {
     const expenses = Object.values(state.expenses || {});
     const total = expenses.reduce((sum, expense) => sum + Number(expense.total || (Number(expense.priceEach || 0) * Number(expense.quantity || 0))), 0);
     const count = expenses.length;
-    const collectedFromStudents = Object.values(state.students || {}).reduce((sum, student) => sum + getPaidTotal(student), 0);
+    const collectedFromStudents = getValidStudents().reduce((sum, student) => sum + getPaidTotal(student), 0);
     const collectedFromPayments = Object.values(state.payments || {}).reduce((sum, payment) => sum + toNumberSafe(payment.amount || 0), 0);
     const collected = Math.max(collectedFromStudents, collectedFromPayments, 0);
     const balance = collected - total;
@@ -1019,6 +1254,78 @@
     if (balanceNode) {
       balanceNode.classList.toggle('negative', balance < 0);
       balanceNode.classList.toggle('positive', balance >= 0);
+    }
+  }
+
+  function buildVendorStats() {
+    const vendors = { ...(state.vendors || {}) };
+    Object.values(state.expenses || {}).forEach((expense) => {
+      const seller = toStr(expense.seller).trim();
+      if (!seller) return;
+      const key = sanitizeKey(seller.toLowerCase());
+      const total = Number(expense.total || (Number(expense.priceEach || 0) * Number(expense.quantity || 0)));
+      const current = vendors[key] || { seller };
+      vendors[key] = {
+        ...current,
+        seller: current.seller || seller,
+        sellerPhone: current.sellerPhone || expense.sellerPhone || '',
+        lastItem: expense.item || current.lastItem || '',
+        lastYear: expense.year || state.currentYear,
+        lastTotal: total || current.lastTotal || 0,
+        usageCount: Number(current.usageCount || 0),
+      };
+    });
+    return Object.entries(vendors)
+      .map(([key, value]) => ({ key, ...(value || {}) }))
+      .filter((vendor) => toStr(vendor.seller).trim())
+      .sort((a, b) => Number(b.lastUsedAt || b.updatedAt || 0) - Number(a.lastUsedAt || a.updatedAt || 0));
+  }
+
+  function renderVendorDirectory() {
+    const rows = buildVendorStats();
+    const datalist = $('#vendorOptions');
+    if (datalist) {
+      datalist.innerHTML = rows.map((vendor) => `<option value="${toStr(vendor.seller)}">${toStr(vendor.sellerPhone || vendor.contact || '')}</option>`).join('');
+    }
+
+    const body = $('#vendorDirectoryBody');
+    if (!body) return;
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="5" class="py-6 text-center text-emerald-800/60">No saved suppliers yet.</td></tr>`;
+      return;
+    }
+    body.innerHTML = rows.slice(0, 80).map((vendor) => {
+      const phone = toStr(vendor.sellerPhone || vendor.contact || '');
+      const lastUsed = vendor.lastUsedAt || vendor.updatedAt
+        ? new Date(Number(vendor.lastUsedAt || vendor.updatedAt)).toLocaleDateString('en-GB')
+        : '--';
+      return `
+        <tr>
+          <td><button type="button" class="vendor-link font-semibold text-left" data-vendor="${vendor.key}">${toStr(vendor.seller)}</button></td>
+          <td>${phone ? `<a class="proof-link" href="tel:${phone.replace(/\s+/g, '')}">${phone}</a>` : '--'}</td>
+          <td>${toStr(vendor.lastItem || '--')}</td>
+          <td>${toStr(vendor.lastYear || '--')}</td>
+          <td>${lastUsed}</td>
+        </tr>`;
+    }).join('');
+  }
+
+  function showVendorDetails(vendorKey) {
+    const key = sanitizeKey(toStr(vendorKey).toLowerCase());
+    const vendor = state.vendors?.[key] || buildVendorStats().find((item) => item.key === key);
+    if (!vendor) return;
+    const sellerInput = document.querySelector('input[name="seller"]');
+    const phoneInput = document.querySelector('input[name="sellerPhone"]');
+    if (sellerInput) sellerInput.value = vendor.seller || '';
+    if (phoneInput) phoneInput.value = vendor.sellerPhone || vendor.contact || '';
+    const details = $('#vendorDetails');
+    if (details) {
+      const phone = toStr(vendor.sellerPhone || vendor.contact || '');
+      details.innerHTML = `
+        <div class="text-xs uppercase tracking-[0.24em] text-emerald-800/60">Selected supplier</div>
+        <div class="mt-1 font-semibold text-emerald-950">${toStr(vendor.seller)}</div>
+        <div class="text-sm text-emerald-800">${phone ? `<a href="tel:${phone.replace(/\s+/g, '')}" class="proof-link">${phone}</a>` : 'No phone saved'}</div>
+        <div class="mt-2 text-xs text-emerald-800/70">Last item: ${toStr(vendor.lastItem || '--')} - Last used: ${toStr(vendor.lastYear || '--')}</div>`;
     }
   }
 
@@ -1047,7 +1354,7 @@
   function renderCertificatesTable() {
     const tbody = $('#certificatesBody');
     if (!tbody) return;
-    const rows = Object.values(state.students || {}).filter((student) => student.isGraduand);
+    const rows = getValidStudents().filter((student) => student.isGraduand);
     if (!rows.length) {
       tbody.innerHTML = `
         <tr>
@@ -1499,11 +1806,15 @@
       proofOriginalSize: proofFile.size || 0,
       proofUploadedSize: uploadFile.size || proofFile.size || 0,
       note,
+      year,
       recordedBy: state.user?.email || 'unknown',
       createdAt: firebase.database.ServerValue.TIMESTAMP,
     };
 
     return expenseRef.set(basePayload).then(() => {
+      upsertVendorFromExpense(expenseId, { ...basePayload, total }).catch((err) => {
+        console.warn('Vendor directory update failed', err?.message || err);
+      });
       uploadExpenseProof(uploadFile, `${expenseId}-${safeName}`, (progress) => {
         expenseRef.update({ proofProgress: progress }).catch(() => {});
       })
@@ -2687,7 +2998,7 @@
   }
 
   async function generateAllCertificates() {
-    const graduands = Object.values(state.students || {}).filter((s) => s.isGraduand);
+    const graduands = getValidStudents().filter((s) => s.isGraduand);
     if (!graduands.length) {
       showToast('No graduands available.', 'warn');
       return;
@@ -2739,6 +3050,7 @@
       .then(() => {
         attachYearListeners(normalized);
         renderAll();
+        refreshTodayAttendance();
       })
       .catch((err) => {
         console.error(err);
@@ -2844,6 +3156,12 @@
 
   // ---------- ACTION BUTTON DELEGATION ----------
   document.addEventListener('click', (event) => {
+    const vendorButton = event.target.closest('[data-vendor]');
+    if (vendorButton) {
+      showVendorDetails(vendorButton.dataset.vendor);
+      return;
+    }
+
     const button = event.target.closest('[data-action][data-adm]');
     if (!button) return;
     const action = button.dataset.action;
@@ -2902,6 +3220,7 @@
     if (now <= cutoff) return;
     const updates = {};
     Object.entries(state.students || {}).forEach(([key, student]) => {
+      if (student?.inactive === true || isGhostStudent(student)) return;
       if (hasOutstanding(student) && student.status !== 'debt') {
         updates[`graduation/${state.currentYear}/students/${key}/status`] = 'debt';
       }
