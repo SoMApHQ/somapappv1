@@ -294,12 +294,19 @@
     return Number.isFinite(year) ? year : null;
   }
 
-  function belongsToYear(student, year) {
+  function belongsToYear(student, year, hasYearOverride) {
     const selectedYear = Number(year);
     if (!Number.isFinite(selectedYear)) return false;
+    // An explicit per-year enrollment record is authoritative for that year.
+    if (hasYearOverride) return true;
     const regYear = getRegistrationYear(student);
-    if (!regYear) return true;
-    return regYear >= Math.min(YEAR_START, ROSTER_BASE_YEAR) && regYear <= selectedYear;
+    if (regYear) {
+      return regYear >= Math.min(YEAR_START, ROSTER_BASE_YEAR) && regYear <= selectedYear;
+    }
+    // No registration year on file and no enrollment override for this year:
+    // only trust this record for the live current year (matching studentlist.html).
+    // Never assume it belongs to a past or future year without evidence.
+    return selectedYear === new Date().getFullYear();
   }
 
   function isCompleteMasterStudent(student) {
@@ -350,8 +357,12 @@
     ]);
   }
 
+  function findEnrollmentOverride(studentKey, student, enrollments) {
+    return enrollments?.[studentKey] || enrollments?.[sanitizeKey(student?.admissionNumber || student?.admissionNo || studentKey)] || null;
+  }
+
   function resolveClassForStudentYear(studentKey, student, year, enrollments) {
-    const override = enrollments?.[studentKey] || enrollments?.[sanitizeKey(student?.admissionNumber || student?.admissionNo || studentKey)] || null;
+    const override = findEnrollmentOverride(studentKey, student, enrollments);
     const overrideClass = override?.className || override?.classLevel || override?.class || '';
     if (overrideClass) return normalizeClassName(overrideClass);
     const baseClass = student?.classLevel || student?.className || student?.class || student?.grade || student?.level || '';
@@ -764,12 +775,13 @@
       entry.photoUrl = entry.photoUrl || entry.passportPhotoUrl || entry.photo || '';
       entry.registrationYear = getRegistrationYear(entry);
       entry.isGraduand = isGraduand(entry.classLevel);
+      entry.__hasYearOverride = Boolean(findEnrollmentOverride(key, entry, enrollments));
       return entry;
     }).filter((entry) => {
       const hasName = toStr(entry.fullName).trim() && toStr(entry.fullName).trim().toLowerCase() !== 'student';
       const hasClass = toStr(entry.classLevel).trim();
       const className = normalizeClassName(entry.classLevel).toUpperCase();
-      return entry.admissionNumber && hasName && hasClass && isCompleteMasterStudent(entry) && belongsToYear(entry, year) && className !== 'GRADUATED' && className !== 'PRE-ADMISSION';
+      return entry.admissionNumber && hasName && hasClass && isCompleteMasterStudent(entry) && belongsToYear(entry, year, entry.__hasYearOverride) && className !== 'GRADUATED' && className !== 'PRE-ADMISSION';
     });
     
     if (list.length) {
@@ -1183,12 +1195,14 @@
     tbody.innerHTML = rows.map((payment) => {
       const student = state.students?.[sanitizeKey(payment.admissionNo)];
       const timestamp = new Date(Number(payment.createdAt || payment.timestamp || Date.now()));
+      const isAdjustment = toStr(payment.method).toUpperCase() === 'ADJUSTMENT' || toStr(payment.type).toUpperCase() === 'ADJUSTMENT';
+      const adjustTag = isAdjustment ? '<span class="adjust-pill" title="Manually edited by staff, not a parent payment"><i class="fas fa-pen"></i> Manual</span>' : '';
       return `
         <tr>
           <td>${student?.name || payment.admissionNo || '--'}</td>
           <td>${formatCurrency(payment.amount)}</td>
           <td>${timestamp.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
-          <td>${toStr(payment.method) || 'Cash'}${payment.note ? `<div class="text-xs text-slate-500">${toStr(payment.note)}</div>` : ''}</td>
+          <td>${toStr(payment.method) || 'Cash'}${adjustTag}${payment.note ? `<div class="text-xs text-slate-500">${toStr(payment.note)}</div>` : ''}</td>
           <td class="text-right text-xs text-slate-400 uppercase">${toStr(payment.recordedBy || '').split('@')[0]}</td>
         </tr>`;
     }).join('');
@@ -1346,9 +1360,30 @@
         <td>${new Date(Number(entry.at || Date.now())).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
         <td>${toStr(entry.action)}</td>
         <td>${toStr(entry.refType)}</td>
-        <td>${toStr(entry.actor || '').split('@')[0]}</td>
-        <td><code class="text-xs break-all">${JSON.stringify(entry.after || {}).slice(0, 120)}${JSON.stringify(entry.after || {}).length > 120 ? '...' : ''}</code></td>
+        <td><i class="fas fa-user-shield text-xs mr-1" style="color:var(--ink-faint);" title="Staff member who performed this action"></i>${toStr(entry.actor || '').split('@')[0]}</td>
+        <td>${describeAuditEntry(entry)}</td>
       </tr>`).join('');
+  }
+
+  function describeAuditEntry(entry) {
+    const after = entry.after || {};
+    const admissionNo = toStr(after.admissionNo || entry.refId || '');
+    const studentName = admissionNo ? toStr(state.students?.[sanitizeKey(admissionNo)]?.name || '') : '';
+    const who = studentName ? `${studentName} (${admissionNo})` : (admissionNo || '--');
+    if (entry.kind === 'paid_adjust') {
+      return `Staff manually set <strong>paid</strong> for ${who}: ${formatCurrency(entry.before)} &rarr; ${formatCurrency(entry.after)}`;
+    }
+    if (entry.kind === 'expected_edit') {
+      return `Staff manually set <strong>expected fee</strong> for ${who}: ${formatCurrency(entry.before)} &rarr; ${formatCurrency(entry.after)}`;
+    }
+    if (entry.action === 'payment:approve') {
+      return `Approved payment of ${formatCurrency(after.amount)} for ${who} (${toStr(after.method || 'Cash')})`;
+    }
+    if (entry.action === 'sync:students') {
+      return `Roster sync: ${toStr(after.added || 0)} student(s) added, ${toStr(after.total || 0)} total on roster`;
+    }
+    const json = JSON.stringify(after);
+    return `<code class="text-xs break-all">${json.slice(0, 120)}${json.length > 120 ? '...' : ''}</code>`;
   }
 
   function renderCertificatesTable() {
