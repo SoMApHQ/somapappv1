@@ -105,6 +105,7 @@
     audits: {},
     masterStudents: null,
     rosterYear: null,
+    activeRosterKeys: new Set(),
     totalPresentToday: null,
     filters: { search: '', classLevel: 'all' },
     watchers: [],
@@ -337,24 +338,36 @@
     return Object.assign({}, ...parts);
   }
 
+  function getCurrentSchoolId() {
+    const school = window.SOMAP?.getSchool?.();
+    const raw = school?.id || window.currentSchoolId || localStorage.getItem('schoolId') || 'socrates-school';
+    const id = toStr(raw).trim();
+    if (!id || id === 'socrates') return 'socrates-school';
+    return id;
+  }
+
   function schoolPath(subPath) {
-    if (window.SOMAP?.P) return window.SOMAP.P(subPath);
-    const schoolId = window.currentSchoolId || localStorage.getItem('schoolId');
-    if (schoolId && schoolId !== 'socrates' && schoolId !== 'socrates-school') return `schools/${schoolId}/${subPath}`;
-    return '';
+    return `schools/${getCurrentSchoolId()}/${subPath}`;
+  }
+
+  function gradPath(year, subPath = '') {
+    const suffix = subPath ? `/${subPath}` : '';
+    return schoolPath(`graduation/${year}${suffix}`);
+  }
+
+  function gradGlobalPath(subPath = '') {
+    return schoolPath(`graduation${subPath ? `/${subPath}` : ''}`);
   }
 
   async function fetchYearEnrollments(year) {
-    const scoped = schoolPath(`enrollments/${year}`);
-    const scopedYear = schoolPath(`years/${year}/enrollments`);
-    return readMergedObject([
-      `enrollments/${year}`,
-      `years/${year}/enrollments`,
-      `schools/socrates-school/enrollments/${year}`,
-      `schools/socrates-school/years/${year}/enrollments`,
-      scoped,
-      scopedYear,
-    ]);
+    const paths = [
+      schoolPath(`enrollments/${year}`),
+      schoolPath(`years/${year}/enrollments`),
+    ];
+    if (getCurrentSchoolId() === 'socrates-school') {
+      paths.unshift(`enrollments/${year}`, `years/${year}/enrollments`);
+    }
+    return readMergedObject(paths);
   }
 
   function findEnrollmentOverride(studentKey, student, enrollments) {
@@ -400,7 +413,7 @@
   }
 
   function getSchoolPrefix() {
-    return window.currentSchoolId ? `schools/${window.currentSchoolId}/` : '';
+    return `schools/${getCurrentSchoolId()}/`;
   }
 
   // ---------- PUBLIC API ----------
@@ -604,8 +617,8 @@
       updatedAt: firebase.database.ServerValue.TIMESTAMP,
     };
     const updates = {};
-    updates[`graduation/vendors/${key}`] = vendorPayload;
-    updates[`graduation/${state.currentYear}/vendors/${key}`] = vendorPayload;
+    updates[`${gradGlobalPath('vendors')}/${key}`] = vendorPayload;
+    updates[`${gradPath(state.currentYear, 'vendors')}/${key}`] = vendorPayload;
     await db().ref().update(updates);
   }
 
@@ -617,7 +630,7 @@
   }
 
   function ensureMeta(year) {
-    const ref = db().ref(`graduation/${year}/meta`);
+    const ref = db().ref(gradPath(year, 'meta'));
     return ref.once('value').then((snapshot) => {
       const meta = snapshot.val();
       state.meta = meta || {};
@@ -635,11 +648,12 @@
   }
 
   async function ensureStudents(year) {
-    const ref = db().ref(`graduation/${year}/students`);
+    const ref = db().ref(gradPath(year, 'students'));
     const snapshot = await ref.once('value');
     const existing = snapshot.val() || {};
     const master = await fetchMasterStudents(true, year);
     const rosterKeys = new Set(master.map((student) => sanitizeKey(student.admissionNumber || student.__key)).filter(Boolean));
+    state.activeRosterKeys = rosterKeys;
 
     const updates = {};
     let addedCount = 0;
@@ -725,7 +739,7 @@
     state.students = { ...existing, ...updates };
 
     if (addedCount) {
-      await db().ref(`graduation/${year}/audits`).push({
+      await db().ref(gradPath(year, 'audits')).push({
         actor: state.user?.email || 'system',
         action: 'sync:students',
         refType: 'students',
@@ -745,9 +759,11 @@
     let enrollments = {};
     try {
       // 10s timeout promise race
+      const studentPaths = [schoolPath('students')];
+      if (getCurrentSchoolId() === 'socrates-school') studentPaths.unshift('students');
       const [studentsObj, yearEnrollments] = await Promise.race([
         Promise.all([
-          readMergedObject(['students', 'schools/socrates-school/students', schoolPath('students')]),
+          readMergedObject(studentPaths),
           fetchYearEnrollments(year),
         ]),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Students fetch timeout')), 10000))
@@ -877,23 +893,23 @@
   // ---------- REALTIME LISTENERS PER YEAR ----------
   function attachYearListeners(year) {
     detachWatchers();
-    listen(`graduation/${year}/meta`, (meta) => {
+    state.paymentTotals = {};
+    listen(gradPath(year, 'meta'), (meta) => {
       state.meta = meta;
       renderDashboardSummary();
     });
-    listen(`graduation/${year}/students`, (students) => {
+    listen(gradPath(year, 'students'), (students) => {
       state.students = students;
       populateClassFilter();
       populateStudentSelect();
       renderStudentTable();
       renderDashboardSummary();
       renderExpenseTotals();
-      syncBalances();
     });
     const hasExports = document.querySelector('[data-export]');
     const needsPayments = document.querySelector('#paymentsBody') || document.querySelector('#paymentStudent') || document.querySelector('#paymentForm') || hasExports;
     if (needsPayments) {
-    listen(`graduation/${year}/payments`, (payments) => {
+    listen(gradPath(year, 'payments'), (payments) => {
       state.payments = payments;
       state.paymentTotals = buildPaymentTotals(payments);
       syncBalances();
@@ -904,32 +920,32 @@
     }
     const needsExpenses = document.querySelector('#expensesBody') || document.querySelector('#expenseForm');
     if (needsExpenses) {
-      listen(`graduation/${year}/expenses`, (expenses) => {
+      listen(gradPath(year, 'expenses'), (expenses) => {
         state.expenses = expenses;
         renderExpensesTable();
       });
-      listen('graduation/vendors', (vendors) => {
+      listen(gradGlobalPath('vendors'), (vendors) => {
         state.vendors = vendors;
         renderVendorDirectory();
       });
     }
     const needsAudits = document.querySelector('#auditBody');
     if (needsAudits) {
-      listen(`graduation/${year}/audits`, (audits) => {
+      listen(gradPath(year, 'audits'), (audits) => {
         state.audits = audits;
         renderAuditLog();
       });
     }
     const needsCertificates = document.querySelector('#certificatesBody');
     if (needsCertificates) {
-      listen(`graduation/${year}/certificates`, (certificates) => {
+      listen(gradPath(year, 'certificates'), (certificates) => {
         state.certificates = certificates;
         renderCertificatesTable();
       });
     }
     const needsGallery = document.querySelector('#galleryGrid') || document.querySelector('#galleryForm');
     if (needsGallery) {
-      listen(`graduation/${year}/galleries`, (galleries) => {
+      listen(gradPath(year, 'galleries'), (galleries) => {
         state.galleries = galleries;
         renderGallery();
       });
@@ -959,13 +975,13 @@
       const status = computeStatus(student);
 
       if (toNumberSafe(student.paid) !== paid) {
-        updates[`graduation/${year}/students/${key}/paid`] = paid;
+        updates[`${gradPath(year, 'students')}/${key}/paid`] = paid;
       }
       if (toNumberSafe(student.balance) !== balance) {
-        updates[`graduation/${year}/students/${key}/balance`] = balance;
+        updates[`${gradPath(year, 'students')}/${key}/balance`] = balance;
       }
       if (toStr(student.status) !== status) {
-        updates[`graduation/${year}/students/${key}/status`] = status;
+        updates[`${gradPath(year, 'students')}/${key}/status`] = status;
       }
     });
 
@@ -1037,12 +1053,15 @@
   }
 
   function getValidStudents() {
-    return Object.values(state.students || {}).filter((student) => {
+    const activeKeys = state.activeRosterKeys instanceof Set ? state.activeRosterKeys : new Set();
+    return Object.entries(state.students || {}).filter(([key, student]) => {
       if (!student || student.inactive === true) return false;
+      const adm = sanitizeKey(student.admissionNo || student.admissionNumber || key);
+      if (activeKeys.size && adm && !activeKeys.has(adm)) return false;
       if (isGhostStudent(student)) return false;
       const className = normalizeClassName(student.class || student.classLevel || student.className).toUpperCase();
       return className !== 'GRADUATED' && className !== 'PRE-ADMISSION';
-    });
+    }).map(([, student]) => student);
   }
 
   function getExpectedFee(student) {
@@ -1056,9 +1075,12 @@
     return toNumberSafe(fallback);
   }
 
-  function buildPaymentTotals(payments) {
+  function buildPaymentTotals(payments, year = state.currentYear) {
     const totals = {};
+    const targetYear = Number(year);
     Object.values(payments || {}).forEach((payment) => {
+      const explicitYear = Number(payment?.year || payment?.academicYear || payment?.graduationYear || payment?.modulePayload?.year);
+      if (Number.isFinite(explicitYear) && explicitYear > 1900 && explicitYear !== targetYear) return;
       const admRaw = payment?.admissionNo || payment?.admission || payment?.admNo || payment?.studentAdm;
       const adm = sanitizeKey(admRaw);
       if (!adm) return;
@@ -1069,9 +1091,7 @@
 
   function getPaidTotal(student) {
     const adm = sanitizeKey(student?.admissionNo || student?.__key);
-    const stored = toNumberSafe(student?.paid || 0);
-    const fromPayments = adm ? toNumberSafe(state.paymentTotals?.[adm] || 0) : 0;
-    return Math.max(0, stored, fromPayments);
+    return adm ? Math.max(0, toNumberSafe(state.paymentTotals?.[adm] || 0)) : 0;
   }
 
   function renderStudentTable() {
@@ -1638,7 +1658,10 @@
     });
 
     if (scope) {
-      updates[`students/${adm}`] = null;
+      updates[`${schoolPath('students')}/${adm}`] = null;
+      if (getCurrentSchoolId() === 'socrates-school') {
+        updates[`students/${adm}`] = null;
+      }
     }
 
     await db().ref().update(updates);
@@ -1804,7 +1827,7 @@
 
   async function recordExpense({ item, seller, sellerPhone, quantity, priceEach, note, proofFile }) {
     const year = state.currentYear;
-    const expenseRef = db().ref(`graduation/${year}/expenses`).push();
+    const expenseRef = db().ref(gradPath(year, 'expenses')).push();
     const expenseId = expenseRef.key;
     const total = Number(quantity || 0) * Number(priceEach || 0);
     let uploadFile = proofFile;
@@ -1823,7 +1846,7 @@
       }
     }
     const safeName = uploadFile.name || proofFile.name || 'proof.jpg';
-    const storagePath = `graduation/${year}/expenses/${expenseId}/${encodeURIComponent(safeName)}`;
+    const storagePath = `${gradPath(year, 'expenses')}/${expenseId}/${encodeURIComponent(safeName)}`;
 
     // First write the expense so it appears immediately, then upload proof in background.
     const basePayload = {
@@ -1855,7 +1878,7 @@
       })
         .then((url) => {
           expenseRef.update({ proofUrl: url, proofStatus: 'ready', proofProgress: 100 }).catch(() => {});
-          db().ref(`graduation/${year}/audits`).push({
+          db().ref(gradPath(year, 'audits')).push({
             actor: state.user?.email || 'unknown',
             action: 'expense:add',
             refType: 'expense',
@@ -2001,7 +2024,7 @@
 
   function uploadGalleryPhoto({ caption, file }) {
     const year = state.currentYear;
-    const entryRef = db().ref(`graduation/${year}/galleries`).push();
+    const entryRef = db().ref(gradPath(year, 'galleries')).push();
     const galleryId = entryRef.key;
     const pathHint = `${year}-${galleryId}-${file.name || 'photo'}`;
     let uploadFile = file;
@@ -2020,7 +2043,7 @@
           uploadedAt: firebase.database.ServerValue.TIMESTAMP,
           storagePath: `${CLD_GALLERY_FOLDER}/${pathHint}`,
         }).then(() => url))
-        .then((url) => db().ref(`graduation/${year}/audits`).push({
+        .then((url) => db().ref(gradPath(year, 'audits')).push({
           actor: state.user?.email || 'unknown',
           action: 'gallery:add',
           refType: 'gallery',
@@ -2038,7 +2061,7 @@
         uploadedAt: firebase.database.ServerValue.TIMESTAMP,
         storagePath: `${CLD_GALLERY_FOLDER}/${pathHint}`,
       }).then(() => url))
-      .then((url) => db().ref(`graduation/${year}/audits`).push({
+      .then((url) => db().ref(gradPath(year, 'audits')).push({
         actor: state.user?.email || 'unknown',
         action: 'gallery:add',
         refType: 'gallery',
@@ -2052,11 +2075,7 @@
   async function loadGradExpenses(year) {
     const SCHOOL = getSchoolPrefix();
     const snap = await db().ref(`${SCHOOL}graduation/${year}/expenses`).once('value');
-    let raw = snap.val() || {};
-    if (!Object.keys(raw).length && SCHOOL) {
-      const fallbackSnap = await db().ref(`graduation/${year}/expenses`).once('value');
-      raw = fallbackSnap.val() || {};
-    }
+    const raw = snap.val() || {};
     return Object.entries(raw).map(([id, e]) => {
       const qty = Number(e.quantity || 0);
       const priceEach = toNumberSafe(e.priceEach || 0);
@@ -2085,8 +2104,6 @@
     const paths = [
       `${SCHOOL}graduations/${yr}/donations`,
       `${SCHOOL}graduation/${yr}/donations`,
-      `graduations/${yr}/donations`,
-      `graduation/${yr}/donations`,
     ];
     let raw = null;
     for (const path of paths) {
@@ -2146,19 +2163,10 @@
       db().ref(`${SCHOOL}graduation/${year}/students`).once('value'),
       db().ref(`${SCHOOL}graduation/${year}/payments`).once('value'),
     ]);
-    let studentsRaw = studentsSnap.val() || {};
-    let paymentsRaw = paymentsSnap.val() || {};
+    const studentsRaw = studentsSnap.val() || {};
+    const paymentsRaw = paymentsSnap.val() || {};
 
-    if (!Object.keys(studentsRaw).length && SCHOOL) {
-      const [fallbackStudents, fallbackPayments] = await Promise.all([
-        db().ref(`graduation/${year}/students`).once('value'),
-        db().ref(`graduation/${year}/payments`).once('value'),
-      ]);
-      studentsRaw = fallbackStudents.val() || {};
-      paymentsRaw = fallbackPayments.val() || {};
-    }
-
-    const paymentTotals = buildPaymentTotals(paymentsRaw || {});
+    const paymentTotals = buildPaymentTotals(paymentsRaw || {}, year);
     const seen = new Set();
 
     return Object.entries(studentsRaw).map(([id, s]) => {
@@ -2166,7 +2174,7 @@
       if (adm && seen.has(adm)) return null;
       if (adm) seen.add(adm);
       const expected = toNumberSafe(s.expectedOverride ?? s.expectedFee ?? s.expected ?? computeExpectedFee(s.class));
-      const paid = Math.max(toNumberSafe(s.paid || 0), toNumberSafe(paymentTotals[id] || paymentTotals[adm] || 0));
+      const paid = toNumberSafe(paymentTotals[id] || paymentTotals[adm] || 0);
       const parent = s.parentPhone || s.primaryParentContact || s.guardianPhone || s.contact || s.parentContact || '-';
       const name = s.name || s.fullName || '-';
       const cls = s.class || s.className || '-';
@@ -2994,7 +3002,7 @@
     }
 
     const year = state.currentYear;
-    const base = `graduation/${year}/certificates/${admissionNo}`;
+    const base = gradPath(year, `certificates/${admissionNo}`);
     const pdfRef = storage().ref(`${base}.pdf`);
     const pngRef = storage().ref(`${base}.png`);
 
@@ -3015,14 +3023,14 @@
 
     const urlPdf = await pdfRef.getDownloadURL();
 
-    await db().ref(`graduation/${year}/certificates/${admissionNo}`).set({
+    await db().ref(gradPath(year, `certificates/${admissionNo}`)).set({
       urlPdf,
       urlPreview,
       generatedAt: firebase.database.ServerValue.TIMESTAMP,
       generatedBy: state.user?.email || 'unknown',
     });
 
-    await db().ref(`graduation/${year}/audits`).push({
+    await db().ref(gradPath(year, 'audits')).push({
       actor: state.user?.email || 'unknown',
       action: 'certificate:generate',
       refType: 'certificate',
@@ -3214,7 +3222,7 @@
       const student = state.students?.[admission];
       confirmDeleteFlow(admission, student?.name || admission);
     } else if (action === 'note') {
-      const ref = db().ref(`graduation/${state.currentYear}/students/${admission}`);
+      const ref = db().ref(gradPath(state.currentYear, `students/${admission}`));
       const student = state.students?.[admission];
       const before = toStr(student?.notes || '');
       const updated = window.prompt(`Notes for ${student?.name || admission}`, before);
@@ -3223,7 +3231,7 @@
         notes: updated,
         notesUpdatedBy: state.user?.email || 'unknown',
         notesUpdatedAt: firebase.database.ServerValue.TIMESTAMP,
-      }).then(() => db().ref(`graduation/${state.currentYear}/audits`).push({
+      }).then(() => db().ref(gradPath(state.currentYear, 'audits')).push({
         actor: state.user?.email || 'unknown',
         action: 'student:note',
         refType: 'student',
@@ -3257,7 +3265,7 @@
     Object.entries(state.students || {}).forEach(([key, student]) => {
       if (student?.inactive === true || isGhostStudent(student)) return;
       if (hasOutstanding(student) && student.status !== 'debt') {
-        updates[`graduation/${state.currentYear}/students/${key}/status`] = 'debt';
+        updates[`${gradPath(state.currentYear, 'students')}/${key}/status`] = 'debt';
       }
     });
     if (!Object.keys(updates).length) return;

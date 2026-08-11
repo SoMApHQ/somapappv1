@@ -1854,16 +1854,19 @@
     const paymentData = record.modulePayload?.payment;
     if (!year || !admission || !paymentData) throw new Error('Missing graduation payload.');
 
-    const ref = db.ref(`graduation/${year}/payments`).push();
+    const gradBase = scopedPath(`graduation/${year}`);
+    const ref = db.ref(`${gradBase}/payments`).push();
     const paymentId = ref.key;
     await ref.set({
       ...paymentData,
+      year,
+      graduationYear: year,
       receiptRefId: paymentId,
       approvedAt: firebase.database.ServerValue.TIMESTAMP,
       approvedBy: actorEmail(),
     });
 
-    await db.ref(`graduation/${year}/students/${admission}`).transaction((stu) => {
+    await db.ref(`${gradBase}/students/${admission}`).transaction((stu) => {
       if (!stu) return stu;
       const paid = Number(stu.paid || 0) + Number(paymentData.amount || 0);
       const expected = Number(stu.expectedFee || record.totalRequired || 0);
@@ -1891,10 +1894,10 @@
       recordedBy: actorEmail(),
       timestamp: firebase.database.ServerValue.TIMESTAMP,
       graduationYear: year,
-      _src: `graduation/${year}/payments/${paymentId}`,
+      _src: `${gradBase}/payments/${paymentId}`,
     });
 
-    await db.ref(`graduation/${year}/audits`).push({
+    await db.ref(`${gradBase}/audits`).push({
       actor: actorEmail(),
       action: 'payment:approve',
       refType: 'payment',
@@ -2332,20 +2335,33 @@
   }
 
   async function computeGraduationSummary() {
-    const year = new Date().getFullYear();
-    const [studentsSnap, metaSnap] = await Promise.all([
-      db.ref(`graduation/${year}/students`).once('value'),
-      db.ref(`graduation/${year}/meta`).once('value'),
+    const year = getContextYear();
+    const gradBase = scopedPath(`graduation/${year}`);
+    const [studentsSnap, metaSnap, paymentsSnap] = await Promise.all([
+      db.ref(`${gradBase}/students`).once('value'),
+      db.ref(`${gradBase}/meta`).once('value'),
+      db.ref(`${gradBase}/payments`).once('value'),
     ]);
     const students = studentsSnap.val() || {};
     const meta = metaSnap.val() || {};
+    const paymentTotals = {};
+    Object.values(paymentsSnap.val() || {}).forEach((payment) => {
+      const admission = String(payment?.admissionNo || payment?.admission || payment?.admNo || payment?.studentAdm || '').replace(/[.#$/[\]]/g, '_');
+      if (!admission) return;
+      const paymentYear = Number(payment?.year || payment?.academicYear || payment?.graduationYear || payment?.modulePayload?.year);
+      if (Number.isFinite(paymentYear) && paymentYear > 1900 && String(paymentYear) !== String(year)) return;
+      paymentTotals[admission] = Number(paymentTotals[admission] || 0) + Number(payment.amount || 0);
+    });
     let required = 0;
     let approved = 0;
 
-    Object.values(students).forEach((student) => {
+    Object.entries(students).forEach(([key, student]) => {
+      const status = String(student?.status || '').trim().toLowerCase();
+      if (!student || student.inactive === true || student.deleted === true || student.isDeleted === true || ['deleted', 'archived', 'removed', 'shifted', 'graduated'].includes(status)) return;
       const expected = Number(student.expectedFee != null ? student.expectedFee : computeGraduationExpected(student.class, meta));
       required += expected;
-      approved += Number(student.paid || 0);
+      const admission = String(student.admissionNo || student.admissionNumber || key || '').replace(/[.#$/[\]]/g, '_');
+      approved += Number(paymentTotals[admission] || 0);
     });
 
     const balance = Math.max(0, required - approved - state.summary.graduation.pendingAmount);
