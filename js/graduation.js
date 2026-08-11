@@ -413,6 +413,10 @@
     return normalizeClassName(className).toLowerCase() === normalizeClassName(teacherClass).toLowerCase();
   }
 
+  function canRecordPayment() {
+    return state.access?.mode === 'admin' || state.access?.mode === 'teacher';
+  }
+
   async function resolveTeacherAccess(user) {
     const email = toStr(user?.email).trim().toLowerCase();
     if (!email) return null;
@@ -459,7 +463,7 @@
     });
     const paymentForm = $('#paymentForm');
     const paymentPanel = paymentForm?.closest('.glass, .panel, section, div');
-    if (paymentPanel) paymentPanel.style.display = teacherMode ? 'none' : '';
+    if (paymentPanel) paymentPanel.style.display = '';
     document.querySelectorAll('[data-export="expenses"], [data-export="audit"], #btnExpCSV, #btnExpPDF, #btnAuditCSV, #btnAuditPDF').forEach((node) => {
       node.style.display = teacherMode ? 'none' : '';
     });
@@ -1265,6 +1269,7 @@
       const id = sanitizeKey(student.admissionNo);
        const isGhost = isGhostStudent(student);
       const canEdit = !state.readOnly;
+      const canPay = canRecordPayment();
       const debtTag = status === 'debt' ? '<span class="debt-pill">DEBT</span>' : '';
       const badge = status === 'paid'
         ? 'status-badge paid'
@@ -1309,7 +1314,7 @@
               <button class="action-btn" data-action="pay" data-adm="${id}">Record Payment</button>
               <button class="action-btn secondary" data-action="note" data-adm="${id}">Note</button>
               <button class="action-btn danger" data-action="delete" data-adm="${id}">Delete</button>
-            ` : '<span class="text-xs text-slate-400">Class view</span>'}
+            ` : canPay ? `<button class="action-btn" data-action="pay" data-adm="${id}">Record Payment</button>` : '<span class="text-xs text-slate-400">Class view</span>'}
           </td>
         </tr>`;
     }).join('');
@@ -1853,8 +1858,8 @@
   // ---------- FORMS: PAYMENTS / EXPENSES / GALLERY ----------
   function handlePaymentSubmit(event) {
     event.preventDefault();
-    if (state.readOnly) {
-      showToast('Teacher view is read-only.', 'warn');
+    if (!canRecordPayment()) {
+      showToast('You do not have access to record graduation payments.', 'warn');
       return;
     }
     const form = event.currentTarget;
@@ -1892,6 +1897,9 @@
     const student = state.students?.[sanitizeKey(admissionNo)] || state.students?.[admissionNo];
     if (!student) {
       return Promise.reject(new Error('Student not found in graduation roster.'));
+    }
+    if (!classMatchesAccess(student.class || student.classLevel || student.className)) {
+      return Promise.reject(new Error('This student is outside your assigned class.'));
     }
     const expected = getExpectedFee(student);
     const paidBefore = getPaidTotal(student);
@@ -3370,8 +3378,12 @@
     if (!button) return;
     const action = button.dataset.action;
     const admission = button.dataset.adm;
-    if (state.readOnly && ['pay', 'delete', 'note', 'generate-cert'].includes(action)) {
+    if (state.readOnly && ['delete', 'note', 'generate-cert'].includes(action)) {
       showToast('Teacher view is read-only.', 'warn');
+      return;
+    }
+    if (state.readOnly && action === 'pay' && !canRecordPayment()) {
+      showToast('You do not have access to record graduation payments.', 'warn');
       return;
     }
 

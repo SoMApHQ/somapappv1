@@ -876,6 +876,9 @@
       <div title="Books" class="icon" data-action="books">
         <i class="fas fa-book"></i>
       </div>
+      <div title="Graduation" class="icon" data-action="graduation">
+        <i class="fas fa-award"></i>
+      </div>
       <div
         id="preform-icon"
         title="Preform One"
@@ -1647,6 +1650,16 @@
         return db.ref(SOMAP.P(subPath));
       }
 
+      function scopedSchoolPath(subPath) {
+        const sid = currentSchool?.id || localStorage.getItem("somap.currentSchoolId") || "socrates-school";
+        return `schools/${sid}/${String(subPath || "").replace(/^\/+/, "")}`;
+      }
+
+      function graduationRef(year, subPath = "") {
+        const suffix = subPath ? `/${String(subPath).replace(/^\/+/, "")}` : "";
+        return db.ref(scopedSchoolPath(`graduation/${year}${suffix}`));
+      }
+
       // Helpers
       const q = (s) => document.querySelector(s);
       const qa = (s) => Array.from(document.querySelectorAll(s));
@@ -1759,11 +1772,13 @@
         return (
           c.includes("preunit") ||
           c.includes("pre-unit") ||
+          c.includes("pre unit") ||
           c.includes("class 7") ||
           c.includes("std 7") ||
           c.includes("grade 7")
         );
       };
+      const computeGraduationExpected = (cls) => isGraduationClass(cls) ? 45000 : 10000;
 
       function getStudentDisplayName(student = currentStudent) {
         return `${safe(student?.firstName)} ${safe(student?.middleName || "")} ${safe(student?.lastName)}`
@@ -2129,7 +2144,16 @@
             window.open("societycashbook/societycashbook.html", "_blank");
             break;
           case "gallery":
-            openGalleryFull?.click();
+            graduationGalleryCard?.scrollIntoView({ behavior: "smooth", block: "start" });
+            loadGraduationGallery(getActiveYearString());
+            break;
+          case "graduation":
+            graduationCardEl?.scrollIntoView({ behavior: "smooth", block: "start" });
+            loadGraduationSummary(
+              currentStudent?.admissionNumber || currentStudent?.pupilId || currentStudentKey || "",
+              currentStudent?.classLevel || "",
+              getActiveYearString()
+            );
             break;
           case "referral":
             openReferralSummary();
@@ -4156,15 +4180,6 @@
           return;
         }
 
-        if (!isGraduationClass(classLevel)) {
-          graduationCardEl.classList.add("hidden");
-          gradStatusEl?.classList.add("hidden");
-          gradCertActionsEl.textContent = "";
-          gradCertMessageEl.textContent =
-            "Graduation fee is not required for this class.";
-          return;
-        }
-
         graduationCardEl.classList.remove("hidden");
         gradStatusEl?.classList.add("hidden");
         gradYearLabel.textContent = yearArg;
@@ -4175,13 +4190,21 @@
         gradCertActionsEl.textContent = "";
 
         try {
-          const snap = await schoolRef(
-            `graduation/${yearArg}/students/${admKey}`
-          ).once("value");
+          const [snap, paymentsSnap] = await Promise.all([
+            graduationRef(yearArg, `students/${admKey}`).once("value"),
+            graduationRef(yearArg, "payments").once("value"),
+          ]);
           const data = snap.val();
           if (data) {
-            const expected = Number(data.expectedFee || 0);
-            const paid = Number(data.paid || 0);
+            const expected = Number(data.expectedOverride ?? data.expectedFee ?? computeGraduationExpected(classLevel));
+            const payments = Object.values(paymentsSnap.val() || {});
+            const paid = payments.reduce((sum, payment) => {
+              const paymentAdm = sanitizeKey(payment?.admissionNo || payment?.admission || payment?.admNo || payment?.studentAdm || "");
+              const paymentYear = Number(payment?.year || payment?.academicYear || payment?.graduationYear || payment?.modulePayload?.year);
+              if (paymentAdm !== admKey) return sum;
+              if (Number.isFinite(paymentYear) && paymentYear > 1900 && String(paymentYear) !== String(yearArg)) return sum;
+              return sum + Number(payment.amount || 0);
+            }, 0);
             const balance = Math.max(0, expected - paid);
             gradExpectedEl.textContent = fmtTsh(expected);
             gradPaidEl.textContent = fmtTsh(paid);
@@ -4192,8 +4215,13 @@
                 ? "Balance remaining for graduation is highlighted below. Kindly clear it before November 7."
                 : "Thank you! Graduation contribution is fully cleared.";
           } else {
+            const fallbackExpected = computeGraduationExpected(classLevel);
+            gradExpectedEl.textContent = fmtTsh(fallbackExpected);
+            gradPaidEl.textContent = fmtTsh(0);
+            gradBalanceEl.textContent = fmtTsh(fallbackExpected);
+            updateGradBadge("unpaid");
             gradCertMessageEl.textContent =
-              "Graduation record not yet prepared. Please check with the class teacher.";
+              "Graduation contribution is prepared yearly. Please check with the class teacher if this amount looks wrong.";
           }
         } catch (err) {
           console.warn("Graduation summary load error", err);
@@ -4202,9 +4230,7 @@
         }
 
         try {
-          const certSnap = await schoolRef(
-            `graduation/${yearArg}/certificates/${admKey}`
-          ).once("value");
+          const certSnap = await graduationRef(yearArg, `certificates/${admKey}`).once("value");
           const cert = certSnap.val();
           gradCertActionsEl.textContent = "";
           if (cert && cert.urlPdf) {
@@ -4244,7 +4270,7 @@
         graduationGalleryLoaded = true;
         graduationGalleryYear = targetYear;
         try {
-          const snap = await schoolRef(`graduation/${targetYear}/galleries`)
+          const snap = await graduationRef(targetYear, "galleries")
             .limitToLast(12)
             .once("value");
           const all = snap.val() || {};
@@ -4757,7 +4783,7 @@
         window.open("marketing/index.html", "_blank")
       );
       openGalleryFull?.addEventListener("click", () =>
-        window.open("Tostaffhtml/gradgalleries.html", "_blank")
+        graduationGalleryCard?.scrollIntoView({ behavior: "smooth", block: "start" })
       );
 
       // Refresh payments
@@ -4854,6 +4880,14 @@
                 getActiveYearString()
               )}&class=${encodeURIComponent(currentStudent.classLevel || "")}`,
               "_blank"
+            );
+            break;
+          case "graduation":
+            graduationCardEl?.scrollIntoView({ behavior: "smooth", block: "start" });
+            loadGraduationSummary(
+              currentStudent?.admissionNumber || currentStudent?.pupilId || currentStudentKey || "",
+              currentStudent?.classLevel || "",
+              getActiveYearString()
             );
             break;
         }
