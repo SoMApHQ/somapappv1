@@ -109,6 +109,7 @@
     activeRosterLoaded: false,
     totalPresentToday: null,
     filters: { search: '', classLevel: 'all' },
+    access: { mode: 'none', teacherClass: '', teacherEmail: '' },
     watchers: [],
     galleryUploading: false,
   };
@@ -402,11 +403,74 @@
     return AUTHORIZED_EMAILS.has(email.toLowerCase());
   }
 
+  function safeEmailKey(email) {
+    return toStr(email).trim().toLowerCase().replace(/\./g, '_');
+  }
+
+  function classMatchesAccess(className) {
+    const teacherClass = toStr(state.access?.teacherClass).trim();
+    if (!teacherClass || state.access?.mode !== 'teacher') return true;
+    return normalizeClassName(className).toLowerCase() === normalizeClassName(teacherClass).toLowerCase();
+  }
+
+  async function resolveTeacherAccess(user) {
+    const email = toStr(user?.email).trim().toLowerCase();
+    if (!email) return null;
+    const key = safeEmailKey(email);
+    let profile = null;
+    try {
+      const snap = await db().ref(`users/${key}`).once('value');
+      profile = snap.val();
+    } catch (err) {
+      console.warn('Graduation teacher profile read failed', err?.message || err);
+    }
+    const sessionClass = toStr(sessionStorage.getItem('graduationTeacherClass') || sessionStorage.getItem('lockedClassAttendance')).trim();
+    const sessionEmail = toStr(sessionStorage.getItem('graduationTeacherEmail') || sessionStorage.getItem('lockedClassTeacher')).trim().toLowerCase();
+    const role = toStr(profile?.role || '').trim().toLowerCase();
+    const profileClass = toStr(profile?.class || profile?.classLevel || profile?.streamClass).trim();
+    const profileSchoolId = toStr(profile?.schoolId || profile?.school).trim();
+    const selectedSchoolId = getCurrentSchoolId();
+    const legacySocratesTeacher = selectedSchoolId === 'socrates-school' && !profileSchoolId;
+    const className = profileClass || (sessionEmail === email ? sessionClass : '');
+
+    if (profile) {
+      if (profile.active === false) return null;
+      if (role && role !== 'teacher') return null;
+      if (!legacySocratesTeacher && profileSchoolId && profileSchoolId !== selectedSchoolId) return null;
+    } else if (sessionEmail !== email) {
+      return null;
+    }
+    if (!className) return null;
+    return { mode: 'teacher', teacherClass: className, teacherEmail: email };
+  }
+
   function showAuthGate(allowed) {
     const gate = $('#authGate');
     const shell = $('#appShell');
     if (gate) gate.style.display = allowed ? 'none' : 'flex';
     if (shell) shell.style.display = allowed ? 'block' : 'none';
+  }
+
+  function applyAccessUi() {
+    const teacherMode = state.access?.mode === 'teacher';
+    document.body.classList.toggle('teacher-grad-view', teacherMode);
+    document.querySelectorAll('[data-link="expenses"], [data-link="certificates"], [data-link="galleries"]').forEach((node) => {
+      node.style.display = teacherMode ? 'none' : '';
+    });
+    const paymentForm = $('#paymentForm');
+    const paymentPanel = paymentForm?.closest('.glass, .panel, section, div');
+    if (paymentPanel) paymentPanel.style.display = teacherMode ? 'none' : '';
+    document.querySelectorAll('[data-export="expenses"], [data-export="audit"], #btnExpCSV, #btnExpPDF, #btnAuditCSV, #btnAuditPDF').forEach((node) => {
+      node.style.display = teacherMode ? 'none' : '';
+    });
+    const auditPanel = $('#auditBody')?.closest('section, .glass, .panel');
+    if (auditPanel) auditPanel.style.display = teacherMode ? 'none' : '';
+    document.querySelectorAll('button[onclick="cleanGhosts()"], button[onclick="clearDeleteMode()"]').forEach((node) => {
+      node.style.display = teacherMode ? 'none' : '';
+    });
+    const teacherClass = toStr(state.access?.teacherClass).trim();
+    const title = document.querySelector('.hero h1');
+    if (title) title.textContent = teacherMode && teacherClass ? `Graduation Control Center - ${teacherClass}` : 'Graduation Control Center';
   }
 
   function getSelectedYear() {
@@ -506,6 +570,7 @@
 
     document.querySelectorAll('[data-link]').forEach((button) => {
       const target = button.dataset.link;
+      if (state.readOnly && ['expenses', 'certificates', 'galleries'].includes(target)) return;
       if (target === 'expenses') button.addEventListener('click', () => { window.location.href = 'gradexpenses.html'; });
       if (target === 'certificates') button.addEventListener('click', () => { window.location.href = 'gradcertificates.html'; });
       if (target === 'galleries') button.addEventListener('click', () => { window.location.href = 'gradgalleries.html'; });
@@ -530,21 +595,30 @@
   }
 
   // ---------- AUTH & YEAR BOOTSTRAP ----------
-  function handleAuthChange(user) {
+  async function handleAuthChange(user) {
     console.log('handleAuthChange:', user ? user.email : 'No user');
     state.user = user;
+    state.access = { mode: 'none', teacherClass: '', teacherEmail: '' };
     const allowed = isAuthorized(user?.email || '');
+    const teacherAccess = allowed ? null : await resolveTeacherAccess(user);
+    if (allowed) {
+      state.access = { mode: 'admin', teacherClass: '', teacherEmail: toStr(user?.email || '').toLowerCase() };
+    } else if (teacherAccess) {
+      state.access = teacherAccess;
+      state.filters.classLevel = teacherAccess.teacherClass;
+    }
     const allowGalleries = state.page === 'galleries';
-    const allowRead = allowed || allowGalleries;
+    const allowRead = allowed || Boolean(teacherAccess) || allowGalleries;
     state.readOnly = !allowed;
     showAuthGate(allowRead);
+    applyAccessUi();
     if (!user) return;
     if (!allowRead) {
-      showToast('Sign in with an authorised staff email to load graduation data.', 'error');
+      showToast('Sign in with a registered teacher or authorised staff email to load graduation data.', 'error');
       return;
     }
 
-    showToast('Loading graduation data...', 'info');
+    showToast(teacherAccess ? `Loading ${teacherAccess.teacherClass} graduation data...` : 'Loading graduation data...', 'info');
 
     ensureYearReady(state.currentYear)
       .then(() => {
@@ -1108,6 +1182,7 @@
       if (activeKeys.size && adm && !activeKeys.has(adm)) return false;
       if (isGhostStudent(student)) return false;
       const className = normalizeClassName(student.class || student.classLevel || student.className).toUpperCase();
+      if (!classMatchesAccess(className)) return false;
       return className !== 'GRADUATED' && className !== 'PRE-ADMISSION';
     }).map(([, student]) => student);
   }
@@ -1146,7 +1221,9 @@
       const explicitYear = Number(payment?.year || payment?.academicYear || payment?.graduationYear || payment?.modulePayload?.year);
       if (Number.isFinite(explicitYear) && explicitYear > 1900 && explicitYear !== Number(state.currentYear)) return false;
       const adm = sanitizeKey(payment?.admissionNo || payment?.admission || payment?.admNo || payment?.studentAdm);
-      return adm && activeKeys.has(adm);
+      if (!adm || !activeKeys.has(adm)) return false;
+      const student = state.students?.[adm];
+      return !student || classMatchesAccess(student.class || student.classLevel || student.className);
     });
   }
 
@@ -1187,6 +1264,7 @@
       const paid = getPaidTotal(student);
       const id = sanitizeKey(student.admissionNo);
        const isGhost = isGhostStudent(student);
+      const canEdit = !state.readOnly;
       const debtTag = status === 'debt' ? '<span class="debt-pill">DEBT</span>' : '';
       const badge = status === 'paid'
         ? 'status-badge paid'
@@ -1212,11 +1290,11 @@
           <td>${toStr(student.class) || '--'}</td>
           <td class="text-right">
             <span data-col="expected" data-id="${id}" data-val="${expected}">${formatCurrency(expected)}</span>
-            <button class="btn-xs ml-2" data-edit="expected" data-id="${id}">Edit</button>
+            ${canEdit ? `<button class="btn-xs ml-2" data-edit="expected" data-id="${id}">Edit</button>` : ''}
           </td>
           <td class="text-right ${paid >= expected ? 'text-emerald-600 font-semibold' : ''}">
             <span data-col="paid" data-id="${id}" data-val="${paid}">${formatCurrency(paid)}</span>
-            <button class="btn-xs ml-2" data-edit="paid" data-id="${id}">Edit</button>
+            ${canEdit ? `<button class="btn-xs ml-2" data-edit="paid" data-id="${id}">Edit</button>` : ''}
           </td>
           <td class="text-right">
             <span data-col="balance" data-id="${id}" data-val="${balance}">${formatCurrency(balance)}</span>
@@ -1227,9 +1305,11 @@
             <div class="text-xs text-slate-400">${toStr(student.parentName) || ''}</div>
           </td>
           <td class="text-right">
-            <button class="action-btn" data-action="pay" data-adm="${id}">Record Payment</button>
-            <button class="action-btn secondary" data-action="note" data-adm="${id}">Note</button>
-            <button class="action-btn danger" data-action="delete" data-adm="${id}">Delete</button>
+            ${canEdit ? `
+              <button class="action-btn" data-action="pay" data-adm="${id}">Record Payment</button>
+              <button class="action-btn secondary" data-action="note" data-adm="${id}">Note</button>
+              <button class="action-btn danger" data-action="delete" data-adm="${id}">Delete</button>
+            ` : '<span class="text-xs text-slate-400">Class view</span>'}
           </td>
         </tr>`;
     }).join('');
@@ -1246,6 +1326,14 @@
         return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi) || a.localeCompare(b, 'en');
       });
     select.innerHTML = `<option value="all">All Classes</option>${classes.map((className) => `<option value="${className}">${className}</option>`).join('')}`;
+    if (state.access?.mode === 'teacher') {
+      select.innerHTML = `<option value="${state.access.teacherClass}">${state.access.teacherClass}</option>`;
+      select.value = state.access.teacherClass;
+      select.disabled = true;
+      state.filters.classLevel = state.access.teacherClass;
+      return;
+    }
+    select.disabled = false;
     select.value = classes.includes(previous) ? previous : 'all';
     state.filters.classLevel = select.value;
   }
@@ -1547,6 +1635,10 @@
     document.addEventListener('click', (e) => {
       const btn = e.target.closest('[data-edit]');
       if (!btn) return;
+      if (state.readOnly) {
+        showToast('Teacher view is read-only.', 'warn');
+        return;
+      }
       const field = btn.getAttribute('data-edit');
       const id = btn.getAttribute('data-id');
       const span = document.querySelector(`[data-col="${field}"][data-id="${id}"]`);
@@ -1761,6 +1853,10 @@
   // ---------- FORMS: PAYMENTS / EXPENSES / GALLERY ----------
   function handlePaymentSubmit(event) {
     event.preventDefault();
+    if (state.readOnly) {
+      showToast('Teacher view is read-only.', 'warn');
+      return;
+    }
     const form = event.currentTarget;
     const data = new FormData(form);
     const admissionNo = sanitizeKey(data.get('admissionNo'));
@@ -3274,6 +3370,10 @@
     if (!button) return;
     const action = button.dataset.action;
     const admission = button.dataset.adm;
+    if (state.readOnly && ['pay', 'delete', 'note', 'generate-cert'].includes(action)) {
+      showToast('Teacher view is read-only.', 'warn');
+      return;
+    }
 
     if (action === 'pay') {
       const select = $('#paymentStudent');
