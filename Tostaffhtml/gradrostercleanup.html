@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SoMAp • Graduation Roster Cleanup</title>
+
+<script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+<script src="../firebase.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; }
+  .panel { background: #111827; border: 1px solid #1e293b; border-radius: 14px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid #1e293b; text-align: left; font-size: 0.82rem; }
+  th { text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.65rem; color: #94a3b8; }
+  tr:hover { background: rgba(56,189,248,0.06); }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:0.65rem; font-weight:700; }
+  .pill-stray { background: rgba(244,63,94,0.16); color:#fda4af; }
+  .pill-money { background: rgba(217,119,6,0.18); color:#fcd34d; }
+  code { background:#1e293b; padding:1px 5px; border-radius:5px; font-size:0.78rem; }
+</style>
+</head>
+<body class="p-4 md:p-10 max-w-6xl mx-auto space-y-6">
+
+  <div id="authGate" class="min-h-[60vh] flex items-center justify-center">
+    <div class="panel p-6 w-full max-w-sm space-y-3">
+      <h1 class="text-lg font-bold text-white">Restricted Maintenance Tool</h1>
+      <p class="text-xs text-slate-400">Authorised Socrates staff only. This finds and removes stray future-year class-promotion records caused by a fixed bug in the Promotion/Demotion tool (see academic-transfer.js).</p>
+      <form id="loginForm" class="space-y-2">
+        <input id="loginEmail" type="email" required placeholder="Email" class="w-full rounded-lg px-3 py-2 bg-slate-800 border border-slate-700 text-white text-sm">
+        <input id="loginPass" type="password" required placeholder="Password" class="w-full rounded-lg px-3 py-2 bg-slate-800 border border-slate-700 text-white text-sm">
+        <div id="loginError" class="text-xs text-rose-400 min-h-[1rem]"></div>
+        <button class="w-full py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-sm">Sign in</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="appShell" class="space-y-6" style="display:none;">
+    <header class="panel p-5">
+      <h1 class="text-xl font-bold text-white">Graduation Roster Cleanup</h1>
+      <p class="text-sm text-slate-400 mt-1">
+        Scans <code>enrollments/&#123;year&#125;</code> and <code>years/&#123;year&#125;/enrollments</code> (root and Socrates-scoped mirrors) for
+        promotion overrides that were duplicated into future years by a bug in the Promotion/Demotion tool — the exact defect that made
+        already-graduated students (e.g. Class 7 in 2025) keep reappearing as "Class 7" in 2026, 2027, 2028.
+      </p>
+      <p class="text-xs text-slate-500 mt-2">
+        Detection rule: within a group of enrollment records for the same student written by the <em>same</em> promotion action
+        (same internal <code>updatedAt</code> timestamp), any year after the earliest one that repeats that action's original class
+        is flagged as a duplicate. Records without a matching duplicate, or written by separate/legitimate actions, are left untouched.
+      </p>
+      <div class="flex flex-wrap gap-3 mt-4">
+        <button id="btnScan" class="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-sm font-semibold">Scan for stray records</button>
+        <span id="scanStatus" class="text-xs text-slate-400 self-center"></span>
+      </div>
+    </header>
+
+    <section id="strayPanel" class="panel p-5 space-y-3" style="display:none;">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h2 class="text-base font-bold text-white">Stray enrollment overrides <span id="strayCount" class="text-rose-400"></span></h2>
+        <button id="btnDelete" class="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-sm font-semibold">Delete selected</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table>
+          <thead><tr>
+            <th><input type="checkbox" id="checkAll" checked></th>
+            <th>Student</th>
+            <th>Admission No</th>
+            <th>Stray Year</th>
+            <th>Class Written</th>
+            <th>Legit Year (kept)</th>
+            <th>Mirror Paths</th>
+          </tr></thead>
+          <tbody id="strayBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="cleanEmpty" class="panel p-5" style="display:none;">
+      <p class="text-sm text-emerald-400">No stray promotion overrides found. Roster data looks clean.</p>
+    </section>
+
+    <section id="moneyPanel" class="panel p-5 space-y-3" style="display:none;">
+      <h2 class="text-base font-bold text-white">⚠ Needs manual financial review <span id="moneyCount" class="text-amber-400"></span></h2>
+      <p class="text-xs text-slate-400">
+        These students have graduation ledger entries and/or recorded payments sitting in a stray year. This tool will
+        <strong>not</strong> delete or move money records automatically — decide case-by-case whether a payment belongs in the
+        legitimate year instead, then edit it from the Graduation Control Center.
+      </p>
+      <div class="overflow-x-auto">
+        <table>
+          <thead><tr>
+            <th>Student</th>
+            <th>Admission No</th>
+            <th>Stray Year</th>
+            <th>Ledger Paid (stray yr)</th>
+            <th>Payments Logged (stray yr)</th>
+          </tr></thead>
+          <tbody id="moneyBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+<script>
+(function () {
+  const AUTHORIZED_EMAILS = new Set(['ssclass42023@gmail.com', 'socratesschool2020@gmail.com']);
+  const ADMIN_PASSWORD = 'REHEMam!';
+  const YEAR_START = 2023;
+  const YEAR_END = 2033;
+  const YEARS = [];
+  for (let y = YEAR_START; y <= YEAR_END; y++) YEARS.push(y);
+
+  const ENROLL_PATH_VARIANTS = (year) => ([
+    `enrollments/${year}`,
+    `years/${year}/enrollments`,
+    `schools/socrates-school/enrollments/${year}`,
+    `schools/socrates-school/years/${year}/enrollments`,
+  ]);
+
+  function sanitizeKey(raw) { return String(raw == null ? '' : raw).replace(/[.#$/[\]]/g, '_'); }
+
+  function db() { return firebase.database(); }
+  function auth() { return firebase.auth(); }
+
+  let strays = [];
+
+  function showApp(allowed) {
+    document.getElementById('authGate').style.display = allowed ? 'none' : 'flex';
+    document.getElementById('appShell').style.display = allowed ? 'block' : 'none';
+  }
+
+  auth().onAuthStateChanged((user) => {
+    const allowed = !!user && AUTHORIZED_EMAILS.has((user.email || '').toLowerCase());
+    showApp(allowed);
+  });
+
+  document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = document.getElementById('loginEmail').value.trim();
+    const pass = document.getElementById('loginPass').value;
+    const err = document.getElementById('loginError');
+    err.textContent = '';
+    try {
+      await auth().signInWithEmailAndPassword(email, pass);
+    } catch (e2) {
+      err.textContent = e2.message || 'Sign-in failed';
+    }
+  });
+
+  async function scan() {
+    const statusEl = document.getElementById('scanStatus');
+    statusEl.textContent = 'Scanning...';
+    document.getElementById('btnScan').disabled = true;
+
+    // key -> { [year]: { className, updatedAt, studentName, admissionNo, paths: [] } }
+    const byKey = {};
+
+    for (const year of YEARS) {
+      for (const path of ENROLL_PATH_VARIANTS(year)) {
+        let val = null;
+        try {
+          const snap = await db().ref(path).once('value');
+          val = snap.val();
+        } catch (err) {
+          console.warn('read failed', path, err);
+          continue;
+        }
+        if (!val) continue;
+        Object.entries(val).forEach(([key, rec]) => {
+          if (!rec || typeof rec !== 'object') return;
+          const className = rec.className || rec.classLevel || rec.class || '';
+          const updatedAt = rec.updatedAt || '';
+          const studentName = rec.studentName || '';
+          const admissionNo = rec.admissionNo || rec.admissionNumber || key;
+          byKey[key] = byKey[key] || {};
+          if (!byKey[key][year]) {
+            byKey[key][year] = { className, updatedAt, studentName, admissionNo, paths: [] };
+          }
+          byKey[key][year].paths.push(`${path}/${key}`);
+          // fill in name/admission if this variant has it and the first one didn't
+          if (!byKey[key][year].studentName && studentName) byKey[key][year].studentName = studentName;
+          if (!byKey[key][year].admissionNo && admissionNo) byKey[key][year].admissionNo = admissionNo;
+        });
+      }
+      statusEl.textContent = `Scanning... year ${year}`;
+    }
+
+    strays = [];
+    Object.entries(byKey).forEach(([key, byYear]) => {
+      const years = Object.keys(byYear).map(Number).sort((a, b) => a - b);
+      const byUpdatedAt = {};
+      years.forEach((y) => {
+        const ts = byYear[y].updatedAt;
+        if (!ts) return; // can't safely dedupe records without a batch timestamp
+        byUpdatedAt[ts] = byUpdatedAt[ts] || [];
+        byUpdatedAt[ts].push(y);
+      });
+      Object.values(byUpdatedAt).forEach((ys) => {
+        if (ys.length < 2) return;
+        ys.sort((a, b) => a - b);
+        const firstYear = ys[0];
+        const firstClass = byYear[firstYear].className;
+        ys.slice(1).forEach((y) => {
+          const rec = byYear[y];
+          if (rec.className === firstClass) {
+            strays.push({
+              key,
+              year: y,
+              legitYear: firstYear,
+              className: rec.className,
+              studentName: rec.studentName,
+              admissionNo: rec.admissionNo,
+              paths: rec.paths,
+            });
+          }
+        });
+      });
+    });
+
+    statusEl.textContent = `Scan complete. ${strays.length} stray record(s) found across ${YEARS.length} years.`;
+    document.getElementById('btnScan').disabled = false;
+    renderStrays();
+    await checkFinancialImpact();
+  }
+
+  function renderStrays() {
+    const panel = document.getElementById('strayPanel');
+    const empty = document.getElementById('cleanEmpty');
+    if (!strays.length) {
+      panel.style.display = 'none';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    panel.style.display = 'block';
+    document.getElementById('strayCount').textContent = `(${strays.length})`;
+    const body = document.getElementById('strayBody');
+    body.innerHTML = strays.map((s, i) => `
+      <tr>
+        <td><input type="checkbox" class="stray-check" data-idx="${i}" checked></td>
+        <td>${escapeHtml(s.studentName || s.key)}</td>
+        <td>${escapeHtml(s.admissionNo || '')}</td>
+        <td><span class="pill pill-stray">${s.year}</span></td>
+        <td>${escapeHtml(s.className)}</td>
+        <td>${s.legitYear}</td>
+        <td class="text-slate-500">${s.paths.length} path(s)</td>
+      </tr>
+    `).join('');
+  }
+
+  async function checkFinancialImpact() {
+    const hits = [];
+    for (const s of strays) {
+      const adm = sanitizeKey(s.admissionNo || s.key);
+      const prefixes = ['', 'schools/socrates-school/'];
+      for (const prefix of prefixes) {
+        try {
+          const [studentSnap, paymentsSnap] = await Promise.all([
+            db().ref(`${prefix}graduation/${s.year}/students/${adm}`).once('value'),
+            db().ref(`${prefix}graduation/${s.year}/payments`).once('value'),
+          ]);
+          const studentRec = studentSnap.val();
+          const paidLedger = studentRec ? Number(studentRec.paid || 0) : 0;
+          let paymentsTotal = 0;
+          let paymentsCount = 0;
+          const paymentsVal = paymentsSnap.val() || {};
+          Object.values(paymentsVal).forEach((p) => {
+            if (sanitizeKey(p?.admissionNo) === adm) {
+              paymentsTotal += Number(p?.amount || 0);
+              paymentsCount += 1;
+            }
+          });
+          if (studentRec || paymentsCount > 0) {
+            hits.push({ ...s, paidLedger, paymentsTotal, paymentsCount });
+          }
+        } catch (err) {
+          console.warn('financial check failed', s.year, prefix, err);
+        }
+      }
+    }
+    renderMoney(hits);
+  }
+
+  function renderMoney(hits) {
+    const panel = document.getElementById('moneyPanel');
+    if (!hits.length) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    document.getElementById('moneyCount').textContent = `(${hits.length})`;
+    const body = document.getElementById('moneyBody');
+    body.innerHTML = hits.map((h) => `
+      <tr>
+        <td>${escapeHtml(h.studentName || h.key)}</td>
+        <td>${escapeHtml(h.admissionNo || '')}</td>
+        <td><span class="pill pill-money">${h.year}</span></td>
+        <td>TSh ${h.paidLedger.toLocaleString('en-US')}</td>
+        <td>${h.paymentsCount} record(s), TSh ${h.paymentsTotal.toLocaleString('en-US')}</td>
+      </tr>
+    `).join('');
+  }
+
+  async function deleteSelected() {
+    const checks = Array.from(document.querySelectorAll('.stray-check:checked'));
+    if (!checks.length) { alert('Nothing selected.'); return; }
+    const pass = prompt('Enter admin password to confirm deletion:');
+    if (pass !== ADMIN_PASSWORD) { alert('Incorrect password. Nothing deleted.'); return; }
+
+    const updates = {};
+    checks.forEach((chk) => {
+      const idx = Number(chk.dataset.idx);
+      const s = strays[idx];
+      s.paths.forEach((p) => { updates[p] = null; });
+    });
+
+    if (!confirm(`This will permanently remove ${Object.keys(updates).length} stray enrollment path(s) for ${checks.length} record(s). Continue?`)) return;
+
+    try {
+      await db().ref().update(updates);
+      alert('Stray records deleted.');
+      await scan();
+    } catch (err) {
+      console.error(err);
+      alert('Delete failed: ' + (err?.message || err));
+    }
+  }
+
+  function escapeHtml(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  document.getElementById('btnScan').addEventListener('click', scan);
+  document.getElementById('btnDelete').addEventListener('click', deleteSelected);
+  document.addEventListener('change', (e) => {
+    if (e.target && e.target.id === 'checkAll') {
+      document.querySelectorAll('.stray-check').forEach((c) => { c.checked = e.target.checked; });
+    }
+  });
+})();
+</script>
+</body>
+</html>

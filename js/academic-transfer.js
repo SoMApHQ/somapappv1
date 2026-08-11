@@ -329,8 +329,10 @@
       for (let y = 0; y <= 3; y++) {
         const targetYear = String(baseYear + y);
         const j = idx >= 0 ? idx + y : -1;
-        const futureClass = j >= 0 && j < CLASS_ORDER.length ? CLASS_ORDER[j] : payload.targetClass;
-        if (futureClass === 'GRADUATED') break;
+        // Once the shift pushes the student past Class 7, stop writing overrides —
+        // they graduate out and must not be re-stamped into future years.
+        if (idx >= 0 && j >= CLASS_ORDER.length) break;
+        const futureClass = j >= 0 ? CLASS_ORDER[j] : payload.targetClass;
         const futurePayload = { ...enrollmentPayload, className: futureClass, classLevel: futureClass, class: futureClass };
         setScoped(`enrollments/${targetYear}/${sid}`, futurePayload);
         setScoped(`years/${targetYear}/enrollments/${sid}`, futurePayload);
