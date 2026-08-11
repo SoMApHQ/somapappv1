@@ -106,6 +106,7 @@
     masterStudents: null,
     rosterYear: null,
     activeRosterKeys: new Set(),
+    activeRosterLoaded: false,
     totalPresentToday: null,
     filters: { search: '', classLevel: 'all' },
     watchers: [],
@@ -651,9 +652,11 @@
     const ref = db().ref(gradPath(year, 'students'));
     const snapshot = await ref.once('value');
     const existing = snapshot.val() || {};
+    state.activeRosterLoaded = false;
     const master = await fetchMasterStudents(true, year);
     const rosterKeys = new Set(master.map((student) => sanitizeKey(student.admissionNumber || student.__key)).filter(Boolean));
     state.activeRosterKeys = rosterKeys;
+    state.activeRosterLoaded = true;
 
     const updates = {};
     let addedCount = 0;
@@ -753,6 +756,46 @@
 
   async function fetchMasterStudents(force = false, year = state.currentYear) {
     if (state.masterStudents && state.rosterYear === Number(year) && !force) return state.masterStudents;
+
+    if (window.SomapFinance?.getFinanceRoster) {
+      try {
+        const financeRows = await window.SomapFinance.getFinanceRoster(year);
+        const list = (financeRows || []).map((row) => {
+          const raw = row.rawStudent || {};
+          const admissionNumber = toStr(row.admissionNumber || raw.admissionNumber || raw.admissionNo || raw.admNo || row.id).trim();
+          const classLevel = normalizeClassName(row.classLevel || row.className || raw.classLevel || raw.className || raw.class || '');
+          const fullName = toStr(row.fullName || raw.fullName || raw.name || [raw.firstName, raw.middleName, raw.lastName].filter(Boolean).join(' ')).replace(/\s+/g, ' ').trim();
+          return {
+            ...raw,
+            __key: row.id || sanitizeKey(admissionNumber),
+            admissionNumber,
+            classLevel,
+            fullName,
+            parentPhone: row.parentContact || extractPrimaryPhone(raw),
+            parentName: extractPrimaryName(raw),
+            parentEmail: extractPrimaryEmail(raw),
+            photoUrl: raw.photoUrl || raw.passportPhotoUrl || raw.photo || '',
+            registrationYear: getRegistrationYear(raw),
+            isGraduand: isGraduand(classLevel),
+          };
+        }).filter((entry) => {
+          const className = normalizeClassName(entry.classLevel).toUpperCase();
+          return entry.admissionNumber
+            && entry.fullName
+            && entry.fullName.toLowerCase() !== 'student'
+            && entry.classLevel
+            && className !== 'GRADUATED'
+            && className !== 'PRE-ADMISSION'
+            && isCompleteMasterStudent(entry);
+        });
+        list.sort((a, b) => a.fullName.localeCompare(b.fullName, 'en'));
+        state.masterStudents = list;
+        state.rosterYear = Number(year);
+        return list;
+      } catch (err) {
+        console.warn('Graduation finance roster fetch failed; falling back to direct student read:', err?.message || err);
+      }
+    }
     
     // Attempt fetch with timeout/fallback
     let obj = {};
@@ -967,7 +1010,11 @@
     if (!isAuthorized(state.user?.email)) return;
     const updates = {};
     const year = state.currentYear;
+    const activeKeys = state.activeRosterKeys instanceof Set ? state.activeRosterKeys : new Set();
+    if (!state.activeRosterLoaded || activeKeys.size === 0) return;
     Object.entries(state.students || {}).forEach(([key, student]) => {
+      const adm = sanitizeKey(student?.admissionNo || student?.admissionNumber || key);
+      if (!adm || !activeKeys.has(adm)) return;
       if (student?.inactive === true || isGhostStudent(student)) return;
       const paid = getPaidTotal(student);
       const expected = getExpectedFee(student);
@@ -1054,6 +1101,7 @@
 
   function getValidStudents() {
     const activeKeys = state.activeRosterKeys instanceof Set ? state.activeRosterKeys : new Set();
+    if (!state.activeRosterLoaded || activeKeys.size === 0) return [];
     return Object.entries(state.students || {}).filter(([key, student]) => {
       if (!student || student.inactive === true) return false;
       const adm = sanitizeKey(student.admissionNo || student.admissionNumber || key);
@@ -1084,9 +1132,22 @@
       const admRaw = payment?.admissionNo || payment?.admission || payment?.admNo || payment?.studentAdm;
       const adm = sanitizeKey(admRaw);
       if (!adm) return;
+      const activeKeys = state.activeRosterKeys instanceof Set ? state.activeRosterKeys : new Set();
+      if (activeKeys.size && !activeKeys.has(adm)) return;
       totals[adm] = toNumberSafe(totals[adm]) + toNumberSafe(payment?.amount || 0);
     });
     return totals;
+  }
+
+  function getVisiblePayments() {
+    const activeKeys = state.activeRosterKeys instanceof Set ? state.activeRosterKeys : new Set();
+    if (!state.activeRosterLoaded || activeKeys.size === 0) return [];
+    return Object.entries(state.payments || {}).map(([key, value]) => ({ key, ...(value || {}) })).filter((payment) => {
+      const explicitYear = Number(payment?.year || payment?.academicYear || payment?.graduationYear || payment?.modulePayload?.year);
+      if (Number.isFinite(explicitYear) && explicitYear > 1900 && explicitYear !== Number(state.currentYear)) return false;
+      const adm = sanitizeKey(payment?.admissionNo || payment?.admission || payment?.admNo || payment?.studentAdm);
+      return adm && activeKeys.has(adm);
+    });
   }
 
   function getPaidTotal(student) {
@@ -1114,7 +1175,7 @@
       tbody.innerHTML = `
         <tr>
           <td colspan="8" class="py-8 text-center text-slate-500">
-            No students for ${state.currentYear}. Seed students first.
+            No active students for ${state.currentYear}. Graduation uses the current student list/attendance roster only.
           </td>
         </tr>`;
       return;
@@ -1203,7 +1264,7 @@
   function renderPaymentsTable() {
     const tbody = $('#paymentsBody');
     if (!tbody) return;
-    const rows = Object.entries(state.payments || {}).map(([key, value]) => ({ key, ...(value || {}) }));
+    const rows = getVisiblePayments();
     if (!rows.length) {
       tbody.innerHTML = `
         <tr>
@@ -1275,7 +1336,7 @@
     const total = expenses.reduce((sum, expense) => sum + Number(expense.total || (Number(expense.priceEach || 0) * Number(expense.quantity || 0))), 0);
     const count = expenses.length;
     const collectedFromStudents = getValidStudents().reduce((sum, student) => sum + getPaidTotal(student), 0);
-    const collectedFromPayments = Object.values(state.payments || {}).reduce((sum, payment) => sum + toNumberSafe(payment.amount || 0), 0);
+    const collectedFromPayments = getVisiblePayments().reduce((sum, payment) => sum + toNumberSafe(payment.amount || 0), 0);
     const collected = Math.max(collectedFromStudents, collectedFromPayments, 0);
     const balance = collected - total;
 
@@ -2148,9 +2209,9 @@
     const yearStr = String(year);
     const useStateStudents = state.currentYear === Number(yearStr) ? state.students : null;
     if (useStateStudents && Object.keys(useStateStudents || {}).length) {
-      return Object.entries(useStateStudents).map(([id, s]) => ({
-        id,
-        admission: s.admissionNo || id,
+      return getValidStudents().map((s) => ({
+        id: sanitizeKey(s.admissionNo || s.admissionNumber),
+        admission: s.admissionNo || s.admissionNumber || '-',
         name: s.name || s.fullName || '-',
         className: s.class || s.className || '-',
         expected: getExpectedFee(s),
@@ -2168,9 +2229,13 @@
 
     const paymentTotals = buildPaymentTotals(paymentsRaw || {}, year);
     const seen = new Set();
+    const activeRoster = await fetchMasterStudents(true, year);
+    const activeKeys = new Set(activeRoster.map((student) => sanitizeKey(student.admissionNumber || student.__key)).filter(Boolean));
+    if (!activeKeys.size) return [];
 
     return Object.entries(studentsRaw).map(([id, s]) => {
       const adm = sanitizeKey(s.admissionNo || id);
+      if (!adm || !activeKeys.has(adm)) return null;
       if (adm && seen.has(adm)) return null;
       if (adm) seen.add(adm);
       const expected = toNumberSafe(s.expectedOverride ?? s.expectedFee ?? s.expected ?? computeExpectedFee(s.class));
@@ -2722,7 +2787,7 @@
       });
     } else if (type === 'paid') {
       headers = ['Admission', 'Name', 'Amount', 'Method', 'Recorded By', 'Timestamp'];
-      rows = Object.values(state.payments || {}).map((payment) => [
+      rows = getVisiblePayments().map((payment) => [
         toStr(payment.admissionNo),
         state.students?.[sanitizeKey(payment.admissionNo)]?.name || '--',
         Number(payment.amount || 0),
@@ -2837,7 +2902,7 @@
       });
     } else if (type === 'paid') {
       headers = ['Admission', 'Name', 'Amount', 'Method', 'Recorded By', 'When'];
-      body = Object.values(state.payments || {}).map((payment) => [
+      body = getVisiblePayments().map((payment) => [
         toStr(payment.admissionNo),
         state.students?.[sanitizeKey(payment.admissionNo)]?.name || '--',
         formatCurrency(payment.amount),
@@ -3262,8 +3327,9 @@
     const now = new Date();
     if (now <= cutoff) return;
     const updates = {};
-    Object.entries(state.students || {}).forEach(([key, student]) => {
-      if (student?.inactive === true || isGhostStudent(student)) return;
+    getValidStudents().forEach((student) => {
+      const key = sanitizeKey(student.admissionNo || student.admissionNumber);
+      if (!key || student?.inactive === true || isGhostStudent(student)) return;
       if (hasOutstanding(student) && student.status !== 'debt') {
         updates[`${gradPath(state.currentYear, 'students')}/${key}/status`] = 'debt';
       }
