@@ -18,6 +18,7 @@
   const searchSchool = document.getElementById('searchSchool');
   const schoolList = document.getElementById('schoolList');
   const chooseStatus = document.getElementById('chooseStatus');
+  let activeSchools = [];
 
   function showHub() {
     hubCards.classList.remove('hidden');
@@ -77,7 +78,7 @@
       await ensureSocratesSchoolExists();
       const snap = await db.ref('schools').once('value');
       const data = snap.val() || {};
-      const active = Object.entries(data)
+      activeSchools = Object.entries(data)
         .map(([id, obj]) => ({
           id,
           meta: obj?.meta || {},
@@ -90,8 +91,8 @@
           return hasName;
         });
 
-      renderSchools(active);
-      chooseStatus.textContent = active.length ? '' : 'No active schools yet.';
+      renderSchools(activeSchools);
+      chooseStatus.textContent = activeSchools.length ? '' : 'No active schools yet.';
     } catch (err) {
       console.error(err);
       chooseStatus.textContent = 'Failed to load schools.';
@@ -234,7 +235,11 @@
       return;
     }
 
-    SOMAP.setSchoolId(schoolId);
+    const selected = activeSchools.find(s => s.id === schoolId);
+    SOMAP.setSchool({
+      id: schoolId,
+      ...(selected?.meta || {})
+    });
     chooseStatus.textContent = `School selected: ${schoolId}. Redirecting to login...`;
     
     setTimeout(() => {

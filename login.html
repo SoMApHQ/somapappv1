@@ -398,6 +398,51 @@
           .replace(/\s+/g, " ");
       }
 
+      function makeEmailKey(email) {
+        return String(email || "").trim().toLowerCase().replace(/\./g, "_");
+      }
+
+      function sameEmail(a, b) {
+        return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+      }
+
+      async function loadSelectedSchoolRecord() {
+        const selectedSchool = window.SOMAP && SOMAP.getSchool ? SOMAP.getSchool() : null;
+        const selectedSchoolId = selectedSchool?.id || "";
+        if (!selectedSchoolId) return { selectedSchool, selectedSchoolId, schoolRecord: null, schoolMeta: {} };
+        if (selectedSchoolId === "socrates-school") {
+          return { selectedSchool, selectedSchoolId, schoolRecord: null, schoolMeta: selectedSchool || {} };
+        }
+        const schoolSnap = await db.ref(`schools/${selectedSchoolId}`).once("value");
+        const schoolRecord = schoolSnap.val() || {};
+        const schoolMeta = schoolRecord.meta || schoolRecord.profile || selectedSchool || {};
+        return { selectedSchool, selectedSchoolId, schoolRecord, schoolMeta };
+      }
+
+      async function ensureRegisteredSchoolAdminLogin(email, selectedSchoolId, schoolMeta, existingProfile) {
+        const emailKey = makeEmailKey(email);
+        if (!emailKey || !selectedSchoolId || !schoolMeta || !sameEmail(email, schoolMeta.email)) return null;
+
+        const profile = {
+          email: String(email || "").trim().toLowerCase(),
+          displayName: schoolMeta.ownerName || schoolMeta.name || schoolMeta.schoolName || email,
+          role: "admin",
+          schoolId: selectedSchoolId,
+          schoolName: schoolMeta.name || schoolMeta.schoolName || "",
+          active: true,
+          createdAt: existingProfile?.createdAt || Date.now(),
+          updatedAt: Date.now(),
+          updatedBy: "school-email-login"
+        };
+
+        try {
+          await db.ref(`users/${emailKey}`).update(profile);
+        } catch (err) {
+          console.warn("Could not persist registered school admin login", err);
+        }
+        return { ...(existingProfile || {}), ...profile };
+      }
+
       function uniqueTokens(arr) {
         return Array.from(new Set(arr));
       }
@@ -498,18 +543,48 @@
       auth.onAuthStateChanged(async (user) => {
         if (!user || !user.email) return;
 
-        const emailKey = String(user.email || "").toLowerCase().replace(/\./g, "_");
+        const emailKey = makeEmailKey(user.email);
         // /users is GLOBAL. Do not wrap with SOMAP.P()
         const userPath = "users/" + emailKey;
 
         const snap = await db.ref(userPath).once("value");
-        if (!snap.exists()) return;
+        let profile = snap.val() || null;
+        const { selectedSchoolId, schoolMeta } = await loadSelectedSchoolRecord();
+        const registeredSchoolAdmin =
+          selectedSchoolId &&
+          selectedSchoolId !== "socrates-school" &&
+          sameEmail(user.email, schoolMeta?.email);
 
-        const profile = snap.val() || {};
+        if (registeredSchoolAdmin) {
+          profile = await ensureRegisteredSchoolAdminLogin(user.email, selectedSchoolId, schoolMeta, profile);
+        }
+        if (!profile) return;
+
         const role = profile.role;
-        const selectedSchool = window.SOMAP && SOMAP.getSchool ? SOMAP.getSchool() : null;
-        const selectedSchoolId = selectedSchool?.id || "";
         const profileSchoolId = profile.schoolId || profile.school || "";
+
+        if (role === "admin") {
+          const isLegacySocratesAdmin =
+            selectedSchoolId === "socrates-school" && !profileSchoolId;
+          if (profile.active === false) {
+            await auth.signOut();
+            Swal.fire("Disabled", "This admin email has been disabled.", "warning");
+            return;
+          }
+          if (!isLegacySocratesAdmin && profileSchoolId !== selectedSchoolId) {
+            if (registeredSchoolAdmin) {
+              profile = await ensureRegisteredSchoolAdminLogin(user.email, selectedSchoolId, schoolMeta, profile);
+            } else {
+              await auth.signOut();
+              Swal.fire(
+                "Wrong school",
+                "This admin email is not registered for the school currently selected. Switch school first, then sign in again.",
+                "warning"
+              );
+              return;
+            }
+          }
+        }
 
         if (role === "teacher") {
           const isLegacySocratesTeacher =
