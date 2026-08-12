@@ -7,6 +7,7 @@
   const tableWrapper = document.getElementById('tableWrapper');
   const reportStatusEl = document.getElementById('reportStatus');
   const downloadReportBtn = document.getElementById('downloadReportBtn');
+  const repairLoginsBtn = document.getElementById('repairLoginsBtn');
   const HQ_ID = 'socrates-school';
 
   let requestsRef = null;
@@ -40,6 +41,42 @@
     } catch (_err) {
       return '—';
     }
+  }
+
+  function safeEmailKey(email) {
+    return String(email || '').trim().toLowerCase().replace(/\./g, '_');
+  }
+
+  // Wires up a school's registered Gmail as its admin login (/users/{emailKey}).
+  // Without this record, login.html's Google sign-in has nothing to look up
+  // and silently refuses the account. Safe to call repeatedly.
+  async function ensureAdminLogin(schoolId, meta, approverId) {
+    const email = meta?.email;
+    const emailKey = safeEmailKey(email);
+    if (!emailKey) return { status: 'no-email' };
+
+    const existingSnap = await db.ref(`users/${emailKey}`).once('value');
+    const existing = existingSnap.val();
+    if (existing && existing.schoolId && existing.schoolId !== schoolId) {
+      return { status: 'conflict', existingSchoolId: existing.schoolId, existingRole: existing.role };
+    }
+    if (existing && existing.role === 'admin' && existing.schoolId === schoolId && existing.active !== false) {
+      return { status: 'already-ok' };
+    }
+
+    const now = Date.now();
+    await db.ref(`users/${emailKey}`).update({
+      email,
+      displayName: meta.ownerName || meta.name || meta.schoolName || email,
+      role: 'admin',
+      schoolId,
+      schoolName: meta.name || meta.schoolName || '',
+      active: true,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+      updatedBy: approverId
+    });
+    return { status: 'created' };
   }
 
   function makeSchoolId(name) {
@@ -207,11 +244,69 @@
 
     try {
       await db.ref().update(updates);
-      alert('School approved and activated.');
+
+      // Wire up the school's registered Gmail as its admin login.
+      let adminLoginWarning = '';
+      try {
+        const result = await ensureAdminLogin(schoolId, meta, approverId);
+        if (result.status === 'conflict') {
+          adminLoginWarning = `\n\nNote: ${meta.email} is already registered as ${result.existingRole || 'a user'} for another school and was NOT changed. Ask the school to register a different Gmail for admin access.`;
+        } else if (result.status === 'no-email') {
+          adminLoginWarning = '\n\nNote: this school has no email on file, so no admin login was created.';
+        }
+      } catch (err) {
+        console.error('Failed to set up admin login', err);
+        adminLoginWarning = '\n\nNote: could not set up the admin login for this school. Use "Repair Admin Logins" to retry.';
+      }
+
+      alert('School approved and activated.' + adminLoginWarning);
     } catch (err) {
       console.error(err);
       alert(err?.message || 'Failed to approve school.');
       setButtonsDisabled(requestId, false);
+    }
+  }
+
+  async function repairAdminLogins() {
+    const approverId = getCurrentSchoolId();
+    if (approverId !== HQ_ID) {
+      alert('Only SoMAp HQ (Socrates) can do this.');
+      return;
+    }
+    repairLoginsBtn.disabled = true;
+    const originalLabel = repairLoginsBtn.textContent;
+    repairLoginsBtn.textContent = 'Repairing...';
+    try {
+      const schoolsSnap = await db.ref('schools').once('value');
+      const schools = schoolsSnap.val() || {};
+      const created = [];
+      const conflicts = [];
+      const skipped = [];
+      for (const [schoolId, record] of Object.entries(schools)) {
+        const status = (record?.status || '').toLowerCase();
+        if (status !== 'active') continue;
+        const meta = record?.meta || {};
+        try {
+          const result = await ensureAdminLogin(schoolId, meta, approverId);
+          if (result.status === 'created') created.push(meta.name || schoolId);
+          else if (result.status === 'conflict') conflicts.push(`${meta.name || schoolId} (${meta.email} already used by ${result.existingSchoolId})`);
+          else if (result.status === 'no-email') skipped.push(meta.name || schoolId);
+        } catch (err) {
+          console.error('Repair failed for', schoolId, err);
+          conflicts.push(`${meta.name || schoolId} (error, see console)`);
+        }
+      }
+      const parts = [];
+      parts.push(created.length ? `Created admin logins for: ${created.join(', ')}` : 'No new admin logins were needed.');
+      if (conflicts.length) parts.push(`Conflicts (not changed): ${conflicts.join('; ')}`);
+      if (skipped.length) parts.push(`Skipped (no email on file): ${skipped.join(', ')}`);
+      alert(parts.join('\n\n'));
+    } catch (err) {
+      console.error(err);
+      alert(err?.message || 'Failed to repair admin logins.');
+    } finally {
+      repairLoginsBtn.disabled = false;
+      repairLoginsBtn.textContent = originalLabel;
     }
   }
 
@@ -294,5 +389,6 @@
     }
     rowsEl?.addEventListener('click', handleActions);
     downloadReportBtn?.addEventListener('click', handleDownloadReport);
+    repairLoginsBtn?.addEventListener('click', repairAdminLogins);
   });
 })();
