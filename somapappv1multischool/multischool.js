@@ -4,7 +4,7 @@
   const SOMAP = window.SOMAP;
   const SOCRATES_SCHOOL_ID = 'socrates-school';
   const CLOUDINARY_CLOUD = 'dg7vnrkgd';
-  const SCHOOL_LOGO_PRESET = 'somap_schools';
+  const SCHOOL_LOGO_PRESET = 'somap_unsigned';
 
   const hubCards = document.getElementById('hubCards');
   const registerSection = document.getElementById('registerSection');
