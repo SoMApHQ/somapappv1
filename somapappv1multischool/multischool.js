@@ -143,6 +143,7 @@
     const payload = {
       country: formData.get('country') || '',
       name: formData.get('name') || '',
+      ownerName: formData.get('ownerName') || '',
       registrationNo: formData.get('registrationNo') || '',
       levels: (formData.get('levels') || '').split(',').map(s => s.trim()).filter(Boolean),
       ownershipType: formData.get('ownershipType') || '',
@@ -182,10 +183,12 @@
       const requestRef = db.ref('schoolRequests').push();
       const schoolProfile = {
         name: payload.name || '',
+        ownerName: payload.ownerName || '',
         phone: payload.phone || '',
         email: payload.schoolEmail || '',
         registrationNumber: payload.registrationNo || '',
         location: payload.location || '',
+        country: payload.country || '',
         logoUrl,
         updatedAt: Date.now()
       };

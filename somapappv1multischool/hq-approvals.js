@@ -5,10 +5,13 @@
   const statusEl = document.getElementById('hqStatus');
   const guardEl = document.getElementById('hqGuardMessage');
   const tableWrapper = document.getElementById('tableWrapper');
+  const reportStatusEl = document.getElementById('reportStatus');
+  const downloadReportBtn = document.getElementById('downloadReportBtn');
   const HQ_ID = 'socrates-school';
 
   let requestsRef = null;
   let pendingMap = new Map();
+  let allEntries = [];
 
   function getCurrentSchoolId() {
     return SOMAP && typeof SOMAP.getSchoolId === 'function' ? SOMAP.getSchoolId() : null;
@@ -51,22 +54,36 @@
 
   function normalizeRequest(id, raw) {
     raw = raw || {};
+    // Support the legacy nested {school, contact} shape as well as the flat
+    // shape actually written by multischool.js's registration form.
     const school = raw.school || {};
     const contact = raw.contact || {};
     const derivedName = school.name || raw.name || raw.schoolName || '';
+    const levels = Array.isArray(raw.levels) ? raw.levels : (raw.levels ? [raw.levels] : []);
+    const banks = Array.isArray(raw.banks) ? raw.banks : (raw.banks ? [raw.banks] : []);
+    const languages = Array.isArray(raw.languages) ? raw.languages : (raw.languages ? [raw.languages] : []);
 
     const schoolData = {
       name: derivedName,
       shortName: school.shortName || raw.shortName || derivedName,
-      type: school.type || raw.schoolType || raw.type || '',
-      level: school.level || raw.schoolLevel || raw.level || '',
+      type: school.type || raw.ownershipType || raw.schoolType || raw.type || '',
+      level: school.level || levels.join(', ') || raw.schoolLevel || raw.level || '',
+      country: school.country || raw.country || '',
       region: school.region || raw.region || '',
       district: school.district || raw.district || '',
       ward: school.ward || raw.ward || '',
       village: school.village || raw.village || '',
+      location: school.location || raw.location || '',
       phone: school.phone || raw.phone || '',
       email: school.email || raw.schoolEmail || raw.email || '',
-      registrationNumber: school.registrationNumber || raw.registrationNumber || raw.registrationNo || ''
+      registrationNumber: school.registrationNumber || raw.registrationNumber || raw.registrationNo || '',
+      avgStudents: raw.avgStudents || school.avgStudents || '',
+      poBox: raw.poBox || school.poBox || '',
+      banks,
+      dayBoardingType: raw.dayBoardingType || school.dayBoardingType || '',
+      languages,
+      plan: raw.plan || school.plan || '',
+      reason: raw.reason || school.reason || ''
     };
 
     const contactData = {
@@ -85,6 +102,7 @@
 
   function renderRows(data) {
     const entries = Object.entries(data || {}).map(([id, raw]) => normalizeRequest(id, raw));
+    allEntries = entries;
     const pending = entries.filter(r => !r.status || r.status === 'pending');
     pendingMap = new Map(pending.map(r => [r.id, r]));
 
@@ -95,7 +113,7 @@
     }
 
     rowsEl.innerHTML = pending.map(r => {
-      const location = [r.school.region, r.school.district, r.school.ward, r.school.village].filter(Boolean).join(', ');
+      const location = [r.school.location, r.school.district, r.school.ward, r.school.village, r.school.region, r.school.country].filter(Boolean).join(', ');
       const owner = r.contact.ownerName || '—';
       const contact = r.contact.ownerPhone || r.school.phone || '—';
       const typeLevel = [r.school.type, r.school.level].filter(Boolean).join(' / ');
@@ -152,16 +170,24 @@
       name: request.school.name || 'School',
       type: request.school.type || '',
       level: request.school.level || '',
-      region: request.school.region || '',
+      country: request.school.country || '',
+      region: request.school.region || request.school.country || '',
       district: request.school.district || '',
       ward: request.school.ward || '',
       village: request.school.village || '',
+      location: request.school.location || '',
       phone: request.school.phone || request.contact.ownerPhone || '',
       email: request.school.email || request.contact.ownerEmail || '',
       ownerName: request.contact.ownerName || '',
       ownerPhone: request.contact.ownerPhone || '',
       ownerEmail: request.contact.ownerEmail || '',
       registrationNumber: request.school.registrationNumber || '',
+      avgStudents: request.school.avgStudents || '',
+      poBox: request.school.poBox || '',
+      banks: request.school.banks || [],
+      dayBoardingType: request.school.dayBoardingType || '',
+      languages: request.school.languages || [],
+      plan: request.school.plan || '',
       logoUrl
     };
 
@@ -237,11 +263,36 @@
     if (action === 'reject') rejectRequest(requestId);
   }
 
+  async function handleDownloadReport() {
+    if (!allEntries.length) {
+      if (reportStatusEl) reportStatusEl.textContent = 'No school registrations to report yet.';
+      return;
+    }
+    if (!window.SomapSchoolsReportPdf) {
+      if (reportStatusEl) reportStatusEl.textContent = 'PDF generator failed to load. Refresh and try again.';
+      return;
+    }
+    downloadReportBtn.disabled = true;
+    downloadReportBtn.textContent = 'Building PDF...';
+    if (reportStatusEl) reportStatusEl.textContent = 'Fetching logos and building the report...';
+    try {
+      await window.SomapSchoolsReportPdf.downloadReport(allEntries);
+      if (reportStatusEl) reportStatusEl.textContent = '';
+    } catch (err) {
+      console.error(err);
+      if (reportStatusEl) reportStatusEl.textContent = err?.message || 'Failed to build report.';
+    } finally {
+      downloadReportBtn.disabled = false;
+      downloadReportBtn.textContent = 'Download Full Report (PDF)';
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
     guardAccess();
     if (guardAccess()) {
       attachListener();
     }
     rowsEl?.addEventListener('click', handleActions);
+    downloadReportBtn?.addEventListener('click', handleDownloadReport);
   });
 })();
