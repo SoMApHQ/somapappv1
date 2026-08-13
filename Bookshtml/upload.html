@@ -14,6 +14,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/mammoth@1.8.0/mammoth.browser.min.js"></script>
   <script src="../js/book-content-index.js?v=20260621-5"></script>
@@ -69,7 +70,7 @@
       <div class="rounded-lg w-16 h-16 flex items-center justify-center text-white" style="background:linear-gradient(135deg,var(--accent-2),var(--accent-1));font-weight:800;font-size:22px;box-shadow:0 8px 20px rgba(124,58,237,0.12)">SoM</div>
       <div>
         <h1 style="margin:0;font-size:22px">Admin — Upload Book (MnyoreBooks)</h1>
-        <p class="muted" style="margin-top:6px">Upload PDFs to Cloudinary. Metadata saved to Firebase RTDB <code>/books</code>. Parser webhook (optional) will auto-generate questions. This page expects you're already signed into the main app once.</p>
+        <p class="muted" style="margin-top:6px">Upload PDFs and Word books to Google Drive using limited app-file access. Metadata is saved to Firebase RTDB <code>/books</code>. Existing Cloudinary books remain supported.</p>
       </div>
     </header>
 
@@ -119,7 +120,7 @@
 
         <div id="fileDrop" class="file-drop" title="Click or drag and drop a PDF or Word document">
           <div style="font-weight:700;color:var(--accent-1)">Drag & Drop PDF or Word file here</div>
-          <div class="small">or click to browse — PDF only, max 9.5MB recommended</div>
+          <div class="small">or click to browse - PDF or DOCX accepted, max 200MB</div>
           <input id="fileInput" type="file" accept="application/pdf,.pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none" />
         </div>
 
@@ -166,7 +167,7 @@
       <!-- RIGHT: settings and recent uploads -->
       <aside class="card">
         <h3 class="text-lg font-semibold mb-2">Admin Quick Tools</h3>
-        <p class="small muted mb-3">Configure Cloudinary unsigned preset and optional parser webhook (saved locally).</p>
+        <p class="small muted mb-3">Google Drive upload uses the public OAuth Client ID and the narrow <code>drive.file</code> permission. Parser settings are saved locally.</p>
 
         <div class="space-y-3">
           <div style="display:none">
@@ -175,7 +176,7 @@
             <div class="small muted-italic mt-1">Your Cloudinary cloud name (pre-filled). No secrets here.</div>
           </div>
 
-          <div>
+          <div style="display:none">
             <label class="small">Upload preset (unsigned)</label>
             <input id="uploadPreset" placeholder="books_unsigned" class="w-full px-3 py-2 rounded-md border mt-1" />
             <div class="small muted-italic mt-1">Create this preset in Cloudinary → Settings → Upload → Upload presets → Unsigned.</div>
@@ -208,7 +209,7 @@
           <div style="display:none">
             <label class="small">Upload safe limit (MB)</label>
             <input id="uploadLimitMb" type="number" min="1" step="0.1" placeholder="9.5" class="w-full px-3 py-2 rounded-md border mt-1" />
-            <div class="small muted-italic mt-1">Default is 9.5 MB, safely below the current Cloudinary 10 MB limit.</div>
+            <div class="small muted-italic mt-1">Default is 200 MB for Google Drive book uploads.</div>
           </div>
         </div>
 
@@ -223,7 +224,7 @@
 
         <h4 class="text-md font-semibold mb-2">Quick notes</h4>
         <ul style="padding-left:16px;color:var(--muted);font-size:13px">
-          <li>Files are uploaded via unsigned Cloudinary preset — <strong>no API secret</strong> in the browser.</li>
+          <li>New files upload to Google Drive with <code>drive.file</code>; SoMAp cannot use this permission to scan your whole Drive.</li>
           <li>Metadata stored at <code>/books/{bookId}</code>. Books are indexed at <code>/class_books/{class}/{bookId}</code>.</li>
           <li>Teachers are notified under <code>/notifications/{teacherKey}</code> where <code>/users/{key}.role==="teacher"</code>.</li>
         </ul>
@@ -276,6 +277,11 @@
   (function(){
     /* ---------------- CONFIG ---------------- */
     const MAX_FILE_SIZE = 70 * 1024 * 1024; // 70 MB
+    const MAX_DRIVE_FILE_SIZE = 200 * 1024 * 1024; // SoMAp Drive safety limit
+    const GOOGLE_CLIENT_ID = '105526245138-6om2vv54l5adt0a79afmpbjb26rofjqc.apps.googleusercontent.com';
+    const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+    const DRIVE_ROOT_FOLDER_NAME = 'SoMAp Books Storage 2026';
+    const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
     const DEFAULT_CLOUD_NAME = 'dg7vnrkgd'; // your cloud name (public)
     const DEFAULT_UPLOAD_PRESET = 'books_unsigned'; // recommended unsigned preset name
     let PARSER_WEBHOOK = '';
@@ -363,7 +369,7 @@
     function readableSize(bytes){ return (bytes/1024/1024).toFixed(2) + ' MB'; }
     function uploadLimitBytes(){
       const mb = Number(uploadLimitMbInput && uploadLimitMbInput.value);
-      const safeMb = Number.isFinite(mb) && mb > 0 ? mb : 9.5;
+      const safeMb = Number.isFinite(mb) && mb >= 100 ? mb : 200;
       return safeMb * 1024 * 1024;
     }
     function uploadLimitLabel(){ return readableSize(uploadLimitBytes()); }
@@ -392,7 +398,7 @@
     function normalizeEmailKey(email){ if(!email) return ''; return email.replace(/\./g,'_'); } // matches your DB keys
     function activeStatus(book){ return String(book && book.status ? book.status : 'active').toLowerCase(); }
     function isHiddenBook(book){ const s = activeStatus(book); return s === 'archived' || s === 'deleted'; }
-    function bookUrl(book){ return (book && (book.url || book.cloudinaryUrl || book.secure_url)) || ''; }
+    function bookUrl(book){ return (book && (book.url || book.driveWebViewLink || book.cloudinaryUrl || book.secure_url)) || ''; }
     function getBookYear(book){ return String((book && (book.year || book.academicYear)) || new Date().getFullYear()); }
     function encodedClassKey(cls){ return encodeURIComponent(cls || ''); }
     function firebaseSafeKey(value){ return String(value || '').replace(/[.#$\[\]]/g, '_'); }
@@ -409,7 +415,11 @@
         public_id: book && (book.public_id || book.cloudinary_public_id || ''),
         resource_type: book && (book.resource_type || 'raw'),
         secure_url: bookUrl(book),
-        version: book && (book.version || '')
+        version: book && (book.version || ''),
+        storageProvider: book && (book.storageProvider || (book.driveFileId ? 'google_drive' : 'cloudinary')),
+        driveFileId: book && (book.driveFileId || ''),
+        driveWebViewLink: book && (book.driveWebViewLink || ''),
+        driveDownloadLink: book && (book.driveDownloadLink || '')
       };
     }
     function classBookIndexPayload(book){
@@ -417,7 +427,14 @@
         title: book.title || '',
         subject: book.subject || '',
         url: bookUrl(book),
-        cloudinaryUrl: bookUrl(book),
+        cloudinaryUrl: book.cloudinaryUrl || '',
+        storageProvider: book.storageProvider || (book.driveFileId ? 'google_drive' : 'cloudinary'),
+        driveFileId: book.driveFileId || '',
+        driveWebViewLink: book.driveWebViewLink || '',
+        driveDownloadLink: book.driveDownloadLink || '',
+        fileName: book.fileName || '',
+        fileSize: book.fileSize || 0,
+        mimeType: book.mimeType || '',
         uploadedAt: book.uploadedAt || Date.now(),
         updatedAt: book.updatedAt || Date.now(),
         year: getBookYear(book),
@@ -512,7 +529,7 @@
       if(!files || files.length===0) return;
       const f = files[0];
       if(!isPdfFile(f) && !isDocxFile(f)){ showError('Please choose a PDF or DOCX Word file.'); return; }
-      if(f.size > MAX_FILE_SIZE){ showError('File too large. Keep file under ' + readableSize(MAX_FILE_SIZE)); return; }
+      if(f.size > MAX_DRIVE_FILE_SIZE){ showError('File too large. Keep file under ' + readableSize(MAX_DRIVE_FILE_SIZE)); return; }
       selectedFile = f;
       originalSelectedFile = f;
       fileNameEl.textContent = f.name;
@@ -530,8 +547,8 @@
         showError('Please choose a .docx Word file. Older .doc files should be saved as .docx first.');
         return;
       }
-      if(f.size > MAX_FILE_SIZE){
-        showError('Word file too large. Keep file under ' + readableSize(MAX_FILE_SIZE));
+      if(f.size > MAX_DRIVE_FILE_SIZE){
+        showError('Word file too large. Keep file under ' + readableSize(MAX_DRIVE_FILE_SIZE));
         return;
       }
       selectedWordFile = f;
@@ -609,6 +626,197 @@
         xhr.onerror = function(){ reject(new Error('Network error during upload.')); };
         xhr.send(formData);
       });
+    }
+
+    function waitForGoogleIdentity(){
+      return new Promise((resolve, reject) => {
+        const started = Date.now();
+        const timer = setInterval(() => {
+          if (window.google?.accounts?.oauth2) {
+            clearInterval(timer);
+            resolve();
+            return;
+          }
+          if (Date.now() - started > 10000) {
+            clearInterval(timer);
+            reject(new Error('Google sign-in library did not load. Check your connection and refresh.'));
+          }
+        }, 100);
+      });
+    }
+
+    async function requestDriveAccessToken(){
+      await waitForGoogleIdentity();
+      return new Promise((resolve, reject) => {
+        const tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID,
+          scope: GOOGLE_DRIVE_SCOPE,
+          prompt: '',
+          callback: (response) => {
+            if (response?.access_token) {
+              resolve(response.access_token);
+            } else {
+              reject(new Error(response?.error_description || response?.error || 'Google Drive permission was not granted.'));
+            }
+          }
+        });
+        tokenClient.requestAccessToken();
+      });
+    }
+
+    function driveHeaders(accessToken, extra){
+      return { Authorization: `Bearer ${accessToken}`, ...(extra || {}) };
+    }
+
+    function escapeDriveQueryText(value){
+      return String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    }
+
+    function driveFolderStorageKey(name, parentId){
+      return `somap_drive_folder_${parentId || 'root'}_${name}`;
+    }
+
+    async function driveApiJson(accessToken, url, options){
+      const res = await fetch(url, {
+        ...(options || {}),
+        headers: driveHeaders(accessToken, {
+          'Content-Type': 'application/json; charset=UTF-8',
+          ...((options && options.headers) || {})
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error?.message || `Google Drive request failed with HTTP ${res.status}`);
+      return data;
+    }
+
+    async function findDriveFolder(accessToken, name, parentId){
+      const key = driveFolderStorageKey(name, parentId);
+      const savedId = localStorage.getItem(key);
+      if (savedId) return savedId;
+
+      const clauses = [
+        `name = '${escapeDriveQueryText(name)}'`,
+        `mimeType = '${DRIVE_FOLDER_MIME}'`,
+        'trashed = false'
+      ];
+      if (parentId) clauses.push(`'${escapeDriveQueryText(parentId)}' in parents`);
+      const q = encodeURIComponent(clauses.join(' and '));
+      const data = await driveApiJson(accessToken, `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=1`);
+      const id = data.files && data.files[0] && data.files[0].id;
+      if (id) localStorage.setItem(key, id);
+      return id || '';
+    }
+
+    async function createDriveFolder(accessToken, name, parentId){
+      const metadata = {
+        name,
+        mimeType: DRIVE_FOLDER_MIME
+      };
+      if (parentId) metadata.parents = [parentId];
+      const data = await driveApiJson(accessToken, 'https://www.googleapis.com/drive/v3/files?fields=id,name', {
+        method: 'POST',
+        body: JSON.stringify(metadata)
+      });
+      localStorage.setItem(driveFolderStorageKey(name, parentId), data.id);
+      return data.id;
+    }
+
+    async function ensureDriveFolder(accessToken, name, parentId){
+      return (await findDriveFolder(accessToken, name, parentId)) || createDriveFolder(accessToken, name, parentId);
+    }
+
+    function safeDriveName(value){
+      return String(value || '')
+        .replace(/[\\/:*?"<>|]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 140) || 'SoMAp Book';
+    }
+
+    function buildDriveFileName(file, title, cls, subject, year){
+      const extension = (String(file.name || '').match(/\.[a-z0-9]+$/i) || [''])[0];
+      return safeDriveName([title, cls, subject, year].filter(Boolean).join(' - ')) + extension.toLowerCase();
+    }
+
+    async function ensureBookDriveFolder(accessToken, cls, subject, year){
+      const rootId = await ensureDriveFolder(accessToken, DRIVE_ROOT_FOLDER_NAME, '');
+      const yearId = await ensureDriveFolder(accessToken, String(year || new Date().getFullYear()), rootId);
+      const classId = await ensureDriveFolder(accessToken, safeDriveName(cls), yearId);
+      return ensureDriveFolder(accessToken, safeDriveName(subject), classId);
+    }
+
+    async function uploadFileToDrive(accessToken, file, metadata, onProgress){
+      const initRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,mimeType,size,webViewLink,webContentLink', {
+        method: 'POST',
+        headers: driveHeaders(accessToken, {
+          'Content-Type': 'application/json; charset=UTF-8',
+          'X-Upload-Content-Type': file.type || 'application/octet-stream',
+          'X-Upload-Content-Length': String(file.size)
+        }),
+        body: JSON.stringify(metadata)
+      });
+      if (!initRes.ok) {
+        const text = await initRes.text().catch(() => initRes.statusText);
+        throw new Error(`Google Drive upload setup failed: ${text || initRes.status}`);
+      }
+      const sessionUrl = initRes.headers.get('Location');
+      if (!sessionUrl) throw new Error('Google Drive did not return an upload session.');
+
+      const uploaded = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', sessionUrl, true);
+        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable && typeof onProgress === 'function') {
+            onProgress(Math.round((event.loaded / event.total) * 100));
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText || '{}')); } catch (error) { reject(error); }
+          } else {
+            reject(new Error(`Google Drive upload failed: ${xhr.status} ${xhr.responseText || xhr.statusText}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error during Google Drive upload.'));
+        xhr.send(file);
+      });
+      return uploaded;
+    }
+
+    async function shareDriveFileByLink(accessToken, fileId){
+      await driveApiJson(accessToken, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/permissions?fields=id`, {
+        method: 'POST',
+        body: JSON.stringify({ role: 'reader', type: 'anyone' })
+      });
+      return driveApiJson(accessToken, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size,webViewLink,webContentLink`);
+    }
+
+    function driveDownloadUrl(fileId){
+      return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
+    }
+
+    async function uploadBookFileToDrive(accessToken, file, details, onProgress){
+      const folderId = await ensureBookDriveFolder(accessToken, details.className, details.subject, details.year);
+      const driveName = buildDriveFileName(file, details.title, details.className, details.subject, details.year);
+      const uploaded = await uploadFileToDrive(accessToken, file, {
+        name: driveName,
+        mimeType: file.type || 'application/octet-stream',
+        parents: [folderId],
+        description: `SoMAp book upload: ${details.title || file.name}`
+      }, onProgress);
+      const shared = await shareDriveFileByLink(accessToken, uploaded.id);
+      return {
+        storageProvider: 'google_drive',
+        driveFileId: shared.id,
+        driveFolderId: folderId,
+        driveWebViewLink: shared.webViewLink || `https://drive.google.com/file/d/${encodeURIComponent(shared.id)}/view`,
+        driveWebContentLink: shared.webContentLink || '',
+        driveDownloadLink: driveDownloadUrl(shared.id),
+        fileName: shared.name || driveName,
+        fileSize: Number(shared.size || file.size || 0),
+        mimeType: shared.mimeType || file.type || 'application/octet-stream'
+      };
     }
 
     function evaluateSelectedFileSize(file){
@@ -788,7 +996,7 @@
       const pak = localStorage.getItem('parserApiKey') || '';
       const delEndpoint = localStorage.getItem('deleteEndpoint') || '';
       const compressionEndpoint = localStorage.getItem('compressionEndpoint') || '';
-      const uploadLimitMb = localStorage.getItem('uploadLimitMb') || '9.5';
+      const uploadLimitMb = localStorage.getItem('uploadLimitMb') || '200';
       cloudNameInput.value = cN; uploadPresetInput.value = up;
       parserWebhookInput.value = ph; parserApiKeyInput.value = pak;
       deleteEndpointInput.value = delEndpoint;
@@ -823,7 +1031,7 @@
       deleteEndpointInput.addEventListener('change', ()=> localStorage.setItem('deleteEndpoint', deleteEndpointInput.value.trim()));
       compressionEndpointInput.addEventListener('change', ()=> localStorage.setItem('compressionEndpoint', compressionEndpointInput.value.trim()));
       uploadLimitMbInput.addEventListener('change', ()=> {
-        localStorage.setItem('uploadLimitMb', uploadLimitMbInput.value.trim() || '9.5');
+        localStorage.setItem('uploadLimitMb', uploadLimitMbInput.value.trim() || '200');
         if (selectedFile) evaluateSelectedFileSize(selectedFile);
       });
       if (bookSearchInput) bookSearchInput.addEventListener('input', renderBookManager);
@@ -842,7 +1050,6 @@
     uploadBtn.addEventListener('click', async ()=>{
       if(!currentUser){ showError('Not signed in. Sign in from main app then return to upload page.'); return; }
       if(!selectedFile){ showError('Choose a PDF or Word file first.'); return; }
-      await wordExtractionPromise;
       if(isPdfFile(selectedFile) && (selectedFileNeedsCompression || selectedFile.size > uploadLimitBytes())){
         selectedFileNeedsCompression = true;
         const ready = await compressSelectedPdf();
@@ -856,69 +1063,52 @@
       const description = descriptionInput.value.trim();
       const academicYearSelect = document.getElementById('academicYear');
       const academicYear = academicYearSelect ? academicYearSelect.value.trim() : String(new Date().getFullYear());
-      const cloudName = (cloudNameInput.value.trim() || localStorage.getItem('cloudName') || DEFAULT_CLOUD_NAME).trim();
-      const uploadPreset = (uploadPresetInput.value.trim() || localStorage.getItem('uploadPreset') || DEFAULT_UPLOAD_PRESET).trim();
-
       if(!title){ showError('Please enter book title.'); return; }
       if(!cls){ showError('Please select class.'); return; }
       if(!subject){ showError('Please select subject.'); return; }
       if(!academicYear){ showError('Please select academic year.'); return; }
-      if(!cloudName || !uploadPreset){ showError('Set Cloudinary cloud name and upload preset on the right.'); return; }
-
-      // save settings locally
-      localStorage.setItem('cloudName', cloudName);
-      localStorage.setItem('uploadPreset', uploadPreset);
+      if(selectedFile.size > MAX_DRIVE_FILE_SIZE){ showError('File too large. Keep file under ' + readableSize(MAX_DRIVE_FILE_SIZE)); return; }
 
       // UI lock
       uploadBtn.disabled = true; clearBtn.disabled = true;
       setProgress(0);
-      showMessage(el('<div class="small">Starting upload to Cloudinary…</div>'));
+      showMessage(el('<div class="small">Starting Google Drive upload...</div>'));
 
       try{
-        // Upload to Cloudinary (unsigned) via XHR for progress
-        const formData = new FormData();
-        formData.append("file", selectedFile);
-        formData.append("upload_preset", uploadPreset);
-        // optional: folder
-        // formData.append('folder', `books/${cls.replace(/\s+/g,'_')}`);
-
-        const cloudUrl = `https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/raw/upload`;
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', cloudUrl, true);
-
-        xhr.upload.onprogress = function(e){
-          if(e.lengthComputable){ const percent = Math.round((e.loaded / e.total) * 100); setProgress(percent); }
-        };
-
-        const uploadResult = await new Promise((resolve,reject)=>{
-          xhr.onload = function(){
-            if(xhr.status >=200 && xhr.status < 300){
-              try{ resolve(JSON.parse(xhr.responseText)); } catch(err){ reject(err); }
-            } else {
-              reject(new Error('Cloudinary upload failed: ' + xhr.status + ' ' + xhr.statusText + ' — ' + xhr.responseText));
-            }
-          };
-          xhr.onerror = function(){ reject(new Error('Network error during upload.')); };
-          xhr.send(formData);
-        });
-
-        const cloudData = uploadResult;
-        const secureUrl = cloudData.secure_url || cloudData.url;
-        const publicId = cloudData.public_id || '';
-        const assetId = cloudData.asset_id || '';
-        const resourceType = cloudData.resource_type || 'raw';
-        const version = cloudData.version || '';
+        let secureUrl = '';
+        let publicId = '';
+        let assetId = '';
+        let resourceType = 'google_drive';
+        let version = '';
         let wordUploadData = null;
         let wordUploadError = null;
+        let driveData = null;
 
-        if(!secureUrl) throw new Error('Cloudinary did not return a secure URL.');
+        showMessage(el('<div class="small">Requesting Google Drive permission...</div>'));
+        const accessToken = await requestDriveAccessToken();
+        await wordExtractionPromise;
+        showMessage(el('<div class="small">Uploading book to Google Drive...</div>'));
+        driveData = await uploadBookFileToDrive(accessToken, selectedFile, {
+          title,
+          className: cls,
+          subject,
+          year: academicYear
+        }, (percent) => setProgress(Math.round(percent * 0.7)));
+        secureUrl = driveData.driveWebViewLink;
+
+        if(!secureUrl) throw new Error('Google Drive did not return a viewer link.');
 
         if (selectedWordFile && selectedWordFile === selectedFile) {
-          wordUploadData = cloudData;
+          wordUploadData = driveData;
         } else if (selectedWordFile) {
           try {
-            showMessage(el('<div class="small">Uploading Word source for lesson notes...</div>'));
-            wordUploadData = await uploadRawFileToCloudinary(selectedWordFile, cloudName, uploadPreset, (percent)=>{
+            showMessage(el('<div class="small">Uploading Word source to Google Drive...</div>'));
+            wordUploadData = await uploadBookFileToDrive(accessToken, selectedWordFile, {
+              title: `${title} Word Source`,
+              className: cls,
+              subject,
+              year: academicYear
+            }, (percent)=>{
               setProgress(70 + Math.round(percent * 0.15));
             });
           } catch (error) {
@@ -942,14 +1132,25 @@
           year: yearToUse,
           description: description || '',
           url: secureUrl,
-          cloudinaryUrl: secureUrl,
+          storageProvider: 'google_drive',
+          driveFileId: driveData ? driveData.driveFileId : '',
+          driveFolderId: driveData ? driveData.driveFolderId : '',
+          driveWebViewLink: driveData ? driveData.driveWebViewLink : '',
+          driveWebContentLink: driveData ? driveData.driveWebContentLink : '',
+          driveDownloadLink: driveData ? driveData.driveDownloadLink : '',
+          fileName: driveData ? driveData.fileName : selectedFile.name,
+          fileSize: driveData ? driveData.fileSize : selectedFile.size,
+          mimeType: driveData ? driveData.mimeType : (selectedFile.type || ''),
+          cloudinaryUrl: '',
           primary_file_type: isDocxFile(selectedFile) ? 'docx' : 'pdf',
           public_id: publicId,
           asset_id: assetId,
           resource_type: resourceType,
           version: version,
           cloudinary_public_id: publicId,
-          word_url: wordUploadData ? (wordUploadData.secure_url || wordUploadData.url || '') : '',
+          word_url: wordUploadData ? (wordUploadData.driveWebViewLink || wordUploadData.secure_url || wordUploadData.url || '') : '',
+          word_drive_file_id: wordUploadData ? (wordUploadData.driveFileId || '') : '',
+          word_drive_download_link: wordUploadData ? (wordUploadData.driveDownloadLink || '') : '',
           word_public_id: wordUploadData ? (wordUploadData.public_id || '') : '',
           word_asset_id: wordUploadData ? (wordUploadData.asset_id || '') : '',
           word_file_name: selectedWordFile ? selectedWordFile.name : '',
@@ -1085,7 +1286,7 @@
             await fetch(PARSER_WEBHOOK, {
               method:'POST',
               headers:{ 'Content-Type':'application/json', 'x-api-key': PARSER_API_KEY || '' },
-              body: JSON.stringify({ bookId, cloudinaryUrl: secureUrl, metadata: bookMeta }),
+              body: JSON.stringify({ bookId, cloudinaryUrl: bookMeta.cloudinaryUrl || '', driveFileId: bookMeta.driveFileId || '', driveWebViewLink: bookMeta.driveWebViewLink || '', metadata: bookMeta }),
               keepalive: true
             });
           } catch(parserErr){
@@ -1128,7 +1329,7 @@
               await fetch(PARSER_WEBHOOK, {
                 method:'POST',
                 headers:{ 'Content-Type':'application/json', 'x-api-key': PARSER_API_KEY || '' },
-                body: JSON.stringify({ bookId, cloudinaryUrl: secureUrl, metadata: bookMeta })
+                body: JSON.stringify({ bookId, cloudinaryUrl: bookMeta.cloudinaryUrl || '', driveFileId: bookMeta.driveFileId || '', driveWebViewLink: bookMeta.driveWebViewLink || '', metadata: bookMeta })
               });
               showSuccess('Parser re-run requested.');
             } catch(e){ console.error(e); showError('Failed to request parser re-run.'); }
@@ -1409,12 +1610,13 @@
         const items = Object.entries(books).sort((a,b)=> (b[1].uploadedAt||0) - (a[1].uploadedAt||0));
         if(items.length===0){ recentList.innerHTML='<div class="small muted">No uploads yet</div>'; return; }
         items.forEach(([id,b])=>{
+          const openUrl = bookUrl(b);
           const row = document.createElement('div'); row.style.display='flex'; row.style.justifyContent='space-between'; row.style.alignItems='center';
           row.style.padding='8px'; row.style.borderRadius='8px'; row.style.background='#fff'; row.style.border='1px solid #eef2f7';
           row.innerHTML = `<div style="max-width:70%"><strong>${escapeHtml(b.title || '(untitled)')}</strong><div class="small muted">${escapeHtml(b.class||'')} • ${escapeHtml(b.subject||'')}</div></div>
             <div style="display:flex;gap:8px;align-items:center">
-              <a class="chip" href="${b.url}" target="_blank">Open</a>
-              <button class="chip" data-bookid="${id}" data-url="${b.url}">Details</button>
+              <a class="chip" href="${escapeHtml(openUrl)}" target="_blank">Open</a>
+              <button class="chip" data-bookid="${id}" data-url="${escapeHtml(openUrl)}">Details</button>
             </div>`;
           recentList.appendChild(row);
           const btn = row.querySelector('button[data-bookid]');
