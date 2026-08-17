@@ -623,7 +623,8 @@
     const debtForCollection = (isOverdueDebt || overdueRows.length > 0)
       ? debtTillNowCapped
       : Math.max(0, (hasCarryOutstanding ? carryOutstanding : 0) + overdueBaseOutstanding);
-    const debtForDisplay = debtForCollection > 0 ? debtForCollection : (effectivelyCarryDebt && yearBalance > 0 ? yearBalance : 0);
+    const rawDebtForDisplay = debtForCollection > 0 ? debtForCollection : (effectivelyCarryDebt && yearBalance > 0 ? yearBalance : 0);
+    const debtForDisplay = Math.min(Math.max(0, Number(yearBalance || 0)), Math.max(0, Number(rawDebtForDisplay || 0)));
     const finalPeriodDebtLabel = (debtForDisplay > 0 && effectivelyCarryDebt) ? new Date(carryOverdueTs).toLocaleDateString() : periodDebtLabel;
     const finalOverdueWindowLabel = (debtForDisplay > 0 && effectivelyCarryDebt) ? `Carry from ${prevYearNum} — due by ${new Date(carryOverdueTs).toLocaleDateString()}` : overdueWindowLabel;
     return {

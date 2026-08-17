@@ -1282,7 +1282,8 @@
     const debtForCollection = (isOverdueDebt || overdueRows.length > 0)
       ? debtTillNowCapped
       : Math.max(0, (hasCarryOutstanding ? carryOutstanding : 0) + overdueBaseOutstanding);
-    const debtForDisplay = debtForCollection > 0 ? debtForCollection : (effectivelyCarryDebt && yearBalance > 0 ? yearBalance : 0);
+    const rawDebtForDisplay = debtForCollection > 0 ? debtForCollection : (effectivelyCarryDebt && yearBalance > 0 ? yearBalance : 0);
+    const debtForDisplay = Math.min(Math.max(0, Number(yearBalance || 0)), Math.max(0, Number(rawDebtForDisplay || 0)));
     const finalPeriodDebtLabel = (debtForDisplay > 0 && effectivelyCarryDebt) ? new Date(carryOverdueTs).toLocaleDateString() : periodDebtLabel;
     const finalOverdueWindowLabel = (debtForDisplay > 0 && effectivelyCarryDebt) ? `Carry from ${prevYearNum} — due by ${new Date(carryOverdueTs).toLocaleDateString()}` : overdueWindowLabel;
     return {
@@ -2642,7 +2643,8 @@ function buildFinanceStudents(
       const paidVal = parseNumberFromCell(tds[6]);
       const balanceVal = parseNumberFromCell(tds[7]);
       const debtCellText = (tds[8]?.innerText || '').trim();
-      const debtAmountVal = parseDebtAmountFromCell(tds[8]);
+      const debtAmountRaw = parseDebtAmountFromCell(tds[8]);
+      const debtAmountVal = balanceVal > 0 ? Math.min(balanceVal, debtAmountRaw) : 0;
       let debtLabel = '-';
       if (debtAmountVal > 0 && debtCellText) {
         const dateMatch = debtCellText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/);
@@ -2721,7 +2723,7 @@ function buildFinanceStudents(
 
   function _gatherDebtNow() {
     const tableRows = getTableRowsForExport();
-    const debtorRows = tableRows.filter((r) => r.periodDebtValue > 0);
+    const debtorRows = tableRows.filter((r) => r.balance > 0 && r.periodDebtValue > 0);
     const rows = debtorRows.map((r) => [r.admissionNumber, r.fullName, r.parentContact, r.classLevel, r.paymentPlan, r.periodDebtLabel, fmt(r.periodDebtValue)]);
     const totalDebt = debtorRows.reduce((s, r) => s + r.periodDebtValue, 0);
     return { rows, totalDebt: fmt(totalDebt), debtorRows, totalDebtValue: totalDebt };
@@ -2739,7 +2741,7 @@ function buildFinanceStudents(
 
   function downloadSMSDebtExcel() {
     const tableRows = getTableRowsForExport();
-    const debtorRows = tableRows.filter((r) => r.periodDebtValue > 0);
+    const debtorRows = tableRows.filter((r) => r.balance > 0 && r.periodDebtValue > 0);
     const header = ['Number', 'Name', 'Debt'];
     const rows = debtorRows.map((r) => {
       // Strip non-digit chars so Excel treats it as a plain number
@@ -3021,7 +3023,10 @@ function buildFinanceStudents(
     const paidTotal = Math.max(0, Number(fin.paidAmount || 0));
     const balanceDisplay = Math.max(0, totalDue - paidTotal);
     const carryNotYetMerged = Math.max(0, carryForwardPrev - Math.max(0, Number(s.carryAmount || 0)));
-    const debtWithCarry = Math.max(0, Number(fin.periodDebtValue || 0) + carryNotYetMerged);
+    const debtWithCarry = Math.min(
+      balanceDisplay,
+      Math.max(0, Number(fin.periodDebtValue || 0) + carryNotYetMerged)
+    );
     const scheduleItems = fin.scheduleItems || [];
     const paymentEntries = Object.entries(s.payments || {}).filter(([, p]) => p).sort((a, b) => (a[1]?.timestamp || 0) - (b[1]?.timestamp || 0));
     let currentInstallmentLabel = '-';
@@ -3189,7 +3194,7 @@ function buildFinanceStudents(
       if (s.isGraduated) return;
       if (filterClass && canonClass(s.classLevel) !== filterClass) return;
       const fin = computeStudentFinancials(s);
-      if (Number(fin.periodDebtValue || 0) > 0) debtorStudents.push(id);
+      if (Number(fin.balance || 0) > 0 && Number(fin.periodDebtValue || 0) > 0) debtorStudents.push(id);
     });
     if (!debtorStudents.length) return alert('Hakuna wanafunzi wenye deni kwa darasa linalochaguliwa.');
     const schoolName = getSchoolNameForLetter();
@@ -3430,7 +3435,10 @@ function buildFinanceStudents(
     const paidTotal = Math.max(0, Number(fin.paidAmount || 0));
     const balanceDisplay = Math.max(0, totalDue - paidTotal);
     const carryNotYetMerged = Math.max(0, Number(carryForwardPrev || 0) - Math.max(0, Number(s.carryAmount || 0)));
-    const debtWithCarry = Math.max(0, Number(fin.periodDebtValue || 0) + carryNotYetMerged);
+    const debtWithCarry = Math.min(
+      balanceDisplay,
+      Math.max(0, Number(fin.periodDebtValue || 0) + carryNotYetMerged)
+    );
 
     let carryLine = '';
     if (carryForwardPrev > 0 || dbCarry > 0) {
