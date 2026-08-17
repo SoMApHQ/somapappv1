@@ -2626,6 +2626,59 @@ function buildFinanceStudents(
     return lastNumMatch ? parseNumberFromCell({ innerText: lastNumMatch[1] }) : 0;
   }
 
+  function normalizeExportText(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+
+  function normalizeExportPhone(value) {
+    const digits = String(value || '').replace(/\D/g, '');
+    return digits.length > 9 ? digits.slice(-9) : digits;
+  }
+
+  function exportChildSignatures(row) {
+    const name = normalizeExportText(row?.fullName || row?.name);
+    const className = normalizeExportText(row?.classLevel || row?.className);
+    const phone = normalizeExportPhone(row?.parentContact || row?.contact);
+    if (!name || !className) return [];
+    if (phone) return [`${name}|${className}|${phone}`];
+    return [`${name}|${className}`];
+  }
+
+  function clearedExportSignatures(rows) {
+    const cleared = new Set();
+    (rows || []).forEach((row) => {
+      if (Number(row?.balance || 0) > 0) return;
+      exportChildSignatures(row).forEach((sig) => cleared.add(sig));
+    });
+    Object.values(cachedStudents || {}).forEach((student) => {
+      if (!student || student.isGraduated) return;
+      let fin = null;
+      try {
+        fin = computeStudentFinancials(student);
+      } catch (_) {
+        fin = null;
+      }
+      if (!fin || Number(fin.balance || 0) > 0) return;
+      exportChildSignatures({
+        fullName: `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim(),
+        classLevel: student.classLevel || student.className || '',
+        parentContact: getStudentContact(student),
+        balance: Number(fin.balance || 0),
+      }).forEach((sig) => cleared.add(sig));
+    });
+    return cleared;
+  }
+
+  function isClearedDuplicateExportRow(row, clearedSet) {
+    if (Number(row?.balance || 0) <= 0) return true;
+    const signatures = exportChildSignatures(row);
+    return signatures.some((sig) => clearedSet.has(sig));
+  }
+
   function getTableRowsForExport() {
     const table = document.getElementById('financeTable');
     if (!table) return [];
@@ -2723,7 +2776,12 @@ function buildFinanceStudents(
 
   function _gatherDebtNow() {
     const tableRows = getTableRowsForExport();
-    const debtorRows = tableRows.filter((r) => r.balance > 0 && r.periodDebtValue > 0);
+    const clearedSet = clearedExportSignatures(tableRows);
+    const debtorRows = tableRows.filter((r) => (
+      r.balance > 0 &&
+      r.periodDebtValue > 0 &&
+      !isClearedDuplicateExportRow(r, clearedSet)
+    ));
     const rows = debtorRows.map((r) => [r.admissionNumber, r.fullName, r.parentContact, r.classLevel, r.paymentPlan, r.periodDebtLabel, fmt(r.periodDebtValue)]);
     const totalDebt = debtorRows.reduce((s, r) => s + r.periodDebtValue, 0);
     return { rows, totalDebt: fmt(totalDebt), debtorRows, totalDebtValue: totalDebt };
@@ -2741,7 +2799,12 @@ function buildFinanceStudents(
 
   function downloadSMSDebtExcel() {
     const tableRows = getTableRowsForExport();
-    const debtorRows = tableRows.filter((r) => r.balance > 0 && r.periodDebtValue > 0);
+    const clearedSet = clearedExportSignatures(tableRows);
+    const debtorRows = tableRows.filter((r) => (
+      r.balance > 0 &&
+      r.periodDebtValue > 0 &&
+      !isClearedDuplicateExportRow(r, clearedSet)
+    ));
     const header = ['Number', 'Name', 'Debt'];
     const rows = debtorRows.map((r) => {
       // Strip non-digit chars so Excel treats it as a plain number
@@ -3190,11 +3253,25 @@ function buildFinanceStudents(
   async function downloadBulkDebtLettersPDF() {
     const filterClass = canonClass(classFilter?.value || '');
     const debtorStudents = [];
+    const tableRows = getTableRowsForExport();
+    const clearedSet = clearedExportSignatures(tableRows);
     Object.entries(cachedStudents || {}).forEach(([id, s]) => {
       if (s.isGraduated) return;
       if (filterClass && canonClass(s.classLevel) !== filterClass) return;
       const fin = computeStudentFinancials(s);
-      if (Number(fin.balance || 0) > 0 && Number(fin.periodDebtValue || 0) > 0) debtorStudents.push(id);
+      const rowLike = {
+        fullName: `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.trim(),
+        classLevel: s.classLevel || s.className || '',
+        parentContact: getStudentContact(s),
+        balance: Number(fin.balance || 0),
+      };
+      if (
+        Number(fin.balance || 0) > 0 &&
+        Number(fin.periodDebtValue || 0) > 0 &&
+        !isClearedDuplicateExportRow(rowLike, clearedSet)
+      ) {
+        debtorStudents.push(id);
+      }
     });
     if (!debtorStudents.length) return alert('Hakuna wanafunzi wenye deni kwa darasa linalochaguliwa.');
     const schoolName = getSchoolNameForLetter();
