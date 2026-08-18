@@ -1434,6 +1434,9 @@
       if (!window.html2pdf || !window.SomapFinance || !isVerifiedTeachingRole()) return null;
       const assignments = await resolveCurrentClassTeacherAssignments(year);
       if (!assignments.length) return null;
+      if (typeof window.SomapFinance._clearFinanceCaches === 'function') {
+        window.SomapFinance._clearFinanceCaches();
+      }
       const debtors = await buildCurrentDebtDebtors(year);
       const roster = await window.SomapFinance.getFinanceRoster(year).catch(() => []);
       const rosterById = new Map((roster || []).map((row) => [String(row.studentId || row.id || ''), row]));
@@ -1474,6 +1477,140 @@
 
     async function downloadClassTeacherDebtPdfFromElement(sourceEl, downloadData) {
       if (!sourceEl || !downloadData) return;
+      const JsPdfCtor = window.jspdf?.jsPDF || window.jsPDF;
+      if (JsPdfCtor) {
+        const doc = new JsPdfCtor({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        const pageW = doc.internal.pageSize.getWidth();
+        const pageH = doc.internal.pageSize.getHeight();
+        const margin = 10;
+        const columns = [
+          { label: '#', x: margin, w: 9 },
+          { label: 'Student', x: 20, w: 55 },
+          { label: 'Class', x: 78, w: 25 },
+          { label: 'Stream', x: 105, w: 22 },
+          { label: 'Parent Contact', x: 130, w: 38 },
+          { label: 'Debt Till', x: 171, w: 35 },
+          { label: 'Debt', x: 209, w: 35 },
+          { label: 'Balance', x: 247, w: 38 },
+        ];
+        const teacherName = downloadData.assignments?.[0]?.teacherName || getWorkerName();
+        const classLabels = (downloadData.assignments || [])
+          .map((assignment) => `${assignment.className} (${streamLabelForTeacher(assignment.stream)})`)
+          .join(', ');
+        const money = (value) => `TZS ${Number(value || 0).toLocaleString('en-US')}`;
+        let y = margin;
+
+        function drawHeader(pageNumber) {
+          doc.setFillColor(15, 118, 110);
+          doc.rect(0, 0, pageW, 13, 'F');
+          doc.setTextColor(255, 255, 255);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(13);
+          doc.text('Socrates SoMAp - Class Debt Attendance List', margin, 8.5);
+          doc.setFontSize(8);
+          doc.text(`Page ${pageNumber}`, pageW - margin - 18, 8.5);
+          doc.setTextColor(15, 23, 42);
+          doc.setFontSize(9);
+          doc.setFont('helvetica', 'normal');
+          y = 19;
+          doc.text(`${state.schoolName || 'Socrates School'} | Academic Year ${downloadData.year} | Generated ${downloadData.generatedAt}`, margin, y);
+          y += 5;
+          doc.text(`Class Teacher: ${teacherName} | Class: ${classLabels}`, margin, y, { maxWidth: pageW - (margin * 2) });
+          y += 8;
+          doc.setFillColor(254, 242, 242);
+          doc.setDrawColor(220, 38, 38);
+          doc.rect(margin, y - 4, pageW - (margin * 2), 8, 'FD');
+          doc.setTextColor(127, 29, 29);
+          doc.setFont('helvetica', 'bold');
+          doc.text('Students listed here have current Debt till amounts and should be sent home for fee follow-up before entering class.', margin + 3, y + 1.5);
+          doc.setTextColor(15, 23, 42);
+          y += 11;
+          drawTableHeader();
+        }
+
+        function drawTableHeader() {
+          doc.setFillColor(15, 118, 110);
+          doc.rect(margin, y, pageW - (margin * 2), 7, 'F');
+          doc.setTextColor(255, 255, 255);
+          doc.setFontSize(8);
+          doc.setFont('helvetica', 'bold');
+          columns.forEach((col) => doc.text(col.label, col.x + 1, y + 4.8));
+          doc.setTextColor(15, 23, 42);
+          y += 8;
+        }
+
+        function drawFooter(pageNumber) {
+          doc.setDrawColor(203, 213, 225);
+          doc.line(margin, pageH - 9, pageW - margin, pageH - 9);
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(7);
+          doc.setTextColor(100, 116, 139);
+          doc.text('SoMAp Workers Attendance auto-download', margin, pageH - 4);
+          doc.text(String(pageNumber), pageW - margin - 6, pageH - 4);
+          doc.setTextColor(15, 23, 42);
+        }
+
+        let pageNumber = 1;
+        drawHeader(pageNumber);
+        const rows = Array.isArray(downloadData.debtors) ? downloadData.debtors : [];
+        const totalDebt = rows.reduce((sum, row) => sum + Number(row.debtAmount || 0), 0);
+        const totalBalance = rows.reduce((sum, row) => sum + Number(row.balance || 0), 0);
+
+        if (!rows.length) {
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(10);
+          doc.setTextColor(4, 120, 87);
+          doc.text('No current debtors for this assigned class.', margin, y + 8);
+        } else {
+          rows.forEach((row, index) => {
+            const cells = [
+              String(index + 1),
+              String(row.name || ''),
+              String(row.classLevel || '-'),
+              String(row.stream || '-'),
+              String(row.phone || '-'),
+              String(row.debtTill || '-'),
+              money(row.debtAmount),
+              money(row.balance),
+            ];
+            const wrapped = cells.map((cell, i) => doc.splitTextToSize(cell, columns[i].w - 2));
+            const rowH = Math.max(7, ...wrapped.map((lines) => lines.length * 4.2 + 2));
+            if (y + rowH > pageH - 13) {
+              drawFooter(pageNumber);
+              doc.addPage();
+              pageNumber += 1;
+              drawHeader(pageNumber);
+            }
+            if (index % 2 === 1) {
+              doc.setFillColor(248, 250, 252);
+              doc.rect(margin, y - 1.2, pageW - (margin * 2), rowH, 'F');
+            }
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(7.5);
+            doc.setTextColor(15, 23, 42);
+            wrapped.forEach((lines, i) => {
+              if (i >= 6) doc.setTextColor(185, 28, 28);
+              doc.text(lines, columns[i].x + 1, y + 3.8);
+              if (i >= 6) doc.setTextColor(15, 23, 42);
+            });
+            doc.setDrawColor(219, 227, 238);
+            doc.line(margin, y + rowH - 1, pageW - margin, y + rowH - 1);
+            y += rowH;
+          });
+          if (y + 8 > pageH - 13) {
+            drawFooter(pageNumber);
+            doc.addPage();
+            pageNumber += 1;
+            drawHeader(pageNumber);
+          }
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(8);
+          doc.text(`Debtors: ${rows.length} | Current Debt: ${money(totalDebt)} | Class Balance: ${money(totalBalance)}`, margin, y + 5);
+        }
+        drawFooter(pageNumber);
+        doc.save(downloadData.filename);
+        return;
+      }
       await window.html2pdf().set({
         margin: 5,
         filename: downloadData.filename,
@@ -4664,31 +4801,43 @@
 
     async function buildCurrentDebtDebtors(year) {
       if (!window.SomapFinance) return [];
-      let students = {};
+      let entries = {};
       try {
-        students = await window.SomapFinance.getYearStudents(year);
+        entries = await window.SomapFinance.getYearFinanceEntries(year);
       } catch (e) {
-        console.warn('Finance students load failed', e);
+        console.warn('Finance entries load failed', e);
         return [];
-      }
-
-      const entries = Object.fromEntries(
-        Object.entries(students || {}).map(([studentId, student]) => [studentId, { student }])
-      );
-
-      try {
-        const deadlineSnap = await schoolRef(`financeDeadlineExtensions/${year}`).once('value');
-        financeCallAttachDeadlineExtensions(entries, deadlineSnap.val() || {});
-      } catch (e) {
-        console.warn('Finance deadline extensions load failed', e);
       }
 
       const debtors = [];
       Object.entries(entries || {}).forEach(([studentId, entry]) => {
         try {
-          const record = financeCallComputeDebtorRecord(studentId, entry, Number(year));
-          if (!record) return;
-          debtors.push(record);
+          const student = entry?.student || {};
+          const finance = entry?.finance || {};
+          if (student.isGraduated) return;
+          const balance = Math.max(0, Number(finance.balance ?? entry?.outstanding ?? 0) || 0);
+          const debtAmount = Math.max(0, Number(finance.periodDebtValue || 0) || 0);
+          if (!(balance > 0) || !(debtAmount > 0)) return;
+          const debtTill = String(finance.periodDebtLabel || '-').trim();
+          if (!debtTill || debtTill === '-') return;
+          const debtTillTs = Number(finance.overdueThroughTs || finance.originalOverdueThroughTs || 0) ||
+            (Number.isFinite(Date.parse(debtTill)) ? Date.parse(debtTill) : 0);
+          const fullName = String(
+            student.fullName ||
+            [student.firstName, student.middleName, student.lastName].filter(Boolean).join(' ')
+          ).trim();
+          debtors.push({
+            studentId,
+            admissionNumber: student.admissionNumber || student.admissionNo || studentId,
+            name: fullName || student.admissionNumber || studentId,
+            classLevel: student.classLevel || student.className || '-',
+            stream: studentStreamValue(student),
+            phone: student.primaryParentContact || String(entry?.parentContact || '').trim() || '-',
+            debtTill,
+            debtAmount,
+            balance,
+            debtTillTs,
+          });
         } catch (e) {
           console.warn('Skipping malformed finance debtor row', studentId, e);
         }
