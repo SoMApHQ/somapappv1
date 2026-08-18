@@ -708,6 +708,67 @@
       }
       return scopedSnap;
     }
+
+    function isSocratesLegacySchool() {
+      return ['socrates-school', 'default', 'socrates'].includes(String(school?.id || '').trim().toLowerCase());
+    }
+
+    function canonicalAttendanceDayKey(dayKey) {
+      const cleaned = String(dayKey || '').replace(/[^0-9]/g, '');
+      return /^\d{8}$/.test(cleaned) ? cleaned : '';
+    }
+
+    function chooseAttendanceRecord(existing, next) {
+      if (!existing) return next;
+      const existingHasTimes = !!(existing?.checkInTs || existing?.checkOutTs);
+      const nextHasTimes = !!(next?.checkInTs || next?.checkOutTs);
+      if (nextHasTimes && !existingHasTimes) return next;
+      if (!nextHasTimes && existingHasTimes) return existing;
+      return { ...(existing || {}), ...(next || {}) };
+    }
+
+    function mergeAttendanceMonths(...months) {
+      const merged = {};
+      months.forEach((month) => {
+        Object.entries(month || {}).forEach(([dayKey, record]) => {
+          const canonical = canonicalAttendanceDayKey(dayKey);
+          if (!canonical) return;
+          merged[canonical] = chooseAttendanceRecord(merged[canonical], record || {});
+        });
+      });
+      return merged;
+    }
+
+    function mergeAttendanceRoots(...roots) {
+      const merged = {};
+      roots.forEach((root) => {
+        Object.entries(root || {}).forEach(([workerId, byMonth]) => {
+          if (!workerId || !byMonth || typeof byMonth !== 'object') return;
+          if (!merged[workerId]) merged[workerId] = {};
+          Object.entries(byMonth).forEach(([monthKey, monthRecords]) => {
+            if (!/^\d{6}$/.test(String(monthKey || ''))) return;
+            merged[workerId][monthKey] = mergeAttendanceMonths(merged[workerId][monthKey], monthRecords || {});
+          });
+        });
+      });
+      return merged;
+    }
+
+    async function loadWorkerAttendanceMonth(workerId, monthKey) {
+      const [scopedSnap, legacySnap] = await Promise.all([
+        schoolRef(`years/${currentYear}/workerAttendance/${workerId}/${monthKey}`).once('value').catch(() => null),
+        isSocratesLegacySchool() ? db.ref(`attendance/${workerId}/${monthKey}`).once('value').catch(() => null) : Promise.resolve(null),
+      ]);
+      return mergeAttendanceMonths(scopedSnap?.val?.() || {}, legacySnap?.val?.() || {});
+    }
+
+    async function loadWorkerAttendanceRoot() {
+      const [scopedSnap, legacySnap] = await Promise.all([
+        schoolRef(`years/${currentYear}/workerAttendance`).once('value').catch(() => null),
+        isSocratesLegacySchool() ? db.ref('attendance').once('value').catch(() => null) : Promise.resolve(null),
+      ]);
+      return mergeAttendanceRoots(scopedSnap?.val?.() || {}, legacySnap?.val?.() || {});
+    }
     
     /* ==============================
        UI REFS
@@ -1297,9 +1358,9 @@
           classNames = Array.from(new Set(Object.values(students).map(s => (s?.classLevel || s?.className || '').trim()).filter(Boolean)));
         }
 
-        const [workersSnap, attendanceSnap] = await Promise.all([
+        const [workersSnap, attendanceRoot] = await Promise.all([
           scopedOrSocratesLegacy(`years/${currentYear}/workers`, 'workers').catch(e => { console.error('Workers fetch error:', e); return null; }),
-          scopedOrSocratesLegacy(`years/${currentYear}/workerAttendance`, 'attendance').catch(e => { console.error('Attendance fetch error:', e); return null; })
+          loadWorkerAttendanceRoot().catch(e => { console.error('Attendance fetch error:', e); return {}; })
         ]);
 
         // Student attendance: use same path as dashboard (attendance/{class}/{month}/{day})
@@ -1319,7 +1380,7 @@
         }
         const studentsAbsent = Math.max(0, totalStudents - studentsPresent);
 
-        console.log('?? Database snapshots:', { workers: workersSnap?.exists(), attendance: attendanceSnap?.exists() });
+        console.log('?? Database snapshots:', { workers: workersSnap?.exists(), attendanceWorkers: Object.keys(attendanceRoot || {}).length });
 
         // Total workers
         const workers = workersSnap?.val() || {};
@@ -1334,15 +1395,12 @@
         // Workers present today
         let workersPresent = 0;
         let workersAbsent = 0;
-        if (attendanceSnap?.exists()) {
-          const attendance = attendanceSnap.val() || {};
-          Object.values(attendance).forEach(byMonth => {
-            if (byMonth && typeof byMonth === 'object') {
-              const rec = byMonth[workerMonthKey]?.[workerDayKey];
-              if (rec?.checkInTs && (rec?.checkInStatus === 'approved' || rec?.approved === true)) workersPresent++;
-            }
-          });
-        }
+        Object.values(attendanceRoot || {}).forEach(byMonth => {
+          if (byMonth && typeof byMonth === 'object') {
+            const rec = byMonth[workerMonthKey]?.[workerDayKey];
+            if (rec?.checkInTs && (rec?.checkInStatus === 'approved' || rec?.approved === true)) workersPresent++;
+          }
+        });
         workersAbsent = Math.max(totalWorkers - workersPresent, 0);
         console.log('?? Workers present:', workersPresent, 'absent:', workersAbsent);
         document.getElementById('workersPresent').textContent = workersPresent;
@@ -1387,8 +1445,8 @@
       if(selfGrid&&!document.getElementById('kpiSalaryYear'))selfGrid.insertAdjacentHTML('beforeend',`<div class="kpi-card success" id="kpiSalaryYear" role="link" tabindex="0"><div class="kpi-label">Received This Year</div><div class="kpi-value">—</div></div><div class="kpi-card success" id="kpiSalaryLifetime" role="link" tabindex="0"><div class="kpi-label">Received Since Employment</div><div class="kpi-value">—</div></div>`);
       ['kpiSalaryYear','kpiSalaryLifetime'].forEach(id=>{const card=document.getElementById(id);if(card){card.onclick=()=>location.href='workerssalary.html';card.onkeydown=e=>{if(e.key==='Enter')location.href='workerssalary.html'}}});
 
-      const [attSnap, taskSnap, leaveSnap, penSnap] = await Promise.all([
-        scopedOrSocratesLegacy(`years/${currentYear}/workerAttendance/${workerId}/${mm}`, `attendance/${workerId}/${mm}`).catch(()=>null),
+      const [attendanceMonth, taskSnap, leaveSnap, penSnap] = await Promise.all([
+        loadWorkerAttendanceMonth(workerId, mm).catch(()=>({})),
         schoolRef(`years/${currentYear}/workerTasks/${workerId}/${dayKey}`).once('value').catch(()=>null),
         scopedOrSocratesLegacy(`years/${currentYear}/workerLeaveRequests/${workerId}`, `leave_requests/${workerId}`).catch(()=>null),
         scopedOrSocratesLegacy(`years/${currentYear}/workers_penalties_ledger/${workerId}/${mm}`, `penalties_ledger/${workerId}/${mm}`).catch(()=>null),
@@ -1402,7 +1460,7 @@
       const kpiPens  = document.getElementById('kpiPenalties');
 
       // Check-in
-      const rec = attSnap?.val()?.[dayKey] || null;
+      const rec = attendanceMonth?.[dayKey] || null;
       const checked = !!(rec && rec.checkInTs);
       const lateMin = Number(rec?.lateMinutes||0);
       
@@ -1410,7 +1468,7 @@
       kpiCheck.querySelector('.kpi-value').textContent = checked ? (lateMin>0?`Late ${lateMin}m`:'Checked in') : (after0720()?'Not in 07:20+':'Not yet');
 
       // Lates this month
-      let lates=0; Object.values(attSnap?.val()||{}).forEach(v=>{ if (v && Number(v.lateMinutes||0)>0) lates++; });
+      let lates=0; Object.values(attendanceMonth || {}).forEach(v=>{ if (v && Number(v.lateMinutes||0)>0) lates++; });
       kpiLates.className = 'kpi-card ' + (lates?'warning':'success'); 
       kpiLates.querySelector('.kpi-value').textContent = lates;
 
@@ -1506,11 +1564,11 @@
         return regYear >= BASE_YEAR && regYear <= selectedYear;
       };
 
-      const [wSnap, sSnap, lSnap, aSnap] = await Promise.all([
+      const [wSnap, sSnap, lSnap, attendanceRoot] = await Promise.all([
         scopedOrSocratesLegacy(`years/${currentYear}/workers`, 'workers').catch(()=>null),
         scopedOrSocratesLegacy(`years/${currentYear}/students`, 'students').catch(()=>null),
         scopedOrSocratesLegacy(`years/${currentYear}/workerLeaveRequests`, 'leave_requests').catch(()=>null),
-        scopedOrSocratesLegacy(`years/${currentYear}/workerAttendance`, 'attendance').catch(()=>null),
+        loadWorkerAttendanceRoot().catch(()=>({})),
       ]);
 
       const add = (label,val,cls='')=>{
@@ -1527,17 +1585,14 @@
         add('Active Workers', activeWorkers, 'success');
 
         let checked=0, late=0;
-        if (aSnap && aSnap.exists()){
-          const attendance=aSnap.val()||{};
-          Object.values(attendance).forEach(byMonth=>{
-            const rec=byMonth?.[mm]?.[dayKey];
-            if (rec?.checkInTs) checked++;
-            if (Number(rec?.lateMinutes||0)>0) late++;
-          });
-          add('Checked-in Today', checked, 'success');
-          add('Late Today', late, late?'warning':'success');
-          if (after0720()) add('Not Checked-in 07:20+', Math.max(activeWorkers-checked,0), (activeWorkers-checked)?'danger':'success');
-        }
+        Object.values(attendanceRoot || {}).forEach(byMonth=>{
+          const rec=byMonth?.[mm]?.[dayKey];
+          if (rec?.checkInTs) checked++;
+          if (Number(rec?.lateMinutes||0)>0) late++;
+        });
+        add('Checked-in Today', checked, 'success');
+        add('Late Today', late, late?'warning':'success');
+        if (after0720()) add('Not Checked-in 07:20+', Math.max(activeWorkers-checked,0), (activeWorkers-checked)?'danger':'success');
       }
 
       if (sSnap && sSnap.exists()){
