@@ -718,10 +718,47 @@
       return /^\d{8}$/.test(cleaned) ? cleaned : '';
     }
 
+    function normalizeAttendanceTs(value) {
+      if (value === null || value === undefined || value === '') return 0;
+      if (typeof value === 'number' && Number.isFinite(value)) return value > 1e9 && value < 1e12 ? value * 1000 : value;
+      const text = String(value || '').trim();
+      if (!text) return 0;
+      if (/^\d{10,13}$/.test(text)) {
+        const numeric = Number(text);
+        return numeric > 1e9 && numeric < 1e12 ? numeric * 1000 : numeric;
+      }
+      const parsed = Date.parse(text);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function attendanceTs(record, kind) {
+      if (!record || typeof record !== 'object') return 0;
+      const candidates = kind === 'out'
+        ? [record.checkOutTs, record.checkoutTs, record.checkOutAt, record.checkoutAt, record.checkOutTime, record.checkoutTime, record.outTs, record.outTime, record.checkOut?.ts, record.checkOut?.timestamp, record.out?.ts, record.out?.timestamp]
+        : [record.checkInTs, record.checkinTs, record.checkInAt, record.checkinAt, record.checkInTime, record.checkinTime, record.inTs, record.inTime, record.checkIn?.ts, record.checkIn?.timestamp, record.in?.ts, record.in?.timestamp];
+      for (const value of candidates) {
+        const ts = normalizeAttendanceTs(value);
+        if (ts > 0) return ts;
+      }
+      return 0;
+    }
+
+    function hasAttendanceTime(record) {
+      return attendanceTs(record, 'in') > 0 || attendanceTs(record, 'out') > 0;
+    }
+
+    function isCountableAttendanceRecord(record) {
+      if (!record || typeof record !== 'object') return false;
+      if (attendanceTs(record, 'in') > 0) return true;
+      const status = String(record.attendanceStatus || record.status || '').trim().toLowerCase();
+      if (status.includes('absent') || status.includes('no sign') || status.includes('missed')) return false;
+      return Object.keys(record).length > 0;
+    }
+
     function chooseAttendanceRecord(existing, next) {
       if (!existing) return next;
-      const existingHasTimes = !!(existing?.checkInTs || existing?.checkOutTs);
-      const nextHasTimes = !!(next?.checkInTs || next?.checkOutTs);
+      const existingHasTimes = hasAttendanceTime(existing);
+      const nextHasTimes = hasAttendanceTime(next);
       if (nextHasTimes && !existingHasTimes) return next;
       if (!nextHasTimes && existingHasTimes) return existing;
       return { ...(existing || {}), ...(next || {}) };
@@ -1398,7 +1435,7 @@
         Object.values(attendanceRoot || {}).forEach(byMonth => {
           if (byMonth && typeof byMonth === 'object') {
             const rec = byMonth[workerMonthKey]?.[workerDayKey];
-            if (rec?.checkInTs && (rec?.checkInStatus === 'approved' || rec?.approved === true)) workersPresent++;
+            if ((attendanceTs(rec, 'in') || isCountableAttendanceRecord(rec)) && (rec?.checkInStatus === 'approved' || rec?.approved === true || isCountableAttendanceRecord(rec))) workersPresent++;
           }
         });
         workersAbsent = Math.max(totalWorkers - workersPresent, 0);
@@ -1461,11 +1498,11 @@
 
       // Check-in
       const rec = attendanceMonth?.[dayKey] || null;
-      const checked = !!(rec && rec.checkInTs);
+      const checked = !!(rec && (attendanceTs(rec, 'in') || isCountableAttendanceRecord(rec)));
       const lateMin = Number(rec?.lateMinutes||0);
       
       kpiCheck.className = 'kpi-card ' + (checked?(lateMin>0?'warning':'success'):'danger');
-      kpiCheck.querySelector('.kpi-value').textContent = checked ? (lateMin>0?`Late ${lateMin}m`:'Checked in') : (after0720()?'Not in 07:20+':'Not yet');
+      kpiCheck.querySelector('.kpi-value').textContent = checked ? (lateMin>0?`Late ${lateMin}m`:(attendanceTs(rec, 'in') ? 'Checked in' : 'Recorded')) : (after0720()?'Not in 07:20+':'Not yet');
 
       // Lates this month
       let lates=0; Object.values(attendanceMonth || {}).forEach(v=>{ if (v && Number(v.lateMinutes||0)>0) lates++; });
@@ -1587,7 +1624,7 @@
         let checked=0, late=0;
         Object.values(attendanceRoot || {}).forEach(byMonth=>{
           const rec=byMonth?.[mm]?.[dayKey];
-          if (rec?.checkInTs) checked++;
+          if (attendanceTs(rec, 'in') || isCountableAttendanceRecord(rec)) checked++;
           if (Number(rec?.lateMinutes||0)>0) late++;
         });
         add('Checked-in Today', checked, 'success');

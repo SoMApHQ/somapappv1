@@ -3980,9 +3980,47 @@
         : `Wi-Fi haitakiwi kwa sasa (imetolewa na Mwalimu Mkuu). ${extraText}`.trim();
     }
 
+    function normalizeAttendanceTs(value) {
+      if (value === null || value === undefined || value === '') return 0;
+      if (typeof value === 'number' && Number.isFinite(value)) return value > 1e9 && value < 1e12 ? value * 1000 : value;
+      const text = String(value || '').trim();
+      if (!text) return 0;
+      if (/^\d{10,13}$/.test(text)) {
+        const numeric = Number(text);
+        return numeric > 1e9 && numeric < 1e12 ? numeric * 1000 : numeric;
+      }
+      const parsed = Date.parse(text);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function attendanceTs(record, kind) {
+      if (!record || typeof record !== 'object') return 0;
+      const candidates = kind === 'out'
+        ? [record.checkOutTs, record.checkoutTs, record.checkOutAt, record.checkoutAt, record.checkOutTime, record.checkoutTime, record.outTs, record.outTime, record.checkOut?.ts, record.checkOut?.timestamp, record.out?.ts, record.out?.timestamp]
+        : [record.checkInTs, record.checkinTs, record.checkInAt, record.checkinAt, record.checkInTime, record.checkinTime, record.inTs, record.inTime, record.checkIn?.ts, record.checkIn?.timestamp, record.in?.ts, record.in?.timestamp];
+      for (const value of candidates) {
+        const ts = normalizeAttendanceTs(value);
+        if (ts > 0) return ts;
+      }
+      return 0;
+    }
+
+    function hasAttendanceTime(record) {
+      return attendanceTs(record, 'in') > 0 || attendanceTs(record, 'out') > 0;
+    }
+
+    function isCountableAttendanceRecord(record) {
+      if (!record || typeof record !== 'object') return false;
+      if (attendanceTs(record, 'in') > 0) return true;
+      const status = String(record.attendanceStatus || record.status || '').trim().toLowerCase();
+      if (status.includes('absent') || status.includes('no sign') || status.includes('missed')) return false;
+      return Object.keys(record).length > 0;
+    }
+
     function formatTs(ts) {
-      if (!ts) return '--';
-      return new Date(ts).toLocaleTimeString('sw-TZ', {
+      const normalized = normalizeAttendanceTs(ts);
+      if (!normalized) return '--';
+      return new Date(normalized).toLocaleTimeString('sw-TZ', {
         timeZone: 'Africa/Nairobi',
         hour: '2-digit',
         minute: '2-digit'
@@ -4011,10 +4049,10 @@
       if (approved === false && record?.approvedTs) return 'rejected';
 
       if (kind === 'in') {
-        return record?.checkInTs ? 'pending' : '--';
+        return attendanceTs(record, 'in') ? 'pending' : '--';
       }
 
-      return record?.checkOutTs ? 'pending' : '--';
+      return attendanceTs(record, 'out') ? 'pending' : '--';
     }
 
     function isHeadTeacher() {
@@ -4051,10 +4089,11 @@
 
     function chooseAttendanceRecord(existing, next) {
       if (!existing) return next;
-      const existingHasTimes = !!(existing.record?.checkInTs || existing.record?.checkOutTs);
-      const nextHasTimes = !!(next.record?.checkInTs || next.record?.checkOutTs);
-      if (next.source !== 'legacy' && existing.source === 'legacy') return next;
+      const existingHasTimes = hasAttendanceTime(existing.record);
+      const nextHasTimes = hasAttendanceTime(next.record);
       if (nextHasTimes && !existingHasTimes) return next;
+      if (!nextHasTimes && existingHasTimes) return existing;
+      if (next.source !== 'legacy' && existing.source === 'legacy') return next;
       return existing;
     }
 
@@ -4101,6 +4140,8 @@
         const record = entry.record || {};
         const source = entry.source || 'scoped';
         const row = document.createElement('tr');
+        const checkInTs = attendanceTs(record, 'in');
+        const checkOutTs = attendanceTs(record, 'out');
         const inStatus = statusFromLegacy(record, 'in');
         const outStatus = statusFromLegacy(record, 'out');
         const adminCell = isAdmin
@@ -4110,8 +4151,8 @@
           : '';
         row.innerHTML = `
           <td>${formatDayKey(dayKey)}${source === 'legacy' ? ' *' : ''}</td>
-          <td>${formatTs(record.checkInTs)}</td>
-          <td>${formatTs(record.checkOutTs)}</td>
+          <td>${formatTs(checkInTs)}</td>
+          <td>${formatTs(checkOutTs)}</td>
           <td>${record.lateMinutes || 0}</td>
           <td>${record.earlyMinutes || 0}</td>
           <td>${record.attendanceStatus ? `<div class="pill success" style="margin-bottom:5px">${escapeHtml(record.attendanceStatus)}</div>` : ''}IN: <span class="pill ${inStatus === 'approved' ? 'success' : inStatus === 'rejected' ? 'danger' : inStatus === 'pending' ? 'warning' : 'info'}">${inStatus}</span> • OUT: <span class="pill ${outStatus === 'approved' ? 'success' : outStatus === 'rejected' ? 'danger' : outStatus === 'pending' ? 'warning' : 'info'}">${outStatus}</span></td>
@@ -4153,9 +4194,11 @@
       let late = 0;
       let early = 0;
       Array.from(recordsByDay.values()).forEach(({ record }) => {
-        if (record.checkInTs) daysPresent += 1;
-        if (record.lateMinutes > 0) late += 1;
-        if (record.earlyMinutes > 0) early += 1;
+        const checkInTs = attendanceTs(record, 'in');
+        const checkOutTs = attendanceTs(record, 'out');
+        if (checkInTs || isCountableAttendanceRecord(record)) daysPresent += 1;
+        if (Number(record.lateMinutes || 0) > 0) late += 1;
+        if (Number(record.earlyMinutes || 0) > 0 || (checkOutTs && Number(record.earlyMinutes || 0) > 0)) early += 1;
       });
       const penalties = penaltiesSnap.val() || {};
       const finesTotal = Object.values(penalties).reduce((sum, p) => sum + Number(p.amountTZS || 0), 0);
