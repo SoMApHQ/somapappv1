@@ -140,6 +140,7 @@
     .detail-panel { max-height: 600px; overflow-y: auto; }
     .danger { color: var(--bad); font-weight: 700; }
     .ok { color: var(--good); font-weight: 700; }
+    .btn-danger { background: #fee2e2; color: var(--bad); }
     #financeBridge { width: 0; height: 0; border: 0; opacity: 0; position: absolute; pointer-events: none; }
     @media (max-width: 1200px) {
       .layout { grid-template-columns: 1fr; }
@@ -205,10 +206,11 @@
                 <th>To</th>
                 <th>Status</th>
                 <th>Notes</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody id="historyBody">
-              <tr><td colspan="8" class="muted">Loading...</td></tr>
+              <tr><td colspan="9" class="muted">Loading...</td></tr>
             </tbody>
           </table>
         </div>
@@ -318,6 +320,7 @@
     let selectedSummary = null;
     let selectedHistoryRecord = null;
     let financeBridgeReady = false;
+    let saveInProgress = false;
     let selectedWorkerId = String(localStorage.getItem('workerId') || sessionStorage.getItem('workerId') || '').trim();
 
     const hubMeta = document.getElementById('hubMeta');
@@ -461,6 +464,26 @@
       return out;
     }
 
+    function extensionSignature(row) {
+      const admission = String(row?.admissionNumber || '').trim().toUpperCase();
+      const studentKey = String(admission || row?.studentId || row?.studentKey || '').trim().toUpperCase();
+      const oldDeadline = Number(row?.oldDeadlineTs || row?.sourceOverdueTs || 0);
+      const newDeadlineTs = Number(row?.newDeadlineTs || row?.extendedDeadlineTs || 0);
+      const debtAmount = Math.round(Number(row?.debtAmount || 0));
+      const status = String(row?.status || 'approved').trim().toLowerCase();
+      return [studentKey, admission, oldDeadline, newDeadlineTs, debtAmount, status].join('|');
+    }
+
+    function findMatchingExtension(payload) {
+      const wanted = extensionSignature(payload);
+      return flattenExtensions(extensionsByStudent).find((row) => extensionSignature(row) === wanted) || null;
+    }
+
+    function extensionRecordKey(payload) {
+      const raw = extensionSignature(payload).replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase();
+      return `ext-${raw.slice(0, 120)}`;
+    }
+
     function approvedCountForStudent(studentId, admission) {
       const bucketA = extensionsByStudent[studentId] || {};
       const bucketB = admission ? (extensionsByStudent[admission] || {}) : {};
@@ -480,7 +503,7 @@
       const flat = flattenExtensions(extensionsByStudent)
         .sort((a, b) => Number(b.createdAt || b.approvedAt || 0) - Number(a.createdAt || a.approvedAt || 0));
       if (!flat.length) {
-        historyBody.innerHTML = '<tr><td colspan="8" class="muted">No extension agreements yet for this year.</td></tr>';
+        historyBody.innerHTML = '<tr><td colspan="9" class="muted">No extension agreements yet for this year.</td></tr>';
         return;
       }
       historyBody.innerHTML = flat.map((row, idx) => {
@@ -499,6 +522,7 @@
           <td>${fmtDate(row.newDeadlineTs)}</td>
           <td class="${statusClass}">${status}</td>
           <td>${String(row.headteacherReason || row.parentReason || '-').slice(0, 60)}</td>
+          <td><button class="btn btn-danger delete-extension-btn" type="button" data-idx="${idx}">Delete</button></td>
         </tr>`;
       }).join('');
       historyBody.querySelectorAll('.history-row').forEach((el) => {
@@ -517,8 +541,36 @@
           }
         });
       });
+      historyBody.querySelectorAll('.delete-extension-btn').forEach((btn) => {
+        btn.addEventListener('click', async (event) => {
+          event.stopPropagation();
+          const idx = parseInt(btn.getAttribute('data-idx'), 10);
+          const flat = flattenExtensions(extensionsByStudent)
+            .sort((a, b) => Number(b.createdAt || b.approvedAt || 0) - Number(a.createdAt || a.approvedAt || 0));
+          const row = flat[idx];
+          if (row) await deleteExtension(row);
+        });
+      });
 
       enrichUnknownStudents(flat);
+    }
+
+    async function deleteExtension(row) {
+      const studentId = String(row?.studentId || '').trim();
+      const rowId = String(row?.id || '').trim();
+      if (!studentId || !rowId) return;
+      const childName = getChildName(row);
+      if (!confirm(`Delete this extension record for ${childName}? This removes it from finance deadline extension data.`)) return;
+      try {
+        await schoolRef(`financeDeadlineExtensions/${year}/${studentId}/${rowId}`).remove();
+        if (selectedHistoryRecord && selectedHistoryRecord.id === rowId && String(selectedHistoryRecord.studentId || '') === studentId) {
+          showDetailPlaceholder();
+        }
+        await loadExtensions();
+        renderSearchResults();
+      } catch (err) {
+        alert(err.message || String(err));
+      }
     }
 
     async function enrichUnknownStudents(flat) {
@@ -835,10 +887,24 @@
     }
 
     async function saveExtension() {
+      if (saveInProgress) return;
       saveStatus.textContent = '';
+      const saveBtn = document.getElementById('saveExtensionBtn');
+      saveInProgress = true;
+      if (saveBtn) saveBtn.disabled = true;
       try {
         const payload = buildAgreementPayload();
-        await schoolRef(`financeDeadlineExtensions/${year}/${selected.id}`).push(payload);
+        const duplicate = findMatchingExtension(payload);
+        if (duplicate) {
+          throw new Error(`${payload.fullName || 'This child'} already has the same extension details: ${fmtDate(payload.oldDeadlineTs)} to ${fmtDate(payload.newDeadlineTs)} for ${fmtNum(payload.debtAmount)}.`);
+        }
+        const recordKey = extensionRecordKey(payload);
+        const recordRef = schoolRef(`financeDeadlineExtensions/${year}/${selected.id}/${recordKey}`);
+        const existing = await recordRef.once('value');
+        if (existing.exists()) {
+          throw new Error(`${payload.fullName || 'This child'} already has the same extension details: ${fmtDate(payload.oldDeadlineTs)} to ${fmtDate(payload.newDeadlineTs)} for ${fmtNum(payload.debtAmount)}.`);
+        }
+        await recordRef.set(payload);
         saveStatus.textContent = 'Saved. Finance overdue date will update for this child.';
         saveStatus.className = 'ok';
         await loadExtensions();
@@ -846,6 +912,9 @@
       } catch (err) {
         saveStatus.textContent = err.message || String(err);
         saveStatus.className = 'danger';
+      } finally {
+        saveInProgress = false;
+        if (saveBtn) saveBtn.disabled = false;
       }
     }
 
@@ -997,7 +1066,7 @@
       hubMeta.textContent = `${school.name || school.id} | Academic Year ${year}`;
 
       showDetailPlaceholder();
-      historyBody.innerHTML = '<tr><td colspan="8" class="muted">Loading...</td></tr>';
+      historyBody.innerHTML = '<tr><td colspan="9" class="muted">Loading...</td></tr>';
 
       const frame = document.getElementById('financeBridge');
       if (frame) {
@@ -1043,7 +1112,7 @@
         resolvedExtensionStudents = {};
         showDetailPlaceholder();
         debtCards.style.display = 'none';
-        historyBody.innerHTML = '<tr><td colspan="8" class="muted">Loading...</td></tr>';
+        historyBody.innerHTML = '<tr><td colspan="9" class="muted">Loading...</td></tr>';
         try {
           await Promise.all([loadExtensions(), loadStudentsFromFirebase()]);
         } catch (err) {
@@ -1079,7 +1148,7 @@
           resolvedExtensionStudents = {};
           showDetailPlaceholder();
           debtCards.style.display = 'none';
-          historyBody.innerHTML = '<tr><td colspan="8" class="muted">Loading...</td></tr>';
+          historyBody.innerHTML = '<tr><td colspan="9" class="muted">Loading...</td></tr>';
           await Promise.all([loadExtensions(), loadStudentsFromFirebase()]);
           renderAllHistory();
           renderSearchResults();
