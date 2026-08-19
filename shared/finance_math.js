@@ -123,6 +123,19 @@
     return `${schoolPrefix()}${trimmed}`;
   }
 
+  function activeSchoolId(){
+    return String(
+      global.SOMAP?.getSchool?.()?.id ||
+      global.currentSchoolId ||
+      global.SOMAP?.getSchoolId?.() ||
+      'socrates-school'
+    ).trim();
+  }
+
+  function activeSchoolCacheKey(year){
+    return `${activeSchoolId() || 'socrates-school'}::${normalizeYear(year)}`;
+  }
+
   function normalizeYear(year){
     const num = Number(year);
     if (!Number.isFinite(num)) return String(SOMAP_DEFAULT_YEAR);
@@ -689,7 +702,7 @@ function buildFinanceStudents(
 ){
     const targetYear = String(year || SOMAP_DEFAULT_YEAR);
     const targetYearNum = Number(targetYear);
-    const currentSchoolId = String(global.SOMAP?.getSchool?.()?.id || global.currentSchoolId || '').trim();
+    const currentSchoolId = activeSchoolId();
     const isNonEmptyObj = (o) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).length > 0;
     const toMs = (value) => {
       if (value === null || value === undefined) return null;
@@ -747,11 +760,44 @@ function buildFinanceStudents(
       );
     };
     const normalizeSchoolId = (value) => String(value || '').trim().toLowerCase().replace(/_/g, '-');
+    const isCurrentSocrates = normalizeSchoolId(currentSchoolId) === 'socrates-school';
+    const legacyCutoffMs = Date.UTC(2026, 7, 1);
+    const recordSchoolId = (stu) => String(
+      stu?.schoolId ||
+      stu?.schoolID ||
+      stu?.school_id ||
+      stu?.currentSchoolId ||
+      stu?.ownerSchoolId ||
+      stu?.meta?.schoolId ||
+      ''
+    ).trim();
+    const recordSchoolName = (stu) => String(
+      stu?.schoolName ||
+      stu?.school ||
+      stu?.schoolBranch ||
+      stu?.campusName ||
+      stu?.meta?.schoolName ||
+      ''
+    ).trim().toLowerCase();
+    const hasSocratesName = (name) => /socrates/.test(String(name || '').toLowerCase());
+    const hasWrongSchoolProvenance = (stu) => {
+      const sid = recordSchoolId(stu);
+      if (sid && currentSchoolId && normalizeSchoolId(sid) !== normalizeSchoolId(currentSchoolId)) return true;
+      const sname = recordSchoolName(stu);
+      if (!sname) return false;
+      if (isCurrentSocrates) return !hasSocratesName(sname);
+      return hasSocratesName(sname);
+    };
+    const isUnmarkedNewSocratesLegacyLeak = (stu) => {
+      if (!isCurrentSocrates || recordSchoolId(stu) || recordSchoolName(stu)) return false;
+      const createdMs = getRegistrationMs(stu);
+      return Number.isFinite(createdMs) && createdMs >= legacyCutoffMs;
+    };
     const isCompleteStudent = (stu) => {
       if (!stu || typeof stu !== 'object') return false;
       if (looksDeleted(stu)) return false;
-      const sid = String(stu.schoolId || '').trim();
-      if (sid && currentSchoolId && normalizeSchoolId(sid) !== normalizeSchoolId(currentSchoolId)) return false;
+      if (hasWrongSchoolProvenance(stu)) return false;
+      if (isUnmarkedNewSocratesLegacyLeak(stu)) return false;
       const admission = String(stu.admissionNumber || '').trim();
       const first = String(stu.firstName || '').trim();
       const last = String(stu.lastName || '').trim();
@@ -987,8 +1033,9 @@ function buildFinanceStudents(
 
   async function loadApprovedFinanceApprovals(year){
     const y = normalizeYear(year);
-    if (!approvalsCache[y]) {
-      approvalsCache[y] = (async () => {
+    const cacheKey = activeSchoolCacheKey(y);
+    if (!approvalsCache[cacheKey]) {
+      approvalsCache[cacheKey] = (async () => {
         const database = getDb();
         if (!database) return {};
         try {
@@ -1032,13 +1079,14 @@ function buildFinanceStudents(
         }
       })();
     }
-    return approvalsCache[y];
+    return approvalsCache[cacheKey];
   }
 
   async function ensureYearDataset(year){
     const y = normalizeYear(year);
-    if (!datasetCache[y]) {
-      datasetCache[y] = (async () => {
+    const cacheKey = activeSchoolCacheKey(y);
+    if (!datasetCache[cacheKey]) {
+      datasetCache[cacheKey] = (async () => {
         const database = getDb();
         if (!database) throw new Error('SomapFinance: Firebase database not initialised.');
         const isSocratesSchool =
@@ -1096,8 +1144,6 @@ function buildFinanceStudents(
           const legacyLedgerData = legacyLedgerSnap.val() || {};
           if (isSocratesSchool) {
             ledgerData = { ...(legacyLedgerData || {}), ...(ledgerData || {}) };
-          } else if (!Object.keys(ledgerData || {}).length) {
-            ledgerData = legacyLedgerData;
           }
         } catch (legacyErr) {
           console.warn('SomapFinance: legacy financeLedgers read failed', legacyErr?.message || legacyErr);
@@ -1108,8 +1154,6 @@ function buildFinanceStudents(
           const legacyStudentFeesData = legacyStudentFeesSnap.val() || {};
           if (isSocratesSchool) {
             studentFeesData = { ...(legacyStudentFeesData || {}), ...(studentFeesData || {}) };
-          } else if (!Object.keys(studentFeesData || {}).length) {
-            studentFeesData = legacyStudentFeesData;
           }
         } catch (studentFeesErr) {
           console.warn('SomapFinance: student fee override read failed', studentFeesErr?.message || studentFeesErr);
@@ -1153,15 +1197,16 @@ function buildFinanceStudents(
         dataset.students = decorateStudentsWithDeadlineExtensions(built || {}, deadlineExtensionsSnap.val() || {});
         return dataset;
       })();
-      datasetCache[y].catch(() => { delete datasetCache[y]; });
+      datasetCache[cacheKey].catch(() => { delete datasetCache[cacheKey]; });
     }
-    return datasetCache[y];
+    return datasetCache[cacheKey];
   }
 
   async function ensureYearSummary(year){
     const y = normalizeYear(year);
-    if (!summaryCache[y]) {
-      summaryCache[y] = (async () => {
+    const cacheKey = activeSchoolCacheKey(y);
+    if (!summaryCache[cacheKey]) {
+      summaryCache[cacheKey] = (async () => {
         const dataset = await ensureYearDataset(y);
         const entries = {};
         let totalDue = 0;
@@ -1197,9 +1242,9 @@ function buildFinanceStudents(
         });
         return { year: y, entries, totalDue, totalPaid, dataset };
       })();
-      summaryCache[y].catch(() => { delete summaryCache[y]; });
+      summaryCache[cacheKey].catch(() => { delete summaryCache[cacheKey]; });
     }
-    return summaryCache[y];
+    return summaryCache[cacheKey];
   }
 
   async function loadStudentFinance(year, studentId){

@@ -1184,6 +1184,45 @@
     }
     function normalizeYearValue(y) { const n = Number(y); return Number.isFinite(n) ? String(n) : String(SOMAP_DEFAULT_YEAR); }
 
+    function normalizeSchoolId(value) {
+      return String(value || '').trim().toLowerCase().replace(/_/g, '-');
+    }
+    function getStudentSchoolId(s) {
+      return String(s?.schoolId || s?.schoolID || s?.school_id || s?.currentSchoolId || s?.ownerSchoolId || s?.meta?.schoolId || '').trim();
+    }
+    function getStudentSchoolName(s) {
+      return String(s?.schoolName || s?.school || s?.schoolBranch || s?.campusName || s?.meta?.schoolName || '').trim().toLowerCase();
+    }
+    function toMs(value) {
+      if (value === null || value === undefined) return null;
+      if (typeof value === 'number' && Number.isFinite(value)) return value > 1e9 && value < 1e12 ? value * 1000 : value;
+      const text = String(value || '').trim();
+      if (!text) return null;
+      const parsed = /^\d{10,13}$/.test(text) ? Number(text) : Date.parse(text);
+      if (!Number.isFinite(parsed)) return null;
+      return parsed > 1e9 && parsed < 1e12 ? parsed * 1000 : parsed;
+    }
+    function studentBelongsToCurrentSchool(s) {
+      const activeId = normalizeSchoolId(currentSchoolId);
+      const sid = getStudentSchoolId(s);
+      if (sid && normalizeSchoolId(sid) !== activeId) return false;
+      const schoolName = getStudentSchoolName(s);
+      if (schoolName) {
+        const namedSocrates = /socrates/.test(schoolName);
+        if (activeId === 'socrates-school' && !namedSocrates) return false;
+        if (activeId !== 'socrates-school' && namedSocrates) return false;
+      }
+      if (activeId === 'socrates-school' && !sid && !schoolName) {
+        const createdMs =
+          toMs(s?.createdAt) ??
+          toMs(s?.timestamp) ??
+          toMs(s?.registeredAt) ??
+          toMs(s?.admissionDate);
+        if (Number.isFinite(createdMs) && createdMs >= Date.UTC(2026, 7, 1)) return false;
+      }
+      return true;
+    }
+
     function canonicalClassKey(str) {
       const api = window.SomapSubjects || {};
       const canonical = api.canonClass ? api.canonClass(str) : str;
@@ -1224,6 +1263,7 @@
           const roster = Object.keys(data).map((k) => {
             const s = data[k] || {};
             if (String(s.status || '').toLowerCase() === 'shifted') return null;
+            if (!studentBelongsToCurrentSchool(s)) return null;
             const name = [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' ').trim() || s.name || s.fullName || '';
             const admissionNo = s.admissionNumber || s.admNo || s.admissionNo || '';
             const anchorEnroll = lookupEnrollment(anchorIndex, k, admissionNo);
