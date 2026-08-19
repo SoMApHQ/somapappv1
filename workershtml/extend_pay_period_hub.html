@@ -484,11 +484,17 @@
       return `ext-${raw.slice(0, 120)}`;
     }
 
-    function approvedCountForStudent(studentId, admission) {
+    function approvedRowsForStudent(studentId, admission) {
       const bucketA = extensionsByStudent[studentId] || {};
       const bucketB = admission ? (extensionsByStudent[admission] || {}) : {};
-      const all = [...Object.values(bucketA), ...Object.values(bucketB)];
-      return all.filter((row) => String(row.status || 'approved').toLowerCase() === 'approved').length;
+      return [...Object.values(bucketA), ...Object.values(bucketB)]
+        .filter((row) => String(row.status || 'approved').toLowerCase() === 'approved');
+    }
+
+    function approvedCountForStudent(studentId, admission) {
+      const unique = new Set();
+      approvedRowsForStudent(studentId, admission).forEach((row) => unique.add(extensionSignature(row)));
+      return unique.size;
     }
 
     function getStudentHistory(studentId, admission) {
@@ -506,12 +512,18 @@
         historyBody.innerHTML = '<tr><td colspan="9" class="muted">No extension agreements yet for this year.</td></tr>';
         return;
       }
+      const duplicateCounts = flat.reduce((map, row) => {
+        const sig = extensionSignature(row);
+        map[sig] = (map[sig] || 0) + 1;
+        return map;
+      }, {});
       historyBody.innerHTML = flat.map((row, idx) => {
         const status = String(row.status || 'approved');
         const statusClass = status.toLowerCase() === 'approved' ? 'ok' : (status.toLowerCase() === 'rejected' ? 'danger' : '');
         const childName = getChildName(row);
         const cls = getStudentClass(row);
         const contact = getStudentContact(row);
+        const canDelete = Number(duplicateCounts[extensionSignature(row)] || 0) > 1;
         const isSelected = selectedHistoryRecord && selectedHistoryRecord.id === row.id && String(selectedHistoryRecord.studentId || '') === String(row.studentId || '');
         return `<tr class="history-row ${isSelected ? 'selected' : ''}" data-idx="${idx}" data-row-id="${row.id}" data-student-id="${row.studentId || ''}">
           <td><strong>${String(childName).slice(0, 35)}</strong></td>
@@ -522,7 +534,9 @@
           <td>${fmtDate(row.newDeadlineTs)}</td>
           <td class="${statusClass}">${status}</td>
           <td>${String(row.headteacherReason || row.parentReason || '-').slice(0, 60)}</td>
-          <td><button class="btn btn-danger delete-extension-btn" type="button" data-idx="${idx}">Delete</button></td>
+          <td>${canDelete
+            ? `<button class="btn btn-danger delete-extension-btn" type="button" data-idx="${idx}">Delete duplicate</button>`
+            : '<span class="muted">Saved</span>'}</td>
         </tr>`;
       }).join('');
       historyBody.querySelectorAll('.history-row').forEach((el) => {
@@ -559,8 +573,14 @@
       const studentId = String(row?.studentId || '').trim();
       const rowId = String(row?.id || '').trim();
       if (!studentId || !rowId) return;
+      const sameRows = flattenExtensions(extensionsByStudent)
+        .filter((item) => extensionSignature(item) === extensionSignature(row));
       const childName = getChildName(row);
-      if (!confirm(`Delete this extension record for ${childName}? This removes it from finance deadline extension data.`)) return;
+      if (sameRows.length <= 1) {
+        alert(`Cannot delete ${childName}. This is the only saved copy of this extension agreement.`);
+        return;
+      }
+      if (!confirm(`Delete this duplicate extension record for ${childName}? One saved copy will remain.`)) return;
       try {
         await schoolRef(`financeDeadlineExtensions/${year}/${studentId}/${rowId}`).remove();
         if (selectedHistoryRecord && selectedHistoryRecord.id === rowId && String(selectedHistoryRecord.studentId || '') === studentId) {
@@ -645,10 +665,10 @@
       flat.forEach((row) => {
         const key = String(row.studentId || row.studentKey || row.admissionNumber || '').trim();
         if (!key) return;
-        if (!grouped[key]) grouped[key] = 0;
-        if (String(row.status || '').toLowerCase() === 'approved') grouped[key] += 1;
+        if (!grouped[key]) grouped[key] = new Set();
+        if (String(row.status || '').toLowerCase() === 'approved') grouped[key].add(extensionSignature(row));
       });
-      const blocked = Object.values(grouped).filter((n) => Number(n) >= MAX_EXTENSIONS_PER_YEAR).length;
+      const blocked = Object.values(grouped).filter((set) => set.size >= MAX_EXTENSIONS_PER_YEAR).length;
       document.getElementById('statTotal').textContent = String(flat.length);
       document.getElementById('statApproved').textContent = String(approved);
       document.getElementById('statRejected').textContent = String(rejected);
@@ -905,7 +925,7 @@
           throw new Error(`${payload.fullName || 'This child'} already has the same extension details: ${fmtDate(payload.oldDeadlineTs)} to ${fmtDate(payload.newDeadlineTs)} for ${fmtNum(payload.debtAmount)}.`);
         }
         await recordRef.set(payload);
-        saveStatus.textContent = 'Saved. Finance overdue date will update for this child.';
+        saveStatus.textContent = 'Successful. Extension saved and finance overdue date will update for this child.';
         saveStatus.className = 'ok';
         await loadExtensions();
         await refreshSelectedStudent();
