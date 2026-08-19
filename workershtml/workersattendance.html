@@ -2050,8 +2050,18 @@
       `;
     }
 
+    function getSomapLogoSrc() {
+      const displayed = document.getElementById('school-logo-display')?.getAttribute('src') || '';
+      if (displayed && !displayed.startsWith('data:')) return displayed;
+      try {
+        return new URL('../images/somap-logo.png', window.location.href).href;
+      } catch (_) {
+        return '../images/somap-logo.png';
+      }
+    }
+
     function buildDriverDebtPdfHtml(data) {
-      const logoSrc = document.getElementById('school-logo-display')?.getAttribute('src') || '../images/somap-logo.png';
+      const logoSrc = getSomapLogoSrc();
       const money = (value) => `TZS ${Number(value || 0).toLocaleString('en-US')}`;
       const totalSchoolDebt = data.debtors.reduce((sum, row) => sum + Number(row.schoolDebt || 0), 0);
       const totalTransportDebt = data.debtors.reduce((sum, row) => sum + Number(row.transportDebt || 0), 0);
@@ -2114,6 +2124,196 @@
       `;
     }
 
+    function loadImageAsDataUrl(src) {
+      return new Promise((resolve) => {
+        if (!src) return resolve('');
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth || img.width || 1;
+            canvas.height = img.naturalHeight || img.height || 1;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            resolve(canvas.toDataURL('image/png'));
+          } catch (error) {
+            console.warn('Logo conversion skipped for PDF', error);
+            resolve('');
+          }
+        };
+        img.onerror = () => resolve('');
+        img.src = src;
+      });
+    }
+
+    async function downloadDriverDebtPdf(data, fallbackSourceEl) {
+      const JsPdfCtor = window.jspdf?.jsPDF || window.jsPDF;
+      if (!JsPdfCtor) {
+        await window.html2pdf().set({
+          margin: 5,
+          filename: data.filename,
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' }
+        }).from(fallbackSourceEl).save();
+        return;
+      }
+
+      const doc = new JsPdfCtor({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      const pageW = doc.internal.pageSize.getWidth();
+      const pageH = doc.internal.pageSize.getHeight();
+      const margin = 8;
+      const money = (value) => `TZS ${Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+      const totalSchoolDebt = data.debtors.reduce((sum, row) => sum + Number(row.schoolDebt || 0), 0);
+      const totalTransportDebt = data.debtors.reduce((sum, row) => sum + Number(row.transportDebt || 0), 0);
+      const logoData = await loadImageAsDataUrl(getSomapLogoSrc());
+      const columns = [
+        { label: '#', x: margin, w: 8 },
+        { label: 'Admission', x: 17, w: 35 },
+        { label: 'Student / Parent', x: 53, w: 46 },
+        { label: 'Class', x: 100, w: 24 },
+        { label: 'School Debt', x: 125, w: 25 },
+        { label: 'Debt Till', x: 151, w: 24 },
+        { label: 'Transport Debt', x: 176, w: 27 },
+        { label: 'Unpaid Months', x: 204, w: 53 },
+        { label: 'Total Debt', x: 258, w: 24 },
+        { label: 'Action', x: 283, w: 8 },
+      ];
+      let y = margin;
+      let page = 1;
+
+      function drawHeader() {
+        y = margin;
+        if (logoData) {
+          try { doc.addImage(logoData, 'PNG', margin, y, 15, 15); } catch (_) {}
+        }
+        doc.setTextColor(17, 24, 39);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(16);
+        doc.text('SoMAp Driver No-Pickup Debt List', margin + 19, y + 6);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(71, 85, 105);
+        doc.text(`${state.schoolName || 'Socrates School'} | Academic Year ${data.year} | Generated ${data.generatedAt}`, margin + 19, y + 11);
+        doc.text(`Driver: ${data.driverName || getWorkerName()}`, margin + 19, y + 16);
+        y += 22;
+
+        doc.setDrawColor(153, 27, 27);
+        doc.setLineWidth(1);
+        doc.line(margin, y, pageW - margin, y);
+        y += 7;
+
+        doc.setFillColor(254, 242, 242);
+        doc.rect(margin, y, pageW - (margin * 2), 13, 'F');
+        doc.setTextColor(127, 29, 29);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        const alertLines = doc.splitTextToSize('Students listed here use transport under this driver and must not be picked up until finance clears them. A student appears if either current school-fee debt or transport debt to date is above zero.', pageW - (margin * 2) - 4);
+        doc.text(alertLines, margin + 2, y + 5);
+        y += 18;
+
+        const cardW = 50;
+        const cardGap = 4;
+        const cards = [
+          ['Assigned Riders', data.assignedCount],
+          ['No-Pickup Students', data.debtors.length],
+          ['School Fee Debt', money(totalSchoolDebt)],
+          ['Transport Debt', money(totalTransportDebt)],
+        ];
+        cards.forEach((card, idx) => {
+          const x = margin + idx * (cardW + cardGap);
+          doc.setDrawColor(203, 213, 225);
+          doc.setFillColor(248, 250, 252);
+          doc.roundedRect(x, y, cardW, 14, 1.5, 1.5, 'FD');
+          doc.setTextColor(100, 116, 139);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(6.5);
+          doc.text(String(card[0]).toUpperCase(), x + 3, y + 5);
+          doc.setTextColor(17, 24, 39);
+          doc.setFontSize(9);
+          doc.text(String(card[1]), x + 3, y + 10.5);
+        });
+        y += 19;
+        drawTableHeader();
+      }
+
+      function drawTableHeader() {
+        doc.setFillColor(127, 29, 29);
+        doc.rect(margin, y, pageW - (margin * 2), 7, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(6.2);
+        columns.forEach((col) => doc.text(col.label, col.x + 1, y + 4.7, { maxWidth: col.w - 1 }));
+        y += 8;
+      }
+
+      function drawFooter() {
+        doc.setDrawColor(203, 213, 225);
+        doc.line(margin, pageH - 8, pageW - margin, pageH - 8);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(6.5);
+        doc.setTextColor(100, 116, 139);
+        doc.text('SoMAp Workers Attendance driver gate', margin, pageH - 4);
+        doc.text(`${state.today || ''} | Page ${page}`, pageW - margin - 34, pageH - 4);
+      }
+
+      drawHeader();
+      if (!data.debtors.length) {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.setTextColor(4, 120, 87);
+        doc.text('No assigned transport child has current school-fee or transport debt.', margin, y + 8);
+      } else {
+        data.debtors.forEach((row, index) => {
+          const cells = [
+            String(index + 1),
+            String(row.admissionNumber || row.studentId || ''),
+            `${row.fullName || ''}\n${row.parentContact || '-'}`,
+            String(row.classLevel || '-'),
+            money(row.schoolDebt),
+            String(row.schoolDebtTill || '-'),
+            money(row.transportDebt),
+            String(row.unpaidMonthsDisplay || 'None'),
+            money(Number(row.schoolDebt || 0) + Number(row.transportDebt || 0)),
+            'USIMCHUKUE',
+          ];
+          const wrapped = cells.map((cell, idx) => doc.splitTextToSize(String(cell), columns[idx].w - 2));
+          const rowH = Math.max(7, ...wrapped.map((lines) => (Array.isArray(lines) ? lines.length : 1) * 3.4 + 2));
+          if (y + rowH > pageH - 11) {
+            drawFooter();
+            doc.addPage();
+            page += 1;
+            drawHeader();
+          }
+          if (index % 2 === 1) {
+            doc.setFillColor(248, 250, 252);
+            doc.rect(margin, y - 1, pageW - (margin * 2), rowH, 'F');
+          }
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(6.3);
+          doc.setTextColor(15, 23, 42);
+          wrapped.forEach((lines, idx) => {
+            if ([4, 6, 8].includes(idx)) {
+              doc.setTextColor(185, 28, 28);
+              doc.setFont('helvetica', 'bold');
+            } else if (idx === 9) {
+              doc.setTextColor(127, 29, 29);
+              doc.setFont('helvetica', 'bold');
+            }
+            doc.text(lines, columns[idx].x + 1, y + 3.7);
+            doc.setTextColor(15, 23, 42);
+            doc.setFont('helvetica', 'normal');
+          });
+          doc.setDrawColor(219, 227, 238);
+          doc.line(margin, y + rowH - 1, pageW - margin, y + rowH - 1);
+          y += rowH;
+        });
+      }
+      drawFooter();
+      doc.save(data.filename);
+    }
+
     function showDriverDebtDownloadGate(data) {
       if (!data) return Promise.resolve({ downloaded: true });
       return new Promise((resolve) => {
@@ -2126,7 +2326,7 @@
           <section class="mini-modal-card" role="dialog" aria-modal="true" style="width:min(1220px,100%);max-height:94vh;overflow:auto;background:#fff7ed;color:#111827;border:3px solid #991b1b;border-radius:18px;padding:14px;box-shadow:0 30px 90px rgba(0,0,0,.55);">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
               <div style="display:flex;gap:12px;align-items:center;">
-                <img src="${escapeHtml(document.getElementById('school-logo-display')?.getAttribute('src') || '../images/somap-logo.png')}" alt="SoMAp logo" style="width:58px;height:58px;object-fit:contain;border-radius:14px;background:#fff;border:1px solid #fed7aa;padding:6px;">
+                <img src="${escapeHtml(getSomapLogoSrc())}" alt="SoMAp logo" style="width:58px;height:58px;object-fit:contain;border-radius:14px;background:#fff;border:1px solid #fed7aa;padding:6px;">
                 <div>
                   <div style="display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;background:#dc2626;color:#fff;font-weight:900;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;">Driver no-pickup list required</div>
                   <h2 style="margin:8px 0 2px;color:#7f1d1d;font-size:1.25rem;">Download transport debt list before check-in</h2>
@@ -2150,13 +2350,7 @@
           button.disabled = true;
           button.textContent = 'Preparing PDF...';
           try {
-            await window.html2pdf().set({
-              margin: 5,
-              filename: data.filename,
-              image: { type: 'jpeg', quality: 0.98 },
-              html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
-              jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' }
-            }).from(sourceEl).save();
+            await downloadDriverDebtPdf(data, sourceEl);
             overlay.remove();
             resolve({ downloaded: true, debtorCount: data.debtors.length, assignedCount: data.assignedCount });
           } catch (error) {
