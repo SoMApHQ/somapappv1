@@ -7,7 +7,12 @@
   const DEFAULT_SCHOOL_ID = 'socrates-school';
 
   function getSchoolId() {
-    return localStorage.getItem(STORAGE_KEY) || DEFAULT_SCHOOL_ID;
+    // Do NOT fall back to DEFAULT_SCHOOL_ID here. A browser/device that has
+    // never explicitly selected a school (fresh device, cleared storage,
+    // bookmarked deep link) must NOT silently masquerade as Socrates —
+    // every page's "if (!currentSchool.id) redirect to multischool.html"
+    // guard depends on this returning a falsy value in that case.
+    return localStorage.getItem(STORAGE_KEY) || '';
   }
 
   function setSchoolId(id) {
