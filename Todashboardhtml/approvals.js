@@ -176,13 +176,15 @@
     return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
   }
 
-  const schoolContext = { resolved: null };
-
   function getActiveSchool() {
-    if (schoolContext.resolved) return schoolContext.resolved;
+    // Always read live rather than caching: an admin with access to more than
+    // one school can switch schools without a full page reload, and a cached
+    // value here would silently keep resolving approvals against the wrong
+    // school (this is what let a Mnyore Academy admission get approved into
+    // Socrates' root students node - see the schoolId-mismatch guard in
+    // commitAdmissionApproval below).
     const school = window.SOMAP?.getSchool?.();
     if (school && school.id) {
-      schoolContext.resolved = school;
       window.currentSchoolId = school.id;
       return school;
     }
@@ -1435,6 +1437,11 @@
   function rejectSelectedRecord() {
     const record = state.selectedRecord;
     if (!record) return;
+    // Captured now, before the confirm dialog (which can sit open for as
+    // long as the admin takes to respond) and the writes below - keeps this
+    // rejection filed under the school it was actually shown for even if the
+    // active-school context drifts while the dialog is open.
+    const lockedSchoolId = resolveSchoolId();
     Swal.fire({
       icon: 'warning',
       title: 'Reject this payment?',
@@ -1449,17 +1456,30 @@
           const year = String(record.modulePayload?.year || record.forYear || state.selectedYear || getContextYear());
           const draftId = record.modulePayload?.admissionDraftId;
           if (draftId) {
+            const lockedP = (subPath) => {
+              const trimmed = normalizePath(subPath);
+              const normalized = normalizeSchoolIdForAccess(lockedSchoolId);
+              if (!lockedSchoolId || normalized === 'socrates-school' || normalized === 'default') return trimmed;
+              return `schools/${lockedSchoolId}/${trimmed}`;
+            };
+            const lockedScopedPath = (subPath) => {
+              const trimmed = normalizePath(subPath);
+              if (!lockedSchoolId) return trimmed;
+              return `schools/${lockedSchoolId}/${trimmed}`;
+            };
+            const normalized = normalizeSchoolIdForAccess(lockedSchoolId);
+            const lockedIsSocrates = normalized === 'socrates-school' || normalized === 'default';
             const updates = {};
-            updates[P(`admissionsPending/${year}/${draftId}/status`)] = 'rejected';
-            updates[P(`admissionsPending/${year}/${draftId}/rejectedAt`)] = firebase.database.ServerValue.TIMESTAMP;
-            if (shouldUseScopedShadow('admissionsPending')) {
-              updates[`${scopedPath(`admissionsPending/${year}/${draftId}/status`)}`] = 'rejected';
-              updates[`${scopedPath(`admissionsPending/${year}/${draftId}/rejectedAt`)}`] = firebase.database.ServerValue.TIMESTAMP;
+            updates[lockedP(`admissionsPending/${year}/${draftId}/status`)] = 'rejected';
+            updates[lockedP(`admissionsPending/${year}/${draftId}/rejectedAt`)] = firebase.database.ServerValue.TIMESTAMP;
+            if (lockedIsSocrates && lockedScopedPath(`admissionsPending/${year}/${draftId}`) !== lockedP(`admissionsPending/${year}/${draftId}`)) {
+              updates[`${lockedScopedPath(`admissionsPending/${year}/${draftId}/status`)}`] = 'rejected';
+              updates[`${lockedScopedPath(`admissionsPending/${year}/${draftId}/rejectedAt`)}`] = firebase.database.ServerValue.TIMESTAMP;
             }
             await db.ref().update(updates);
           }
         }
-        await moveApprovalToHistory(record, 'rejected');
+        await moveApprovalToHistory(record, 'rejected', lockedSchoolId);
         toast('Payment rejected. Record archived for audit.', 'warning');
         hideDetailModal();
       })().catch((err) => {
@@ -1470,6 +1490,11 @@
   }
 
   async function processApproval(record) {
+    // Captured before any of the awaited commit work below, so that filing
+    // this approval into history afterwards (moveApprovalToHistory) targets
+    // the same school this approval started on, even if the active-school
+    // context drifts mid-flight.
+    const lockedSchoolId = resolveSchoolId();
     const targetYear = await ensureApprovalHasYear(record, record.forYear || state.selectedYear);
     const approvedAt = Date.now();
     record.approvedAt = record.approvedAt || approvedAt;
@@ -1533,7 +1558,7 @@
             throw new Error(`Unknown module ${record.sourceModule}`);
         }
       }
-      await moveApprovalToHistory(record, 'approved');
+      await moveApprovalToHistory(record, 'approved', lockedSchoolId);
       toast(record.sourceModule === 'financeconfig' ? 'Finance config approved and applied.' : 'Student approved. Payment saved.', 'success');
       hideDetailModal();
     } catch (err) {
@@ -1585,6 +1610,43 @@
     }
     if (!draft) throw new Error('Admission draft not found.');
 
+    // The draft records which school the admission was actually submitted
+    // for. Everything below writes via P()/resolveSchoolId(), which reflect
+    // whatever school this browser tab is CURRENTLY active on - if that has
+    // drifted from the draft's own school (multi-school admin switched
+    // schools without reloading this page, stale cached context, etc.) the
+    // approved student would silently land under the wrong school. Refuse
+    // rather than risk cross-school data contamination.
+    const draftSchoolId = normalizeSchoolIdForAccess(draft.schoolId || record.modulePayload?.schoolId || '');
+    const activeSchoolId = normalizeSchoolIdForAccess(resolveSchoolId());
+    if (draftSchoolId && activeSchoolId && draftSchoolId !== activeSchoolId) {
+      throw new Error(`This admission belongs to "${draft.schoolId}" but you are currently viewing "${resolveSchoolId()}". Switch to the correct school before approving.`);
+    }
+
+    // Freeze the school for the rest of this approval instead of re-reading
+    // ambient P()/resolveSchoolId() at every write below. This function awaits
+    // several sequential Firebase round trips (draft read, the big update(),
+    // the draft removal) - if the browser's active-school context changes
+    // mid-flight (another tab switching schools, an auth/session refresh
+    // resetting it) those later ambient reads could silently diverge from the
+    // earlier ones and split a single admission's writes across two schools.
+    // This is exactly how Mnyore Academy Dampo admissions ended up partially
+    // duplicated into Socrates' root students node.
+    const lockedSchoolId = resolveSchoolId();
+    const lockedIsSocrates = normalizeSchoolIdForAccess(lockedSchoolId) === 'socrates-school'
+      || normalizeSchoolIdForAccess(lockedSchoolId) === 'default';
+    const lockedP = (subPath) => {
+      const trimmed = normalizePath(subPath);
+      if (!lockedSchoolId || lockedIsSocrates) return trimmed;
+      return `schools/${lockedSchoolId}/${trimmed}`;
+    };
+    const lockedScopedPath = (subPath) => {
+      const trimmed = normalizePath(subPath);
+      if (!lockedSchoolId) return trimmed;
+      return `schools/${lockedSchoolId}/${trimmed}`;
+    };
+    const lockedShouldUseScopedShadow = (subPath) => lockedIsSocrates && lockedScopedPath(subPath) !== lockedP(subPath);
+
     const studentKey = draft.reservedStudentKey || record.modulePayload?.reservedStudentKey || sref('students').push().key;
     const studentData = draft.studentData || {};
     const docs = draft.documents || {};
@@ -1598,7 +1660,7 @@
     // Socrates keeps its original approval-date-based behavior untouched.
     const manualJoinDateStr = trimText(studentData.dateOfRegistration || studentData.dateRegistered || '');
     const manualJoinMs = manualJoinDateStr ? new Date(`${manualJoinDateStr}T00:00:00`).getTime() : null;
-    const useManualJoinDate = !isSocratesSchool() && Number.isFinite(manualJoinMs);
+    const useManualJoinDate = !lockedIsSocrates && Number.isFinite(manualJoinMs);
 
     const studentPayload = {
       createdAt: useManualJoinDate ? manualJoinMs : (studentData.createdAt || serverNow),
@@ -1623,7 +1685,7 @@
     studentPayload.dateRegistered = studentPayload.dateRegistered || registrationDate;
     studentPayload.dateOfRegistration = studentPayload.dateOfRegistration || studentPayload.dateRegistered;
     studentPayload.academicYear = String(studentPayload.academicYear || year);
-    studentPayload.schoolId = studentPayload.schoolId || resolveSchoolId();
+    studentPayload.schoolId = studentPayload.schoolId || lockedSchoolId;
 
     const className = studentPayload.classLevel || studentPayload.className || '';
     const enrollmentPayload = {
@@ -1637,13 +1699,13 @@
     };
 
     const updates = {};
-    updates[P(`students/${studentKey}`)] = studentPayload;
-    updates[P(`years/${year}/students/${studentKey}`)] = true;
+    updates[lockedP(`students/${studentKey}`)] = studentPayload;
+    updates[lockedP(`years/${year}/students/${studentKey}`)] = true;
     if (className) {
-      updates[P(`enrollments/${year}/${studentKey}`)] = enrollmentPayload;
-      updates[P(`years/${year}/enrollments/${studentKey}`)] = enrollmentPayload;
+      updates[lockedP(`enrollments/${year}/${studentKey}`)] = enrollmentPayload;
+      updates[lockedP(`years/${year}/enrollments/${studentKey}`)] = enrollmentPayload;
     }
-    updates[P(`admittedStudents/${studentKey}`)] = {
+    updates[lockedP(`admittedStudents/${studentKey}`)] = {
       student: {
         firstName: studentPayload.firstName,
         middleName: studentPayload.middleName || '',
@@ -1663,20 +1725,20 @@
       studentId: studentKey,
       source: 'direct_admission_approved'
     };
-    if (shouldUseScopedShadow('admissionsPending')) {
-      updates[scopedPath(`students/${studentKey}`)] = studentPayload;
-      updates[scopedPath(`years/${year}/students/${studentKey}`)] = true;
+    if (lockedShouldUseScopedShadow('admissionsPending')) {
+      updates[lockedScopedPath(`students/${studentKey}`)] = studentPayload;
+      updates[lockedScopedPath(`years/${year}/students/${studentKey}`)] = true;
       if (className) {
-        updates[scopedPath(`enrollments/${year}/${studentKey}`)] = enrollmentPayload;
-        updates[scopedPath(`years/${year}/enrollments/${studentKey}`)] = enrollmentPayload;
+        updates[lockedScopedPath(`enrollments/${year}/${studentKey}`)] = enrollmentPayload;
+        updates[lockedScopedPath(`years/${year}/enrollments/${studentKey}`)] = enrollmentPayload;
       }
-      updates[scopedPath(`admittedStudents/${studentKey}`)] = updates[P(`admittedStudents/${studentKey}`)];
+      updates[lockedScopedPath(`admittedStudents/${studentKey}`)] = updates[lockedP(`admittedStudents/${studentKey}`)];
     }
     await db.ref().update(updates);
 
-    const removals = [sref(draftPath).remove()];
-    if (shouldUseScopedShadow('admissionsPending')) {
-      removals.push(scopedRef(draftPath).remove());
+    const removals = [db.ref(lockedP(draftPath)).remove()];
+    if (lockedShouldUseScopedShadow('admissionsPending')) {
+      removals.push(db.ref(lockedScopedPath(draftPath)).remove());
     }
     await Promise.all(removals);
   }
@@ -1926,7 +1988,7 @@
     });
   }
 
-  async function moveApprovalToHistory(record, finalStatus) {
+  async function moveApprovalToHistory(record, finalStatus, lockedSchoolIdArg) {
     const approvalId = record.approvalId;
     if (!approvalId) throw new Error('Missing approvalId');
     const pendingPath = resolvePendingRecordPath(record);
@@ -1946,11 +2008,33 @@
       approvedAt: firebase.database.ServerValue.TIMESTAMP,
     };
 
+    // Accept a school id captured at the START of the caller's approval flow
+    // rather than always re-resolving ambient P()/shouldUseScopedShadow here.
+    // The caller may have just awaited a multi-step commit (e.g. an
+    // admission approval); if the browser's active-school context drifted
+    // during that await, filing this history entry under the NOW-current
+    // school instead of the school this approval was actually processed for
+    // silently splits one approval's writes across two schools' data.
+    const lockedSchoolId = lockedSchoolIdArg || resolveSchoolId();
+    const lockedIsSocrates = normalizeSchoolIdForAccess(lockedSchoolId) === 'socrates-school'
+      || normalizeSchoolIdForAccess(lockedSchoolId) === 'default';
+    const lockedP = (subPath) => {
+      const trimmed = normalizePath(subPath);
+      if (!lockedSchoolId || lockedIsSocrates) return trimmed;
+      return `schools/${lockedSchoolId}/${trimmed}`;
+    };
+    const lockedScopedPath = (subPath) => {
+      const trimmed = normalizePath(subPath);
+      if (!lockedSchoolId) return trimmed;
+      return `schools/${lockedSchoolId}/${trimmed}`;
+    };
+    const lockedShouldUseScopedShadow = (subPath) => lockedIsSocrates && lockedScopedPath(subPath) !== lockedP(subPath);
+
     const updates = {};
-    updates[P(pendingPath || `approvalsPending/${approvalId}`)] = null;
-    updates[P(historyPath)] = payload;
-    if (shouldUseScopedShadow('approvalsPending')) {
-      updates[`${scopedPath(pendingPath || `approvalsPending/${approvalId}`)}`] = null;
+    updates[lockedP(pendingPath || `approvalsPending/${approvalId}`)] = null;
+    updates[lockedP(historyPath)] = payload;
+    if (lockedShouldUseScopedShadow('approvalsPending')) {
+      updates[`${lockedScopedPath(pendingPath || `approvalsPending/${approvalId}`)}`] = null;
     }
     await firebase.database().ref().update(updates);
   }
@@ -1987,7 +2071,14 @@
       if (!studentKey) continue;
 
       const existingSnap = await sref(`students/${studentKey}`).once('value').catch(() => null);
-      const existing = existingSnap?.val?.() || {};
+      // Only fill gaps on a student record that already exists under THIS
+      // school. Never fabricate a brand-new one from an approvalsHistory
+      // entry alone - a history entry can end up filed under the wrong
+      // school (see the commitAdmissionApproval school-lock fix above), and
+      // this repair previously took that as license to create a duplicate
+      // stub of another school's student here.
+      if (!existingSnap || !existingSnap.exists()) continue;
+      const existing = existingSnap.val() || {};
       const names = splitStudentName(entry.studentName || existing.fullName || '');
       const approvedAt = Number(entry.approvedAt || entry.datePaid || entry.createdAt || Date.now());
       const registrationDate = new Date(approvedAt).toISOString().slice(0, 10);
