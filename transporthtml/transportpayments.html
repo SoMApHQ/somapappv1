@@ -466,7 +466,7 @@
           return scopedSnap;
         } catch (err) {
           console.warn('Scoped read failed, falling back to legacy:', scopedSubPath, err);
-          return db.ref(legacyPath).once('value');
+          return db.ref(legacyPath).once('value').catch(() => ({ val: () => null, exists: () => false }));
         }
       }
 
@@ -1000,8 +1000,15 @@
       }
 
       function isDisplayableTransportStudent(student) {
-        if (!student || typeof student !== 'object' || student.__synthetic === true) return false;
-        if (!studentBelongsToCurrentSchool(student)) return false;
+        if (!student || typeof student !== 'object') return false;
+        const isSyntheticTransportProfile = student.__synthetic === true;
+        if (isSyntheticTransportProfile) {
+          const admission = String(student.admissionNumber || student.admissionNo || '').trim().toLowerCase();
+          const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.replace(/\s+/g, ' ').trim().toLowerCase();
+          const hasUsableIdentity = admission && admission !== 'n/a' && admission !== 'na' && fullName && fullName !== admission;
+          if (!hasUsableIdentity) return false;
+        }
+        if (!isSyntheticTransportProfile && !studentBelongsToCurrentSchool(student)) return false;
         const status = String(student.status || '').trim().toLowerCase();
         if (student.deleted === true || student.isDeleted === true || student.archived === true ||
             student.isArchived === true || student.removed === true || student.isRemoved === true ||
@@ -2630,8 +2637,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             catalogStopsSnap,
             ...legacyBusesSnaps
           ] = await Promise.all([
-            schoolRef(`years/${year}/transportEnrollments`).once('value'),
-            isLegacyMerge ? db.ref('transport_enrollments').once('value') : Promise.resolve(null),
+            schoolRef(`years/${year}/transportEnrollments`).once('value').catch(() => ({ val: () => null, exists: () => false })),
+            isLegacyMerge ? db.ref('transport_enrollments').once('value').catch(() => ({ val: () => null, exists: () => false })) : Promise.resolve(null),
             schoolRef(`years/${year}/transportRegistry`).once('value').catch(() => ({ val: () => null })),
             isLegacyMerge ? db.ref(`transportRegistry/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
             schoolRef(`years/${year}/transportAssignments`).once('value').catch(() => ({ val: () => null })),
@@ -3094,7 +3101,9 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           for (let i = 0; i < studentIds.length; i += BATCH_SIZE) {
             const batch = studentIds.slice(i, i + BATCH_SIZE);
             const studentPromises = batch.map(id => 
-              scopedOrSocratesLegacy(`students/${id}`, `students/${id}`).then(snap => ({ id, data: snap.val() }))
+              scopedOrSocratesLegacy(`students/${id}`, `students/${id}`)
+                .then(snap => ({ id, data: snap.val() }))
+                .catch(() => ({ id, data: null }))
             );
             const students = await Promise.all(studentPromises);
             students.forEach(({ id, data }) => {
@@ -3190,7 +3199,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
 
           // STEP 3: Load payments ONLY for transport students (year-scoped ledgers primary)
           showToast('Loading payments...', 'ok');
-          const paymentsSnap = await scopedOrSocratesLegacy(`years/${year}/transportLedgers`, `transportLedgers/${year}`);
+          const paymentsSnap = await scopedOrSocratesLegacy(`years/${year}/transportLedgers`, `transportLedgers/${year}`).catch(() => ({ val: () => null, exists: () => false }));
           let scopedPaymentsSnap = null;
           let legacyPaymentsSnap = null;
 
@@ -3308,7 +3317,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           state.transportPayments = paymentsData;
 
           // STEP 4: Load expenses (lightweight, can load all)
-          const expensesSnap = await scopedOrSocratesLegacy(`years/${year}/transport_expenses`, 'transport_expenses');
+          const expensesSnap = await scopedOrSocratesLegacy(`years/${year}/transport_expenses`, 'transport_expenses').catch(() => ({ val: () => null, exists: () => false }));
           const allExpenses = expensesSnap.val() || {};
           state.expenses = {};
           Object.entries(allExpenses).forEach(([key, exp]) => {
