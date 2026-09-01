@@ -162,7 +162,7 @@
       if (!window.firebase || !firebase.database) return [];
       const stops = await readMergedObject(candidatePaths(`transportCatalog/${year}/stops`));
       // normalize while preserving metadata such as priceHistory for callers that render it.
-      return Object.entries(stops).map(([id,s])=>({
+      const list = Object.entries(stops).map(([id,s])=>({
         ...s,
         id,
         name: s.name || id,
@@ -170,6 +170,8 @@
         active: s.active !== false,
         priceHistory: s.priceHistory || {}
       }));
+      applyMergedHistoryByName(list);
+      return list;
     }catch(_){ return []; }
   }
 
@@ -183,16 +185,37 @@
   // === Date-aware pricing functions ===
   const NAME = s => String(s||'').trim().toLowerCase();
 
+  // A legacy bulk import created several duplicate stop records sharing the same
+  // name (e.g. 4 separate "Mbezi" entries). Editing a route only updates the one
+  // record you clicked, leaving the others stale. Name-based lookups must see the
+  // union of every duplicate's priceHistory or they can resolve to a stale price.
+  function applyMergedHistoryByName(stopsList){
+    const historyByName = {};
+    (stopsList||[]).forEach(s => {
+      const key = NAME(s?.name || s?.routeName || s?.stopName);
+      if (!key) return;
+      if (!historyByName[key]) historyByName[key] = {};
+      Object.assign(historyByName[key], s.priceHistory || {});
+    });
+    (stopsList||[]).forEach(s => {
+      const key = NAME(s?.name || s?.routeName || s?.stopName);
+      if (key && historyByName[key]) s.priceHistory = historyByName[key];
+    });
+    return stopsList;
+  }
+
   // Load stops map by name (with priceHistory)
   async function loadStopsMap(year){
     const cacheKey = `${currentSchoolId() || 'root'}:${year}`;
     if (pricingCache.stops[cacheKey]) return pricingCache.stops[cacheKey];
     const data = await readMergedObject(candidatePaths(`transportCatalog/${year}/stops`));
+    const list = Object.entries(data)
+      .filter(([, s]) => s && typeof s === 'object')
+      .map(([id, s]) => ({ id, ...s, priceHistory: s.priceHistory || {} }));
+    applyMergedHistoryByName(list);
     const byName = {};
-    Object.entries(data).forEach(([id, s])=>{
-      if (!s || typeof s !== 'object') return;
-      const stop = { id, ...s, priceHistory: s.priceHistory || {} };
-      [id, s.id, s.name, s.routeName, s.stopName].forEach((candidate) => {
+    list.forEach((stop) => {
+      [stop.id, stop.name, stop.routeName, stop.stopName].forEach((candidate) => {
         const key = NAME(candidate);
         if (key) byName[key] = stop;
       });
