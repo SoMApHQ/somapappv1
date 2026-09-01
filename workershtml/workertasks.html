@@ -11,6 +11,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="../firebase.js"></script>
   <script src="../shared/academic-class-utils.js"></script>
   <script src="../shared/teacher-assignment-utils.js"></script>
@@ -700,6 +701,15 @@
     .assignment-field select option {
       background: #1f2a4d;
       color: #fff;
+    }
+
+    .assignment-download-action {
+      align-self: end;
+    }
+
+    .assignment-download-action .btn {
+      width: 100%;
+      min-height: 42px;
     }
 
     .assignment-summary-grid {
@@ -1450,6 +1460,9 @@
             <option value="Red">Red</option>
           </select>
         </div>
+        <div class="assignment-download-action">
+          <button type="button" class="btn btn-primary" id="downloadClassTeacherSmsExcel">SMS Class Teachers Excel</button>
+        </div>
       </div>
 
       <div class="assignment-summary-grid">
@@ -1646,6 +1659,7 @@
       const assignmentAssistantTeacherSummary = document.getElementById('assignmentAssistantTeacherSummary');
       const assignmentStatusText = document.getElementById('assignmentStatusText');
       const classTeacherDirectory = document.getElementById('classTeacherDirectory');
+      const downloadClassTeacherSmsExcel = document.getElementById('downloadClassTeacherSmsExcel');
       const bulkWorkerIdsCard = document.getElementById('bulkWorkerIdsCard');
       const workerIdsCountEl = document.getElementById('workerIdsCount');
       const workerIdsStatCard = document.getElementById('workerIdsStatCard');
@@ -1791,6 +1805,55 @@
         return window.SomapClassTeachers?.resolveAssignment
           ? window.SomapClassTeachers.resolveAssignment(classTeacherAssignmentsCache, target.className, target.stream)
           : null;
+      }
+
+      function toExcelPhoneNumber(contact) {
+        const rawPhone = String(contact || '').replace(/\D/g, '');
+        return rawPhone ? Number(rawPhone) : contact;
+      }
+
+      function classTeacherSmsRows() {
+        const rows = [];
+        const seen = new Set();
+        Object.values(classTeacherAssignmentsCache || {}).forEach((streamBucket) => {
+          Object.values(streamBucket || {}).forEach((assignment) => {
+            [assignment?.classTeacher, assignment?.assistantTeacher].forEach((person) => {
+              if (!person || !person.name) return;
+              const phone = person.phone || window.SomapClassTeachers?.formatPhoneLocal(person.phoneRaw) || person.phoneRaw || '';
+              if (!phone) return;
+              const phoneDigits = String(phone).replace(/\D/g, '');
+              const key = phoneDigits || person.workerId || person.name;
+              if (seen.has(key)) return;
+              seen.add(key);
+              rows.push([toExcelPhoneNumber(phone), person.name]);
+            });
+          });
+        });
+        return rows.sort((a, b) => String(a[1] || '').localeCompare(String(b[1] || '')));
+      }
+
+      function exportClassTeacherSmsExcel() {
+        if (!window.XLSX) {
+          toast('Excel library not loaded. Please refresh and try again.', 'error');
+          return;
+        }
+        const rows = classTeacherSmsRows();
+        if (!rows.length) {
+          toast('No assigned class teacher contacts found for this year.', 'warning');
+          return;
+        }
+        const ws = XLSX.utils.aoa_to_sheet([['Number', 'Name'], ...rows]);
+        const range = XLSX.utils.decode_range(ws['!ref']);
+        for (let row = 1; row <= range.e.r; row++) {
+          const cell = ws[XLSX.utils.encode_cell({ r: row, c: 0 })];
+          if (cell && typeof cell.v === 'number') { cell.t = 'n'; delete cell.w; }
+        }
+        ws['!cols'] = [{ wch: 16 }, { wch: 32 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Class Teachers SMS');
+        const schoolSafe = String(school?.id || 'school').replace(/[^a-z0-9_-]/gi, '_');
+        XLSX.writeFile(wb, `class_teachers_sms_${schoolSafe}_${currentYear}_${Date.now()}.xlsx`);
+        toast(`${rows.length} class teacher contacts exported.`, 'success');
       }
 
       function refreshAssignmentSummaries() {
@@ -3641,6 +3704,10 @@
 
       if (assignmentStreamSelect) {
         assignmentStreamSelect.addEventListener('change', refreshAssignmentSummaries);
+      }
+
+      if (downloadClassTeacherSmsExcel) {
+        downloadClassTeacherSmsExcel.addEventListener('click', exportClassTeacherSmsExcel);
       }
 
       if (assignmentClassTeacherSummary) {
