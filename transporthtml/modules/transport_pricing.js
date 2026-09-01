@@ -4,6 +4,39 @@
 
   const daysInMonth = (y, m) => new Date(y, m, 0).getDate();
   const parseYMD = s => { const [y,m,d] = String(s||'').split('-').map(n=>parseInt(n,10)); return {y,m,d}; };
+  const pricingCache = { multipliers: {}, stops: {} };
+
+  function currentSchoolId(){
+    const school = window.SOMAP?.getSchool?.();
+    return String(school?.id || window.currentSchoolId || '').trim();
+  }
+
+  function maybePrefixPath(path){
+    const clean = String(path || '').replace(/^\/+/, '');
+    if (window.SOMAP && typeof window.SOMAP.P === 'function') return window.SOMAP.P(clean);
+    return clean;
+  }
+
+  function candidatePaths(relativePath){
+    const clean = String(relativePath || '').replace(/^\/+/, '');
+    const paths = [];
+    const sid = currentSchoolId();
+    if (sid) paths.push(maybePrefixPath(`schools/${sid}/${clean}`));
+    paths.push(maybePrefixPath(clean));
+    return Array.from(new Set(paths.filter(Boolean)));
+  }
+
+  async function readMergedObject(paths){
+    if (!window.firebase || !firebase.database) return {};
+    const snaps = await Promise.all(
+      paths.map(path => firebase.database().ref(path).once('value').catch(() => null))
+    );
+    return snaps.reduce((merged, snap) => {
+      const val = snap?.val?.();
+      if (val && typeof val === 'object') return { ...merged, ...val };
+      return merged;
+    }, {});
+  }
 
   // Unmultiplied baseMonthlyFee = sum(morning+evening) before month multiplier
   // Now supports date-aware pricing via amStop/pmStop OR legacy baseMonthlyFee
@@ -92,12 +125,14 @@
   async function loadYearMultipliers(year){
     try{
       if (!window.firebase || !firebase.database) return DEFAULT_MULTIPLIERS;
-      const snap = await firebase.database().ref(`transportSettings/${year}/monthMultipliers`).once('value');
-      const val = snap.val();
+      const cacheKey = `${currentSchoolId() || 'root'}:${year}`;
+      if (pricingCache.multipliers[cacheKey]) return pricingCache.multipliers[cacheKey];
+      const val = await readMergedObject(candidatePaths(`transportSettings/${year}/monthMultipliers`));
       if (!val) return DEFAULT_MULTIPLIERS;
       // sanitize to numbers
       const out = {...DEFAULT_MULTIPLIERS};
       Object.keys(val).forEach(k=>{ const n=Number(val[k]); if(!Number.isNaN(n)) out[Number(k)] = n; });
+      pricingCache.multipliers[cacheKey] = out;
       return out;
     }catch(_){ return DEFAULT_MULTIPLIERS; }
   }
@@ -105,8 +140,7 @@
   async function loadStopsForYear(year){
     try{
       if (!window.firebase || !firebase.database) return [];
-      const snap = await firebase.database().ref(`transportCatalog/${year}/stops`).once('value');
-      const stops = snap.val() || {};
+      const stops = await readMergedObject(candidatePaths(`transportCatalog/${year}/stops`));
       // normalize while preserving metadata such as priceHistory for callers that render it.
       return Object.entries(stops).map(([id,s])=>({
         ...s,
@@ -131,13 +165,19 @@
 
   // Load stops map by name (with priceHistory)
   async function loadStopsMap(year){
-    const snap = await firebase.database().ref(`transportCatalog/${year}/stops`).once('value');
-    const data = snap.val() || {};
+    const cacheKey = `${currentSchoolId() || 'root'}:${year}`;
+    if (pricingCache.stops[cacheKey]) return pricingCache.stops[cacheKey];
+    const data = await readMergedObject(candidatePaths(`transportCatalog/${year}/stops`));
     const byName = {};
     Object.entries(data).forEach(([id, s])=>{
-      const key = NAME(s.name);
-      byName[key] = { id, ...s, priceHistory: s.priceHistory || {} };
+      if (!s || typeof s !== 'object') return;
+      const stop = { id, ...s, priceHistory: s.priceHistory || {} };
+      [id, s.id, s.name, s.routeName, s.stopName].forEach((candidate) => {
+        const key = NAME(candidate);
+        if (key) byName[key] = stop;
+      });
     });
+    pricingCache.stops[cacheKey] = byName;
     return byName;
   }
 
@@ -174,7 +214,12 @@
     if (!stopName) return 0;
     try {
       const map = await loadStopsMap(year);
-      const stop = map[NAME(stopName)];
+      const key = NAME(stopName);
+      let stop = map[key];
+      if (!stop && key) {
+        const partial = Object.keys(map).find(k => key.includes(k) || k.includes(key));
+        stop = partial ? map[partial] : null;
+      }
       if (!stop) {
         // Fallback to legacy synchronous priceForStop (defined later)
         return getLegacyPriceForStop(stopName);

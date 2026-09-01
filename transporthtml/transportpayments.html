@@ -494,6 +494,19 @@
         return merged;
       }
 
+      async function fetchTransportOverridesForYear(year) {
+        const yearStr = String(year);
+        const merged = {};
+        const refs = [schoolRef(`transportOverrides/${yearStr}`)];
+        if (isSocratesSchool()) refs.push(db.ref(`transportOverrides/${yearStr}`));
+        for (const ref of refs) {
+          const snap = await ref.once('value').catch(() => null);
+          const val = snap?.val?.();
+          if (val && typeof val === 'object') Object.assign(merged, val);
+        }
+        return merged;
+      }
+
       function maybeAutoAdvanceYear() {
         const ctx = window.somapYearContext;
         if (!ctx || typeof ctx.getSelectedYear !== 'function') return;
@@ -595,6 +608,7 @@
         transportEnrollments: {},
         financeData: {},
         transportPayments: {},
+        transportOverrides: {},
         expenses: {},
         showDebtorsOnly: false,
         currentPaymentStudentId: null,
@@ -610,6 +624,116 @@
       
       // Store loaded multipliers per year
       let cachedMultipliers = {};
+
+      function numberOrNull(value) {
+        if (value === null || value === undefined || value === '') return null;
+        const n = Number(value);
+        return Number.isFinite(n) ? n : null;
+      }
+
+      function overrideAppliesToMonth(override, year, month) {
+        if (!override || typeof override !== 'object') return false;
+        const months = override.months;
+        if (!months || typeof months !== 'object' || Object.keys(months).length === 0) return true;
+        const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+        return months[monthKey] === true || months[String(month)] === true || months[month] === true;
+      }
+
+      function getTransportOverride(studentId) {
+        if (!studentId) return null;
+        const aliasId = state.studentKeyAliases?.[studentId];
+        const student = state.students?.[studentId] || {};
+        const candidates = [
+          studentId,
+          aliasId,
+          student.admissionNumber,
+          student.admissionNo,
+          student.studentId,
+        ].filter(Boolean);
+        for (const id of candidates) {
+          const direct = state.transportOverrides?.[id];
+          if (direct && typeof direct === 'object') return direct;
+          const normalized = normalizeIdentifier(id);
+          const matchKey = Object.keys(state.transportOverrides || {}).find(key => normalizeIdentifier(key) === normalized);
+          if (matchKey) return state.transportOverrides[matchKey];
+        }
+        return null;
+      }
+
+      async function calculateBaseParts(amStop, pmStop, year, month) {
+        const [morning, evening] = await Promise.all([
+          amStop ? calculateBaseMonthlyFee(amStop, '', year, month) : Promise.resolve(0),
+          pmStop ? calculateBaseMonthlyFee('', pmStop, year, month) : Promise.resolve(0),
+        ]);
+        return { morning: Number(morning) || 0, evening: Number(evening) || 0 };
+      }
+
+      async function resolveMonthlyBaseWithOverride({ enrollment, year, month, studentId }) {
+        const amStop = enrollment?.amStop || '';
+        const pmStop = enrollment?.pmStop || '';
+        const override = getTransportOverride(studentId);
+        if (!amStop && !pmStop) return getTransportBaseMonthlyFee(enrollment);
+        if (!overrideAppliesToMonth(override, year, month)) {
+          return calculateBaseMonthlyFee(amStop, pmStop, year, month);
+        }
+        const applyTo = String(override?.applyTo || 'both').toLowerCase();
+        const feeM = numberOrNull(override?.feePerMonthMorning);
+        const feeE = numberOrNull(override?.feePerMonthEvening);
+        if (feeM === null && feeE === null) return calculateBaseMonthlyFee(amStop, pmStop, year, month);
+
+        const parts = await calculateBaseParts(amStop, pmStop, year, month);
+        const morning = (applyTo === 'both' || applyTo === 'morning') && feeM !== null ? feeM : parts.morning;
+        const evening = (applyTo === 'both' || applyTo === 'evening') && feeE !== null ? feeE : parts.evening;
+        return Math.max(0, (Number(morning) || 0) + (Number(evening) || 0));
+      }
+
+      async function buildTransportLedger({ year, enrollment, payments, multipliers, studentId }) {
+        const monthNumbers = Array.from({ length: 12 }, (_, i) => i + 1);
+        const startDate = resolveStartDate(enrollment);
+        const endDate = resolveEndDate(enrollment);
+        const dues = await Promise.all(monthNumbers.map(async (month) => {
+          const baseMonthlyFee = await resolveMonthlyBaseWithOverride({ enrollment, year, month, studentId });
+          return Number(await TransportPricing.dueForMonth({
+            year,
+            month,
+            baseMonthlyFee,
+            startDate,
+            endDate,
+            multipliers,
+          }) || 0);
+        }));
+
+        const approvedPayments = Array.isArray(payments) ? payments : Object.values(payments || {});
+        const totalPaidInput = approvedPayments.reduce((sum, p) => sum + (Number(p?.amount || p?.paidAmount || p?.value || 0) || 0), 0);
+        let carry = totalPaidInput;
+        let totalDue = 0;
+        const months = monthNumbers.map((month, idx) => {
+          const due = +Number(dues[idx] || 0).toFixed(2);
+          const paid = Math.min(due, Math.max(0, carry));
+          carry = Math.max(0, carry - paid);
+          const balance = +Math.max(0, due - paid).toFixed(2);
+          const status = due === 0 ? 'SKIP' : (paid <= 0 ? 'UNPAID' : (balance > 0 ? 'PARTIAL' : 'PAID'));
+          totalDue += due;
+          return {
+            month,
+            mult: multipliers?.[month] ?? TransportPricing.DEFAULT_MULTIPLIERS?.[month] ?? 1,
+            due,
+            paid: +paid.toFixed(2),
+            balance,
+            status,
+          };
+        });
+
+        return {
+          months,
+          totals: {
+            due: +totalDue.toFixed(2),
+            paid: +Number(totalPaidInput || 0).toFixed(2),
+            balance: +Math.max(0, totalDue - totalPaidInput).toFixed(2),
+            credit: +Math.max(0, totalPaidInput - totalDue).toFixed(2),
+          },
+        };
+      }
 
       function getFocusedMonth() {
         const today = new Date();
@@ -995,9 +1119,7 @@
         // Base monthly fee (without multipliers) - for display & calculations
         // Always use live route prices when amStop/pmStop exist so route edits propagate to students
         const selectedMonth = getFocusedMonth();
-        const baseMonthlyFee = (amStop || pmStop)
-          ? (await calculateBaseMonthlyFee(amStop, pmStop, year, selectedMonth))
-          : getTransportBaseMonthlyFee(enrollment);
+        const baseMonthlyFee = await resolveMonthlyBaseWithOverride({ enrollment, year, month: selectedMonth, studentId });
         const startDateIso = resolveStartDate(enrollment);
         const endDateIso = resolveEndDate(enrollment);
         const hasExplicitStart = Boolean(enrollment?.startDate || enrollment?.start_date || enrollment?.startTimestamp || enrollment?.start_time);
@@ -1008,15 +1130,14 @@
           p.approved === true || p.approved === 'true' || !!p.approvedAt
         );
 
-        const ledger = await TransportPricing.buildLedger({
+        const ledger = await buildTransportLedger({
           year,
-          baseMonthlyFee,
-          amStop,
-          pmStop,
+          enrollment,
           startDate: startDateIso,
           endDate: endDateIso,
           payments: approvedPayments,
           multipliers,
+          studentId,
         });
         const monthResults = ledger.months.map(m => ({
           month: m.month,
@@ -1388,33 +1509,30 @@
           const assign = assignSnap.val();
           
           if (assign && (assign.status === 'Using' || String(assign.status || '').toLowerCase() === 'stopped')) {
-            baseMonthlyFee = getTransportBaseMonthlyFee(assign) || getTransportBaseMonthlyFee(enrollment);
+            const effectiveEnrollment = {
+              ...enrollment,
+              ...assign,
+              amStop: assign?.amStop || assign?.morningRouteId || enrollment?.amStop || '',
+              pmStop: assign?.pmStop || assign?.eveningRouteId || enrollment?.pmStop || '',
+              startDate: assign.startDate || assign.start_date || enrollmentStart,
+              endDate: resolveEndDate(assign) || enrollmentEnd,
+            };
+            baseMonthlyFee = await resolveMonthlyBaseWithOverride({ enrollment: effectiveEnrollment, year: Number(year), month: focusedMonth, studentId });
             const startDate = normalizeDateInput(assign.startDate || enrollmentStart, Number(year));
             const endDate = resolveEndDate(assign) || enrollmentEnd;
         const hasAssignedStart = Boolean(assign?.startDate || assign?.start_date || assign?.startTimestamp || assign?.start_time);
             
             currentMonthLabel = focusedMonthLabel;
-            currentMonthAmount = Math.round(await TransportPricing.dueForMonth({
+            const ledger = await buildTransportLedger({
               year: Number(year),
-              month: focusedMonth,
-              amStop: assign?.amStop || enrollment?.amStop,
-              pmStop: assign?.pmStop || enrollment?.pmStop,
-              baseMonthlyFee,
-              startDate,
-              endDate,
-              multipliers // Pass year-specific multipliers
-            }));
-            
-            const ledger = await TransportPricing.buildLedger({
-              year: Number(year),
-              amStop: assign?.amStop || enrollment?.amStop,
-              pmStop: assign?.pmStop || enrollment?.pmStop,
-              baseMonthlyFee,
+              enrollment: effectiveEnrollment,
               startDate,
               endDate,
               payments,
-              multipliers // Pass year-specific multipliers
+              multipliers,
+              studentId,
             });
+            currentMonthAmount = Math.round(ledger.months.find(m => m.month === focusedMonth)?.due || 0);
             
             status = {
               monthlyFee: baseMonthlyFee,
@@ -1432,32 +1550,14 @@
             status = await calculateTransportStatus(enrollment, payments, multipliers);
             baseMonthlyFee = status.monthlyFee;
             currentMonthLabel = focusedMonthLabel;
-            currentMonthAmount = Math.round(await TransportPricing.dueForMonth({
-              year: Number(year),
-              month: focusedMonth,
-              amStop: enrollment?.amStop,
-              pmStop: enrollment?.pmStop,
-              baseMonthlyFee,
-              startDate: enrollmentStart,
-              endDate: enrollmentEnd,
-              multipliers // Pass year-specific multipliers
-            }) || status.currentMonthExpected || status.monthlyFee);
+            currentMonthAmount = Math.round(status.currentMonthExpected || status.monthlyFee);
           }
         } catch (err) {
           console.warn('Error loading assignment data, using legacy:', err);
           status = await calculateTransportStatus(enrollment, payments, multipliers);
           baseMonthlyFee = status.monthlyFee;
           currentMonthLabel = focusedMonthLabel;
-          currentMonthAmount = Math.round(await TransportPricing.dueForMonth({
-            year: Number(year),
-            month: focusedMonth,
-            amStop: enrollment?.amStop,
-            pmStop: enrollment?.pmStop,
-            baseMonthlyFee,
-            startDate: enrollmentStart,
-            endDate: enrollmentEnd,
-            multipliers // Pass year-specific multipliers
-          }) || status.currentMonthExpected || status.monthlyFee);
+          currentMonthAmount = Math.round(status.currentMonthExpected || status.monthlyFee);
         }
         
         document.getElementById('paymentStudentInfo').innerHTML = `
@@ -1862,12 +1962,9 @@
         if (!cachedMultipliers[year]) cachedMultipliers[year] = multipliers;
         const amStop = enrollment?.amStop || '';
         const pmStop = enrollment?.pmStop || '';
-        const baseMonthlyFee = (amStop || pmStop)
-          ? (await calculateBaseMonthlyFee(amStop, pmStop, year, getFocusedMonth()))
-          : getTransportBaseMonthlyFee(enrollment);
         const startDate = resolveStartDate(enrollment);
         const endDate = resolveEndDate(enrollment);
-        const ledger = await TransportPricing.buildLedger({ year, baseMonthlyFee, amStop, pmStop, startDate, endDate, payments, multipliers });
+        const ledger = await buildTransportLedger({ year, enrollment, startDate, endDate, payments, multipliers, studentId });
         paymentScheduleLedger = ledger;
         paymentScheduleStudent = student;
         paymentScheduleStudentId = studentId;
@@ -2907,6 +3004,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           if (studentIds.length === 0) {
             state.students = {};
             state.transportPayments = {};
+            state.transportOverrides = {};
             state.expenses = {};
             renderKPIs();
             renderPaymentsTable();
@@ -3004,6 +3102,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           const activeStudentIds = Object.keys(state.transportEnrollments);
           if (activeStudentIds.length === 0) {
             state.transportPayments = {};
+            state.transportOverrides = {};
             state.expenses = {};
             renderKPIs();
             renderPaymentsTable();
@@ -3011,6 +3110,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             showToast('No non-graduated students on transport for this year', 'ok');
             return;
           }
+
+          state.transportOverrides = await fetchTransportOverridesForYear(year);
 
           // STEP 3: Load payments ONLY for transport students (year-scoped ledgers primary)
           showToast('Loading payments...', 'ok');
@@ -3614,6 +3715,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         state.transportEnrollments[safeTransportId] = enrollment || effectiveAssign || {};
         state.transportPayments[safeTransportId] = normalizedPayments;
         state.studentKeyAliases[safeTransportId] = resolvedStudentKey || admissionKey || safeTransportId;
+        state.transportOverrides = await fetchTransportOverridesForYear(y);
 
         // Mirror onto requested key too, so downstream consumers don't break.
         state.students[requestedId] = state.students[requestedId] || student;
@@ -3677,34 +3779,32 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           assign?.startTimestamp ||
           assign?.start_time
         );
-        const base = (amStop || pmStop)
-          ? await calculateBaseMonthlyFee(amStop, pmStop, Number(year), getFocusedMonth())
-          : getTransportBaseMonthlyFee(assign);
-        const startDate = normalizeDateInput((assign && (assign.startDate || assign.start_date || assign.startTimestamp || assign.start_time)) || `${year}-01-01`, Number(year));
-        const endDate = resolveEndDate(assign);
-        const ledger = await TransportPricing.buildLedger({ 
-          year: Number(year), 
+        const effectiveEnrollmentForLedger = {
+          ...(assign || {}),
           amStop,
           pmStop,
-          baseMonthlyFee: base, 
+        };
+        const base = await resolveMonthlyBaseWithOverride({
+          enrollment: effectiveEnrollmentForLedger,
+          year: Number(year),
+          month: getFocusedMonth(),
+          studentId: effectiveStudentId,
+        });
+        const startDate = normalizeDateInput((assign && (assign.startDate || assign.start_date || assign.startTimestamp || assign.start_time)) || `${year}-01-01`, Number(year));
+        const endDate = resolveEndDate(assign);
+        const ledger = await buildTransportLedger({ 
+          year: Number(year), 
+          enrollment: effectiveEnrollmentForLedger,
           startDate, 
           endDate,
           payments, 
-          multipliers 
+          multipliers,
+          studentId: effectiveStudentId,
         });
 
         const focusedMonth = getFocusedMonth();
         const selectedMonthLabel = MONTH_NAMES[focusedMonth] || ('Month ' + focusedMonth);
-        const dueThisMonth = await TransportPricing.dueForMonth({ 
-          year:Number(year), 
-          month:focusedMonth, 
-          amStop,
-          pmStop,
-          baseMonthlyFee: base, 
-          startDate, 
-          endDate,
-          multipliers 
-        });
+        const dueThisMonth = ledger.months.find(m => m.month === focusedMonth)?.due || 0;
         const startDisplay = hasAssignedStart ? formatStartDateDisplay(startDate) : 'N/A';
         const stopDisplay = endDate ? formatStartDateDisplay(endDate) : '';
 
