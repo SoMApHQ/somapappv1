@@ -147,6 +147,43 @@
         return db.ref(path).update(value);
       }
 
+      function currentSchoolId(){
+        try {
+          const params = new URLSearchParams(window.location.search || '');
+          const raw = String(window.SOMAP?.getSchool?.()?.id || window.currentSchoolId || params.get('school') || params.get('schoolId') || '').trim();
+          const normalized = raw.toLowerCase();
+          if (normalized === 'socrates school' || normalized === 'socrates' || normalized === 'default') return 'socrates-school';
+          return raw;
+        } catch (_) {
+          return '';
+        }
+      }
+
+      function scopedCandidates(path){
+        const clean = String(path || '').replace(/^\/+/, '');
+        const sid = currentSchoolId();
+        return Array.from(new Set([
+          clean,
+          sid ? `schools/${sid}/${clean}` : ''
+        ].filter(Boolean)));
+      }
+
+      async function readMerged(path){
+        if (!db) return {};
+        const snaps = await Promise.all(scopedCandidates(path).map(p => db.ref(p).once('value').catch(() => null)));
+        return snaps.reduce((merged, snap) => {
+          const val = snap?.val?.();
+          if (val && typeof val === 'object') return { ...merged, ...val };
+          return merged;
+        }, {});
+      }
+
+      function writePath(path){
+        const clean = String(path || '').replace(/^\/+/, '');
+        const sid = currentSchoolId();
+        return sid ? `schools/${sid}/${clean}` : clean;
+      }
+
       // Fallback module
       window.TransportPricing = {
         DEFAULT_MULTIPLIERS,
@@ -157,7 +194,7 @@
          */
         async loadStopsForYear(year){
           const y = String(year);
-          const raw = await readOnce(`transportCatalog/${y}/stops`) || {};
+          const raw = await readMerged(`transportCatalog/${y}/stops`) || {};
           const arr = Object.keys(raw).map(id => ({ id, ...(raw[id]||{}) }));
           // Normalize fields
           arr.forEach(s => {
@@ -174,12 +211,12 @@
          */
         async loadYearMultipliers(year){
           const y = String(year);
-          let mult = await readOnce(`transportSettings/${y}/monthMultipliers`);
+          let mult = await readMerged(`transportSettings/${y}/monthMultipliers`);
           if (!mult || typeof mult !== 'object') {
             // Seed defaults but do not throw
             mult = {...DEFAULT_MULTIPLIERS};
             try {
-              await write(`transportSettings/${y}/monthMultipliers`, mult);
+              await write(writePath(`transportSettings/${y}/monthMultipliers`), mult);
             } catch(e) {
               console.warn('Could not seed default multipliers (non-fatal):', e);
             }
@@ -205,13 +242,13 @@
          */
         async ensureYearStructure(year){
           const y = String(year);
-          const base = await readOnce(`transportCatalog/${y}`);
+          const base = await readMerged(`transportCatalog/${y}`);
           if (!base) {
-            await patch(`transportCatalog/${y}`, { createdAt: Date.now(), createdBy: 'system' }).catch(()=>{});
+            await patch(writePath(`transportCatalog/${y}`), { createdAt: Date.now(), createdBy: 'system' }).catch(()=>{});
           }
-          const mult = await readOnce(`transportSettings/${y}/monthMultipliers`);
+          const mult = await readMerged(`transportSettings/${y}/monthMultipliers`);
           if (!mult) {
-            await write(`transportSettings/${y}/monthMultipliers`, DEFAULT_MULTIPLIERS).catch(()=>{});
+            await write(writePath(`transportSettings/${y}/monthMultipliers`), DEFAULT_MULTIPLIERS).catch(()=>{});
           }
         }
       };
@@ -436,6 +473,30 @@
     // ========= Globals & helpers =========
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
+    function selectedSchoolId() {
+      try {
+        const params = new URLSearchParams(window.location.search || '');
+        const raw = String(window.SOMAP?.getSchool?.()?.id || window.currentSchoolId || params.get('school') || params.get('schoolId') || '').trim();
+        const normalized = raw.toLowerCase();
+        if (normalized === 'socrates school' || normalized === 'socrates' || normalized === 'default') return 'socrates-school';
+        return raw;
+      } catch (_) {
+        return '';
+      }
+    }
+
+    function transportDataPath(path) {
+      const clean = String(path || '').replace(/^\/+/, '');
+      const sid = selectedSchoolId();
+      return sid ? `schools/${sid}/${clean}` : clean;
+    }
+
+    function clearTransportPricingCache(year) {
+      if (window.TransportPricing && typeof window.TransportPricing.clearCache === 'function') {
+        window.TransportPricing.clearCache(year);
+      }
+    }
+
     let currentEditStopId = null;
     let multInputs = {};
     let currentUser = null;
@@ -510,10 +571,12 @@
           return;
         }
 
-        db.ref(`transportSettings/${year}/monthMultipliers`).set(payload)
+        db.ref(transportDataPath(`transportSettings/${year}/monthMultipliers`)).set(payload)
           .then(() => {
+            clearTransportPricingCache(year);
             console.log('✅ Multipliers saved');
             showToast(`✅ Monthly multipliers saved for ${year}!`);
+            render();
           })
           .catch(error => {
             console.error('❌ Error saving multipliers:', error);
@@ -867,7 +930,7 @@
 
         if (currentEditStopId) {
           // Update existing - check if price changed
-          const stopRef = db.ref(`transportCatalog/${year}/stops/${currentEditStopId}`);
+          const stopRef = db.ref(transportDataPath(`transportCatalog/${year}/stops/${currentEditStopId}`));
           const prevSnap = await stopRef.once('value');
           const prev = prevSnap.val() || {};
           
@@ -890,7 +953,7 @@
           showToast('Stop updated successfully!');
         } else {
           // Create new - seed priceHistory
-          const newRef = db.ref(`transportCatalog/${year}/stops`).push();
+          const newRef = db.ref(transportDataPath(`transportCatalog/${year}/stops`)).push();
           await newRef.set({
             ...stopData,
             createdAt: Date.now()
@@ -913,6 +976,7 @@
           editStopModal.classList.add('hidden');
           editStopModal.setAttribute('aria-hidden','true');
         }
+        clearTransportPricingCache(year);
         render();
       } catch (error) {
         console.error('Error saving stop:', error);
@@ -925,11 +989,12 @@
         if (!db) {
           showToast('DB unavailable', 'bad'); return;
         }
-        await db.ref(`transportCatalog/${year}/stops/${id}`).update({
+        await db.ref(transportDataPath(`transportCatalog/${year}/stops/${id}`)).update({
           active,
           updatedAt: Date.now()
         });
         showToast(`Stop ${active ? 'activated' : 'deactivated'} successfully!`);
+        clearTransportPricingCache(year);
         render();
       } catch (error) {
         console.error('Error toggling stop:', error);
@@ -950,7 +1015,7 @@
 
         title.textContent = `Price History - ${stop.name || 'Stop'}`;
         
-        const stopRef = db.ref(`transportCatalog/${year}/stops/${stop.id}`);
+        const stopRef = db.ref(transportDataPath(`transportCatalog/${year}/stops/${stop.id}`));
         const snap = await stopRef.once('value');
         const data = snap.val() || {};
         const history = data.priceHistory || {};
@@ -1009,8 +1074,9 @@
         if (!db) {
           showToast('DB unavailable', 'bad'); return;
         }
-        await db.ref(`transportCatalog/${year}/stops/${id}`).remove();
+        await db.ref(transportDataPath(`transportCatalog/${year}/stops/${id}`)).remove();
         showToast('Stop deleted successfully!');
+        clearTransportPricingCache(year);
         render();
       } catch (error) {
         console.error('Error deleting stop:', error);
@@ -1078,7 +1144,7 @@
 
         for (const year of yearsToImport) {
           // Check existing routes
-          const existingSnap = await db.ref(`transportCatalog/${year}/stops`).once('value');
+          const existingSnap = await db.ref(transportDataPath(`transportCatalog/${year}/stops`)).once('value');
           const existing = existingSnap.val() || {};
 
           for (const group of LEGACY_ROUTES) {
@@ -1100,7 +1166,7 @@
                 .join(' ');
 
               // Save to database
-              const newRef = db.ref(`transportCatalog/${year}/stops`).push();
+              const newRef = db.ref(transportDataPath(`transportCatalog/${year}/stops`)).push();
               await newRef.set({
                 name: formattedName,
                 baseFee: group.price,
@@ -1129,6 +1195,7 @@
         console.log(`✨ Bulk import complete! Imported ${totalImported}, skipped ${totalSkipped}`);
         showToast(`✅ Bulk import complete! Imported ${totalImported} routes across ${yearsToImport.length} years!`);
 
+        yearsToImport.forEach(clearTransportPricingCache);
         setTimeout(() => render(), 500);
       } catch (error) {
         console.error('❌ Error in bulk import:', error);
@@ -1148,7 +1215,7 @@
 
         showToast(`🔄 Importing ${totalRoutes} routes for ${year}...`, 'ok');
 
-        const existingSnap = await db.ref(`transportCatalog/${year}/stops`).once('value');
+        const existingSnap = await db.ref(transportDataPath(`transportCatalog/${year}/stops`)).once('value');
         const existing = existingSnap.val() || {};
         const existingCount = Object.keys(existing).length;
 
@@ -1179,7 +1246,7 @@
               .map(word => word.charAt(0).toUpperCase() + word.slice(1))
               .join(' ');
 
-            const newRef = db.ref(`transportCatalog/${year}/stops`).push();
+            const newRef = db.ref(transportDataPath(`transportCatalog/${year}/stops`)).push();
             await newRef.set({
               name: formattedName,
               baseFee: group.price,
@@ -1203,6 +1270,7 @@
         }
 
         showToast(`✅ Imported ${imported} routes for ${year}${skipped > 0 ? ` (${skipped} duplicates skipped)` : ''}!`);
+        clearTransportPricingCache(year);
         setTimeout(() => render(), 500);
       } catch (error) {
         console.error('❌ Error migrating routes:', error);
@@ -1394,8 +1462,8 @@
     };
 
     const schoolPrefix = (path) => {
-      if (window.currentSchoolId) return `schools/${window.currentSchoolId}/${path}`;
-      return path;
+      const sid = selectedSchoolId();
+      return sid ? `schools/${sid}/${path}` : path;
     };
 
     const state = { y: String(yearCtx.getSelectedYear()), students:null, idx:[], pick:null };

@@ -8,7 +8,20 @@
 
   function currentSchoolId(){
     const school = window.SOMAP?.getSchool?.();
-    return String(school?.id || window.currentSchoolId || '').trim();
+    const querySchool = (() => {
+      try {
+        const params = new URLSearchParams(window.location.search || '');
+        return params.get('school') || params.get('schoolId') || '';
+      } catch (_) {
+        return '';
+      }
+    })();
+    const raw = String(school?.id || window.currentSchoolId || querySchool || '').trim();
+    const normalized = raw.toLowerCase();
+    if (normalized === 'socrates school' || normalized === 'socrates' || normalized === 'default') {
+      return 'socrates-school';
+    }
+    return raw;
   }
 
   function maybePrefixPath(path){
@@ -21,8 +34,15 @@
     const clean = String(relativePath || '').replace(/^\/+/, '');
     const paths = [];
     const sid = currentSchoolId();
-    if (sid) paths.push(maybePrefixPath(`schools/${sid}/${clean}`));
     paths.push(maybePrefixPath(clean));
+    if (sid) {
+      const scoped = `schools/${sid}/${clean}`;
+      if (window.SOMAP && typeof window.SOMAP.P === 'function') {
+        paths.push(sid === 'socrates-school' ? scoped : window.SOMAP.P(clean));
+      } else {
+        paths.push(scoped);
+      }
+    }
     return Array.from(new Set(paths.filter(Boolean)));
   }
 
@@ -307,6 +327,21 @@
 
   function getMonthMultiplier(m) { return DEFAULT_MULTIPLIERS[m] || 1.0; }
 
+  function clearCache(year){
+    if (!year) {
+      pricingCache.multipliers = {};
+      pricingCache.stops = {};
+      return;
+    }
+    const suffix = `:${year}`;
+    Object.keys(pricingCache.multipliers).forEach(key => {
+      if (key.endsWith(suffix)) delete pricingCache.multipliers[key];
+    });
+    Object.keys(pricingCache.stops).forEach(key => {
+      if (key.endsWith(suffix)) delete pricingCache.stops[key];
+    });
+  }
+
   function expectedForMonth(amStop, pmStop, month){
     const base = (priceForStop(amStop) + priceForStop(pmStop));
     return Math.round(base * getMonthMultiplier(month));
@@ -341,6 +376,7 @@
     pickPriceForDate,
     baseFeeOnDate,
     computeBaseMonthlyFeeOnMonth,
-    monthStartIso
+    monthStartIso,
+    clearCache
   };
 })();
