@@ -107,8 +107,15 @@
       if (!window.firebase || !firebase.database) return [];
       const snap = await firebase.database().ref(`transportCatalog/${year}/stops`).once('value');
       const stops = snap.val() || {};
-      // normalize { stopId: {name, baseFee, active} }
-      return Object.entries(stops).map(([id,s])=>({ id, name:s.name||id, baseFee:Number(s.baseFee)||0, active: s.active !== false }));
+      // normalize while preserving metadata such as priceHistory for callers that render it.
+      return Object.entries(stops).map(([id,s])=>({
+        ...s,
+        id,
+        name: s.name || id,
+        baseFee: Number(s.baseFee) || 0,
+        active: s.active !== false,
+        priceHistory: s.priceHistory || {}
+      }));
     }catch(_){ return []; }
   }
 

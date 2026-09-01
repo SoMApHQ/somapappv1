@@ -85,11 +85,25 @@
     }
   }
 
+  function getDefaultYear() {
+    return new Date().getFullYear();
+  }
+
+  function getStoredYear() {
+    const currentYear = getDefaultYear();
+    const storedYear = Number(getStored("year", String(currentYear)));
+    if (!Number.isFinite(storedYear) || storedYear < currentYear) {
+      setStored("year", String(currentYear));
+      return currentYear;
+    }
+    return storedYear;
+  }
+
   function getContext() {
     const base = {
       school: getStored("school", "socrates-school"),
       schoolName: getStored("schoolName", "Socrates School"),
-      year: Number(getStored("year", String(new Date().getFullYear()))) || 2026,
+      year: getStoredYear(),
       month: Number(getStored("month", String(new Date().getMonth() + 1))) || 1,
       day: Number(getStored("day", "1")) || 1,
     };

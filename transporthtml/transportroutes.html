@@ -53,10 +53,21 @@
   </script>
 
   <!-- Year constants + Global Year Context (unchanged from your intent) -->
+  <script src="../Todashboardhtml/yearContext.js"></script>
   <script>
     // Year selector constants
     const SOMAP_ALLOWED_YEARS = Array.from({length: 20}, (_,i)=>2023+i); // 2023..2042
-    const SOMAP_DEFAULT_YEAR = 2025;
+    const SOMAP_DEFAULT_YEAR = new Date().getFullYear();
+    function getInitialTransportYear(){
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const queryYear = Number(params.get('year'));
+        if (Number.isFinite(queryYear) && SOMAP_ALLOWED_YEARS.includes(queryYear)) {
+          return String(queryYear);
+        }
+      } catch {}
+      return String(SOMAP_DEFAULT_YEAR);
+    }
 
     /** Tanzania class ladder (no Class 8). Keep labels EXACTLY. */
     const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
@@ -74,7 +85,7 @@
 
     // Reuse shared year context if present, else create a light fallback
     window.somapYearContext = window.somapYearContext || (function(){
-      let selected = (sessionStorage.getItem('somap_selected_year') || SOMAP_DEFAULT_YEAR) + '';
+      let selected = getInitialTransportYear();
       const listeners = new Set();
       return {
         getSelectedYear(){ return selected; },
@@ -87,6 +98,12 @@
         },
         onYearChanged(fn){ if (typeof fn==='function') listeners.add(fn); }
       };
+    })();
+    (function syncInitialTransportYear(){
+      const initialYear = getInitialTransportYear();
+      if (window.somapYearContext && typeof window.somapYearContext.setSelectedYear === 'function') {
+        window.somapYearContext.setSelectedYear(initialYear, { manual: false, forceDispatch: true });
+      }
     })();
   </script>
 
@@ -625,37 +642,9 @@
 
         // Load stops (with priceHistory)
         console.log('🚏 Loading stops for year:', year);
-        const stopsRaw = await window.TransportPricing.loadStopsForYear(year);
-        // Also load priceHistory for each stop and migrate if missing
-        const stops = await Promise.all(stopsRaw.map(async (stop) => {
-          try {
-            const stopRef = db.ref(`transportCatalog/${year}/stops/${stop.id}`);
-            const stopSnap = await stopRef.once('value');
-            const stopData = stopSnap.val() || {};
-            
-            // Auto-migrate: seed priceHistory if missing
-            if (!stopData.priceHistory || Object.keys(stopData.priceHistory || {}).length === 0) {
-              const baseFee = Number(stopData.baseFee || stop.baseFee || 0);
-              if (baseFee > 0) {
-                await stopRef.child('priceHistory').push({
-                  amount: baseFee,
-                  effectiveFrom: `${year}-01-01`,
-                  changedAt: Date.now(),
-                  changedBy: 'system',
-                  note: 'Auto-migrated from baseFee'
-                });
-                // Reload to get updated data
-                const updatedSnap = await stopRef.once('value');
-                const updatedData = updatedSnap.val() || {};
-                return { ...stop, priceHistory: updatedData.priceHistory || {} };
-              }
-            }
-            
-            return { ...stop, priceHistory: stopData.priceHistory || {} };
-          } catch (e) {
-            console.warn('Error loading/migrating stop:', stop.id, e);
-            return { ...stop, priceHistory: {} };
-          }
+        const stops = (await window.TransportPricing.loadStopsForYear(year)).map((stop) => ({
+          ...stop,
+          priceHistory: stop.priceHistory || {}
         }));
         console.log(`✅ Loaded ${stops.length} stops:`, stops);
         drawStops(stops, year);
@@ -1390,7 +1379,7 @@
 
   <script>
   (function(){
-    const SOMAP_DEFAULT_YEAR = 2025;
+    const SOMAP_DEFAULT_YEAR = new Date().getFullYear();
     const L = s => String(s||'').trim().toLowerCase();
     const pad2 = n => String(n).padStart(2,'0');
     const fmt = n => Number(n||0).toLocaleString();

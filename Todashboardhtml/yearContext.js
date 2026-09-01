@@ -7,7 +7,7 @@
   const ATTACHED_FLAG = 'somapYearAttached';
 
   function clampYearRange(start, end) {
-    const min = Number.isInteger(start) ? start : 2024;
+    const min = Number.isInteger(start) ? start : 2023;
     const max = Number.isInteger(end) ? end : 2042;
     return [Math.min(min, max), Math.max(min, max)];
   }
@@ -38,12 +38,12 @@
 
   function getSelectedYear() {
     const stored = localStorage.getItem(STORAGE_KEY);
-    const MIN_YEAR = 2024;
+    const MIN_YEAR = 2023;
     const currentYear = new Date().getFullYear();
+    const defaultYear = String(Math.max(MIN_YEAR, currentYear));
     if (stored) {
       const yearNum = Number(stored);
-      if (yearNum < MIN_YEAR) {
-        const defaultYear = String(Math.max(MIN_YEAR, currentYear));
+      if (!Number.isFinite(yearNum) || yearNum < MIN_YEAR || yearNum < currentYear) {
         localStorage.setItem(STORAGE_KEY, defaultYear);
         setManualFlag(false);
         return defaultYear;
@@ -51,7 +51,6 @@
       return stored;
     }
     // Default to current year when nothing stored (so approvals match Finance in 2026+)
-    const defaultYear = String(Math.max(MIN_YEAR, currentYear));
     localStorage.setItem(STORAGE_KEY, defaultYear);
     setManualFlag(false);
     return defaultYear;
@@ -63,7 +62,7 @@
 
   function setSelectedYear(year, options = {}) {
     if (!year) return getSelectedYear();
-    const MIN_YEAR = 2024;
+    const MIN_YEAR = 2023;
     let normalized = String(year);
     // Ensure year is at least 2024
     if (Number(normalized) < MIN_YEAR) {
@@ -88,9 +87,8 @@
   }
 
   function maybeAutoAdvance() {
-    if (getManualFlag()) return;
     const current = String(new Date().getFullYear());
-    if (getSelectedYear() !== current) {
+    if (Number(getSelectedYear()) < Number(current)) {
       setSelectedYear(current, { manual: false, forceDispatch: true });
     }
   }
