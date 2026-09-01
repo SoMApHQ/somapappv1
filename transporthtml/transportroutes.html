@@ -491,6 +491,58 @@
       return sid ? `schools/${sid}/${clean}` : clean;
     }
 
+    // Money-affecting transport changes (stop prices, monthly multipliers, per-student
+    // overrides) must not write to transportCatalog/transportSettings/transportOverrides
+    // directly — they go through the same approvalsPending queue the finance module uses
+    // (see Tofinancehtml/paymentedits.html:queueFinanceConfigChange for the precedent),
+    // and only take effect once an admin approves them in Todashboardhtml/approvals.html.
+    // Paths inside `operations` are intentionally UNSCOPED (no schools/{id}/ prefix) —
+    // approvals.js applies its own P() scoping when it commits the change.
+    async function queueTransportPricingChange(change = {}) {
+      if (!db) throw new Error('DB unavailable');
+      const operations = Array.isArray(change.operations) ? change.operations.filter((op) => op && op.path) : [];
+      if (!operations.length) throw new Error('No transport pricing changes to queue.');
+      const year = String(change.year || window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR);
+      const approvalRef = db.ref('approvalsPending').push();
+      const approvalId = approvalRef.key;
+      const target = change.target || 'Transport Pricing';
+      const summary = change.summary || change.action || 'Transport pricing change';
+      const recordedBy = (auth?.currentUser?.email || auth?.currentUser?.uid || 'unknown');
+      await approvalRef.set({
+        approvalId,
+        sourceModule: 'transportpricing',
+        source: 'Transport Pricing',
+        status: 'pending',
+        forYear: Number(year),
+        academicYear: Number(year),
+        financeYear: Number(year),
+        createdAt: Date.now(),
+        datePaid: Date.now(),
+        recordedBy,
+        studentName: change.studentName || '',
+        studentAdm: change.studentAdm || '',
+        studentId: change.studentId || '',
+        className: change.className || '',
+        parentContact: '',
+        amountPaidNow: 0,
+        paymentMethod: 'Transport Pricing Change',
+        configTarget: target,
+        configSummary: summary,
+        notes: change.notes || summary,
+        modulePayload: {
+          configAction: change.action || summary,
+          studentId: change.studentId || '',
+          studentName: change.studentName || '',
+          studentAdm: change.studentAdm || '',
+          className: change.className || '',
+          operations,
+          historyEntries: Array.isArray(change.historyEntries) ? change.historyEntries : []
+        }
+      });
+      showToast('Submitted for approval — takes effect once an admin approves it.', 'ok');
+      return approvalId;
+    }
+
     function clearTransportPricingCache(year) {
       if (window.TransportPricing && typeof window.TransportPricing.clearCache === 'function') {
         window.TransportPricing.clearCache(year);
@@ -498,6 +550,7 @@
     }
 
     let currentEditStopId = null;
+    let currentEditStopSnapshot = null; // the in-memory stop object the edit modal was opened with, used as "before" for the approval record
     let multInputs = {};
     let currentUser = null;
     let isInitialized = false;
@@ -571,17 +624,20 @@
           return;
         }
 
-        db.ref(transportDataPath(`transportSettings/${year}/monthMultipliers`)).set(payload)
-          .then(() => {
-            clearTransportPricingCache(year);
-            console.log('✅ Multipliers saved');
-            showToast(`✅ Monthly multipliers saved for ${year}!`);
-            render();
-          })
-          .catch(error => {
-            console.error('❌ Error saving multipliers:', error);
-            showToast('Failed to save multipliers', 'bad');
+        (async () => {
+          const before = await window.TransportPricing.loadYearMultipliers(year).catch(() => null);
+          await queueTransportPricingChange({
+            year,
+            action: 'multipliers:update',
+            target: `Monthly Multipliers ${year}`,
+            summary: `Monthly multipliers for ${year} updated`,
+            operations: [{ op: 'set', path: `transportSettings/${year}/monthMultipliers`, value: payload }],
+            historyEntries: [{ year, category: 'multipliers', id: String(year), action: 'multipliers:update', before, after: payload }]
           });
+        })().catch(error => {
+          console.error('❌ Error queuing multiplier change:', error);
+          showToast('Failed to submit multiplier change', 'bad');
+        });
       } catch (e) {
         console.error('Save multipliers handler error:', e);
         showToast('Failed to save multipliers', 'bad');
@@ -842,6 +898,7 @@
     function openEditStopModal(stop, year) {
       try {
         currentEditStopId = stop ? stop.id : null;
+        currentEditStopSnapshot = stop || null;
         const titleEl = document.getElementById('editStopTitle');
         const nameEl  = document.getElementById('editStopName');
         const feeEl   = document.getElementById('editStopFee');
@@ -928,59 +985,68 @@
           updatedAt: Date.now()
         };
 
+        const operations = [];
+        const historyEntries = [];
+        let summary;
+
         if (currentEditStopId) {
-          // Update existing - check if price changed
-          const stopRef = db.ref(transportDataPath(`transportCatalog/${year}/stops/${currentEditStopId}`));
-          const prevSnap = await stopRef.once('value');
-          const prev = prevSnap.val() || {};
-          
-          await stopRef.update(stopData);
-          
-          // If price changed, add to priceHistory
-          if (Number(prev.baseFee) !== Number(fee)) {
+          // Update existing - check if price changed against the stop object the modal was opened with
+          const prev = currentEditStopSnapshot || {};
+          const priceChanged = Number(prev.baseFee) !== Number(fee);
+
+          operations.push({ op: 'update', path: `transportCatalog/${year}/stops/${currentEditStopId}`, value: stopData });
+
+          if (priceChanged) {
             const eff = effectiveFrom || new Date().toISOString().slice(0,10);
-            const changedBy = (auth?.currentUser?.email || auth?.currentUser?.uid || 'unknown');
-            
-            await stopRef.child('priceHistory').push({
-              amount: Number(fee),
-              effectiveFrom: eff,
-              changedAt: Date.now(),
-              changedBy: changedBy,
-              note: 'Edited in Routes'
+            const histKey = db.ref(`transportCatalog/${year}/stops/${currentEditStopId}/priceHistory`).push().key;
+            operations.push({
+              op: 'set',
+              path: `transportCatalog/${year}/stops/${currentEditStopId}/priceHistory/${histKey}`,
+              value: {
+                amount: Number(fee),
+                effectiveFrom: eff,
+                changedAt: Date.now(),
+                changedBy: (auth?.currentUser?.email || auth?.currentUser?.uid || 'unknown'),
+                note: 'Edited in Routes'
+              }
             });
+            summary = `${name}: TSh ${Number(prev.baseFee)||0} → TSh ${fee} /month, effective ${eff}`;
+          } else {
+            summary = `${name}: details updated (price unchanged)`;
           }
-          
-          showToast('Stop updated successfully!');
+          historyEntries.push({ year, category: 'stops', id: currentEditStopId, action: 'stop:update', before: prev, after: stopData });
+
+          await queueTransportPricingChange({ year, action: 'stop:update', target: name, summary, operations, historyEntries });
         } else {
-          // Create new - seed priceHistory
-          const newRef = db.ref(transportDataPath(`transportCatalog/${year}/stops`)).push();
-          await newRef.set({
-            ...stopData,
-            createdAt: Date.now()
+          // Create new - pre-generate keys locally so the pending record can reference them; nothing is written until approved.
+          const newId = db.ref(`transportCatalog/${year}/stops`).push().key;
+          const histKey = db.ref(`transportCatalog/${year}/stops/${newId}/priceHistory`).push().key;
+
+          operations.push({ op: 'set', path: `transportCatalog/${year}/stops/${newId}`, value: { ...stopData, createdAt: Date.now() } });
+          operations.push({
+            op: 'set',
+            path: `transportCatalog/${year}/stops/${newId}/priceHistory/${histKey}`,
+            value: {
+              amount: Number(fee),
+              effectiveFrom: `${year}-01-01`,
+              changedAt: Date.now(),
+              changedBy: (auth?.currentUser?.email || auth?.currentUser?.uid || 'unknown'),
+              note: 'Initial price'
+            }
           });
-          
-          // Seed initial priceHistory entry
-          const changedBy = (auth?.currentUser?.email || auth?.currentUser?.uid || 'unknown');
-          await newRef.child('priceHistory').push({
-            amount: Number(fee),
-            effectiveFrom: `${year}-01-01`,
-            changedAt: Date.now(),
-            changedBy: changedBy,
-            note: 'Initial price'
-          });
-          
-          showToast('Stop created successfully!');
+          historyEntries.push({ year, category: 'stops', id: newId, action: 'stop:create', before: null, after: stopData });
+          summary = `${name}: new stop, TSh ${fee}/month`;
+
+          await queueTransportPricingChange({ year, action: 'stop:create', target: name, summary, operations, historyEntries });
         }
 
         if (editStopModal) {
           editStopModal.classList.add('hidden');
           editStopModal.setAttribute('aria-hidden','true');
         }
-        clearTransportPricingCache(year);
-        render();
       } catch (error) {
         console.error('Error saving stop:', error);
-        showToast('Failed to save stop', 'bad');
+        showToast('Failed to submit stop change', 'bad');
       }
     }
 
@@ -1580,20 +1646,46 @@
         editedBy: (window.currentUserEmail || 'unknown'),
         editedAt: Date.now()
       };
-      await db.ref(schoolPrefix(`transportOverrides/${state.y}/${id}`)).set(payload);
-      el('tsoOp').textContent = 'Saved ✓';
-      setTimeout(()=> el('tsoOp').textContent='', 1500);
-      state.pick.override = payload;
+      const before = state.pick.override || null;
+      await window.queueTransportPricingChange({
+        year: state.y,
+        action: 'override:update',
+        target: state.pick.S.name,
+        studentId: id,
+        studentName: state.pick.S.name,
+        studentAdm: state.pick.S.adm,
+        className: state.pick.S.cls,
+        summary: `${state.pick.S.name} (${state.pick.S.adm}): transport override updated`,
+        operations: [{ op: 'set', path: `transportOverrides/${state.y}/${id}`, value: payload }],
+        historyEntries: [{ year: state.y, category: 'overrides', id, action: 'override:update', before, after: payload }]
+      });
+      el('tsoOp').textContent = 'Submitted for approval ✓';
+      setTimeout(()=> el('tsoOp').textContent='', 2200);
     }
 
     async function removeOverride(){
       if(!state.pick){ return; }
       const id = state.pick.id;
-      await db.ref(schoolPrefix(`transportOverrides/${state.y}/${id}`)).set(null);
-      el('tsoOp').textContent = 'Removed ✓';
-      setTimeout(()=> el('tsoOp').textContent='', 1500);
-      state.pick.override = null;
-      renderPick(state.pick);
+      const before = state.pick.override || null;
+      if (!before) {
+        el('tsoOp').textContent = 'No override to remove';
+        setTimeout(()=> el('tsoOp').textContent='', 1500);
+        return;
+      }
+      await window.queueTransportPricingChange({
+        year: state.y,
+        action: 'override:remove',
+        target: state.pick.S.name,
+        studentId: id,
+        studentName: state.pick.S.name,
+        studentAdm: state.pick.S.adm,
+        className: state.pick.S.cls,
+        summary: `${state.pick.S.name} (${state.pick.S.adm}): transport override removed`,
+        operations: [{ op: 'set', path: `transportOverrides/${state.y}/${id}`, value: null }],
+        historyEntries: [{ year: state.y, category: 'overrides', id, action: 'override:remove', before, after: null }]
+      });
+      el('tsoOp').textContent = 'Removal submitted for approval ✓';
+      setTimeout(()=> el('tsoOp').textContent='', 2200);
     }
 
     el('tsoClear').addEventListener('click', ()=>{ el('tsoSearch').value=''; el('tsoResult').classList.add('hidden'); el('tsoStatus').textContent=''; });

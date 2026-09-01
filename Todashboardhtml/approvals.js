@@ -45,6 +45,7 @@
     finance: 'School Fees',
     financeconfig: 'Finance Config',
     transport: 'Transport',
+    transportpricing: 'Transport Pricing',
     prefonefinance: 'Preform One',
     graduation: 'Graduation',
     fridaymoney: 'Friday Money',
@@ -99,6 +100,13 @@
         balance: document.getElementById('transport-balance'),
         pending: document.getElementById('transport-pending-count'),
       },
+      transportpricing: {
+        required: null,
+        approved: null,
+        balance: null,
+        pending: document.getElementById('transportpricing-pending-count'),
+        list: document.getElementById('transportpricing-pending-list'),
+      },
       prefonefinance: {
         required: document.getElementById('prefone-required'),
         approved: document.getElementById('prefone-approved'),
@@ -146,6 +154,7 @@
       finance: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       financeconfig: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       transport: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
+      transportpricing: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       prefonefinance: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       graduation: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
       fridaymoney: { required: 0, approved: 0, balance: 0, pendingAmount: 0, pendingCount: 0 },
@@ -688,9 +697,12 @@
     };
   }
 
+  const CONFIG_STYLE_MODULES = new Set(['financeconfig', 'transportpricing']);
+
   function renderPendingTable() {
     if (!els.pendingBody) return;
     renderFinanceConfigPendingList();
+    renderTransportPricingPendingList();
     if (!state.pendingList.length) {
       els.pendingBody.innerHTML = `
         <tr>
@@ -745,7 +757,7 @@
     filtered.forEach((row) => {
       const tr = document.createElement('tr');
       const rowYear = getRecordYearString(row);
-      const isConfig = row.sourceModule === 'financeconfig';
+      const isConfig = CONFIG_STYLE_MODULES.has(row.sourceModule);
       const configDisplay = getConfigDisplay(row);
       const queueAttempts = Number(row.queueAttempts) || 0;
       const queueBadge = queueAttempts
@@ -816,6 +828,32 @@
           <p class="font-semibold text-slate-100">${display.studentName || 'Config change'}</p>
           <p class="text-slate-400">${display.studentAdm || ''}${display.className ? ` · ${display.className}` : ''}</p>
           <p class="mt-1 text-amber-100">${display.summary || 'Finance configuration change'}</p>
+        </div>`;
+    }).join('');
+  }
+
+  function renderTransportPricingPendingList() {
+    const listEl = els.summary.transportpricing?.list;
+    if (!listEl) return;
+    const selectedYear = state.selectedYear;
+    const rows = state.pendingList
+      .filter((row) => row.sourceModule === 'transportpricing')
+      .filter((row) => {
+        const recordYear = getRecordYearString(row);
+        return !recordYear || recordYear === selectedYear;
+      })
+      .slice(0, 5);
+    if (!rows.length) {
+      listEl.innerHTML = '<p class="text-slate-400">No pricing changes waiting.</p>';
+      return;
+    }
+    listEl.innerHTML = rows.map((row) => {
+      const display = getConfigDisplay(row);
+      return `
+        <div class="rounded-xl border border-slate-500/25 bg-slate-950/30 px-3 py-2">
+          <p class="font-semibold text-slate-100">${display.studentName || 'Pricing change'}</p>
+          <p class="text-slate-400">${display.studentAdm || ''}${display.className ? ` · ${display.className}` : ''}</p>
+          <p class="mt-1 text-amber-100">${display.summary || 'Transport pricing change'}</p>
         </div>`;
     }).join('');
   }
@@ -1018,7 +1056,7 @@
       }
     }
 
-    const isConfig = viewModel.sourceModule === 'financeconfig';
+    const isConfig = CONFIG_STYLE_MODULES.has(viewModel.sourceModule);
     const configDisplay = getConfigDisplay(viewModel);
     const dataRows = isConfig ? [
       { label: 'Student', value: `${configDisplay.studentName || '--'} (${configDisplay.studentAdm || '--'})` },
@@ -1085,6 +1123,7 @@
       finance: 'Verify the student ledger in finance.html before approving.',
       financeconfig: 'Review the requested finance configuration change carefully. Approval will update fee structures, plans, or student overrides.',
       transport: 'Check transport payments module to confirm the month and amount.',
+      transportpricing: 'Review the requested transport pricing change carefully. Approval will update stop prices, monthly multipliers, or a student override immediately.',
       prefonefinance: 'Cross-check Preform One finance records before approval.',
       graduation: 'Check graduation dashboard to ensure totals align.',
       fridaymoney: 'Confirm Friday register entries match payments.',
@@ -1139,7 +1178,7 @@
   }
 
   function buildFinanceConfigPreview(record) {
-    if (record?.sourceModule !== 'financeconfig') return '';
+    if (!CONFIG_STYLE_MODULES.has(record?.sourceModule)) return '';
     const entries = Array.isArray(record.modulePayload?.historyEntries) ? record.modulePayload.historyEntries : [];
     if (!entries.length) return '';
     const rows = entries.slice(0, 6).map((entry) => `
@@ -1539,6 +1578,9 @@
           case 'transport':
             await commitTransportPayment(record);
             break;
+          case 'transportpricing':
+            await commitTransportPricingChange(record, targetYear);
+            break;
           case 'prefonefinance':
             await commitPrefonePayment(record);
             break;
@@ -1817,6 +1859,65 @@
 
     if (!Object.keys(updates).length) throw new Error('No finance config updates to apply.');
     await db.ref().update(updates);
+  }
+
+  async function commitTransportPricingChange(record, targetYear) {
+    if (record.sourceModule !== 'transportpricing') return;
+    const payload = record.modulePayload || {};
+    const operations = Array.isArray(payload.operations) ? payload.operations : [];
+    if (!operations.length) throw new Error('Missing transport pricing operations.');
+
+    const updates = {};
+    const approvalMeta = {
+      approvedAt: record.approvedAt || Date.now(),
+      approvedBy: record.approvedBy || actorEmail(),
+      approvalId: record.approvalId || '',
+    };
+    const isAllowedTransportPricingPath = (path) => (
+      /^transportCatalog\/20\d{2}\/stops(\/|$)/.test(path) ||
+      /^transportSettings\/20\d{2}\/monthMultipliers(\/|$)/.test(path) ||
+      /^transportOverrides\/20\d{2}(\/|$)/.test(path)
+    );
+
+    operations.forEach((operation) => {
+      const path = normalizePath(operation?.path || '');
+      if (!path) return;
+      if (!isAllowedTransportPricingPath(path)) {
+        throw new Error(`Blocked unsafe transport pricing path: ${path}`);
+      }
+      if (operation.op === 'update') {
+        Object.entries(operation.value || {}).forEach(([key, value]) => {
+          updates[P(`${path}/${key}`)] = value;
+        });
+      } else {
+        updates[P(path)] = operation.value === undefined ? null : operation.value;
+      }
+    });
+
+    const historyEntries = Array.isArray(payload.historyEntries) ? payload.historyEntries : [];
+    historyEntries.forEach((entry) => {
+      const year = String(entry.year || record.forYear || targetYear || state.selectedYear || getContextYear());
+      const category = normalizePath(entry.category || 'transport');
+      const id = normalizePath(entry.id || record.approvalId || 'change');
+      const histRef = sref(`transportPricingHistory/${year}/${category}/${id}`).push();
+      updates[P(`transportPricingHistory/${year}/${category}/${id}/${histRef.key}`)] = {
+        action: entry.action || payload.configAction || 'approve',
+        before: entry.before ?? null,
+        after: entry.after ?? null,
+        requestedAt: record.createdAt || null,
+        requestedBy: record.recordedBy || '',
+        ...approvalMeta,
+      };
+    });
+
+    if (!Object.keys(updates).length) throw new Error('No transport pricing updates to apply.');
+    await db.ref().update(updates);
+    // Otherwise transportpayments.html / transportroutes.html would keep serving prices
+    // cached before this approval landed, for anyone with the page already open.
+    const yr = String(record.forYear || targetYear || '');
+    if (yr && window.TransportPricing && typeof window.TransportPricing.clearCache === 'function') {
+      window.TransportPricing.clearCache(yr);
+    }
   }
 
   async function commitTransportPayment(record) {
@@ -2249,6 +2350,7 @@
     const totals = {
       finance: { count: 0, amount: 0 },
       transport: { count: 0, amount: 0 },
+      transportpricing: { count: 0, amount: 0 },
       prefonefinance: { count: 0, amount: 0 },
       graduation: { count: 0, amount: 0 },
       fridaymoney: { count: 0, amount: 0 },
@@ -2268,7 +2370,7 @@
       const pendEl = els.summary[module]?.pending;
       if (pendEl) {
         pendEl.textContent = data.count
-          ? (module === 'financeconfig' ? `${data.count} Pending` : `${data.count} Pending (${formatCurrency(data.amount)})`)
+          ? (CONFIG_STYLE_MODULES.has(module) ? `${data.count} Pending` : `${data.count} Pending (${formatCurrency(data.amount)})`)
           : 'All Clear';
       }
     });
