@@ -609,6 +609,7 @@
         financeData: {},
         transportPayments: {},
         transportOverrides: {},
+        transportOverrideIndex: {},
         expenses: {},
         showDebtorsOnly: false,
         currentPaymentStudentId: null,
@@ -624,6 +625,57 @@
       
       // Store loaded multipliers per year
       let cachedMultipliers = {};
+      let cachedStopMaps = {};
+      let cachedRouteMonthBaseFees = {};
+
+      function normalizeStopKey(value) {
+        return String(value || '').trim().toLowerCase();
+      }
+
+      function buildOverrideIndex(overrides) {
+        const index = {};
+        Object.entries(overrides || {}).forEach(([key, value]) => {
+          const normalized = normalizeIdentifier(key);
+          if (normalized) index[normalized] = value;
+        });
+        return index;
+      }
+
+      function buildStopMap(stops) {
+        const map = {};
+        (stops || []).forEach((stop) => {
+          if (!stop || typeof stop !== 'object') return;
+          [stop.id, stop.name, stop.routeName, stop.stopName].forEach((candidate) => {
+            const key = normalizeStopKey(candidate);
+            if (key) map[key] = stop;
+          });
+        });
+        return map;
+      }
+
+      async function ensureStopMapForYear(year) {
+        const cacheKey = String(year);
+        if (cachedStopMaps[cacheKey]) return cachedStopMaps[cacheKey];
+        const stops = await TransportPricing.loadStopsForYear(year);
+        cachedStopMaps[cacheKey] = buildStopMap(stops);
+        return cachedStopMaps[cacheKey];
+      }
+
+      function findCachedStop(stopName, year) {
+        const map = cachedStopMaps[String(year)] || {};
+        const key = normalizeStopKey(stopName);
+        if (!key) return null;
+        if (map[key]) return map[key];
+        const partial = Object.keys(map).find(k => key.includes(k) || k.includes(key));
+        return partial ? map[partial] : null;
+      }
+
+      function clearPaymentCalculationCaches() {
+        statusCache.clear();
+        cachedRouteMonthBaseFees = {};
+        cachedStopMaps = {};
+        cachedMultipliers = {};
+      }
 
       function numberOrNull(value) {
         if (value === null || value === undefined || value === '') return null;
@@ -654,8 +706,8 @@
           const direct = state.transportOverrides?.[id];
           if (direct && typeof direct === 'object') return direct;
           const normalized = normalizeIdentifier(id);
-          const matchKey = Object.keys(state.transportOverrides || {}).find(key => normalizeIdentifier(key) === normalized);
-          if (matchKey) return state.transportOverrides[matchKey];
+          const indexed = state.transportOverrideIndex?.[normalized];
+          if (indexed && typeof indexed === 'object') return indexed;
         }
         return null;
       }
@@ -1079,7 +1131,25 @@
       // Calculate base monthly fee (without month multipliers) - for display in table
       // Now date-aware: uses priceHistory for the selected month
       async function calculateBaseMonthlyFee(amStop, pmStop, year, month) {
-        return await TransportPricing.computeBaseMonthlyFeeOnMonth({ year, month, amStop, pmStop });
+        const routeCacheKey = `${year}:${month}:${normalizeStopKey(amStop)}:${normalizeStopKey(pmStop)}`;
+        if (Object.prototype.hasOwnProperty.call(cachedRouteMonthBaseFees, routeCacheKey)) {
+          return cachedRouteMonthBaseFees[routeCacheKey];
+        }
+        const monthDate = `${Number(year)}-${String(Number(month) || 1).padStart(2, '0')}-01`;
+        const priceFor = (stopName) => {
+          if (!stopName) return 0;
+          const stop = findCachedStop(stopName, year);
+          if (!stop) return null;
+          return Number(TransportPricing.pickPriceForDate(stop, monthDate)) || 0;
+        };
+        const cachedMorning = priceFor(amStop);
+        const cachedEvening = priceFor(pmStop);
+        if ((amStop ? cachedMorning !== null : true) && (pmStop ? cachedEvening !== null : true)) {
+          cachedRouteMonthBaseFees[routeCacheKey] = (cachedMorning || 0) + (cachedEvening || 0);
+          return cachedRouteMonthBaseFees[routeCacheKey];
+        }
+        cachedRouteMonthBaseFees[routeCacheKey] = await TransportPricing.computeBaseMonthlyFeeOnMonth({ year, month, amStop, pmStop });
+        return cachedRouteMonthBaseFees[routeCacheKey];
       }
 
       function getTransportBaseMonthlyFee(enrollment) {
@@ -2539,6 +2609,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         try {
           showToast('Loading transport data...', 'ok');
           const year = String(state.year);
+          const yearNum = Number(state.year);
+          await ensureStopMapForYear(yearNum);
           
           // STEP 1: Load and merge transport sources exactly like transport hub
           const isLegacyMerge = isSocratesSchool();
@@ -3005,6 +3077,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             state.students = {};
             state.transportPayments = {};
             state.transportOverrides = {};
+            state.transportOverrideIndex = {};
             state.expenses = {};
             renderKPIs();
             renderPaymentsTable();
@@ -3103,6 +3176,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           if (activeStudentIds.length === 0) {
             state.transportPayments = {};
             state.transportOverrides = {};
+            state.transportOverrideIndex = {};
             state.expenses = {};
             renderKPIs();
             renderPaymentsTable();
@@ -3112,6 +3186,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           }
 
           state.transportOverrides = await fetchTransportOverridesForYear(year);
+          state.transportOverrideIndex = buildOverrideIndex(state.transportOverrides);
 
           // STEP 3: Load payments ONLY for transport students (year-scoped ledgers primary)
           showToast('Loading payments...', 'ok');
@@ -3243,7 +3318,6 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           });
 
           // STEP 5: Pre-load multipliers
-          const yearNum = Number(state.year);
           if (!cachedMultipliers[yearNum]) {
             cachedMultipliers[yearNum] = await TransportPricing.loadYearMultipliers(yearNum);
           }
@@ -3266,6 +3340,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
 
       function refreshData() {
         showToast('Refreshing data...');
+        clearPaymentCalculationCaches();
         loadAllData();
       }
 
@@ -3277,7 +3352,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         yearSelect.value = state.year;
         yearSelect.addEventListener('change', (e) => {
           state.year = parseInt(e.target.value);
-          statusCache.clear(); // Clear cache on year change
+          clearPaymentCalculationCaches();
           if (window.somapYearContext) {
             window.somapYearContext.setSelectedYear(String(state.year));
           }
@@ -3291,7 +3366,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           const newYear = parseInt(year) || state.year;
           if (newYear !== state.year) {
             state.year = newYear;
-            statusCache.clear(); // Clear cache on year change
+            clearPaymentCalculationCaches();
             if (yearSelect) yearSelect.value = state.year;
             loadAllData();
           }
@@ -3716,6 +3791,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         state.transportPayments[safeTransportId] = normalizedPayments;
         state.studentKeyAliases[safeTransportId] = resolvedStudentKey || admissionKey || safeTransportId;
         state.transportOverrides = await fetchTransportOverridesForYear(y);
+        state.transportOverrideIndex = buildOverrideIndex(state.transportOverrides);
+        await ensureStopMapForYear(Number(y));
 
         // Mirror onto requested key too, so downstream consumers don't break.
         state.students[requestedId] = state.students[requestedId] || student;
