@@ -994,11 +994,14 @@
 
   function getConfigDisplay(row = {}) {
     const payload = row.modulePayload || {};
+    const fallbackSummary = row.configSummary || row.notes || payload.configAction || 'Finance configuration change';
     return {
       studentName: row.studentName || payload.studentName || row.configTarget || '--',
       studentAdm: row.studentAdm || payload.studentAdm || '',
       className: row.className || payload.className || '--',
-      summary: row.configSummary || row.notes || payload.configAction || 'Finance configuration change',
+      summary: row.sourceModule === 'transportpricing'
+        ? buildTransportDisplaySummary(row, fallbackSummary)
+        : fallbackSummary,
     };
   }
 
@@ -1177,15 +1180,168 @@
     return parts.length ? parts.join(' | ') : JSON.stringify(value).slice(0, 220);
   }
 
+  const MONTH_LABELS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[char]));
+  }
+
+  function formatMultiplierValue(value) {
+    if (value === undefined || value === null || value === '') return '--';
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric === 0 ? 'No payment (x0)' : `x${numeric}`;
+    return String(value);
+  }
+
+  function readMonthValue(source, month) {
+    if (!source || typeof source !== 'object') return undefined;
+    return source[month] ?? source[String(month)] ?? undefined;
+  }
+
+  function normalizeCompareValue(value) {
+    if (value === undefined || value === null || value === '') return '';
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? String(numeric) : String(value);
+  }
+
+  function formatTransportFieldValue(field, value) {
+    if (value === undefined || value === null || value === '') return '--';
+    if (field === 'baseFee' || field === 'feePerMonthMorning' || field === 'feePerMonthEvening') {
+      return formatCurrency(value);
+    }
+    if (field === 'active') return value ? 'Active' : 'Inactive';
+    if (field === 'applyTo') {
+      const labels = { morning: 'Morning only', evening: 'Evening only', both: 'Morning and evening' };
+      return labels[String(value).toLowerCase()] || String(value);
+    }
+    if (field === 'months') {
+      if (!value || typeof value !== 'object') return 'All months';
+      const months = Object.keys(value)
+        .filter((month) => value[month])
+        .map((month) => MONTH_LABELS[Number(month)] || month);
+      return months.length ? months.join(', ') : 'All months';
+    }
+    if (field === 'note') return String(value) || '--';
+    return String(value);
+  }
+
+  function pushTransportDiffRow(rows, action, detail, before, after) {
+    rows.push({
+      action,
+      detail,
+      before: before === undefined || before === null || before === '' ? '--' : before,
+      after: after === undefined || after === null || after === '' ? '--' : after,
+    });
+  }
+
+  function buildMultiplierDiffRows(entry) {
+    const rows = [];
+    for (let month = 1; month <= 12; month += 1) {
+      const before = readMonthValue(entry.before, month);
+      const after = readMonthValue(entry.after, month);
+      if (normalizeCompareValue(before) === normalizeCompareValue(after)) continue;
+      pushTransportDiffRow(
+        rows,
+        entry.action || 'multipliers:update',
+        `${MONTH_LABELS[month]} multiplier changed`,
+        formatMultiplierValue(before),
+        formatMultiplierValue(after)
+      );
+    }
+    if (!rows.length) {
+      pushTransportDiffRow(rows, entry.action || 'multipliers:update', 'No multiplier value changed', '--', '--');
+    }
+    return rows;
+  }
+
+  function buildObjectDiffRows(entry, fieldLabels, valueFormatter) {
+    const rows = [];
+    const before = entry.before && typeof entry.before === 'object' ? entry.before : {};
+    const after = entry.after && typeof entry.after === 'object' ? entry.after : {};
+    const fields = Object.keys(fieldLabels);
+    fields.forEach((field) => {
+      const beforeValue = before[field];
+      const afterValue = after[field];
+      if (normalizeCompareValue(beforeValue) === normalizeCompareValue(afterValue)) return;
+      pushTransportDiffRow(
+        rows,
+        entry.action || 'change',
+        `${fieldLabels[field]} changed`,
+        valueFormatter(field, beforeValue),
+        valueFormatter(field, afterValue)
+      );
+    });
+    if (!rows.length) {
+      pushTransportDiffRow(rows, entry.action || 'change', 'No visible field changed', summarizeConfigValue(entry.before), summarizeConfigValue(entry.after));
+    }
+    return rows;
+  }
+
+  function buildTransportChangeRows(entries) {
+    return entries.flatMap((entry) => {
+      const action = String(entry.action || '');
+      const category = String(entry.category || '');
+      if (action.includes('multipliers') || category === 'multipliers') {
+        return buildMultiplierDiffRows(entry);
+      }
+      if (action.startsWith('stop:') || category === 'stops') {
+        return buildObjectDiffRows(entry, {
+          name: 'Stop name',
+          baseFee: 'Base monthly fee',
+          active: 'Status',
+        }, formatTransportFieldValue);
+      }
+      if (action.startsWith('override:') || category === 'overrides') {
+        return buildObjectDiffRows(entry, {
+          feePerMonthMorning: 'Morning override fee',
+          feePerMonthEvening: 'Evening override fee',
+          applyTo: 'Applies to',
+          months: 'Months',
+          note: 'Reason/note',
+        }, formatTransportFieldValue);
+      }
+      return [{
+        action: entry.action || 'change',
+        detail: entry.category || 'Transport pricing change',
+        before: summarizeConfigValue(entry.before),
+        after: summarizeConfigValue(entry.after),
+      }];
+    });
+  }
+
+  function buildTransportDisplaySummary(record, fallback) {
+    const entries = Array.isArray(record?.modulePayload?.historyEntries) ? record.modulePayload.historyEntries : [];
+    const rows = buildTransportChangeRows(entries).filter((row) => row.detail && row.detail !== 'No visible field changed');
+    if (!rows.length) return fallback || 'Transport pricing change';
+    const short = rows.slice(0, 3).map((row) => `${row.detail}: ${row.before} to ${row.after}`);
+    const extra = rows.length > short.length ? ` +${rows.length - short.length} more` : '';
+    return `${short.join('; ')}${extra}`;
+  }
+
   function buildFinanceConfigPreview(record) {
     if (!CONFIG_STYLE_MODULES.has(record?.sourceModule)) return '';
     const entries = Array.isArray(record.modulePayload?.historyEntries) ? record.modulePayload.historyEntries : [];
     if (!entries.length) return '';
-    const rows = entries.slice(0, 6).map((entry) => `
+    const displayRows = record.sourceModule === 'transportpricing'
+      ? buildTransportChangeRows(entries).slice(0, 18)
+      : entries.slice(0, 6).map((entry) => ({
+        action: entry.action || 'change',
+        detail: entry.category || '',
+        before: summarizeConfigValue(entry.before),
+        after: summarizeConfigValue(entry.after),
+      }));
+    const rows = displayRows.map((entry) => `
       <tr>
-        <td class="border-b border-slate-700/40 px-3 py-2">${entry.action || 'change'}</td>
-        <td class="border-b border-slate-700/40 px-3 py-2 text-slate-300">${summarizeConfigValue(entry.before)}</td>
-        <td class="border-b border-slate-700/40 px-3 py-2 text-slate-100">${summarizeConfigValue(entry.after)}</td>
+        <td class="border-b border-slate-700/40 px-3 py-2">${escapeHtml(entry.action || 'change')}</td>
+        <td class="border-b border-slate-700/40 px-3 py-2 text-slate-200">${escapeHtml(entry.detail || '--')}</td>
+        <td class="border-b border-slate-700/40 px-3 py-2 text-slate-300">${escapeHtml(entry.before)}</td>
+        <td class="border-b border-slate-700/40 px-3 py-2 text-slate-100">${escapeHtml(entry.after)}</td>
       </tr>`).join('');
     return `
       <div class="rounded-2xl border border-slate-600/40 bg-slate-900/40">
@@ -1194,7 +1350,7 @@
         </div>
         <div class="overflow-x-auto">
           <table class="min-w-full text-sm">
-            <thead><tr><th class="text-left">Action</th><th class="text-left">Before</th><th class="text-left">After</th></tr></thead>
+            <thead><tr><th class="text-left">Action</th><th class="text-left">Detail</th><th class="text-left">Before</th><th class="text-left">After</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
@@ -1236,14 +1392,15 @@
     const record = state.selectedRecord;
     if (!record) return;
     const configDisplay = getConfigDisplay(record);
+    const isConfigApproval = CONFIG_STYLE_MODULES.has(record.sourceModule);
 
     Swal.fire({
       icon: 'question',
-      title: record.sourceModule === 'financeconfig' ? 'Approve finance config change?' : 'Approve payment?',
-      html: record.sourceModule === 'financeconfig'
-        ? `<p class="text-slate-600">You are about to approve <strong>${configDisplay.summary || 'a finance configuration change'}</strong>.</p>
+      title: isConfigApproval ? `Approve ${MODULE_LABELS[record.sourceModule] || 'config'} change?` : 'Approve payment?',
+      html: isConfigApproval
+        ? `<p class="text-slate-600">You are about to approve <strong>${configDisplay.summary || 'a configuration change'}</strong>.</p>
              <p class="mt-2 text-sm text-slate-500">Student: <strong>${configDisplay.studentName || '--'}</strong> (${configDisplay.studentAdm || '--'}), Class: <strong>${configDisplay.className || '--'}</strong>.</p>
-             <p class="mt-2 text-sm text-slate-500">The system will apply the queued config writes and archive the approval.</p>`
+             <p class="mt-2 text-sm text-slate-500">The system will apply the queued ${MODULE_LABELS[record.sourceModule] || 'configuration'} writes and archive the approval.</p>`
         : `<p class="text-slate-600">You are about to approve <strong>${formatCurrency(record.amountPaidNow)}</strong> for <strong>${record.studentName || record.studentAdm}</strong>.</p>
              <p class="mt-2 text-sm text-slate-500">The system will write this payment to <strong>${MODULE_LABELS[record.sourceModule] || record.sourceModule}</strong> and archive the approval.</p>`,
       showCancelButton: true,
