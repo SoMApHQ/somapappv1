@@ -191,20 +191,38 @@
   // union of every duplicate's priceHistory or they can resolve to a stale price.
   function applyMergedHistoryByName(stopsList){
     const historyByName = {};
+    const newestByName = {};
+    const stopStamp = (stop) => {
+      const histStamp = Math.max(0, ...Object.values(stop?.priceHistory || {}).map((entry) => Number(entry?.changedAt || 0) || 0));
+      return Math.max(Number(stop?.updatedAt || 0) || 0, Number(stop?.createdAt || 0) || 0, histStamp);
+    };
     (stopsList||[]).forEach(s => {
       const key = NAME(s?.name || s?.routeName || s?.stopName);
       if (!key) return;
       if (!historyByName[key]) historyByName[key] = {};
       Object.assign(historyByName[key], s.priceHistory || {});
+      if (!newestByName[key] || stopStamp(s) >= stopStamp(newestByName[key])) newestByName[key] = s;
     });
     (stopsList||[]).forEach(s => {
       const key = NAME(s?.name || s?.routeName || s?.stopName);
-      if (key && historyByName[key]) s.priceHistory = historyByName[key];
+      if (key && historyByName[key]) {
+        s.priceHistory = historyByName[key];
+        const newest = newestByName[key];
+        if (newest) {
+          s.baseFee = Number(newest.baseFee) || Number(s.baseFee) || 0;
+          s.active = newest.active !== false;
+        }
+      }
     });
     return stopsList;
   }
 
   // Load stops map by name (with priceHistory)
+  function stopFreshnessStamp(stop) {
+    const histStamp = Math.max(0, ...Object.values(stop?.priceHistory || {}).map((entry) => Number(entry?.changedAt || 0) || 0));
+    return Math.max(Number(stop?.updatedAt || 0) || 0, Number(stop?.createdAt || 0) || 0, histStamp);
+  }
+
   async function loadStopsMap(year){
     const cacheKey = `${currentSchoolId() || 'root'}:${year}`;
     if (pricingCache.stops[cacheKey]) return pricingCache.stops[cacheKey];
@@ -217,7 +235,7 @@
     list.forEach((stop) => {
       [stop.id, stop.name, stop.routeName, stop.stopName].forEach((candidate) => {
         const key = NAME(candidate);
-        if (key) byName[key] = stop;
+        if (key && (!byName[key] || stopFreshnessStamp(stop) >= stopFreshnessStamp(byName[key]))) byName[key] = stop;
       });
     });
     pricingCache.stops[cacheKey] = byName;
@@ -229,8 +247,9 @@
     // if no history => fallback to baseFee
     const list = Object.values(stop.priceHistory||{}).map(r=>({
       amount: Number(r.amount)||0,
-      eff: String(r.effectiveFrom||'1970-01-01')
-    })).sort((a,b)=> a.eff.localeCompare(b.eff));
+      eff: String(r.effectiveFrom||'1970-01-01'),
+      changedAt: Number(r.changedAt || 0) || 0
+    })).sort((a,b)=> a.eff.localeCompare(b.eff) || (a.changedAt - b.changedAt));
     
     const target = String(onDateIso||new Date().toISOString().slice(0,10));
     let price = Number(stop.baseFee)||0;
