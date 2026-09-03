@@ -1232,6 +1232,23 @@
     return String(value);
   }
 
+  function formatTransportOverrideTerms(value) {
+    if (!value || typeof value !== 'object') return 'Route/default transport pricing';
+    const parts = [];
+    const applyTo = String(value.applyTo || 'both').toLowerCase();
+    const feeM = value.feePerMonthMorning;
+    const feeE = value.feePerMonthEvening;
+    if (feeM !== undefined && feeM !== null && feeM !== '') parts.push(`Morning ${formatCurrency(feeM)}`);
+    if (feeE !== undefined && feeE !== null && feeE !== '') parts.push(`Evening ${formatCurrency(feeE)}`);
+    if (!parts.length) parts.push('Route default fee');
+    parts.push(`Applies: ${formatTransportFieldValue('applyTo', applyTo)}`);
+    const effectiveFrom = value.effectiveFrom || value.startDate || value.effectiveDate || '';
+    if (effectiveFrom) parts.push(`From: ${formatTransportFieldValue('effectiveFrom', effectiveFrom)}`);
+    parts.push(`Months: ${value.months ? formatTransportFieldValue('months', value.months) : 'All payable months'}`);
+    if (value.note) parts.push(`Note: ${value.note}`);
+    return parts.join(' | ');
+  }
+
   function pushTransportDiffRow(rows, action, detail, before, after) {
     rows.push({
       action,
@@ -1284,6 +1301,27 @@
     return rows;
   }
 
+  function buildOverrideDiffRows(entry) {
+    const rows = [];
+    const action = entry.action || 'override:update';
+    pushTransportDiffRow(
+      rows,
+      action,
+      'Transport fee agreement',
+      formatTransportOverrideTerms(entry.before),
+      formatTransportOverrideTerms(entry.after)
+    );
+    rows.push(...buildObjectDiffRows(entry, {
+      feePerMonthMorning: 'Morning override fee',
+      feePerMonthEvening: 'Evening override fee',
+      applyTo: 'Applies to',
+      effectiveFrom: 'Effective from',
+      months: 'Months',
+      note: 'Reason/note',
+    }, formatTransportFieldValue));
+    return rows;
+  }
+
   function buildTransportChangeRows(entries) {
     return entries.flatMap((entry) => {
       const action = String(entry.action || '');
@@ -1299,14 +1337,7 @@
         }, formatTransportFieldValue);
       }
       if (action.startsWith('override:') || category === 'overrides') {
-        return buildObjectDiffRows(entry, {
-          feePerMonthMorning: 'Morning override fee',
-          feePerMonthEvening: 'Evening override fee',
-          applyTo: 'Applies to',
-          effectiveFrom: 'Effective from',
-          months: 'Months',
-          note: 'Reason/note',
-        }, formatTransportFieldValue);
+        return buildOverrideDiffRows(entry);
       }
       return [{
         action: entry.action || 'change',
@@ -1321,6 +1352,8 @@
     const entries = Array.isArray(record?.modulePayload?.historyEntries) ? record.modulePayload.historyEntries : [];
     const rows = buildTransportChangeRows(entries).filter((row) => row.detail && row.detail !== 'No visible field changed');
     if (!rows.length) return fallback || 'Transport pricing change';
+    const agreement = rows.find((row) => row.detail === 'Transport fee agreement');
+    if (agreement) return `Transport fee agreement: ${agreement.before} to ${agreement.after}`;
     const short = rows.slice(0, 3).map((row) => `${row.detail}: ${row.before} to ${row.after}`);
     const extra = rows.length > short.length ? ` +${rows.length - short.length} more` : '';
     return `${short.join('; ')}${extra}`;
