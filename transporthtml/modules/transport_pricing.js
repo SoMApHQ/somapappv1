@@ -217,6 +217,46 @@
     return stopsList;
   }
 
+  function buildCanonicalStopByName(stops) {
+    const grouped = {};
+    (stops || []).forEach((stop) => {
+      const key = NAME(stop?.name || stop?.routeName || stop?.stopName);
+      if (!key) return;
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(stop);
+    });
+    const out = {};
+    Object.entries(grouped).forEach(([key, group]) => {
+      const newest = group.slice().sort((a, b) => stopFreshnessStamp(b) - stopFreshnessStamp(a))[0] || {};
+      const priceHistory = {};
+      group.forEach((stop) => {
+        Object.entries(stop?.priceHistory || {}).forEach(([histKey, entry]) => {
+          priceHistory[`${stop.id || 'stop'}_${histKey}`] = entry;
+        });
+        if (stop.baseFee !== undefined && stop.baseFee !== null && stop.baseFee !== '') {
+          const effectiveFrom = stop.effectiveFrom || Object.values(stop.priceHistory || {})
+            .map((entry) => String(entry?.effectiveFrom || ''))
+            .filter(Boolean)
+            .sort()
+            .pop() || '1970-01-01';
+          priceHistory[`${stop.id || key}_base`] = {
+            amount: Number(stop.baseFee) || 0,
+            effectiveFrom,
+            changedAt: Number(stop.updatedAt || stop.createdAt || 0) || 0,
+          };
+        }
+      });
+      out[key] = {
+        ...newest,
+        name: newest.name || key,
+        baseFee: Number(newest.baseFee) || 0,
+        active: newest.active !== false,
+        priceHistory,
+      };
+    });
+    return out;
+  }
+
   // Load stops map by name (with priceHistory)
   function stopFreshnessStamp(stop) {
     const histStamp = Math.max(0, ...Object.values(stop?.priceHistory || {}).map((entry) => Number(entry?.changedAt || 0) || 0));
@@ -231,11 +271,14 @@
       .filter(([, s]) => s && typeof s === 'object')
       .map(([id, s]) => ({ id, ...s, priceHistory: s.priceHistory || {} }));
     applyMergedHistoryByName(list);
-    const byName = {};
+    const canonicalByName = buildCanonicalStopByName(list);
+    const byName = { ...canonicalByName };
     list.forEach((stop) => {
       [stop.id, stop.name, stop.routeName, stop.stopName].forEach((candidate) => {
         const key = NAME(candidate);
-        if (key && (!byName[key] || stopFreshnessStamp(stop) >= stopFreshnessStamp(byName[key]))) byName[key] = stop;
+        const nameKey = NAME(stop.name || stop.routeName || stop.stopName);
+        const canonical = canonicalByName[nameKey] || stop;
+        if (key && (!byName[key] || stopFreshnessStamp(canonical) >= stopFreshnessStamp(byName[key]))) byName[key] = canonical;
       });
     });
     pricingCache.stops[cacheKey] = byName;
