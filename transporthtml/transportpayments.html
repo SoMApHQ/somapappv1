@@ -261,10 +261,29 @@
           <div id="historyStopReasonValue" style="margin-top: .35rem; color: var(--text-secondary);"></div>
           <div style="margin-top: .35rem; color: var(--text-secondary);">Transport debt is calculated only up to this date, with the stop month prorated by days used.</div>
         </div>
+        <div id="historyPeriodsInfo" style="padding: 1rem; background: rgba(59, 130, 246, 0.08); border-radius: 12px; margin-bottom: 1rem; display: none;"></div>
         <div class="flex mb-2" style="flex-wrap: wrap; gap: 0.5rem;">
           <button type="button" class="btn" id="openPaymentScheduleBtn" title="View and download year payment schedule for parent">
             &#128196; Taarifa ya Malipo (Payment Schedule)
           </button>
+        </div>
+        <div id="historyAllocationInfo" style="margin-top: 1rem; display: none;">
+          <h3 style="margin: 0 0 .75rem;">Transport Billing Allocation</h3>
+          <div style="overflow-x: auto;">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Month</th>
+                  <th>Fee Due</th>
+                  <th>Paid/Credit Applied</th>
+                  <th>Balance</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="historyAllocationBody"></tbody>
+            </table>
+          </div>
+          <div id="historyAllocationNote" style="margin-top: .5rem; color: var(--text-secondary); font-size: .85rem;"></div>
         </div>
         <div style="overflow-x: auto; margin-top: 1.5rem;">
           <table class="table" id="historyTable">
@@ -873,6 +892,37 @@
           const end = resolveEndDate(period);
           return end ? `${start} - Stopped using from ${formatStartDateDisplay(end)}` : `${start} - Using`;
         }).join('; ');
+      }
+
+      function monthBoundsIso(year, month) {
+        const y = Number(year);
+        const m = Number(month);
+        const lastDay = new Date(y, m, 0).getDate();
+        return {
+          start: `${y}-${String(m).padStart(2, '0')}-01`,
+          end: `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`,
+        };
+      }
+
+      function hasTransportPeriodInMonth(studentId, enrollment, year, month) {
+        const bounds = monthBoundsIso(year, month);
+        return getTransportPeriodsForStudent(studentId, enrollment).some((period) => {
+          const start = resolveStartDate(period);
+          const end = resolveEndDate(period) || `${year}-12-31`;
+          return start <= bounds.end && end >= bounds.start;
+        });
+      }
+
+      function describeLedgerMonthStatus(row, studentId, enrollment, year) {
+        if (Number(row.due || 0) <= 0) {
+          return hasTransportPeriodInMonth(studentId, enrollment, year, row.month)
+            ? 'No payment month'
+            : 'Not using transport';
+        }
+        if (row.status === 'PAID') return 'Paid';
+        if (row.status === 'PARTIAL') return 'Partly paid';
+        if (row.status === 'UNPAID') return 'Unpaid';
+        return row.status || '-';
       }
 
       async function buildTransportLedger({ year, enrollment, payments, multipliers, studentId }) {
@@ -2112,6 +2162,57 @@
         state.currentHistoryResolvedPayments = Array.isArray(payments)
           ? payments.slice()
           : Object.values(payments || {});
+
+        try {
+          const enrollment = state.transportEnrollments[studentId] || {};
+          const approvedPayments = state.currentHistoryResolvedPayments.filter(p => (
+            p && (
+              p.approved === true ||
+              p.approved === 'true' ||
+              !!p.approvedAt ||
+              (typeof p.approvedBy === 'string' && !p.approvedBy.toLowerCase().includes('pending'))
+            )
+          ));
+          const yearNum = Number(state.year);
+          const multipliers = cachedMultipliers[yearNum] || (await TransportPricing.loadYearMultipliers(yearNum));
+          if (!cachedMultipliers[yearNum]) cachedMultipliers[yearNum] = multipliers;
+          const ledger = await buildTransportLedger({ year: yearNum, enrollment, payments: approvedPayments, multipliers, studentId });
+          const periodsDisplay = buildTransportPeriodsDisplay(studentId, enrollment);
+          const periodsEl = document.getElementById('historyPeriodsInfo');
+          if (periodsEl && periodsDisplay) {
+            periodsEl.style.display = 'block';
+            periodsEl.innerHTML = `<strong>Transport Usage Periods:</strong> ${periodsDisplay}`;
+          }
+
+          const allocationEl = document.getElementById('historyAllocationInfo');
+          const allocationBody = document.getElementById('historyAllocationBody');
+          const allocationNote = document.getElementById('historyAllocationNote');
+          if (allocationEl && allocationBody) {
+            allocationEl.style.display = 'block';
+            allocationBody.innerHTML = ledger.months.map((m) => {
+              const statusText = describeLedgerMonthStatus(m, studentId, enrollment, yearNum);
+              const rowStyle = statusText === 'Unpaid' || statusText === 'Partly paid'
+                ? 'background: rgba(239, 68, 68, 0.08);'
+                : (statusText === 'Paid' ? 'background: rgba(16, 185, 129, 0.06);' : 'opacity: .78;');
+              return `<tr style="${rowStyle}">
+                <td>${MONTH_NAMES[m.month]}</td>
+                <td>${formatCurrency(m.due)}</td>
+                <td style="color: var(--accent-success);">${formatCurrency(m.paid)}</td>
+                <td style="color: ${m.balance > 0 ? 'var(--accent-danger)' : 'inherit'};">${formatCurrency(m.balance)}</td>
+                <td>${statusText}</td>
+              </tr>`;
+            }).join('');
+            if (allocationNote) {
+              allocationNote.textContent = 'Approved payments are applied oldest-first. Payments recorded during stopped months still count as credit, but stopped months themselves do not create new transport debt.';
+            }
+          }
+        } catch (err) {
+          console.warn('Could not build payment allocation preview:', err);
+          const allocationEl = document.getElementById('historyAllocationInfo');
+          const periodsEl = document.getElementById('historyPeriodsInfo');
+          if (allocationEl) allocationEl.style.display = 'none';
+          if (periodsEl) periodsEl.style.display = 'none';
+        }
         
         const fullName = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.trim();
         const admissionNo = student.admissionNumber || 'N/A';
