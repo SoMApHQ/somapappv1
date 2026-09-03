@@ -379,6 +379,12 @@
                 </div>
               </div>
 
+              <div class="mt-2">
+                <label class="text-xs text-slate-600">Effective from</label>
+                <input id="tsoEffectiveFrom" type="date" class="border rounded px-2 py-1 w-full">
+                <div class="text-[11px] text-slate-500 mt-1">Used by transport payments from this date onward unless months are selected below.</div>
+              </div>
+
               <details class="mt-2">
                 <summary class="text-sm cursor-pointer">Limit to certain months (optional)</summary>
                 <div id="tsoMonths" class="mt-2 grid grid-cols-3 gap-2"></div>
@@ -1534,6 +1540,57 @@
 
     const state = { y: String(yearCtx.getSelectedYear()), students:null, idx:[], pick:null };
 
+    function normalizeIdentifier(value) {
+      return String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    }
+
+    async function readMergedObject(path) {
+      const clean = String(path || '').replace(/^\/+/, '');
+      const sid = selectedSchoolId();
+      const paths = Array.from(new Set([
+        sid ? `schools/${sid}/${clean}` : '',
+        clean
+      ].filter(Boolean)));
+      const snaps = await Promise.all(paths.map(p => db.ref(p).once('value').catch(()=>null)));
+      return snaps.reduce((merged, snap) => {
+        const val = snap?.val?.();
+        if (val && typeof val === 'object') return { ...merged, ...val };
+        return merged;
+      }, {});
+    }
+
+    function splitName(fullName) {
+      const clean = String(fullName || '').replace(/\s+/g, ' ').trim();
+      if (!clean) return { firstName: '', middleName: '', lastName: '' };
+      const parts = clean.split(' ');
+      if (parts.length === 1) return { firstName: parts[0], middleName: '', lastName: '' };
+      if (parts.length === 2) return { firstName: parts[0], middleName: '', lastName: parts[1] };
+      return { firstName: parts[0], middleName: parts.slice(1, -1).join(' '), lastName: parts[parts.length - 1] };
+    }
+
+    function makeFallbackStudent(id, enrollment = {}) {
+      const fullName = enrollment.studentName || enrollment.fullName || enrollment.name || id;
+      const parts = splitName(fullName);
+      return {
+        ...parts,
+        admissionNumber: enrollment.admissionNumber || enrollment.admissionNo || enrollment.studentAdm || id,
+        primaryParentContact: enrollment.primaryParentContact || enrollment.parentContact || enrollment.parentPhone || enrollment.guardianPhone || '',
+        classLevel: enrollment.classLevel || enrollment.className || enrollment.class || '',
+      };
+    }
+
+    function indexStudentsByIdentifier(students) {
+      const index = new Map();
+      Object.entries(students || {}).forEach(([id, S]) => {
+        if (!S || typeof S !== 'object') return;
+        [id, S.admissionNumber, S.admissionNo, S.admission, S.studentAdm, S.studentId].forEach(candidate => {
+          const key = normalizeIdentifier(candidate);
+          if (key && !index.has(key)) index.set(key, { id, student: S });
+        });
+      });
+      return index;
+    }
+
     function setYearUI(){
       el('tsoYearHint').textContent = state.y;
       el('tsoYearText').textContent = state.y;
@@ -1549,17 +1606,61 @@
     }
 
     async function loadStudents(){
-      const snap = await db.ref(schoolPrefix('students')).once('value');
-      state.students = snap.val() || {};
+      const [students, yearEnrollments, legacyEnrollments, directAssignments, yearAssignments] = await Promise.all([
+        readMergedObject('students'),
+        readMergedObject(`years/${state.y}/transportEnrollments`),
+        readMergedObject('transport_enrollments'),
+        readMergedObject(`transportAssignments/${state.y}`),
+        readMergedObject(`years/${state.y}/transportAssignments`)
+      ]);
+      const studentIndex = indexStudentsByIdentifier(students);
+      const transportRows = {};
+
+      Object.entries(legacyEnrollments || {}).forEach(([id, enrollment]) => {
+        if (enrollment) transportRows[id] = enrollment;
+      });
+      Object.entries(yearEnrollments || {}).forEach(([id, enrollment]) => {
+        if (enrollment) transportRows[id] = enrollment;
+      });
+      Object.entries({ ...(directAssignments || {}), ...(yearAssignments || {}) }).forEach(([id, assignment]) => {
+        if (!assignment) return;
+        const stopped = String(assignment.status || '').toLowerCase() === 'stopped';
+        if (assignment.status !== 'Using' && !stopped) return;
+        transportRows[id] = { ...(transportRows[id] || {}), ...assignment };
+      });
+
+      state.students = {};
+      Object.entries(transportRows).forEach(([transportId, enrollment]) => {
+        const candidates = [
+          transportId,
+          enrollment.admissionNumber,
+          enrollment.admissionNo,
+          enrollment.admission,
+          enrollment.studentAdm,
+          enrollment.studentId,
+        ];
+        let match = null;
+        for (const candidate of candidates) {
+          const found = studentIndex.get(normalizeIdentifier(candidate));
+          if (found) { match = found; break; }
+        }
+        state.students[transportId] = match?.student || makeFallbackStudent(transportId, enrollment);
+      });
+
+      if (!Object.keys(state.students).length) state.students = students || {};
+
       state.idx = Object.entries(state.students).map(([id,S])=>{
         const name = `${S.firstName||''} ${S.middleName||''} ${S.lastName||''}`.replace(/\s+/g,' ').trim();
-        return { id, name, adm: S.admissionNumber||id, phone: S.primaryParentContact||S.parentPhone||'', cls: S.classLevel||S.class||'' };
+        return { id, name: name || S.fullName || S.name || id, adm: S.admissionNumber||S.admissionNo||id, phone: S.primaryParentContact||S.parentPhone||S.guardianPhone||'', cls: S.classLevel||S.className||S.class||'' };
       });
     }
 
     async function fetchAssignment(studentId){
-      const p1 = db.ref(schoolPrefix(`transportAssignments/${state.y}/${studentId}`)).once('value').catch(()=>({val:()=>null}));
-      const p2 = db.ref(schoolPrefix(`transportRoutes/${state.y}`)).once('value').catch(()=>({val:()=>null}));
+      const p1 = Promise.all([
+        readMergedObject(`transportAssignments/${state.y}/${studentId}`),
+        readMergedObject(`years/${state.y}/transportAssignments/${studentId}`)
+      ]).then(([direct, scoped])=>({val:()=>({ ...(direct || {}), ...(scoped || {}) })})).catch(()=>({val:()=>null}));
+      const p2 = readMergedObject(`transportRoutes/${state.y}`).then(val=>({val:()=>val})).catch(()=>({val:()=>null}));
       const [asSnap, routesSnap] = await Promise.all([p1,p2]);
       return { asg: (asSnap && asSnap.val && asSnap.val()) || {}, routes: (routesSnap && routesSnap.val && routesSnap.val()) || {} };
     }
@@ -1571,8 +1672,8 @@
     }
 
     async function fetchOverride(studentId){
-      const snap = await db.ref(schoolPrefix(`transportOverrides/${state.y}/${studentId}`)).once('value');
-      return snap.exists()? snap.val() : null;
+      const override = await readMergedObject(`transportOverrides/${state.y}/${studentId}`);
+      return override && Object.keys(override).length ? override : null;
     }
 
     function renderPick(card){
@@ -1600,6 +1701,7 @@
       });
       el('tsoAmtM').value = (override?.feePerMonthMorning ?? '');
       el('tsoAmtE').value = (override?.feePerMonthEvening ?? '');
+      el('tsoEffectiveFrom').value = override?.effectiveFrom || `${state.y}-01-01`;
       el('tsoNote').value  = override?.note || '';
 
       const monthsBox = el('tsoMonths');
@@ -1630,6 +1732,7 @@
       const vE = el('tsoAmtE').value;
       const feeM = vM==='' ? null : Number(vM);
       const feeE = vE==='' ? null : Number(vE);
+      const effectiveFrom = el('tsoEffectiveFrom').value || `${state.y}-01-01`;
       const note = el('tsoNote').value || '';
       const months = {};
       el('tsoMonths').querySelectorAll('input[type="checkbox"]').forEach(ch=>{
@@ -1641,6 +1744,7 @@
         feePerMonthMorning: feeM,
         feePerMonthEvening: feeE,
         applyTo,
+        effectiveFrom,
         months: monthsObj || null,
         note,
         editedBy: (window.currentUserEmail || 'unknown'),
@@ -1655,7 +1759,7 @@
         studentName: state.pick.S.name,
         studentAdm: state.pick.S.adm,
         className: state.pick.S.cls,
-        summary: `${state.pick.S.name} (${state.pick.S.adm}): transport override updated`,
+        summary: `${state.pick.S.name} (${state.pick.S.adm}): transport override updated from ${effectiveFrom}`,
         operations: [{ op: 'set', path: `transportOverrides/${state.y}/${id}`, value: payload }],
         historyEntries: [{ year: state.y, category: 'overrides', id, action: 'override:update', before, after: payload }]
       });
@@ -1697,6 +1801,7 @@
       state.y = String(y);
       setYearUI();
       el('tsoResult').classList.add('hidden');
+      await loadStudents();
     });
 
     (async function init(){

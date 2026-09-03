@@ -685,10 +685,57 @@
 
       function overrideAppliesToMonth(override, year, month) {
         if (!override || typeof override !== 'object') return false;
+        const effectiveFrom = override.effectiveFrom || override.startDate || override.effectiveDate || '';
+        if (effectiveFrom) {
+          const eff = normalizeDateInput(effectiveFrom, year);
+          const effYear = Number(eff.slice(0, 4));
+          const effMonth = Number(eff.slice(5, 7));
+          if (year < effYear || (year === effYear && month < effMonth)) return false;
+        }
         const months = override.months;
         if (!months || typeof months !== 'object' || Object.keys(months).length === 0) return true;
         const monthKey = `${year}-${String(month).padStart(2, '0')}`;
         return months[monthKey] === true || months[String(month)] === true || months[month] === true;
+      }
+
+      function parseIsoDateParts(value) {
+        const iso = normalizeDateInput(value, Number(state.year));
+        return { iso, year: Number(iso.slice(0, 4)), month: Number(iso.slice(5, 7)), day: Number(iso.slice(8, 10)) };
+      }
+
+      function formatLocalIsoDate(date) {
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      }
+
+      function previousDayIso(iso) {
+        const parts = parseIsoDateParts(iso);
+        return formatLocalIsoDate(new Date(parts.year, parts.month - 1, parts.day - 1));
+      }
+
+      function maxIsoDate(a, b) {
+        if (!a) return b;
+        if (!b) return a;
+        return a >= b ? a : b;
+      }
+
+      function minIsoDate(a, b) {
+        if (!a) return b;
+        if (!b) return a;
+        return a <= b ? a : b;
+      }
+
+      function describeTransportOverride(override) {
+        if (!override || typeof override !== 'object') return '';
+        const parts = [];
+        const applyTo = String(override.applyTo || 'both').toLowerCase();
+        const feeM = numberOrNull(override.feePerMonthMorning);
+        const feeE = numberOrNull(override.feePerMonthEvening);
+        if ((applyTo === 'both' || applyTo === 'morning') && feeM !== null) parts.push(`M ${formatCurrency(feeM)}`);
+        if ((applyTo === 'both' || applyTo === 'evening') && feeE !== null) parts.push(`E ${formatCurrency(feeE)}`);
+        if (!parts.length) return '';
+        const effectiveFrom = override.effectiveFrom || override.startDate || override.effectiveDate || '';
+        if (effectiveFrom) parts.push(`from ${formatStartDateDisplay(normalizeDateInput(effectiveFrom, Number(state.year)))}`);
+        return `Override: ${parts.join(' · ')}`;
       }
 
       function getTransportOverride(studentId) {
@@ -739,19 +786,67 @@
         return Math.max(0, (Number(morning) || 0) + (Number(evening) || 0));
       }
 
+      async function resolveDefaultMonthlyBase(enrollment, year, month) {
+        const amStop = enrollment?.amStop || '';
+        const pmStop = enrollment?.pmStop || '';
+        if (!amStop && !pmStop) return getTransportBaseMonthlyFee(enrollment);
+        return calculateBaseMonthlyFee(amStop, pmStop, year, month);
+      }
+
+      async function resolveMonthDueWithOverride({ enrollment, year, month, multipliers, studentId, startDate, endDate }) {
+        const override = getTransportOverride(studentId);
+        if (!overrideAppliesToMonth(override, year, month)) {
+          const baseMonthlyFee = await resolveDefaultMonthlyBase(enrollment, year, month);
+          return Number(await TransportPricing.dueForMonth({ year, month, baseMonthlyFee, startDate, endDate, multipliers }) || 0);
+        }
+
+        const effectiveFrom = override?.effectiveFrom || override?.startDate || override?.effectiveDate || '';
+        const effective = effectiveFrom ? parseIsoDateParts(effectiveFrom) : null;
+        const overrideBase = await resolveMonthlyBaseWithOverride({ enrollment, year, month, studentId });
+
+        if (!effective || effective.year !== Number(year) || effective.month !== Number(month) || effective.day <= 1) {
+          return Number(await TransportPricing.dueForMonth({ year, month, baseMonthlyFee: overrideBase, startDate, endDate, multipliers }) || 0);
+        }
+
+        const defaultBase = await resolveDefaultMonthlyBase(enrollment, year, month);
+        if (Number(defaultBase) === Number(overrideBase)) {
+          return Number(await TransportPricing.dueForMonth({ year, month, baseMonthlyFee: overrideBase, startDate, endDate, multipliers }) || 0);
+        }
+
+        const defaultEnd = minIsoDate(endDate, previousDayIso(effective.iso));
+        const defaultDue = await TransportPricing.dueForMonth({
+          year,
+          month,
+          baseMonthlyFee: defaultBase,
+          startDate,
+          endDate: defaultEnd,
+          multipliers,
+        });
+        const overrideStart = maxIsoDate(startDate, effective.iso);
+        const overrideDue = await TransportPricing.dueForMonth({
+          year,
+          month,
+          baseMonthlyFee: overrideBase,
+          startDate: overrideStart,
+          endDate,
+          multipliers,
+        });
+        return Number(defaultDue || 0) + Number(overrideDue || 0);
+      }
+
       async function buildTransportLedger({ year, enrollment, payments, multipliers, studentId }) {
         const monthNumbers = Array.from({ length: 12 }, (_, i) => i + 1);
         const startDate = resolveStartDate(enrollment);
         const endDate = resolveEndDate(enrollment);
         const dues = await Promise.all(monthNumbers.map(async (month) => {
-          const baseMonthlyFee = await resolveMonthlyBaseWithOverride({ enrollment, year, month, studentId });
-          return Number(await TransportPricing.dueForMonth({
+          return Number(await resolveMonthDueWithOverride({
             year,
             month,
-            baseMonthlyFee,
+            enrollment,
             startDate,
             endDate,
             multipliers,
+            studentId,
           }) || 0);
         }));
 
@@ -1288,6 +1383,7 @@
           totalYearDebt,
           monthlyFee: baseMonthlyFee, // Base fee for table display (e.g., 35,500)
           currentMonthExpected, // Month-specific fee with multiplier for KPIs
+          overrideDisplay: describeTransportOverride(getTransportOverride(studentId)),
           startDateIso,
           endDateIso,
           startDateDisplay: hasExplicitStart ? formatStartDateDisplay(startDateIso) : 'N/A',
@@ -1495,6 +1591,7 @@
           const startDateDisplay = transportStatus.startDateDisplay || 'N/A';
           const stopDateDisplay = transportStatus.endDateIso ? formatStartDateDisplay(transportStatus.endDateIso) : '';
           const baseFeeDisplay = formatCurrency(transportStatus.monthlyFee);
+          const overrideDisplay = transportStatus.overrideDisplay || '';
           const currentMonthDue = transportStatus.currentMonthExpected;
           
           const driverDisplay = getDriverDisplay(enrollment);
@@ -1523,6 +1620,7 @@
                 <span style="font-size: 0.7rem; color: var(--text-muted, #94a3b8);">
                   Base: ${baseFeeDisplay} &#183; ${selectedMonthName}
                 </span>
+                ${overrideDisplay ? `<br><span style="font-size: 0.7rem; color: var(--accent-warning, #f59e0b);">${overrideDisplay}</span>` : ''}
               </td>
               <td style="color: var(--accent-success);">${formatCurrency(transportStatus.totalPaid)}</td>
               <td style="color: ${transportDebt > 0 ? 'var(--accent-danger)' : 'var(--accent-success)'};">
@@ -3934,6 +4032,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           const driverDisplay = getDriverDisplay(assign);
           const currentMonthDue = Math.round(dueThisMonth);
           const baseDisplay = formatCurrency(base);
+          const overrideDisplay = describeTransportOverride(getTransportOverride(effectiveStudentId));
           const rowClass = balanceToDate > 0 ? 'style="background: rgba(239, 68, 68, 0.15); font-weight: 600;"' : '';
           const escapedId = String(effectiveStudentId).replace(/'/g, "\\'");
           tbody.innerHTML = `
@@ -3951,6 +4050,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
                 <span style="font-size: 0.7rem; color: var(--text-muted, #94a3b8);">
                   Base: ${baseDisplay} &#183; ${selectedMonthLabel}
                 </span>
+                ${overrideDisplay ? `<br><span style="font-size: 0.7rem; color: var(--accent-warning, #f59e0b);">${overrideDisplay}</span>` : ''}
               </td>
               <td style="color: var(--accent-success);">${formatCurrency(paidToDate)}</td>
               <td style="color: ${balanceToDate>0?'var(--accent-danger)':'var(--accent-success)'};">${formatCurrency(balanceToDate)}</td>

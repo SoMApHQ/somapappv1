@@ -1220,6 +1220,7 @@
       const labels = { morning: 'Morning only', evening: 'Evening only', both: 'Morning and evening' };
       return labels[String(value).toLowerCase()] || String(value);
     }
+    if (field === 'effectiveFrom') return String(value);
     if (field === 'months') {
       if (!value || typeof value !== 'object') return 'All months';
       const months = Object.keys(value)
@@ -1302,6 +1303,7 @@
           feePerMonthMorning: 'Morning override fee',
           feePerMonthEvening: 'Evening override fee',
           applyTo: 'Applies to',
+          effectiveFrom: 'Effective from',
           months: 'Months',
           note: 'Reason/note',
         }, formatTransportFieldValue);
