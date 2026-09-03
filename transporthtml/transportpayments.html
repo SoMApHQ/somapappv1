@@ -610,6 +610,7 @@
         transportPayments: {},
         transportOverrides: {},
         transportOverrideIndex: {},
+        transportPeriods: {},
         expenses: {},
         showDebtorsOnly: false,
         currentPaymentStudentId: null,
@@ -834,20 +835,52 @@
         return Number(defaultDue || 0) + Number(overrideDue || 0);
       }
 
+      function normalizeTransportPeriod(period, fallback = {}) {
+        const source = { ...(fallback || {}), ...(period || {}) };
+        return {
+          ...source,
+          amStop: source.amStop || source.morningRouteId || '',
+          pmStop: source.pmStop || source.eveningRouteId || '',
+          startDate: normalizeDateInput(source.startDate || source.start_date || source.dateRegistered || fallback.startDate || fallback.start_date || null),
+          endDate: resolveEndDate(source),
+        };
+      }
+
+      function getTransportPeriodsForStudent(studentId, enrollment = {}) {
+        const raw = state.transportPeriods?.[studentId];
+        const list = raw && typeof raw === 'object'
+          ? Object.values(raw).filter(item => item && typeof item === 'object')
+          : [];
+        const periods = list.map(item => normalizeTransportPeriod(item, enrollment))
+          .filter(item => item.startDate)
+          .sort((a, b) => String(a.startDate).localeCompare(String(b.startDate)));
+        if (periods.length) return periods;
+        return [normalizeTransportPeriod(enrollment, enrollment)];
+      }
+
+      function buildTransportPeriodsDisplay(studentId, enrollment = {}) {
+        const periods = getTransportPeriodsForStudent(studentId, enrollment);
+        return periods.map((period) => {
+          const start = formatStartDateDisplay(resolveStartDate(period));
+          const end = resolveEndDate(period);
+          return end ? `${start} - ${formatStartDateDisplay(end)}` : `${start} - Using`;
+        }).join('; ');
+      }
+
       async function buildTransportLedger({ year, enrollment, payments, multipliers, studentId }) {
         const monthNumbers = Array.from({ length: 12 }, (_, i) => i + 1);
-        const startDate = resolveStartDate(enrollment);
-        const endDate = resolveEndDate(enrollment);
+        const periods = getTransportPeriodsForStudent(studentId, enrollment);
         const dues = await Promise.all(monthNumbers.map(async (month) => {
-          return Number(await resolveMonthDueWithOverride({
+          const periodDues = await Promise.all(periods.map((period) => resolveMonthDueWithOverride({
             year,
             month,
-            enrollment,
-            startDate,
-            endDate,
+            enrollment: period,
+            startDate: resolveStartDate(period),
+            endDate: resolveEndDate(period),
             multipliers,
             studentId,
-          }) || 0);
+          })));
+          return periodDues.reduce((sum, due) => sum + Number(due || 0), 0);
         }));
 
         const approvedPayments = Array.isArray(payments) ? payments : Object.values(payments || {});
@@ -1384,6 +1417,7 @@
           monthlyFee: baseMonthlyFee, // Base fee for table display (e.g., 35,500)
           currentMonthExpected, // Month-specific fee with multiplier for KPIs
           overrideDisplay: describeTransportOverride(getTransportOverride(studentId)),
+          periodsDisplay: buildTransportPeriodsDisplay(studentId, enrollment),
           startDateIso,
           endDateIso,
           startDateDisplay: hasExplicitStart ? formatStartDateDisplay(startDateIso) : 'N/A',
@@ -1589,6 +1623,7 @@
           const selectedMonth = getFocusedMonth();
           const selectedMonthName = MONTH_NAMES[selectedMonth] || 'Current';
           const startDateDisplay = transportStatus.startDateDisplay || 'N/A';
+          const periodsDisplay = transportStatus.periodsDisplay || startDateDisplay;
           const stopDateDisplay = transportStatus.endDateIso ? formatStartDateDisplay(transportStatus.endDateIso) : '';
           const baseFeeDisplay = formatCurrency(transportStatus.monthlyFee);
           const overrideDisplay = transportStatus.overrideDisplay || '';
@@ -1611,7 +1646,7 @@
               <td>${fullName}${debtWarning ? '<br>' + debtWarning : ''}</td>
               <td>${shiftedClass}</td>
               <td>${getTransportParentContact(student, enrollment) || 'N/A'}</td>
-              <td>${startDateDisplay}${stopDateDisplay ? `<br><span style="font-size: 0.72rem; color: var(--accent-danger);">Stopped: ${stopDateDisplay}</span>` : ''}</td>
+              <td>${periodsDisplay}${stopDateDisplay && periodsDisplay === startDateDisplay ? `<br><span style="font-size: 0.72rem; color: var(--accent-danger);">Stopped: ${stopDateDisplay}</span>` : ''}</td>
               <td>${enrollment.amStop || '&mdash;'}</td>
               <td>${enrollment.pmStop || '&mdash;'}</td>
               <td style="font-size: 0.85rem;">${driverDisplay}</td>
@@ -2730,6 +2765,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             registryLegacySnap,
             assignmentsScopedSnap,
             assignmentsLegacySnap,
+            periodsScopedSnap,
+            periodsLegacySnap,
             vehiclesSnap,
             workersSnap,
             catalogStopsSnap,
@@ -2741,6 +2778,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             isLegacyMerge ? db.ref(`transportRegistry/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
             schoolRef(`years/${year}/transportAssignments`).once('value').catch(() => ({ val: () => null })),
             isLegacyMerge ? db.ref(`transportAssignments/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
+            schoolRef(`years/${year}/transportPeriods`).once('value').catch(() => ({ val: () => null })),
+            isLegacyMerge ? db.ref(`transportPeriods/${year}`).once('value').catch(() => ({ val: () => null })) : Promise.resolve(null),
             scopedOrSocratesLegacy(`years/${year}/transport/buses`, `transport/socrates-school/${year}/buses`).catch(() => ({ val: () => null, exists: () => false })),
             (async () => {
               try {
@@ -2816,6 +2855,9 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           const scopedAssignments = (assignmentsScopedSnap && typeof assignmentsScopedSnap.val === 'function') ? (assignmentsScopedSnap.val() || {}) : {};
           const legacyAssignments = (assignmentsLegacySnap && typeof assignmentsLegacySnap.val === 'function') ? (assignmentsLegacySnap.val() || {}) : {};
           const assignments = isLegacyMerge ? { ...legacyAssignments, ...scopedAssignments } : scopedAssignments;
+          const scopedPeriods = (periodsScopedSnap && typeof periodsScopedSnap.val === 'function') ? (periodsScopedSnap.val() || {}) : {};
+          const legacyPeriods = (periodsLegacySnap && typeof periodsLegacySnap.val === 'function') ? (periodsLegacySnap.val() || {}) : {};
+          state.transportPeriods = isLegacyMerge ? { ...legacyPeriods, ...scopedPeriods } : scopedPeriods;
 
           // --- DRIVER + VEHICLE RESOLUTION (FIX: Furaha not showing) ---
           const norm = (s) => String(s || '').toLowerCase().trim();
@@ -3183,6 +3225,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             state.transportPayments = {};
             state.transportOverrides = {};
             state.transportOverrideIndex = {};
+            state.transportPeriods = {};
             state.expenses = {};
             renderKPIs();
             renderPaymentsTable();
@@ -3284,6 +3327,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             state.transportPayments = {};
             state.transportOverrides = {};
             state.transportOverrideIndex = {};
+            state.transportPeriods = {};
             state.expenses = {};
             renderKPIs();
             renderPaymentsTable();
@@ -3654,6 +3698,12 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             financeMap = finSnap.val() || {};
           }
           const schoolFeePaid = Object.values(financeMap || {}).reduce((a,p)=>a+(Number(p?.amount)||0),0);
+          let periods = {};
+          for (const idTry of idsForLedger) {
+            if (Object.keys(periods).length) break;
+            const periodSnap = await scopedOrSocratesLegacy(`years/${y}/transportPeriods/${idTry}`, `transportPeriods/${y}/${idTry}`).catch(() => ({ val: () => null }));
+            periods = periodSnap.val() || {};
+          }
 
           const safeTransportId = transportId || requestedId;
           if (!student || Object.keys(student || {}).length === 0) {
@@ -3682,6 +3732,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           state.students[safeTransportId] = student;
           state.transportEnrollments[safeTransportId] = enrollment || effectiveAssign || {};
           state.transportPayments[safeTransportId] = normalizedPayments;
+          if (periods && Object.keys(periods).length) state.transportPeriods[safeTransportId] = periods;
           state.studentKeyAliases[safeTransportId] = studentKey || admissionKey || safeTransportId;
 
           state.students[requestedId] = state.students[requestedId] || student;
@@ -3735,7 +3786,9 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           registryScopedSnap,
           registryLegacySnap,
           assignmentsScopedSnap,
-          assignmentsLegacySnap
+          assignmentsLegacySnap,
+          periodsScopedSnap,
+          periodsLegacySnap
         ] = await Promise.all([
           schoolRef(`years/${y}/transportEnrollments`).once('value').catch(() => ({ val: () => ({}) })),
           isLegacyMerge ? db.ref('transport_enrollments').once('value').catch(() => ({ val: () => ({}) })) : Promise.resolve({ val: () => ({}) }),
@@ -3743,6 +3796,8 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
           isLegacyMerge ? db.ref(`transportRegistry/${y}`).once('value').catch(() => ({ val: () => ({}) })) : Promise.resolve({ val: () => ({}) }),
           schoolRef(`years/${y}/transportAssignments`).once('value').catch(() => ({ val: () => ({}) })),
           isLegacyMerge ? db.ref(`transportAssignments/${y}`).once('value').catch(() => ({ val: () => ({}) })) : Promise.resolve({ val: () => ({}) }),
+          schoolRef(`years/${y}/transportPeriods`).once('value').catch(() => ({ val: () => ({}) })),
+          isLegacyMerge ? db.ref(`transportPeriods/${y}`).once('value').catch(() => ({ val: () => ({}) })) : Promise.resolve({ val: () => ({}) }),
         ]);
 
         const scopedEnrollments = enrollScopedSnap.val() || {};
@@ -3751,10 +3806,13 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         const legacyRegistry = registryLegacySnap.val() || {};
         const scopedAssignments = assignmentsScopedSnap.val() || {};
         const legacyAssignments = assignmentsLegacySnap.val() || {};
+        const scopedPeriods = periodsScopedSnap.val() || {};
+        const legacyPeriods = periodsLegacySnap.val() || {};
 
         const enrollments = isLegacyMerge ? { ...legacyEnrollments, ...scopedEnrollments } : scopedEnrollments;
         const registry = isLegacyMerge ? { ...legacyRegistry, ...scopedRegistry } : scopedRegistry;
         const assignments = isLegacyMerge ? { ...legacyAssignments, ...scopedAssignments } : scopedAssignments;
+        state.transportPeriods = isLegacyMerge ? { ...legacyPeriods, ...scopedPeriods } : scopedPeriods;
 
         const mergedTransport = {};
         Object.entries(enrollments).forEach(([id, enrollment]) => {
@@ -3990,6 +4048,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         const selectedMonthLabel = MONTH_NAMES[focusedMonth] || ('Month ' + focusedMonth);
         const dueThisMonth = ledger.months.find(m => m.month === focusedMonth)?.due || 0;
         const startDisplay = hasAssignedStart ? formatStartDateDisplay(startDate) : 'N/A';
+        const periodsDisplay = buildTransportPeriodsDisplay(effectiveStudentId, effectiveEnrollmentForLedger) || startDisplay;
         const stopDisplay = endDate ? formatStartDateDisplay(endDate) : '';
 
         // Debt only includes months already due: due date is 3rd of same month; paying on/from 3rd is late.
@@ -4041,7 +4100,7 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               <td>${fullName}</td>
               <td>${student.classLevel || '&mdash;'}</td>
               <td>${getTransportParentContact(student, assign) || 'N/A'}</td>
-              <td>${startDisplay}${stopDisplay ? `<br><span style="font-size: 0.72rem; color: var(--accent-danger);">Stopped: ${stopDisplay}</span>` : ''}</td>
+              <td>${periodsDisplay}${stopDisplay && periodsDisplay === startDisplay ? `<br><span style="font-size: 0.72rem; color: var(--accent-danger);">Stopped: ${stopDisplay}</span>` : ''}</td>
               <td>${morningRoute}</td>
               <td>${eveningRoute}</td>
               <td style="font-size: 0.85rem;">${driverDisplay}</td>

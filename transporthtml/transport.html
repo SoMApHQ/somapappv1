@@ -406,6 +406,7 @@
         vehicles: {},
         transportEnrollments: {},
         transportAssignments: {},
+        transportPeriods: {},
         transportPayments: {},
         financeData: {},
         currentAssignStudentId: null,
@@ -487,6 +488,10 @@
 
       function resolveEndDate(enrollment) {
         return normalizeDateInput(enrollment?.endDate || enrollment?.stopDate || enrollment?.stoppedAtDate || enrollment?.transportEndDate || '');
+      }
+
+      function transportPeriodKey(startDate) {
+        return normalizeDateInput(startDate || `${state.year}-01-01`).replace(/[^0-9]/g, '');
       }
 
       function isTransportCurrentlyUsing(enrollment, assignment) {
@@ -1420,8 +1425,6 @@
             status: endDate ? 'Stopped' : 'Using',
           };
 
-          await schoolRef(`years/${state.year}/transportEnrollments/${studentId}`).set(enrollment);
-
           // Also write year-scoped assignment with base fees + start date (canonical path)
           const baseMorningFee = TransportPricing.priceForStop(morningRoute || '');
           const baseEveningFee = TransportPricing.priceForStop(eveningRoute || '');
@@ -1445,7 +1448,37 @@
             admissionNo: state.students[studentId]?.admissionNumber || '',
             fullName: `${state.students[studentId]?.firstName||''} ${state.students[studentId]?.middleName||''} ${state.students[studentId]?.lastName||''}`.replace(/\s+/g,' ').trim()
           };
-          await schoolRef(`years/${state.year}/transportAssignments/${studentId}`).set(assignPayload);
+
+          const existing = state.transportEnrollments[studentId] || {};
+          const existingAssign = state.transportAssignments[studentId] || {};
+          const existingStart = normalizeDateInput(existingAssign.startDate || existing.startDate || '');
+          const existingEnd = resolveEndDate(existingAssign) || resolveEndDate(existing);
+          const updates = {};
+          updates[`years/${state.year}/transportEnrollments/${studentId}`] = enrollment;
+          updates[`years/${state.year}/transportAssignments/${studentId}`] = assignPayload;
+          if (existingStart && existingEnd) {
+            updates[`years/${state.year}/transportPeriods/${studentId}/${transportPeriodKey(existingStart)}`] = {
+              ...existing,
+              ...existingAssign,
+              startDate: existingStart,
+              endDate: existingEnd,
+              stoppedAtDate: existingEnd,
+              status: 'Stopped',
+              archivedAt: Date.now(),
+            };
+          }
+          updates[`years/${state.year}/transportPeriods/${studentId}/${transportPeriodKey(startDate)}`] = {
+            ...enrollment,
+            ...assignPayload,
+            startDate,
+            endDate: endDate || null,
+            stoppedAtDate: endDate || null,
+            status: endDate ? 'Stopped' : 'Using',
+            updatedAt: Date.now(),
+          };
+          await db.ref().update(Object.fromEntries(
+            Object.entries(updates).map(([path, value]) => [schoolPath(path), value])
+          ));
 
           showToast('Transport assignment saved successfully!');
           transportAssignModal.classList.add('hidden');
@@ -1453,6 +1486,12 @@
           // Update local state immediately
           state.transportEnrollments[studentId] = enrollment;
           state.transportAssignments[studentId] = assignPayload;
+          const localPeriods = { ...(state.transportPeriods[studentId] || {}) };
+          if (existingStart && existingEnd) {
+            localPeriods[transportPeriodKey(existingStart)] = updates[`years/${state.year}/transportPeriods/${studentId}/${transportPeriodKey(existingStart)}`];
+          }
+          localPeriods[transportPeriodKey(startDate)] = updates[`years/${state.year}/transportPeriods/${studentId}/${transportPeriodKey(startDate)}`];
+          state.transportPeriods[studentId] = localPeriods;
           
           // Refresh data in background
           loadCriticalData().then(() => {
@@ -1506,12 +1545,34 @@
           updatedBy: state.user?.uid || 'unknown',
         };
         try {
+          const periodKey = transportPeriodKey(startDate);
           await Promise.all([
             schoolRef(`years/${state.year}/transportAssignments/${studentId}`).update(stopPatch),
             schoolRef(`years/${state.year}/transportEnrollments/${studentId}`).update(stopPatch),
+            schoolRef(`years/${state.year}/transportPeriods/${studentId}/${periodKey}`).update({
+              ...existing,
+              ...existingAssign,
+              ...stopPatch,
+              startDate,
+              endDate,
+              stoppedAtDate: endDate,
+              status: 'Stopped',
+            }),
           ]);
           state.transportAssignments[studentId] = { ...existingAssign, ...stopPatch };
           state.transportEnrollments[studentId] = { ...existing, ...stopPatch };
+          state.transportPeriods[studentId] = {
+            ...(state.transportPeriods[studentId] || {}),
+            [periodKey]: {
+              ...existing,
+              ...existingAssign,
+              ...stopPatch,
+              startDate,
+              endDate,
+              stoppedAtDate: endDate,
+              status: 'Stopped',
+            },
+          };
           transportStopModal.classList.add('hidden');
           showToast('Transport stopped. Debt will calculate only until the stop month.');
           renderStudentsTable();
