@@ -9,6 +9,10 @@
     return global.firebase?.auth?.().currentUser || null;
   }
 
+  function storage() {
+    return global.firebase?.storage?.() || global.storage || null;
+  }
+
   function schoolId() {
     return global.SOMAP?.getSchoolId?.() || "";
   }
@@ -28,6 +32,18 @@
 
   function auditPath(y) {
     return path(`years/${y || year()}/bankAudits`);
+  }
+
+  function safeName(value) {
+    return String(value || "file").replace(/[^\w.-]+/g, "_").slice(0, 120);
+  }
+
+  function storageAuditBase(audit, y) {
+    const sid = schoolId() || audit?.schoolId || "socrates-school";
+    const yr = String(y || audit?.year || year());
+    const id = audit?.id || audit?.auditId;
+    if (!id) throw new Error("Audit ID is required before uploading files.");
+    return `bankAudits/${safeName(sid)}/years/${safeName(yr)}/${safeName(id)}`;
   }
 
   async function getSettings(y) {
@@ -75,6 +91,36 @@
     return payload;
   }
 
+  async function updateAudit(id, patch, y) {
+    await db().ref(`${auditPath(y)}/${id}`).update({
+      ...(patch || {}),
+      updatedAt: Date.now()
+    });
+  }
+
+  async function uploadAuditBlob(audit, blob, fileName, contentType, kind) {
+    const store = storage();
+    if (!store) throw new Error("Firebase Storage is not available.");
+    const target = `${storageAuditBase(audit)}/${kind || "files"}/${Date.now()}_${safeName(fileName)}`;
+    const ref = store.ref(target);
+    await ref.put(blob, { contentType: contentType || blob?.type || "application/octet-stream" });
+    const url = await ref.getDownloadURL();
+    return {
+      storageProvider: "firebase_storage",
+      storagePath: target,
+      downloadUrl: url,
+      fileName: fileName || "",
+      contentType: contentType || blob?.type || "",
+      size: blob?.size || 0,
+      uploadedAt: Date.now()
+    };
+  }
+
+  async function uploadAuditFile(audit, file, kind) {
+    if (!file) return null;
+    return uploadAuditBlob(audit, file, file.name, file.type, kind || "statement");
+  }
+
   async function deleteAudit(id, y) {
     await db().ref(`${auditPath(y)}/${id}`).remove();
   }
@@ -89,6 +135,9 @@
     listAudits,
     getAudit,
     saveAudit,
+    updateAudit,
+    uploadAuditBlob,
+    uploadAuditFile,
     deleteAudit
   };
 })(window);

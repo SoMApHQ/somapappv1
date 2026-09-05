@@ -8,7 +8,8 @@
     parsed: null,
     settings: null,
     role: "",
-    readOnly: false
+    readOnly: false,
+    parsedFile: null
   };
 
   const $ = (id) => document.getElementById(id);
@@ -64,6 +65,18 @@
     if (!el) return;
     el.textContent = text;
     el.className = `rounded-lg px-3 py-2 text-sm ${type === "error" ? "bg-rose-50 text-rose-700" : type === "warn" ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`;
+  }
+
+  function setBusy(button, busy, text) {
+    if (!button) return;
+    if (busy) {
+      button.dataset.originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = text || "Working...";
+    } else {
+      button.disabled = false;
+      button.textContent = button.dataset.originalText || button.textContent;
+    }
   }
 
   function renderSummary(audit) {
@@ -161,10 +174,13 @@
         <strong>${esc(audit.bankName || "Bank statement")}</strong>
         <span>${esc(audit.uploadedFileName || "")}</span>
         <small>${audit.uploadedAt ? new Date(audit.uploadedAt).toLocaleString() : ""} | ${audit.transactions?.length || 0} txns</small>
+        <small>${audit.statementFile?.downloadUrl ? "Statement saved" : "Statement file not saved"} | ${audit.reportFile?.downloadUrl ? "PDF saved" : "PDF can be regenerated"}</small>
       </div>
       <div class="audit-actions">
         <button type="button" data-open="${esc(audit.id)}">Open</button>
         <button type="button" data-pdf="${esc(audit.id)}">PDF</button>
+        ${audit.statementFile?.downloadUrl ? `<a href="${esc(audit.statementFile.downloadUrl)}" target="_blank" rel="noopener">Statement</a>` : ""}
+        ${audit.reportFile?.downloadUrl ? `<a href="${esc(audit.reportFile.downloadUrl)}" target="_blank" rel="noopener">Saved PDF</a>` : ""}
         ${state.readOnly ? "" : `<button type="button" class="danger" data-delete="${esc(audit.id)}">Delete</button>`}
       </div>
     </article>`).join("") : `<p class="empty-box">No bank audits saved for ${esc(year())}.</p>`;
@@ -174,10 +190,15 @@
   }
 
   async function loadAudits() {
-    state.audits = await global.SomapBankAuditStorage.listAudits(year());
-    renderSavedAudits();
-    if (!state.activeAudit && state.audits[0]) renderAudit(state.audits[0]);
-    if (!state.audits[0]) renderAudit(null);
+    try {
+      state.audits = await global.SomapBankAuditStorage.listAudits(year());
+      renderSavedAudits();
+      if (!state.activeAudit && state.audits[0]) renderAudit(state.audits[0]);
+      if (!state.audits[0]) renderAudit(null);
+    } catch (error) {
+      console.error(error);
+      setStatus(`Could not load saved audits: ${error.message || error}`, "error");
+    }
   }
 
   async function openAudit(id) {
@@ -189,6 +210,23 @@
     const audit = id ? await global.SomapBankAuditStorage.getAudit(id, year()) : state.activeAudit;
     if (!audit) return toast("Open or save an audit first.", "error");
     await global.SomapBankAuditPdf.download(audit);
+    if (audit.id && !audit.reportFile?.downloadUrl && !state.readOnly) {
+      try {
+        const blob = await global.SomapBankAuditPdf.toBlob(audit);
+        const reportFile = await global.SomapBankAuditStorage.uploadAuditBlob(
+          audit,
+          blob,
+          global.SomapBankAuditPdf.fileName(audit),
+          "application/pdf",
+          "reports"
+        );
+        await global.SomapBankAuditStorage.updateAudit(audit.id, { reportFile }, year());
+        audit.reportFile = reportFile;
+        await loadAudits();
+      } catch (error) {
+        console.warn("Generated PDF downloaded but could not be saved to Storage", error);
+      }
+    }
   }
 
   async function deleteAudit(id) {
@@ -260,6 +298,7 @@
         schoolLogoUrl: currentLogoPath()
       };
       state.parsed = audit;
+      state.parsedFile = file;
       renderAudit(audit);
       setStatus(`Parsed ${analysis.transactions.length} transaction(s). Review the preview, then save this audit session.`, analysis.transactions.length ? "ok" : "warn");
       $("saveAuditBtn").disabled = !analysis.transactions.length;
@@ -271,12 +310,42 @@
 
   async function saveParsedAudit() {
     if (!state.parsed || state.readOnly) return;
-    const saved = await global.SomapBankAuditStorage.saveAudit(state.parsed, year());
-    state.parsed = null;
-    $("saveAuditBtn").disabled = true;
-    renderAudit(saved);
-    await loadAudits();
-    toast("This uploaded statement has been saved as its own audit session.");
+    const btn = $("saveAuditBtn");
+    setBusy(btn, true, "Saving files...");
+    try {
+      let saved = await global.SomapBankAuditStorage.saveAudit(state.parsed, year());
+      state.parsed.id = saved.id;
+      state.parsed.auditId = saved.id;
+      setStatus("Audit data saved. Uploading original statement...", "warn");
+      const statementFile = await global.SomapBankAuditStorage.uploadAuditFile(saved, state.parsedFile, "statement");
+      setStatus("Statement saved. Generating and saving PDF report...", "warn");
+      const pdfBlob = await global.SomapBankAuditPdf.toBlob(saved);
+      const reportFile = await global.SomapBankAuditStorage.uploadAuditBlob(
+        saved,
+        pdfBlob,
+        global.SomapBankAuditPdf.fileName(saved),
+        "application/pdf",
+        "reports"
+      );
+      const filesPatch = { statementFile, reportFile, storageSavedAt: Date.now() };
+      await global.SomapBankAuditStorage.updateAudit(saved.id, filesPatch, year());
+      saved = { ...saved, ...filesPatch };
+      state.parsed = null;
+      state.parsedFile = null;
+      renderAudit(saved);
+      await loadAudits();
+      setStatus("Audit, original statement, and PDF report saved.", "ok");
+      toast("This statement and its PDF report have been saved for later download.");
+    } catch (error) {
+      console.error(error);
+      setStatus(`Save failed: ${error.message || error}`, "error");
+      toast(error.message || "Could not save audit files.", "error");
+    } finally {
+      if (btn) {
+        btn.textContent = btn.dataset.originalText || "Save Audit";
+        btn.disabled = !state.parsed;
+      }
+    }
   }
 
   function bindTabs() {

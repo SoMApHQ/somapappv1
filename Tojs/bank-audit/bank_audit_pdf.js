@@ -161,7 +161,7 @@
     );
   }
 
-  async function download(audit) {
+  async function createDocument(audit) {
     if (!global.jspdf?.jsPDF) throw new Error("PDF library missing.");
     const doc = new global.jspdf.jsPDF({ orientation: "landscape", unit: "pt", format: "a4", compress: true });
     const logo = await imageData([audit.schoolLogoUrl, "../images/somap-logo.png.jpg", "../images/somap-logo.png"].filter(Boolean));
@@ -244,8 +244,22 @@
       "Appendix: Full Transaction Register"
     );
 
-    doc.save(`SoMAp_Bank_Audit_${audit.bankName || "Statement"}_${audit.year || ""}_${audit.id || Date.now()}.pdf`.replace(/[^\w.-]+/g, "_"));
+    return doc;
   }
 
-  global.SomapBankAuditPdf = { download };
+  function fileName(audit) {
+    return `SoMAp_Bank_Audit_${audit.bankName || "Statement"}_${audit.year || ""}_${audit.id || Date.now()}.pdf`.replace(/[^\w.-]+/g, "_");
+  }
+
+  async function toBlob(audit) {
+    const doc = await createDocument(audit);
+    return doc.output("blob");
+  }
+
+  async function download(audit) {
+    const doc = await createDocument(audit);
+    doc.save(fileName(audit));
+  }
+
+  global.SomapBankAuditPdf = { createDocument, toBlob, download, fileName };
 })(window);
