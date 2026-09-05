@@ -1,6 +1,10 @@
 (function (global) {
   "use strict";
 
+  const MARGIN = 28;
+  const HEADER_H = 42;
+  const GAP = 8;
+
   function money(value) {
     return global.SomapBankAuditEngine.formatTsh(value);
   }
@@ -23,65 +27,97 @@
     return null;
   }
 
+  function pageW(doc) {
+    return doc.internal.pageSize.getWidth();
+  }
+
+  function pageH(doc) {
+    return doc.internal.pageSize.getHeight();
+  }
+
+  function contentW(doc) {
+    return pageW(doc) - MARGIN * 2;
+  }
+
   function addHeader(doc, audit, logo, title) {
-    const w = doc.internal.pageSize.getWidth();
+    const width = pageW(doc);
     doc.setFillColor(15, 23, 42);
-    doc.rect(0, 0, w, 58, "F");
-    if (logo) doc.addImage(logo, "PNG", 36, 12, 34, 34);
+    doc.rect(0, 0, width, HEADER_H, "F");
+    if (logo) doc.addImage(logo, "PNG", MARGIN, 8, 25, 25);
     doc.setTextColor(255, 255, 255);
-    doc.setFontSize(16);
-    doc.text(title || "SoMAp Bank Audit & Analyzer Report", logo ? 82 : 36, 32);
-    doc.setFontSize(9);
-    doc.text(`${audit.schoolName || "School"} | ${audit.bankName || "Bank statement"} | ${audit.year || ""}`, logo ? 82 : 36, 46);
+    doc.setFontSize(11);
+    doc.text(title || "SoMAp Bank Audit & Analyzer Report", logo ? 60 : MARGIN, 20);
+    doc.setFontSize(7.5);
+    doc.text(`${audit.schoolName || "School"} | ${audit.bankName || "Bank statement"} | ${audit.year || ""}`, logo ? 60 : MARGIN, 32);
     doc.setTextColor(15, 23, 42);
   }
 
-  function section(doc, text, y) {
-    doc.setFontSize(13);
-    doc.setTextColor(15, 23, 42);
-    doc.text(text, 36, y);
-    doc.setDrawColor(226, 232, 240);
-    doc.line(36, y + 6, 806, y + 6);
-    return y + 18;
+  function topY() {
+    return HEADER_H + 16;
   }
 
-  function table(doc, y, head, body) {
+  function ensureSpace(doc, audit, logo, y, needed, title) {
+    if (y + needed <= pageH(doc) - MARGIN) return y;
+    doc.addPage();
+    addHeader(doc, audit, logo, title);
+    return topY();
+  }
+
+  function section(doc, audit, logo, y, text) {
+    y = ensureSpace(doc, audit, logo, y, 26, text);
+    doc.setFontSize(10.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text(text, MARGIN, y);
+    doc.setDrawColor(203, 213, 225);
+    doc.line(MARGIN, y + 4, pageW(doc) - MARGIN, y + 4);
+    return y + 12;
+  }
+
+  function paragraph(doc, audit, logo, y, text) {
+    const lines = doc.splitTextToSize(text, contentW(doc));
+    y = ensureSpace(doc, audit, logo, y, lines.length * 9 + 4, "SoMAp Bank Audit & Analyzer Report");
+    doc.setFontSize(8.2);
+    doc.setTextColor(51, 65, 85);
+    doc.text(lines, MARGIN, y);
+    return y + lines.length * 9 + 4;
+  }
+
+  function table(doc, audit, logo, y, head, body, title) {
+    const rows = body && body.length ? body : [["No records for this section."]];
+    y = ensureSpace(doc, audit, logo, y, 52, title);
     doc.autoTable({
       startY: y,
       head: [head],
-      body,
-      margin: { left: 36, right: 36 },
-      styles: { fontSize: 7, cellPadding: 3, overflow: "linebreak" },
-      headStyles: { fillColor: [30, 64, 175], textColor: [255, 255, 255] },
-      alternateRowStyles: { fillColor: [248, 250, 252] }
+      body: rows,
+      margin: { left: MARGIN, right: MARGIN, top: HEADER_H + 10, bottom: MARGIN },
+      styles: {
+        fontSize: 6.4,
+        cellPadding: 1.8,
+        overflow: "linebreak",
+        lineWidth: 0.1,
+        minCellHeight: 8
+      },
+      headStyles: {
+        fillColor: [30, 64, 175],
+        textColor: [255, 255, 255],
+        fontStyle: "bold",
+        fontSize: 6.6,
+        cellPadding: 2
+      },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+      didDrawPage(data) {
+        if (data.pageNumber > 1) addHeader(doc, audit, logo, title);
+      }
     });
-    return doc.lastAutoTable.finalY + 16;
+    return doc.lastAutoTable.finalY + GAP;
   }
 
-  async function download(audit) {
-    if (!global.jspdf?.jsPDF) throw new Error("PDF library missing.");
-    const doc = new global.jspdf.jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
-    const logo = await imageData([audit.schoolLogoUrl, "../images/somap-logo.png.jpg", "../images/somap-logo.png"].filter(Boolean));
-    addHeader(doc, audit, logo);
-    let y = 92;
-    doc.setFontSize(18);
-    doc.text("Company Financial Accountability Report", 36, y);
-    y += 22;
-    doc.setFontSize(10);
-    const intro = "This report supports company financial visibility, reconciliation, and evidence-based review. The same rules are applied to all transactions, account operators, employees, directors, recipients, and bank statement entries.";
-    doc.text(doc.splitTextToSize(intro, 760), 36, y);
-    y += 42;
-    y = table(doc, y, ["Metric", "Value"], [
+  function metricRows(audit) {
+    return [
       ["Statement file", audit.uploadedFileName || ""],
       ["Statement period", `${audit.statementPeriodFrom || "Not set"} to ${audit.statementPeriodTo || "Not set"}`],
       ["Generated", new Date().toLocaleString()],
-      ["Generated by", audit.uploadedBy?.email || ""]
-    ]);
-
-    doc.addPage();
-    addHeader(doc, audit, logo, "Executive Summary");
-    y = 82;
-    y = table(doc, y, ["Metric", "Amount / Count"], [
+      ["Generated by", audit.uploadedBy?.email || ""],
       ["Total deposits", money(audit.totals?.totalDeposits)],
       ["Total withdrawals", money(audit.totals?.totalWithdrawals)],
       ["Net movement", money(audit.totals?.netMovement)],
@@ -90,47 +126,90 @@
       ["Recalculated closing balance", money(audit.totals?.recalculatedClosingBalance)],
       ["Running balance variance", money(audit.totals?.balanceVariance)],
       ["Review items", String(audit.totals?.reviewItems || 0)]
+    ];
+  }
+
+  function txnRows(rows) {
+    return (rows || []).map((t) => [
+      t.dateLabel || t.date || "",
+      t.dayOfWeek || "",
+      t.category || "",
+      t.detectedStudentName || t.detectedPurpose || "",
+      t.moneyIn ? money(t.moneyIn) : "",
+      t.moneyOut ? money(t.moneyOut) : "",
+      t.description || "",
+      (t.reviewFlags || []).join("; ")
     ]);
-    y = section(doc, "Key Findings", y);
-    (audit.findings || []).forEach((f) => {
-      const lines = doc.splitTextToSize(`- ${f}`, 760);
-      doc.text(lines, 40, y);
-      y += lines.length * 10 + 5;
-    });
+  }
+
+  function compactRows(rows, limit) {
+    if (!limit || rows.length <= limit) return rows;
+    return rows.slice(0, limit).concat([[`Showing first ${limit} rows in this summary section. See Appendix for the full register.`, "", "", "", "", "", "", ""]]);
+  }
+
+  function addTxnSection(doc, audit, logo, y, title, rows, limit) {
+    if (!rows || !rows.length) return y;
+    y = section(doc, audit, logo, y, title);
+    return table(
+      doc,
+      audit,
+      logo,
+      y,
+      ["Date", "Day", "Category", "Name/Purpose", "Money in", "Money out", "Narration", "Review"],
+      compactRows(txnRows(rows), limit),
+      title
+    );
+  }
+
+  async function download(audit) {
+    if (!global.jspdf?.jsPDF) throw new Error("PDF library missing.");
+    const doc = new global.jspdf.jsPDF({ orientation: "landscape", unit: "pt", format: "a4", compress: true });
+    const logo = await imageData([audit.schoolLogoUrl, "../images/somap-logo.png.jpg", "../images/somap-logo.png"].filter(Boolean));
+    const title = "SoMAp Bank Audit & Analyzer Report";
+    addHeader(doc, audit, logo, title);
+
+    let y = topY();
+    doc.setFontSize(14);
+    doc.setTextColor(15, 23, 42);
+    doc.text("Company Financial Accountability Report", MARGIN, y);
+    y += 14;
+    y = paragraph(
+      doc,
+      audit,
+      logo,
+      y,
+      "This report supports company financial visibility, reconciliation, and evidence-based review. The same rules are applied to all transactions, account operators, employees, directors, recipients, and bank statement entries."
+    );
+
+    y = section(doc, audit, logo, y, "Executive Summary");
+    y = table(doc, audit, logo, y, ["Metric", "Value"], metricRows(audit), "Executive Summary");
+
+    const findings = audit.findings || [];
+    if (findings.length) {
+      y = section(doc, audit, logo, y, "Key Findings");
+      findings.forEach((finding) => {
+        y = paragraph(doc, audit, logo, y, `- ${finding}`);
+      });
+    }
 
     const categories = Object.entries(audit.categoryTotals || {}).map(([name, amount]) => [name, money(amount)]);
-    doc.addPage();
-    addHeader(doc, audit, logo, "Category Summary");
-    y = table(doc, 82, ["Category", "Total"], categories.length ? categories : [["No category totals", ""]]);
-
-    const addTxnSection = (title, rows) => {
-      doc.addPage();
-      addHeader(doc, audit, logo, title);
-      return table(doc, 82, ["Date", "Day", "Category", "Name/Purpose", "Money in", "Money out", "Narration", "Review"], rows.map((t) => [
-        t.dateLabel || t.date,
-        t.dayOfWeek || "",
-        t.category || "",
-        t.detectedStudentName || t.detectedPurpose || "",
-        t.moneyIn ? money(t.moneyIn) : "",
-        t.moneyOut ? money(t.moneyOut) : "",
-        t.description || "",
-        (t.reviewFlags || []).join("; ")
-      ]));
-    };
+    if (categories.length) {
+      y = section(doc, audit, logo, y, "Category Summary");
+      y = table(doc, audit, logo, y, ["Category", "Total"], categories, "Category Summary");
+    }
 
     const txns = audit.transactions || [];
-    addTxnSection("Deposits Summary", txns.filter((t) => t.moneyIn > 0));
-    addTxnSection("Withdrawals Summary", txns.filter((t) => t.moneyOut > 0));
-    addTxnSection("Remedial Collection Analysis", txns.filter((t) => t.category === "Remedial"));
-    addTxnSection("Graduation Collection Analysis", txns.filter((t) => t.category === "Graduation"));
-    addTxnSection("Transport / Usafiri Collection Analysis", txns.filter((t) => t.category === "Transport / Usafiri"));
-    addTxnSection("Unclassified Income Register", txns.filter((t) => t.category === "Unknown income"));
-    addTxnSection("Weekend Withdrawal Register", txns.filter((t) => (t.reviewFlags || []).some((flag) => flag.includes("Weekend withdrawal"))));
-    addTxnSection("Bank Charges Summary", txns.filter((t) => t.category === "Bank charge" || (t.reviewFlags || []).some((flag) => flag.includes("Bank charge"))));
+    y = addTxnSection(doc, audit, logo, y, "Deposits Summary", txns.filter((t) => t.moneyIn > 0), 35);
+    y = addTxnSection(doc, audit, logo, y, "Withdrawals Summary", txns.filter((t) => t.moneyOut > 0), 35);
+    y = addTxnSection(doc, audit, logo, y, "Remedial Collection Analysis", txns.filter((t) => t.category === "Remedial"), 45);
+    y = addTxnSection(doc, audit, logo, y, "Graduation Collection Analysis", txns.filter((t) => t.category === "Graduation"), 45);
+    y = addTxnSection(doc, audit, logo, y, "Transport / Usafiri Collection Analysis", txns.filter((t) => t.category === "Transport / Usafiri"), 45);
+    y = addTxnSection(doc, audit, logo, y, "Unclassified Income Register", txns.filter((t) => t.category === "Unknown income"), 45);
+    y = addTxnSection(doc, audit, logo, y, "Weekend Withdrawal Register", txns.filter((t) => (t.reviewFlags || []).some((flag) => flag.includes("Weekend withdrawal"))), 45);
+    y = addTxnSection(doc, audit, logo, y, "Bank Charges Summary", txns.filter((t) => t.category === "Bank charge" || (t.reviewFlags || []).some((flag) => flag.includes("Bank charge"))), 45);
 
-    doc.addPage();
-    addHeader(doc, audit, logo, "Running Balance Reconciliation");
-    y = table(doc, 82, ["Check", "Value"], [
+    y = section(doc, audit, logo, y, "Running Balance Reconciliation");
+    y = table(doc, audit, logo, y, ["Check", "Value"], [
       ["Opening balance", money(audit.totals?.openingBalance)],
       ["Total deposits", money(audit.totals?.totalDeposits)],
       ["Total withdrawals", money(audit.totals?.totalWithdrawals)],
@@ -138,13 +217,12 @@
       ["Statement closing balance", money(audit.totals?.closingBalance)],
       ["Recalculated closing balance", money(audit.totals?.recalculatedClosingBalance)],
       ["Variance requiring review", money(audit.totals?.balanceVariance)]
-    ]);
+    ], "Running Balance Reconciliation");
 
-    addTxnSection("Student / Payment Trace", txns.filter((t) => t.detectedStudentName));
-    addTxnSection("Review Items and Evidence Required", audit.reviewItems || []);
-    doc.addPage();
-    addHeader(doc, audit, logo, "Governance Recommendations");
-    y = 88;
+    y = addTxnSection(doc, audit, logo, y, "Student / Payment Trace", txns.filter((t) => t.detectedStudentName), 50);
+    y = addTxnSection(doc, audit, logo, y, "Review Items and Evidence Required", audit.reviewItems || [], 70);
+
+    y = section(doc, audit, logo, y, "Governance Recommendations");
     [
       "Attach fuel, repair, service, transfer, and operational evidence to withdrawal events where available.",
       "Classify unclear incoming payments after confirming the student name and payment purpose.",
@@ -152,11 +230,19 @@
       "Compare extracted balances with the original bank statement when a variance is reported.",
       "Keep each uploaded statement as a separate audit session so later reports remain traceable."
     ].forEach((item) => {
-      const lines = doc.splitTextToSize(`- ${item}`, 760);
-      doc.text(lines, 40, y);
-      y += lines.length * 10 + 8;
+      y = paragraph(doc, audit, logo, y, `- ${item}`);
     });
-    addTxnSection("Appendix: Full Transaction Register", audit.transactions || []);
+
+    y = section(doc, audit, logo, y, "Appendix: Full Transaction Register");
+    table(
+      doc,
+      audit,
+      logo,
+      y,
+      ["Date", "Day", "Category", "Name/Purpose", "Money in", "Money out", "Narration", "Review"],
+      txnRows(txns),
+      "Appendix: Full Transaction Register"
+    );
 
     doc.save(`SoMAp_Bank_Audit_${audit.bankName || "Statement"}_${audit.year || ""}_${audit.id || Date.now()}.pdf`.replace(/[^\w.-]+/g, "_"));
   }
