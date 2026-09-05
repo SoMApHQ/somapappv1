@@ -212,6 +212,8 @@
     await global.SomapBankAuditPdf.download(audit);
     if (audit.id && !audit.reportFile?.downloadUrl && !state.readOnly) {
       try {
+        setStatus("Saving regenerated PDF to Google Drive...", "warn");
+        audit._driveAccessToken = await global.SomapBankAuditStorage.requestDriveAccessToken();
         const blob = await global.SomapBankAuditPdf.toBlob(audit);
         const reportFile = await global.SomapBankAuditStorage.uploadAuditBlob(
           audit,
@@ -222,9 +224,11 @@
         );
         await global.SomapBankAuditStorage.updateAudit(audit.id, { reportFile }, year());
         audit.reportFile = reportFile;
+        delete audit._driveAccessToken;
         await loadAudits();
+        setStatus("PDF saved to Google Drive.", "ok");
       } catch (error) {
-        console.warn("Generated PDF downloaded but could not be saved to Storage", error);
+        console.warn("Generated PDF downloaded but could not be saved to Google Drive", error);
       }
     }
   }
@@ -313,23 +317,26 @@
     const btn = $("saveAuditBtn");
     setBusy(btn, true, "Saving files...");
     try {
-      let saved = await global.SomapBankAuditStorage.saveAudit(state.parsed, year());
-      state.parsed.id = saved.id;
-      state.parsed.auditId = saved.id;
-      setStatus("Audit data saved. Uploading original statement...", "warn");
-      const statementFile = await global.SomapBankAuditStorage.uploadAuditFile(saved, state.parsedFile, "statement");
+      setStatus("Requesting Google Drive permission...", "warn");
+      const driveAccessToken = await global.SomapBankAuditStorage.requestDriveAccessToken();
+      const auditId = state.parsed.id || global.SomapBankAuditStorage.reserveAuditId(year());
+      let savedDraft = { ...state.parsed, id: auditId, auditId, _driveAccessToken: driveAccessToken };
+      state.parsed.id = auditId;
+      state.parsed.auditId = auditId;
+      setStatus("Uploading original statement to Google Drive...", "warn");
+      const statementFile = await global.SomapBankAuditStorage.uploadAuditFile(savedDraft, state.parsedFile, "statement");
       setStatus("Statement saved. Generating and saving PDF report...", "warn");
-      const pdfBlob = await global.SomapBankAuditPdf.toBlob(saved);
+      const pdfBlob = await global.SomapBankAuditPdf.toBlob(savedDraft);
       const reportFile = await global.SomapBankAuditStorage.uploadAuditBlob(
-        saved,
+        savedDraft,
         pdfBlob,
-        global.SomapBankAuditPdf.fileName(saved),
+        global.SomapBankAuditPdf.fileName(savedDraft),
         "application/pdf",
         "reports"
       );
       const filesPatch = { statementFile, reportFile, storageSavedAt: Date.now() };
-      await global.SomapBankAuditStorage.updateAudit(saved.id, filesPatch, year());
-      saved = { ...saved, ...filesPatch };
+      delete savedDraft._driveAccessToken;
+      const saved = await global.SomapBankAuditStorage.saveAudit({ ...savedDraft, ...filesPatch }, year());
       state.parsed = null;
       state.parsedFile = null;
       renderAudit(saved);
@@ -339,6 +346,7 @@
     } catch (error) {
       console.error(error);
       setStatus(`Save failed: ${error.message || error}`, "error");
+      await loadAudits().catch(() => {});
       toast(error.message || "Could not save audit files.", "error");
     } finally {
       if (btn) {
