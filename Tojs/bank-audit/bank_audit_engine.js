@@ -228,11 +228,11 @@
       g.reviewFlags = [...new Set([...g.reviewFlags, ...t.reviewFlags])];
     });
     return [...groups.values()].map(g => {
-      // CRDB mobile transfers print tax, fee, then principal under one reference.
+      // CRDB mobile transfers group principal, fee and tax under one reference.
       const mobileTriplet = g.rawLines.length === 3 && /TO (MPESA|AIRTEL|TIGOPESA|HALOPESA)/i.test(g.description);
-      g.amountWithdrawn = mobileTriplet ? g.rawLines[2].moneyOut : g.totalImpact;
+      g.amountWithdrawn = mobileTriplet ? Math.max(...g.rawLines.map(t => t.moneyOut)) : g.totalImpact;
       g.charges = global.SomapCrdb.round(g.totalImpact - g.amountWithdrawn);
-      g.principalBasis = mobileTriplet ? 'CRDB mobile transfer: final line principal; preceding lines charges' : 'Unseparated debit; verify against supporting evidence';
+      g.principalBasis = mobileTriplet ? 'CRDB mobile transfer: largest debit principal; remaining lines charges' : 'Unseparated debit; verify against supporting evidence';
       g.reviewFlags.push('Purpose not stated in bank narration. Supporting documentation required for company records.');
       return g;
     });

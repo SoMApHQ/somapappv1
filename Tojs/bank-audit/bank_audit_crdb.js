@@ -1,6 +1,6 @@
 (function (global) {
   'use strict';
-  const VERSION = 'crdb-block-v2';
+  const VERSION = 'crdb-block-v3';
   const round = n => Math.round(n * 100) / 100;
   const dateToken = /^\d{2}[./]\d{2}[./]\d{4}$/;
   const timeToken = /^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/;
@@ -17,9 +17,10 @@
     const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
     return d.getFullYear() === +m[1] && d.getMonth() === +m[2] - 1 && d.getDate() === +m[3] ? d : null;
   }
-  function amount(value) {
+  function amount(value, accountingPosition = false) {
     const s = String(value).trim();
-    return /^-?(?:\d+|\d{1,3}(?:,\d{3})+)\.\d{1,2}$/.test(s) ? Number(s.replace(/,/g, '')) : NaN;
+    if (!accountingPosition && /^(?:19|20)\d{2}$/.test(s)) return NaN;
+    return /^-?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?$/.test(s) ? Number(s.replace(/,/g, '')) : NaN;
   }
   function header(text) {
     const get = pattern => (text.match(pattern) || [])[1] || '';
@@ -35,7 +36,7 @@
   function narration(lines) {
     const raw = lines.join('\n');
     // Preserve line breaks in the evidence; repair only known split words in the display.
-    const text = lines.join(' ').replace(/Deposi\s+ts/gi, 'Deposits').replace(/Shedr\s+ack/gi, 'Shedrack').replace(/([a-z])([A-Z])/g, '$1 $2');
+    const text = lines.join(' ').replace(/Deposi\s+ts/gi, 'Deposits').replace(/Shedr\s+ack/gi, 'Shedrack').replace(/Scho\s+olbus/gi, 'Schoolbus').replace(/([a-z])([A-Z])/g, '$1 $2');
     const payment = text.match(/\b(AB\d+)\s*:\s*([^:]*)(?::\s*(.*))?/i);
     let name = (payment?.[2] || '').trim();
     const cls = name.match(/\b(?:std|standard|class)\s*(\d+)/i);
@@ -43,65 +44,144 @@
     const purpose = (payment?.[3] || '').replace(/\s*N\/A\s*$/i, '').trim();
     const recipient = text.match(/\bTO\s+(?:MPESA|AIRTEL|TIGOPESA|HALOPESA)\s+(\d+)\s+(.+?)(?=\s+AB\d|$)/i);
     return { rawNarration: raw, description: text, bankReference: (text.match(/REF\s*:\s*([a-z0-9]+)/i) || [])[1] || '',
-      paymentReference: payment?.[1] || '', detectedStudentName: name.replace(/\b\w/g, c => c.toUpperCase()),
+      paymentReference: payment?.[1] || '', detectedStudentName: name.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()),
       extractedClass: cls ? `Standard ${cls[1]}` : '', writtenPurpose: purpose,
       sender: (text.match(/\bFROM\s+(.+?)\s+TO\b/i) || [])[1] || '', recipient: recipient?.[2] || '', recipientAccount: recipient?.[1] || '',
-      transactionType: (text.match(/REF\s*:\s*\w+\s+(.+?)(?=\s+FROM|\s+TO|$)/i) || [])[1] || '' };
+      transactionType: (text.match(/REF\s*:\s*\w+\s+(IB\s+FT\s+TO\s+(?:MPESA|AIRTEL|TIGOPESA|HALOPESA)|.*?)(?=\s+FROM|\s+\d{7,}|$)/i) || [])[1] || '' };
+  }
+﻿  function normalizeLines(text) {
+    const result = [];
+    String(text).replace(/[\f\u0000]/g, '\n').replace(/\u00a0/g, ' ').split(/\r?\n/).forEach(line => {
+      let rest = line.trim();
+      // Separate date/time anchors only at a line's beginning. Never split narration numbers.
+      while (rest) {
+        const anchor = rest.match(/^(\d{2}[./]\d{2}[./]\d{4}|\d{2}:\d{2}:\d{2})(?=\s|$)/);
+        if (!anchor) { result.push(rest); break; }
+        result.push(anchor[1]); rest = rest.slice(anchor[0].length).trim();
+      }
+    });
+    return result;
   }
   function parsePages(pages) {
     const text = pages.map(p => typeof p === 'string' ? p : p.text).join('\n');
-    const rows = [], errors = [];
-    // Coordinate extraction supplies logical column blocks; text fixtures supply the same sequence.
-    const lines = text.split(/\r?\n/).flatMap(s => s.trim().split(/\s+(?=-?(?:\d|,)+\.\d{1,2}(?:\s|$))/)).map(s => s.trim()).filter(Boolean);
-    for (let i = 0; i < lines.length; i++) {
-      if (!dateToken.test(lines[i]) || !timeToken.test(lines[i + 1] || '')) continue;
-      const start = i, posting = lines[i++], postingTime = lines[i++];
-      const details = [];
-      while (i < lines.length && !dateToken.test(lines[i])) details.push(lines[i++]);
-      const valueDate = lines[i++], valueTime = lines[i++];
-      let tokens = (lines[i] || '').split(/\s+/);
-      if (tokens.length === 1 && Number.isFinite(amount(tokens[0]))) tokens = [lines[i], lines[++i], lines[++i]];
-      const values = tokens.map(amount);
-      if (!date(posting) || !date(valueDate) || !timeToken.test(valueTime || '') || !/\bREF\s*:/i.test(details.join(' ')) || values.length !== 3 || values.some(n => !Number.isFinite(n)) || values[0] < 0 || values[1] < 0 || (values[0] > 0) === (values[1] > 0)) {
-        errors.push(`Invalid transaction block at logical line ${start + 1}: ${posting} ${postingTime}`);
-        i = start;
-        continue;
-      }
-      rows.push({ ...narration(details), date: posting, postingTime, valueDate, valueTime, moneyOut: values[0], moneyIn: values[1], balance: values[2], sourceRow: rows.length + 1, accountingColumnsExplicit: true });
+    const lines = normalizeLines(text), rows = [], rejected = [], visitedRefs = new Set();
+    const counts = {
+      postingDateCandidates: lines.filter((s,i) => dateToken.test(s) && timeToken.test(lines[i+1] || '') && /^REF\s*:/i.test(lines[i+2] || '')).length,
+      postingTimeCandidates: lines.filter((s,i) => timeToken.test(s) && /^REF\s*:/i.test(lines[i+1] || '')).length,
+      refBlocks: lines.filter(s => /^REF\s*:/i.test(s)).length,
+      accountingRows: 0, validTransactions: 0, rejectedBlocks: 0
+    };
+    function reject(start, refLine, reason, stop) {
+      rejected.push({ line: start + 1, refLine: refLine + 1, reason, lines: lines.slice(start, Math.min(stop + 1, start + 30)) });
     }
-    const meta = { parserVersion: VERSION, statement: header(text), diagnostics: errors, rawRows: rows.length, pageCount: pages.length };
-    return { rows, meta, extractedText: text, sourceType: 'pdf' };
+    for (let i=0; i<lines.length; i++) {
+      if (!dateToken.test(lines[i]) || !timeToken.test(lines[i+1] || '') || !/^REF\s*:/i.test(lines[i+2] || '')) continue;
+      const start=i, posting=lines[i], postingTime=lines[i+1], refLine=i+2;
+      visitedRefs.add(refLine);
+      let cursor=refLine+1;
+      while (cursor<lines.length && !dateToken.test(lines[cursor]) && !/^REF\s*:/i.test(lines[cursor])) cursor++;
+      const details=lines.slice(refLine,cursor), valueDate=lines[cursor], valueTime=lines[cursor+1];
+      if (!date(posting)) { reject(start,refLine,'Invalid posting date',cursor); continue; }
+      if (!date(valueDate) || !timeToken.test(valueTime || '') || /^REF\s*:/i.test(lines[cursor+2] || '')) {
+        reject(start,refLine,'Value date/time and accounting section not found before next transaction',cursor+2); continue;
+      }
+      cursor+=2;
+      const tokens=[];
+      while(cursor<lines.length && tokens.length<3) {
+        if (dateToken.test(lines[cursor]) || timeToken.test(lines[cursor]) || /^REF\s*:/i.test(lines[cursor])) break;
+        const next=lines[cursor].split(/\s+/);
+        if(next.some(t => !Number.isFinite(amount(t,true)))) break;
+        tokens.push(...next); cursor++;
+      }
+      const values=tokens.map(t=>amount(t,true));
+      if (tokens.length!==3) { reject(start,refLine,`Accounting section must contain exactly three amounts; found ${tokens.length}`,cursor); continue; }
+      counts.accountingRows++;
+      if (values[0]<0 || values[1]<0 || (values[0]>0)===(values[1]>0)) { reject(start,refLine,'Debit and credit must be non-negative, with exactly one positive side',cursor); continue; }
+      const detail=narration(details);
+      if (!detail.bankReference) { reject(start,refLine,'Bank reference missing',cursor); continue; }
+      rows.push({...detail,date:posting,postingTime,valueDate,valueTime,moneyOut:values[0],moneyIn:values[1],balance:values[2],sourceRow:rows.length+1,sourceLine:start+1,accountingColumnsExplicit:true});
+      i=cursor-1;
+    }
+    lines.forEach((line,index) => { if (/^REF\s*:/i.test(line) && !visitedRefs.has(index)) reject(Math.max(0,index-2),index,'REF block has no valid preceding posting date/time',index+3); });
+    counts.validTransactions=rows.length; counts.rejectedBlocks=rejected.length;
+    const statement=header(text);
+    const meta={parserVersion:VERSION,statement,diagnostics:rejected.map(r=>`Line ${r.line}: ${r.reason}`),rejectedBlocks:rejected,counts,rawRows:rows.length,pageCount:pages.length};
+    return {rows,meta,extractedText:text,normalizedLines:lines,sourceType:'pdf'};
   }
-  function logicalPage(items) {
-    const sorted = items.filter(x => x.str.trim()).slice().sort((a,b) => b.transform[5] - a.transform[5] || a.transform[4] - b.transform[4]);
-    const lines = [];
-    sorted.forEach(item => { let line = lines.find(l => Math.abs(l.y - item.transform[5]) < 2); if (!line) lines.push(line = { y: item.transform[5], items: [] }); line.items.push(item); });
-    lines.forEach(l => l.items.sort((a,b) => a.transform[4] - b.transform[4]));
-    const heading = lines.find(l => /Posting\s*Date/.test(l.items.map(i => i.str).join(' ')) && /Book\s*Balance/.test(l.items.map(i => i.str).join(' ')));
-    if (!heading) return lines.map(l => l.items.map(i => i.str).join(' ')).join('\n');
-    const value = heading.items.find(i => /Value/.test(i.str));
-    const details = heading.items.find(i => /Details/.test(i.str));
-    const debit = heading.items.find(i => /^Debit/.test(i.str));
-    const credit = heading.items.find(i => /^Credit/.test(i.str));
-    const book = heading.items.find(i => /^Book/.test(i.str));
-    if (!value || !details || !debit || !credit || !book) return lines.map(l => l.items.map(i => i.str).join(' ')).join('\n');
-    const boundaries = [details, value, debit, credit, book].map(i => i.transform[4] - 5);
-    const out = [], blocks = []; let block = null;
-    lines.forEach(l => {
-      if (l.y >= heading.y) { out.push(l.items.map(i => i.str).join(' ')); return; }
-      const cols = Array.from({length:6}, () => []);
-      l.items.forEach(i => { const at = boundaries.findIndex(x => i.transform[4] < x); cols[at < 0 ? 5 : at].push(i); });
-      const strings = cols.map((c,n) => n === 1 ? c.reduce((s,item,i) => {
-        const previous = c[i-1];
-        const gap = previous ? item.transform[4] - previous.transform[4] - (previous.width || 0) : 0;
-        return s + (i && gap > 1 ? ' ' : '') + item.str;
-      }, '') : c.map(i => i.str).join('').trim());
-      if (dateToken.test(strings[0])) { block = Array.from({length:6}, () => []); blocks.push(block); }
-      if (block) strings.forEach((s, n) => { if (s) block[n].push(s); });
+  function joinItems(items) {
+    return items.reduce((text,item,i) => {
+      const previous=items[i-1];
+      const gap=previous ? item.x-previous.x-previous.width : 0;
+      return text+(i && gap>1 && !/\s$/.test(text) && !/^\s/.test(item.str) ? ' ' : '')+item.str;
+    },'').trim();
+  }
+  function extractPage(items, viewportTransform, inheritedColumns) {
+    // PDF coordinates are bottom-up and may be rotated. Viewport coordinates are displayed top-down.
+    const v=viewportTransform || [1,0,0,-1,0,0];
+    const positioned=items.map((item,index) => ({index,str:item.str || '',rawX:item.transform?.[4] || 0,rawY:item.transform?.[5] || 0,
+      x:v[0]*(item.transform?.[4] || 0)+v[2]*(item.transform?.[5] || 0)+v[4],
+      y:v[1]*(item.transform?.[4] || 0)+v[3]*(item.transform?.[5] || 0)+v[5],
+      width:item.width || 0,height:item.height || 0,hasEOL:!!item.hasEOL}));
+    const visual=[];
+    positioned.filter(i=>i.str.trim()).sort((a,b)=>a.y-b.y || a.x-b.x).forEach(item=>{
+      let line=visual[visual.length-1];
+      if(!line || Math.abs(line.y-item.y)>2) visual.push(line={y:item.y,items:[]});
+      line.items.push(item);
     });
-    blocks.forEach(b => out.push(...b.flat()));
-    return out.join('\n');
+    visual.forEach((line,i)=>{line.items.sort((a,b)=>a.x-b.x);line.text=joinItems(line.items);line.number=i+1;line.items.forEach(item=>item.visualLine=i+1);});
+    const heading=visual.find(l=>/Posting\s*Date/.test(l.text) && /Book\s*Balance/.test(l.text));
+    let columns=inheritedColumns;
+    if(heading) {
+      const find=re=>heading.items.find(i=>re.test(i.str));
+      const posting=find(/^Posting/),details=find(/^Details/),value=find(/^Value/),debit=find(/^Debit/),credit=find(/^Credit/),book=find(/^Book/);
+      if(posting&&details&&value&&debit&&credit&&book) columns=[posting.width ? posting.x+posting.width+5 : details.x-5,value.x-5,debit.x-5,credit.x-5,book.x-5];
+    }
+    const sourceLines=[]; let sourceLine='';
+    positioned.forEach(item=>{
+      // PDF.js content-stream order is preserved as an independent fallback, including hasEOL.
+      sourceLine+=item.str;
+      if(item.hasEOL){if(sourceLine.trim())sourceLines.push(sourceLine.trim());sourceLine='';}
+    });
+    if(sourceLine.trim())sourceLines.push(sourceLine.trim());
+    // Items without reliable EOL still have a usable content-stream token sequence.
+    const itemLines=positioned.map(i=>i.str.trim()).filter(Boolean);
+    let logicalLines=[];
+    if(columns) {
+      const body=visual.filter(l=>!heading || l.y>heading.y);
+      const refs=body.filter(l=>l.items.some(i=>/^REF\s*:/i.test(i.str)));
+      logicalLines=(heading ? visual.filter(l=>l.y<=heading.y) : []).map(l=>l.text);
+      refs.forEach((ref,index)=>{
+        const next=refs[index+1]?.y ?? Infinity;
+        const cols=Array.from({length:6},()=>[]);
+        body.filter(l=>l.y>=ref.y && l.y<next).forEach(line=>{
+          const parts=Array.from({length:6},()=>[]);
+          line.items.forEach(item=>{const n=columns.findIndex(x=>item.x<x);parts[n<0?5:n].push(item);});
+          parts.forEach((items,n)=>{if(items.length)cols[n].push(n===1?joinItems(items):items.map(i=>i.str).join('').trim());});
+        });
+        logicalLines.push(...cols.flat());
+      });
+    }
+    return {items:positioned,visualLines:visual.map(l=>({number:l.number,y:l.y,text:l.text,itemIndices:l.items.map(i=>i.index)})),sourceLines,itemLines,logicalLines,columns};
   }
+  function logicalPage(items, viewportTransform) {
+    const page=extractPage(items,viewportTransform);
+    return (page.logicalLines.length?page.logicalLines:page.visualLines.map(l=>l.text)).join('\n');
+  }
+  function parseExtractedPages(pages) {
+    const candidates=[['content-stream',p=>p.sourceLines],['content-items',p=>p.itemLines],['visual-columns',p=>p.logicalLines]]
+      .map(([strategy,get])=>({strategy,result:parsePages(pages.map(p=>get(p).join('\n')))}));
+    candidates.forEach(c=>{c.validation=validate(c.result.rows,c.result.meta);});
+    candidates.sort((a,b)=>Number(b.validation.valid)-Number(a.validation.valid) || b.result.rows.length-a.result.rows.length || a.result.meta.diagnostics.length-b.result.meta.diagnostics.length);
+    const chosen=candidates[0];
+    // A valid alternative may recover reading order, but conflicting complete parses require review.
+    const signature=c=>JSON.stringify(c.result.rows.map(r=>[r.date,r.postingTime,r.bankReference,r.moneyOut,r.moneyIn,r.balance]));
+    if(candidates.some(c=>c.validation.valid && chosen.validation.valid && signature(c)!==signature(chosen))) chosen.result.meta.diagnostics.push('Different complete extraction paths disagree; inspect PDF diagnostics.');
+    chosen.result.meta.extractionStrategy=chosen.strategy;
+    chosen.result.meta.extractionAttempts=candidates.map(c=>({strategy:c.strategy,counts:c.result.meta.counts,errors:c.validation.errors}));
+    chosen.result.extraction={pages,normalizedLines:chosen.result.normalizedLines,rejectedBlocks:chosen.result.meta.rejectedBlocks};
+    return chosen.result;
+  }
+
   function category(purpose) {
     const p = purpose.toLowerCase();
     if (/\b(usafiri?|usafii|transport|school\s*bus)\b/.test(p)) return 'Transport / Usafiri';
@@ -124,5 +204,5 @@
     });
     return { valid: !errors.length, errors };
   }
-  global.SomapCrdb = { VERSION, amount, date, parsePages, logicalPage, category, validate, round };
+  global.SomapCrdb = { VERSION, amount, date, parsePages, logicalPage, extractPage, parseExtractedPages, category, validate, round };
 })(window);

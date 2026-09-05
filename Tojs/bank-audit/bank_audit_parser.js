@@ -92,7 +92,7 @@
       script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
       script.dataset.lib = "pdfjs";
       script.onload = resolve;
-      script.onerror = reject;
+      script.onerror = () => { script.remove(); reject(new Error("PDF library could not load. Check your connection and retry.")); };
       document.head.appendChild(script);
     });
   }
@@ -103,17 +103,21 @@
     const buffer = await file.arrayBuffer();
     const pdf = await global.pdfjsLib.getDocument({ data: buffer }).promise;
     const pages = [];
+    let columns;
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       const content = await page.getTextContent();
-      pages.push(global.SomapCrdb.logicalPage(content.items || []));
+      const extracted = global.SomapCrdb.extractPage(content.items || [], page.getViewport({scale:1}).transform, columns);
+      columns = extracted.columns;
+      pages.push({...extracted,page:pageNumber,rotation:page.rotate,viewportTransform:page.getViewport({scale:1}).transform});
     }
-    return { text: pages.join("\n"), pages, pageCount: pdf.numPages };
+    await pdf.destroy();
+    return { pages, pageCount: pages.length };
   }
 
   async function parsePdf(file) {
     const extracted = await extractPdfText(file);
-    return global.SomapCrdb.parsePages(extracted.pages);
+    return global.SomapCrdb.parseExtractedPages(extracted.pages);
   }
 
   async function parseFile(file) {

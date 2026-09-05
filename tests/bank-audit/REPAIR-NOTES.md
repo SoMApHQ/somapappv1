@@ -1,4 +1,6 @@
-﻿# CRDB repair verification
+﻿> Superseded by [actual PDF verification](ACTUAL-PDF-VERIFICATION.md): the original PDF has now been located and passes the repaired upload path.
+
+# CRDB repair verification
 
 Status: implemented locally; original-PDF acceptance and live saved-audit reparse remain pending.
 

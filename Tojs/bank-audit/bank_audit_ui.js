@@ -10,6 +10,7 @@
     role: "",
     readOnly: false,
     students: [],
+    diagnostics: null,
     parsedFile: null
   };
 
@@ -154,6 +155,9 @@
   }
 
   function renderAudit(audit) {
+    document.body.classList.remove("parse-failed");
+    $("parseFailure")?.setAttribute("hidden", "");
+    if ($("downloadPdfBtn")) $("downloadPdfBtn").disabled = !audit?.validation?.valid;
     state.activeAudit = audit;
     if (audit) attachMatches(audit);
     renderSummary(audit);
@@ -299,12 +303,16 @@
     if (state.readOnly) return toast("This account has read-only access.", "error");
     const file = $("statementFile")?.files?.[0];
     if (!file) return toast("Choose a PDF, Excel, or CSV bank statement first.", "error");
-    state.parsed = null; state.parsedFile = null;
+    state.parsed = null; state.parsedFile = file; state.diagnostics = null;
+    $("parseBtn").disabled = true;
+    $("parseBtn").textContent = "Parsing...";
     $("saveAuditBtn").disabled = true;
     setStatus("Parsing statement. Please wait...", "warn");
     try {
       const parsed = await global.SomapBankAuditParser.parseFile(file);
       const analysis = global.SomapBankAuditEngine.analyze(parsed.rows, { settings: formSettings(), meta: parsed.meta });
+      state.diagnostics = {fileName:file.name,parserVersion:global.SomapCrdb.VERSION,meta:parsed.meta,validation:analysis.validation,extractedText:parsed.extractedText,extraction:parsed.extraction};
+      if (!analysis.validation.valid) { showParseFailure(analysis.validation.errors, parsed); return; }
       const inferredPeriod = inferPeriod(analysis.transactions);
       if (!$("periodFrom")?.value && inferredPeriod.from && $("periodFrom")) $("periodFrom").value = inferredPeriod.from;
       if (!$("periodTo")?.value && inferredPeriod.to && $("periodTo")) $("periodTo").value = inferredPeriod.to;
@@ -327,11 +335,50 @@
       renderAudit(audit);
       setStatus(`Parsed ${analysis.transactions.length} transaction(s). Review the preview, then save this audit session.`, analysis.transactions.length ? "ok" : "warn");
       $("saveAuditBtn").disabled = !analysis.validation.valid;
-      if (!analysis.validation.valid) setStatus("Parsing failed validation. " + analysis.validation.errors.join(" "), "error");
     } catch (error) {
       console.error(error);
-      setStatus(error.message || "Could not parse statement.", "error");
+      showParseFailure([error.message || "Could not parse statement."]);
+    } finally {
+      $("parseBtn").disabled = false;
+      $("parseBtn").textContent = document.body.classList.contains("parse-failed") ? "Retry Parse" : "Parse";
     }
+  }
+
+
+  function showParseFailure(errors, parsed) {
+    state.parsed = null;
+    renderAudit(null);
+    document.body.classList.add('parse-failed');
+    $('parseFailure')?.removeAttribute('hidden');
+    setText('activeAuditTitle','Statement not yet analysed');
+    setText('activeAuditMeta','Parsing validation failed. No financial totals have been saved.');
+    setStatus('Parsing failed validation. ' + errors.join(' '),'error');
+    $('saveAuditBtn').disabled = true;
+    $('downloadPdfBtn').disabled = true;
+    const meta=parsed?.meta || {}, rows=parsed?.rows || [];
+    const counts=meta.counts || {};
+    const lines=[
+      'Header credit total: ' + money(meta.statement?.totalCredits),
+      'Extracted credit total: ' + money(rows.reduce((n,r)=>n+r.moneyIn,0)),
+      'Header debit total: ' + money(meta.statement?.totalDebits),
+      'Extracted debit total: ' + money(rows.reduce((n,r)=>n+r.moneyOut,0)),
+      'Posting-date candidates: ' + (counts.postingDateCandidates || 0),
+      'Posting-time candidates: ' + (counts.postingTimeCandidates || 0),
+      'REF blocks found: ' + (counts.refBlocks || 0),
+      'Accounting rows found: ' + (counts.accountingRows || 0),
+      'Valid transactions created: ' + rows.length,
+      'Rejected blocks: ' + (counts.rejectedBlocks || 0),
+      ...errors
+    ];
+    setText('parserDiagnosticText',lines.join('\n'));
+    if (!state.diagnostics) state.diagnostics={parserVersion:global.SomapCrdb.VERSION,errors};
+  }
+  function downloadDiagnostics() {
+    if (!state.diagnostics) return;
+    const blob=new Blob([JSON.stringify(state.diagnostics,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob),link=document.createElement('a');
+    link.href=url;link.download='SoMAp_CRDB_parser_diagnostics.json';link.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
 
   async function saveParsedAudit() {
@@ -509,6 +556,7 @@
 
   function bind() {
     bindTabs();
+    $("downloadDiagnosticsBtn")?.addEventListener("click", downloadDiagnostics);
     $("parseBtn")?.addEventListener("click", parseUpload);
     $("saveAuditBtn")?.addEventListener("click", saveParsedAudit);
     $("downloadPdfBtn")?.addEventListener("click", () => downloadAuditPdf());
