@@ -39,6 +39,38 @@
     return String(value || "file").replace(/[^\w.-]+/g, "_").slice(0, 120);
   }
 
+  // Firebase RTDB keys can't contain '.', '#', '$', '/', '[' or ']'. Category names like
+  // "Transport / Usafiri" become categoryTotals keys, so they must be encoded before writing
+  // and decoded after reading, or the whole audit save silently fails after the Drive upload
+  // already succeeded (files land in Drive, but no record is ever created in RTDB).
+  function encodeCategoryKey(key) {
+    return String(key).replace(/[.#$\[\]/]/g, (ch) => `__${ch.charCodeAt(0)}__`);
+  }
+
+  function decodeCategoryKey(key) {
+    return String(key).replace(/__(\d+)__/g, (_, code) => String.fromCharCode(Number(code)));
+  }
+
+  function encodeCategoryTotals(categoryTotals) {
+    if (!categoryTotals) return categoryTotals;
+    const out = {};
+    for (const [k, v] of Object.entries(categoryTotals)) out[encodeCategoryKey(k)] = v;
+    return out;
+  }
+
+  function decodeCategoryTotals(categoryTotals) {
+    if (!categoryTotals) return categoryTotals;
+    const out = {};
+    for (const [k, v] of Object.entries(categoryTotals)) out[decodeCategoryKey(k)] = v;
+    return out;
+  }
+
+  function decodeAuditRecord(record) {
+    if (!record) return record;
+    if (!record.categoryTotals) return record;
+    return { ...record, categoryTotals: decodeCategoryTotals(record.categoryTotals) };
+  }
+
   function safeDriveName(value) {
     return String(value || "")
       .replace(/[\\/:*?"<>|]+/g, " ")
@@ -245,14 +277,14 @@
     const snap = await db().ref(auditPath(y)).once("value");
     const val = snap.val() || {};
     return Object.entries(val)
-      .map(([id, audit]) => ({ id, ...(audit || {}) }))
+      .map(([id, audit]) => decodeAuditRecord({ id, ...(audit || {}) }))
       .sort((a, b) => Number(b.uploadedAt || 0) - Number(a.uploadedAt || 0));
   }
 
   async function getAudit(id, y) {
     const snap = await db().ref(`${auditPath(y)}/${id}`).once("value");
     const val = snap.val();
-    return val ? { id, ...val } : null;
+    return val ? decodeAuditRecord({ id, ...val }) : null;
   }
 
   async function saveAudit(audit, y) {
@@ -262,6 +294,7 @@
     const now = Date.now();
     const payload = {
       ...audit,
+      categoryTotals: encodeCategoryTotals(audit.categoryTotals),
       id: ref.key,
       auditId: ref.key,
       schoolId: schoolId(),
@@ -279,7 +312,7 @@
       return payload;
     });
     if (!result.committed) throw new Error('Audit save was not committed.');
-    return result.snapshot.val();
+    return decodeAuditRecord(result.snapshot.val());
   }
 
   async function reparseAudit(id, analysis, y) {
@@ -287,15 +320,16 @@
     const ref = db().ref(auditPath(y) + '/' + id);
     const versionId = db().ref().push().key;
     const user = authUser();
+    const encodedAnalysis = { ...analysis, categoryTotals: encodeCategoryTotals(analysis.categoryTotals) };
     const result = await ref.transaction(previous => {
       if (!previous) return;
       const { history, ...snapshot } = previous;
-      return { ...previous, ...analysis, id, auditId:id,
+      return { ...previous, ...encodedAnalysis, id, auditId:id,
         history: { ...(history || {}), [versionId]:snapshot },
         parserVersion:analysis.parserVersion, reparsedAt:Date.now(), reparsedBy:{uid:user?.uid || '', email:user?.email || ''} };
     });
     if (!result.committed) throw new Error('Audit no longer exists.');
-    return result.snapshot.val();
+    return decodeAuditRecord(result.snapshot.val());
   }
 
   function reserveAuditId(y) {
@@ -303,8 +337,10 @@
   }
 
   async function updateAudit(id, patch, y) {
+    const safePatch = { ...(patch || {}) };
+    if (safePatch.categoryTotals) safePatch.categoryTotals = encodeCategoryTotals(safePatch.categoryTotals);
     await db().ref(`${auditPath(y)}/${id}`).update({
-      ...(patch || {}),
+      ...safePatch,
       updatedAt: Date.now()
     });
   }

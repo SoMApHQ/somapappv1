@@ -54,6 +54,8 @@ test('reparse versions preserve prior results and do not add a statement',async(
   vm.runInThisContext(fs.readFileSync('Tojs/bank-audit/bank_audit_storage.js','utf8'));
   const saved=await SomapBankAuditStorage.reparseAudit('saved',audit,'2026');assert.equal(saved.id,'saved');assert.equal(saved.statementFile.driveFileId,'original');assert.equal(saved.history.version2.totals.totalDeposits,1658);assert.equal(saved.totals.totalDeposits,538800);assert.equal(saved.reparsedBy.uid,'reviewer');
   await assert.rejects(()=>SomapBankAuditStorage.reparseAudit('saved',{validation:{valid:false}},'2026'));
+  assert.equal(saved.categoryTotals['Transport / Usafiri'],326000);
+  assert.ok(Object.keys(record.categoryTotals).every(k=>!/[.#$\[\]/]/.test(k)),'categoryTotals keys written to Firebase must not contain RTDB-forbidden characters (./ #$[])');
 });
 test('PDF uses readable font sizes, complete cards, repeated headings and page footers',async()=>{
   const tables=[];let pages=1,footerCount=0;
