@@ -99,7 +99,7 @@
       if (values[0]<0 || values[1]<0 || (values[0]>0)===(values[1]>0)) { reject(start,refLine,'Debit and credit must be non-negative, with exactly one positive side',cursor); continue; }
       const detail=narration(details);
       if (!detail.bankReference) { reject(start,refLine,'Bank reference missing',cursor); continue; }
-      rows.push({...detail,date:posting,postingTime,valueDate,valueTime,moneyOut:values[0],moneyIn:values[1],balance:values[2],sourceRow:rows.length+1,sourceLine:start+1,accountingColumnsExplicit:true});
+      rows.push({...detail,date:posting,postingTime,valueDate,valueTime,moneyOut:values[0],moneyIn:values[1],balance:values[2],sourceType:'pdf',sourceRow:rows.length+1,sourceLine:start+1,accountingColumnsExplicit:true});
       i=cursor-1;
     }
     lines.forEach((line,index) => { if (/^REF\s*:/i.test(line) && !visitedRefs.has(index)) reject(Math.max(0,index-2),index,'REF block has no valid preceding posting date/time',index+3); });
@@ -204,5 +204,5 @@
     });
     return { valid: !errors.length, errors };
   }
-  global.SomapCrdb = { VERSION, amount, date, parsePages, logicalPage, extractPage, parseExtractedPages, category, validate, round };
+  global.SomapCrdb = { VERSION, amount, date, header, narration, parsePages, logicalPage, extractPage, parseExtractedPages, category, validate, round };
 })(window);

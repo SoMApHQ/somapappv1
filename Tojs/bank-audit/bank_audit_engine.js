@@ -323,7 +323,7 @@
     const income = transactions.filter((t) => t.moneyIn > 0);
     const expenses = transactions.filter((t) => t.moneyOut > 0);
     return {
-      parserVersion: global.SomapCrdb.VERSION,
+      parserVersion: options?.meta?.parserVersion || global.SomapCrdb.VERSION,
       validation, statement, discontinuities,
       generatedAt: Date.now(),
       settings,

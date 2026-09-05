@@ -100,7 +100,9 @@
     setText("sumGraduation", money(audit?.categoryTotals?.Graduation || 0));
     setText("sumReview", String(t.reviewItems || 0));
     setText("activeAuditTitle", audit ? `${audit.bankName || "Bank"} - ${audit.uploadedFileName || "Statement"}` : "No audit selected");
-    setText("activeAuditMeta", audit ? `${audit.statementPeriodFrom || "Period not set"} to ${audit.statementPeriodTo || "not set"} | ${audit.transactions?.length || 0} transactions` : "Upload or open a saved audit.");
+    const sourceLabels = { pdf: "PDF statement", xls: "XLS statement", xlsx: "XLSX statement", csv: "CSV statement" };
+    const sourceLabel = sourceLabels[audit?.sourceType] || "Statement";
+    setText("activeAuditMeta", audit ? `Source: ${sourceLabel} | File: ${audit.uploadedFileName || "Not reported"} | ${audit.statementPeriodFrom || "Period not set"} to ${audit.statementPeriodTo || "not set"} | ${audit.transactions?.length || 0} transactions` : "Upload or open a saved audit.");
   }
 
   function rowHtml(t) {
@@ -307,7 +309,10 @@
     $("parseBtn").disabled = true;
     $("parseBtn").textContent = "Parsing...";
     $("saveAuditBtn").disabled = true;
-    setStatus("Parsing statement. Please wait...", "warn");
+    const lowerName = file.name.toLowerCase();
+    if (lowerName.endsWith(".pdf")) setStatus("CRDB PDF detected. Using CRDB PDF transaction parser.", "warn");
+    else if (lowerName.endsWith(".xls") || lowerName.endsWith(".xlsx")) setStatus("Excel statement detected. Reading structured worksheet columns.", "warn");
+    else setStatus("Parsing statement. Please wait...", "warn");
     try {
       const parsed = await global.SomapBankAuditParser.parseFile(file);
       const analysis = global.SomapBankAuditEngine.analyze(parsed.rows, { settings: formSettings(), meta: parsed.meta });
@@ -357,7 +362,19 @@
     $('downloadPdfBtn').disabled = true;
     const meta=parsed?.meta || {}, rows=parsed?.rows || [];
     const counts=meta.counts || {};
-    const lines=[
+    const isXls = parsed?.sourceType === 'xls' || parsed?.sourceType === 'xlsx';
+    const lines = isXls ? [
+      'Parsing failed validation.','',
+      'Source type: ' + parsed.sourceType.toUpperCase(),
+      'Rows read: ' + rows.length,
+      'Credit rows read: ' + rows.filter(r=>r.moneyIn>0).length,
+      'Debit rows read: ' + rows.filter(r=>r.moneyOut>0).length,
+      'Extracted credits: ' + money(rows.reduce((n,r)=>n+r.moneyIn,0)),
+      'Statement credits: ' + money(meta.statement?.totalCredits),
+      'Extracted debits: ' + money(rows.reduce((n,r)=>n+r.moneyOut,0)),
+      'Statement debits: ' + money(meta.statement?.totalDebits),
+      ...errors
+    ] : [
       'Header credit total: ' + money(meta.statement?.totalCredits),
       'Extracted credit total: ' + money(rows.reduce((n,r)=>n+r.moneyIn,0)),
       'Header debit total: ' + money(meta.statement?.totalDebits),

@@ -53,17 +53,15 @@
     });
   }
 
-  async function parseExcel(file) {
+  async function parseExcel(file, sourceType) {
     if (!global.XLSX) throw new Error("Excel library is not loaded.");
+    if (!global.SomapXls) throw new Error("Excel worksheet parser is not loaded.");
     const buffer = await file.arrayBuffer();
-    const workbook = global.XLSX.read(buffer, { type: "array", cellDates: true });
-    const sheetName = workbook.SheetNames[0];
-    const rows = global.XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: "" });
-    return {
-      sourceType: "excel",
-      rows: normalizeObjectRows(rows),
-      meta: { sheetName, rawRows: rows.length }
-    };
+    const workbook = global.XLSX.read(buffer, { type: "array", cellDates: false, raw: true });
+    const parsed = global.SomapXls.parseWorkbook(workbook, sourceType);
+    const hash = await global.crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+    parsed.meta.sourceHash = Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, "0")).join("");
+    return { sourceType, rows: parsed.rows, meta: parsed.meta };
   }
 
   async function parseCsv(file) {
@@ -124,7 +122,8 @@
     const name = clean(file?.name).toLowerCase();
     if (!file) throw new Error("No file selected.");
     if (name.endsWith(".csv")) return parseCsv(file);
-    if (name.endsWith(".xlsx") || name.endsWith(".xls")) return parseExcel(file);
+    if (name.endsWith(".xlsx")) return parseExcel(file, "xlsx");
+    if (name.endsWith(".xls")) return parseExcel(file, "xls");
     if (name.endsWith(".pdf")) {
       const parsed = await parsePdf(file);
       const hash = await global.crypto.subtle.digest("SHA-256", await file.arrayBuffer());
