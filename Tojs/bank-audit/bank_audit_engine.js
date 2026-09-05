@@ -20,7 +20,7 @@
     studentAliases: {}
   };
 
-  const MONEY = new Intl.NumberFormat("en-TZ", { maximumFractionDigits: 2 });
+  const MONEY = new Intl.NumberFormat("en-TZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   function mergeSettings(settings) {
     const merged = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
@@ -46,6 +46,7 @@
   function parseMoney(value) {
     if (typeof value === "number" && Number.isFinite(value)) return value;
     const raw = String(value || "").trim();
+    if (/^\d{4}$/.test(raw) || /\d[./-]\d+[./-]/.test(raw)) return 0;
     if (!raw || /^[-–—]$/.test(raw)) return 0;
     const negative = /^\(|\)$/.test(raw) || /^-/.test(raw);
     const cleaned = raw
@@ -58,31 +59,9 @@
   }
 
   function parseDate(value) {
-    if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
-    if (typeof value === "number" && Number.isFinite(value)) {
-      if (value > 20000 && value < 80000) {
-        const utc = Math.round((value - 25569) * 86400 * 1000);
-        return new Date(utc);
-      }
-      const d = new Date(value);
-      if (!Number.isNaN(d.getTime())) return d;
-    }
-    const raw = cleanText(value);
-    if (!raw) return null;
-    const m = raw.match(/(\d{1,2})[\/\-. ]([A-Za-z]{3,}|\d{1,2})[\/\-. ](\d{2,4})/);
-    if (m) {
-      const day = Number(m[1]);
-      const monthRaw = m[2];
-      const year = Number(m[3].length === 2 ? `20${m[3]}` : m[3]);
-      const monthNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-      const month = Number.isFinite(Number(monthRaw))
-        ? Number(monthRaw) - 1
-        : monthNames.findIndex((x) => monthRaw.toLowerCase().startsWith(x));
-      const d = new Date(year, month, day);
-      if (!Number.isNaN(d.getTime())) return d;
-    }
-    const fallback = new Date(raw);
-    return Number.isNaN(fallback.getTime()) ? null : fallback;
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+    if (typeof value === 'number' && value > 20000 && value < 80000) return new Date(Math.round((value - 25569) * 86400000));
+    return global.SomapCrdb.date(value);
   }
 
   function ymd(date) {
@@ -159,13 +138,14 @@
     const moneyIn = Math.max(0, parseMoney(row.moneyIn ?? row.credit ?? row.deposit));
     const moneyOut = Math.max(0, parseMoney(row.moneyOut ?? row.debit ?? row.withdrawal));
     const desc = cleanText(row.description || row.narration || row.details || row.particulars);
-    const reference = cleanText(row.reference || row.ref || row.transactionId || row.chequeNo);
+    const reference = cleanText(row.bankReference || row.reference || row.ref || row.transactionId || row.chequeNo);
     const balance = parseMoney(row.balance);
     const chargeAmount = Math.max(0, parseMoney(row.chargeAmount || row.charges));
-    const [category, confidence] = categoryFor({ description: desc, reference, moneyIn, moneyOut }, settings);
+    const [category, confidence] = moneyIn > 0 ? [global.SomapCrdb.category(row.writtenPurpose ?? desc), global.SomapCrdb.category(row.writtenPurpose ?? desc) === "Unknown income" ? 0.35 : 0.9] : categoryFor({ description: desc, reference, moneyIn, moneyOut }, settings);
     const flags = [];
     if (!dateObj) flags.push("Date requires review");
     if (!desc) flags.push("Narration missing");
+    if (moneyOut > 0) flags.push("Purpose not stated in bank narration. Supporting documentation required for company records.");
     if (confidence < 0.5) flags.push("Purpose unclear");
     if (moneyOut >= settings.largeWithdrawalThreshold) flags.push("Large withdrawal - supporting evidence recommended");
     const dow = dayOfWeek(dateObj);
@@ -175,6 +155,7 @@
     if (category === "Bank charge") flags.push("Bank charge separated from principal");
 
     return {
+      ...row,
       id: row.id || `txn_${String(index + 1).padStart(4, "0")}`,
       sourceRow: row.sourceRow ?? index + 1,
       date: ymd(dateObj),
@@ -188,7 +169,7 @@
       chargeAmount,
       balance,
       counterpartyName: cleanText(row.counterpartyName),
-      detectedStudentName: isIncomingCategory(category) ? detectName(desc, settings) : "",
+      detectedStudentName: moneyIn > 0 ? (row.detectedStudentName ?? "") : "",
       detectedPurpose: category,
       category,
       confidence,
@@ -238,34 +219,23 @@
 
   function groupWithdrawalEvents(transactions) {
     const groups = new Map();
-    transactions.filter((t) => Number(t.moneyOut) > 0).forEach((t) => {
-      const key = [t.date || "unknown", t.reference || t.description.slice(0, 30), t.category].join("|");
-      if (!groups.has(key)) {
-        groups.set(key, {
-          id: `wd_${groups.size + 1}`,
-          date: t.date,
-          dateLabel: t.dateLabel,
-          dayOfWeek: t.dayOfWeek,
-          reference: t.reference,
-          description: t.description,
-          category: t.category,
-          amountWithdrawn: 0,
-          charges: 0,
-          totalImpact: 0,
-          transactions: [],
-          reviewFlags: []
-        });
-      }
-      const g = groups.get(key);
-      if (t.category === "Bank charge") g.charges += t.moneyOut;
-      else g.amountWithdrawn += t.moneyOut;
-      g.totalImpact += t.moneyOut;
-      g.transactions.push(t.id);
-      (t.reviewFlags || []).forEach((flag) => {
-        if (!g.reviewFlags.includes(flag)) g.reviewFlags.push(flag);
-      });
+    transactions.filter(t => t.moneyOut > 0).forEach(t => {
+      const key = t.bankReference && t.postingTime && t.recipient ? [t.bankReference,t.date,t.postingTime,t.recipient,t.recipientAccount].join('|') : t.id;
+      if (!groups.has(key)) groups.set(key, { ...t, id: 'wd_' + (groups.size + 1), transactions: [], rawLines: [], reviewFlags: [], amountWithdrawn: 0, charges: 0, totalImpact: 0,
+        businessPurpose: 'Not stated in bank narration', evidence: 'Required', reviewer: '', reviewStatus: 'Pending documentation' });
+      const g = groups.get(key); g.rawLines.push(t); g.transactions.push(t.id);
+      g.totalImpact = global.SomapCrdb.round(g.totalImpact + t.moneyOut);
+      g.reviewFlags = [...new Set([...g.reviewFlags, ...t.reviewFlags])];
     });
-    return Array.from(groups.values());
+    return [...groups.values()].map(g => {
+      // CRDB mobile transfers print tax, fee, then principal under one reference.
+      const mobileTriplet = g.rawLines.length === 3 && /TO (MPESA|AIRTEL|TIGOPESA|HALOPESA)/i.test(g.description);
+      g.amountWithdrawn = mobileTriplet ? g.rawLines[2].moneyOut : g.totalImpact;
+      g.charges = global.SomapCrdb.round(g.totalImpact - g.amountWithdrawn);
+      g.principalBasis = mobileTriplet ? 'CRDB mobile transfer: final line principal; preceding lines charges' : 'Unseparated debit; verify against supporting evidence';
+      g.reviewFlags.push('Purpose not stated in bank narration. Supporting documentation required for company records.');
+      return g;
+    });
   }
 
   function detectDuplicates(transactions) {
@@ -330,16 +300,31 @@
     const settings = mergeSettings(options?.settings);
     const transactions = (rawRows || [])
       .map((row, index) => normalizeTransaction(row, index, settings))
-      .filter((t) => t.date || t.description || t.moneyIn || t.moneyOut);
-    correctDirectionFromBalances(transactions, settings);
+      .filter((t) => t.date && (t.moneyIn > 0) !== (t.moneyOut > 0));
+    // Printed debit/credit columns are authoritative; balance gaps never change direction.
     detectDuplicates(transactions);
     const { totals, categoryTotals } = summarize(transactions);
     const withdrawalEvents = groupWithdrawalEvents(transactions);
+    const validation = global.SomapCrdb.validate(rawRows || [], options?.meta);
+    const statement = options?.meta?.statement || {};
+    const discontinuities = [];
+    transactions.forEach((t,i) => {
+      if (!i) return;
+      const expected = global.SomapCrdb.round(transactions[i-1].balance + t.moneyIn - t.moneyOut);
+      const difference = global.SomapCrdb.round(t.balance - expected);
+      if (Math.abs(difference) > 0.02) discontinuities.push({ transactionId: t.id, date: t.date, expected, displayed: t.balance, difference });
+    });
+    totals.totalCharges = global.SomapCrdb.round(withdrawalEvents.reduce((n,g) => n + g.charges,0));
+    totals.totalPrincipal = global.SomapCrdb.round(withdrawalEvents.reduce((n,g) => n + g.amountWithdrawn,0));
+    totals.withdrawalEventCount = withdrawalEvents.length;
+    totals.groupedEventCount = totals.creditsCount + withdrawalEvents.length;
+    Object.keys(totals).forEach(k => { if (typeof totals[k] === 'number') totals[k] = global.SomapCrdb.round(totals[k]); });
     const reviewItems = transactions.filter((t) => (t.reviewFlags || []).length);
     const income = transactions.filter((t) => t.moneyIn > 0);
     const expenses = transactions.filter((t) => t.moneyOut > 0);
     return {
-      parserVersion: "bank-audit-v1",
+      parserVersion: global.SomapCrdb.VERSION,
+      validation, statement, discontinuities,
       generatedAt: Date.now(),
       settings,
       totals,
@@ -349,7 +334,7 @@
       reviewItems,
       income,
       expenses,
-      findings: buildFindings(transactions, totals)
+      findings: [...buildFindings(transactions, totals), ...discontinuities.map(d => `Running-balance discontinuity on ${d.date}: expected ${formatTsh(d.expected)}, printed ${formatTsh(d.displayed)}, difference ${formatTsh(d.difference)}.`)]
     };
   }
 

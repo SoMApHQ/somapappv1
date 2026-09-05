@@ -256,6 +256,7 @@
   }
 
   async function saveAudit(audit, y) {
+    if (!audit.validation?.valid) throw new Error("Parsing failed validation; audit cannot be saved.");
     const ref = audit.id ? db().ref(`${auditPath(y)}/${audit.id}`) : db().ref(auditPath(y)).push();
     const user = authUser();
     const now = Date.now();
@@ -273,8 +274,28 @@
         email: user?.email || ""
       }
     };
-    await ref.set(payload);
-    return payload;
+    const result = await ref.transaction(existing => {
+      if (existing) return existing;
+      return payload;
+    });
+    if (!result.committed) throw new Error('Audit save was not committed.');
+    return result.snapshot.val();
+  }
+
+  async function reparseAudit(id, analysis, y) {
+    if (!analysis.validation?.valid) throw new Error('Parsing failed validation.');
+    const ref = db().ref(auditPath(y) + '/' + id);
+    const versionId = db().ref().push().key;
+    const user = authUser();
+    const result = await ref.transaction(previous => {
+      if (!previous) return;
+      const { history, ...snapshot } = previous;
+      return { ...previous, ...analysis, id, auditId:id,
+        history: { ...(history || {}), [versionId]:snapshot },
+        parserVersion:analysis.parserVersion, reparsedAt:Date.now(), reparsedBy:{uid:user?.uid || '', email:user?.email || ''} };
+    });
+    if (!result.committed) throw new Error('Audit no longer exists.');
+    return result.snapshot.val();
   }
 
   function reserveAuditId(y) {
@@ -317,6 +338,7 @@
     getAudit,
     saveAudit,
     reserveAuditId,
+    reparseAudit,
     updateAudit,
     uploadAuditBlob,
     uploadAuditFile,

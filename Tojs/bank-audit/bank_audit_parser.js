@@ -79,30 +79,6 @@
     };
   }
 
-  function splitPdfLine(line) {
-    const dateMatch = line.match(/\b(\d{1,2}[\/\-. ](?:\d{1,2}|[A-Za-z]{3,})[\/\-. ]\d{2,4})\b/);
-    if (!dateMatch) return null;
-    const numberMatches = Array.from(line.matchAll(/(?:TZS\s*)?-?\(?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?\)?/gi));
-    if (!numberMatches.length) return null;
-    const values = numberMatches.map((m) => ({ raw: m[0], index: m.index || 0, value: money(m[0]) }));
-    const balance = values.length >= 2 ? values[values.length - 1].value : 0;
-    const amount = values.length >= 2 ? values[values.length - 2].value : values[0].value;
-    const beforeAmount = line.slice(dateMatch.index + dateMatch[0].length, values[values.length >= 2 ? values.length - 2 : 0].index);
-    const afterDate = clean(beforeAmount.replace(/\b\d{1,2}[\/\-. ](?:\d{1,2}|[A-Za-z]{3,})[\/\-. ]\d{2,4}\b/g, ""));
-    const desc = afterDate || clean(line.slice(dateMatch.index + dateMatch[0].length));
-    const lower = line.toLowerCase();
-    const isDebit = /\b(debit|withdraw|cash|atm|charge|fee|dr)\b/.test(lower) && !/\bcredit|deposit|cr\b/.test(lower);
-    const isCredit = /\b(credit|deposit|cr)\b/.test(lower);
-    const sides = isDebit && !isCredit ? { moneyOut: Math.abs(amount), moneyIn: 0 } : { moneyIn: Math.abs(amount), moneyOut: 0 };
-    return {
-      date: dateMatch[1],
-      description: desc,
-      reference: (line.match(/\b(?:FT|TT|RRN|REF|TRX|TXN)[A-Z0-9/-]{4,}\b/i) || [])[0] || "",
-      balance,
-      ...sides
-    };
-  }
-
   async function ensurePdfJs() {
     if (global.pdfjsLib) return;
     await new Promise((resolve, reject) => {
@@ -130,37 +106,14 @@
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       const content = await page.getTextContent();
-      const items = (content.items || []).map((item) => ({
-        str: clean(item.str),
-        x: Number(item.transform?.[4] || 0),
-        y: Number(item.transform?.[5] || 0)
-      })).filter((item) => item.str);
-      items.sort((a, b) => Math.abs(b.y - a.y) > 2 ? b.y - a.y : a.x - b.x);
-      const lines = [];
-      items.forEach((item) => {
-        const current = lines[lines.length - 1];
-        if (!current || Math.abs(current.y - item.y) > 3) lines.push({ y: item.y, parts: [item] });
-        else current.parts.push(item);
-      });
-      pages.push(lines.map((line) => line.parts.sort((a, b) => a.x - b.x).map((p) => p.str).join(" ")).join("\n"));
+      pages.push(global.SomapCrdb.logicalPage(content.items || []));
     }
-    return { text: pages.join("\n"), pageCount: pdf.numPages };
+    return { text: pages.join("\n"), pages, pageCount: pdf.numPages };
   }
 
   async function parsePdf(file) {
     const extracted = await extractPdfText(file);
-    const rows = extracted.text
-      .split(/\n+/)
-      .map(clean)
-      .map(splitPdfLine)
-      .filter(Boolean)
-      .map((row, index) => ({ ...row, sourceRow: index + 1 }));
-    return {
-      sourceType: "pdf",
-      rows,
-      extractedText: extracted.text.slice(0, 5000),
-      meta: { pageCount: extracted.pageCount, rawRows: rows.length }
-    };
+    return global.SomapCrdb.parsePages(extracted.pages);
   }
 
   async function parseFile(file) {
@@ -168,7 +121,12 @@
     if (!file) throw new Error("No file selected.");
     if (name.endsWith(".csv")) return parseCsv(file);
     if (name.endsWith(".xlsx") || name.endsWith(".xls")) return parseExcel(file);
-    if (name.endsWith(".pdf")) return parsePdf(file);
+    if (name.endsWith(".pdf")) {
+      const parsed = await parsePdf(file);
+      const hash = await global.crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      parsed.meta.sourceHash = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2,"0")).join("");
+      return parsed;
+    }
     throw new Error("Unsupported file type. Upload PDF, Excel, or CSV.");
   }
 
