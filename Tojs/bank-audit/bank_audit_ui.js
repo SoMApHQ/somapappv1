@@ -11,7 +11,8 @@
     readOnly: false,
     students: [],
     diagnostics: null,
-    parsedFile: null
+    parsedFile: null,
+    activeCategory: null
   };
 
   const $ = (id) => document.getElementById(id);
@@ -152,8 +153,66 @@
     if (!el) return;
     const rows = Object.entries(audit?.categoryTotals || {});
     el.innerHTML = rows.length
-      ? rows.map(([name, total]) => `<div><span>${esc(name)}</span><strong>${money(total)}</strong></div>`).join("")
+      ? rows.map(([name, total]) => `<div class="${name === state.activeCategory ? "active-category" : ""}" data-category="${esc(name)}"><span>${esc(name)}</span><strong>${money(total)}</strong></div>`).join("")
       : "<p>No category totals yet.</p>";
+    el.querySelectorAll("[data-category]").forEach((card) => card.addEventListener("click", () => toggleCategoryDetail(card.dataset.category)));
+    renderCategoryDetail(audit);
+  }
+
+  function toggleCategoryDetail(category) {
+    state.activeCategory = state.activeCategory === category ? null : category;
+    renderCategoryTotals(state.activeAudit);
+  }
+
+  function renderCategoryDetail(audit) {
+    const el = $("categoryDetail");
+    if (!el) return;
+    const category = state.activeCategory;
+    if (!category) { el.hidden = true; el.innerHTML = ""; return; }
+    el.hidden = false;
+    const rows = (audit?.transactions || []).filter((t) => t.category === category);
+    const total = rows.reduce((n, t) => n + (t.moneyIn || t.moneyOut || 0), 0);
+    el.innerHTML = `
+      <div class="cd-head">
+        <h3>${esc(category)} — ${rows.length} payment${rows.length === 1 ? "" : "s"}, ${money(total)}</h3>
+        <button type="button" class="secondary" id="downloadCategoryBtn">Download this list</button>
+      </div>
+      <div class="table-wrap"><table><thead><tr>
+        <th>Date</th><th>Name</th><th>AB reference</th><th>Bank reference</th><th>Sender</th><th>Amount</th><th>Narration</th>
+      </tr></thead><tbody>${rows.length ? rows.map((t) => `<tr>
+        <td>${esc(t.dateLabel || t.date || "")}</td>
+        <td>${esc(t.detectedStudentName || t.counterpartyName || "Not stated")}</td>
+        <td>${esc(t.paymentReference || "Not stated")}</td>
+        <td>${esc(t.bankReference || t.reference || "")}</td>
+        <td>${esc(t.sender || "Not stated")}</td>
+        <td class="num">${money(t.moneyIn || t.moneyOut)}</td>
+        <td>${esc(t.writtenPurpose || t.description || "")}</td>
+      </tr>`).join("") : `<tr><td colspan="7" class="empty">No records.</td></tr>`}</tbody></table></div>
+    `;
+    labelCells();
+    $("downloadCategoryBtn")?.addEventListener("click", () => downloadCategoryList(audit, category, rows));
+  }
+
+  function downloadCategoryList(audit, category, rows) {
+    if (!global.XLSX) return toast("Export library not loaded. Refresh and try again.", "error");
+    const data = rows.map((t) => ({
+      Date: t.dateLabel || t.date || "",
+      Name: t.detectedStudentName || t.counterpartyName || "Not stated",
+      "AB Reference": t.paymentReference || "Not stated",
+      "Bank Reference": t.bankReference || t.reference || "",
+      Sender: t.sender || "Not stated",
+      Amount: t.moneyIn || t.moneyOut || 0,
+      Narration: t.writtenPurpose || t.description || ""
+    }));
+    const ws = global.XLSX.utils.json_to_sheet(data);
+    ws["!cols"] = [{ wch: 14 }, { wch: 26 }, { wch: 20 }, { wch: 20 }, { wch: 22 }, { wch: 14 }, { wch: 40 }];
+    const wb = global.XLSX.utils.book_new();
+    const sheetName = category.replace(/[\\/*?:[\]]/g, "-").slice(0, 31) || "Category";
+    global.XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    const safeName = category.replace(/[^\w]+/g, "_").slice(0, 60) || "category";
+    const period = [audit?.statementPeriodFrom, audit?.statementPeriodTo].filter(Boolean).join("_to_");
+    const fileName = `SoMAp_${safeName}_${audit?.bankName || "Bank"}_${period || audit?.year || ""}.xlsx`.replace(/\s+/g, "_");
+    global.XLSX.writeFile(wb, fileName);
   }
 
   function renderAudit(audit) {
@@ -226,7 +285,7 @@
 
   async function openAudit(id) {
     const audit = await global.SomapBankAuditStorage.getAudit(id, year());
-    if (audit) renderAudit(audit);
+    if (audit) { state.activeCategory = null; renderAudit(audit); }
   }
 
   async function downloadAuditPdf(id) {
@@ -334,9 +393,10 @@
         schoolLogoUrl: currentLogoPath()
       };
       const duplicate = state.audits.find(a => parsed.meta.sourceHash && a.parserMeta?.sourceHash === parsed.meta.sourceHash);
-      if (duplicate) { renderAudit(duplicate); setStatus('This original statement is already saved. Use Reparse Statement to create a new analysis version.', 'warn'); return; }
+      if (duplicate) { state.activeCategory = null; renderAudit(duplicate); setStatus('This original statement is already saved. Use Reparse Statement to create a new analysis version.', 'warn'); return; }
       state.parsed = audit;
       state.parsedFile = file;
+      state.activeCategory = null;
       renderAudit(audit);
       setStatus(`Parsed ${analysis.transactions.length} transaction(s). Review the preview, then save this audit session.`, analysis.transactions.length ? "ok" : "warn");
       $("saveAuditBtn").disabled = !analysis.validation.valid;
@@ -541,6 +601,7 @@
       global.somapYearContext.attachYearDropdown(select);
       select.addEventListener("change", async () => {
         state.activeAudit = null;
+        state.activeCategory = null;
         state.settings = await global.SomapBankAuditStorage.getSettings(year());
         fillSettings();
         await loadAudits();
