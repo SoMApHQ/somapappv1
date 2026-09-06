@@ -166,7 +166,10 @@
     for (const key of [...new Set([email.replace(/\./g, '_'), email.replace(/[@.]/g, '_')])]) {
       const profile = (await ctx.database.ref(`users/${key}`).once('value')).val();
       if (!profile) continue;
-      if (String(profile.role).toLowerCase() !== 'admin') return false;
+      // Same role source as the approvals-page access guard: some admins only carry
+      // 'role' in localStorage, not on the Firebase profile record.
+      const role = String(profile.role || global.localStorage?.getItem('role') || '').toLowerCase();
+      if (role !== 'admin') return false;
       const ids = new Set();
       const add = id => { if (typeof id === 'string' && id) ids.add(id.toLowerCase().replace(/_/g, '-')); };
       ['schoolId', 'schoolid', 'school', 'currentSchoolId', 'activeSchoolId'].forEach(k => add(profile[k]));
@@ -333,12 +336,15 @@
     return message ? `<div class="my-3 rounded border border-amber-500 p-3 text-sm">${esc(message)}</div>` : '';
   }
   async function autoReview(year) {
-    if (Number(year) < 2026) return;
+    // Returns a status object so callers (e.g. approvals.html) can show the user why
+    // nothing happened, instead of a silent no-op. Never throws.
+    if (Number(year) < 2026) return { ok: false, reason: 'year-not-supported' };
     try {
       const ctx = context(year);
-      if (!(authorize ? await authorize(ctx.schoolId) : await authenticatedAdmin(ctx))) return;
-      return await review(year);
-    } catch (err) { console.warn('Special plan review:', err.message); }
+      if (!(authorize ? await authorize(ctx.schoolId) : await authenticatedAdmin(ctx))) return { ok: false, reason: 'not-authorized' };
+      const counts = await review(year);
+      return { ok: true, counts };
+    } catch (err) { console.warn('Special plan review:', err.message); return { ok: false, reason: err.message }; }
   }
   let watchedKey = '';
   let unwatch = [];

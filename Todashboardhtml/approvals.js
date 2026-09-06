@@ -638,8 +638,35 @@
       yearContext.onYearChanged(handleYearChange);
     }
   }
+  function formatSpecialPlanCounts(counts) {
+    const labels = { compliant: 'Compliant', breached: 'Breached', queued: 'New requests', alreadyQueued: 'Already queued', alreadyReviewed: 'Already reviewed', skipped: 'Skipped' };
+    return Object.entries(counts).filter(([, n]) => typeof n === 'number').map(([key, n]) => `${labels[key] || key}: ${n}`).join(' · ')
+      + (counts.skippedDetails?.length ? ' — ' + counts.skippedDetails.slice(0, 5).map(row => `${row.student}: ${row.reason}`).join('; ') : '');
+  }
+  function runSpecialPlanAutoReview(year) {
+    if (!window.SomapSpecialPlans) return;
+    const resultEl = document.getElementById('specialPlanReviewResult');
+    window.SomapSpecialPlans.autoReview(year).then((result) => {
+      if (!result) return;
+      if (!result.ok) {
+        if (result.reason === 'year-not-supported') return; // Expected for years before 2026.
+        const reasonText = result.reason === 'not-authorized'
+          ? 'not authorised for this school/year'
+          : result.reason;
+        if (resultEl) resultEl.textContent = `Special plan review did not run: ${reasonText}.`;
+        console.warn('Special plan auto-review did not run:', reasonText);
+        return;
+      }
+      if (resultEl) resultEl.textContent = formatSpecialPlanCounts(result.counts);
+      if (result.counts.queued) toast(`Special plan review: ${result.counts.queued} student(s) queued for approval.`, 'warning');
+    }).catch((err) => {
+      console.warn('Special plan auto-review failed:', err.message);
+      if (resultEl) resultEl.textContent = `Special plan review failed: ${err.message}`;
+      toast(`Special plan review could not run: ${err.message}`, 'danger');
+    });
+  }
   async function loadAllData(options = {}) {
-    window.SomapSpecialPlans?.autoReview(state.selectedYear);
+    runSpecialPlanAutoReview(state.selectedYear);
     window.SomapSpecialPlans?.watchYear(state.selectedYear).catch(err => console.warn(err.message));
     const foreground = options.foreground !== false;
     const showForegroundLoader = foreground && !state.hasFirstLoadCompleted;
@@ -2881,9 +2908,9 @@
       button.disabled = true;
       try {
         const counts = await window.SomapSpecialPlans.review(state.selectedYear);
-        const labels = { compliant: 'Compliant', breached: 'Breached', queued: 'New requests', alreadyQueued: 'Already queued', alreadyReviewed: 'Already reviewed', skipped: 'Skipped' };
-        document.getElementById('specialPlanReviewResult').textContent = Object.entries(counts).filter(([, n]) => typeof n === 'number').map(([key, n]) => `${labels[key] || key}: ${n}`).join(' · ')
-          + (counts.skippedDetails?.length ? ' — ' + counts.skippedDetails.slice(0, 5).map(row => `${row.student}: ${row.reason}`).join('; ') : '');
+        document.getElementById('specialPlanReviewResult').textContent = formatSpecialPlanCounts(counts);
+        if (counts.queued) toast(`Special plan review: ${counts.queued} student(s) queued for approval.`, 'warning');
+        else toast('Special plan review complete. No new breaches found.', 'success');
       } catch (err) { toast(err.message, 'danger'); }
       finally { button.disabled = false; }
     });
