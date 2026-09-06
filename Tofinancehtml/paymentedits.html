@@ -12,7 +12,11 @@
   <!-- Firebase compat -->
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
+  <script src="../somapappv1multischool/js/context.js"></script>
+  <script src="../js/finance_dedupe.js"></script>
   <script src="../shared/finance_math.js"></script>
+  <script src="../js/special_plan_compliance.js"></script>
   <!-- Unified Finance Plans Service -->
   <script type="module" src="../js/financeplans.js"></script>
 
@@ -280,6 +284,7 @@
         <div class="flex flex-wrap gap-2">
           <button id="btnAddPlan" class="btn btn-primary"><i class="fa-solid fa-plus"></i> New Plan</button>
           <button id="btnRefresh" class="btn btn-ghost"><i class="fa-solid fa-rotate"></i> Refresh</button>
+          <a href="../Todashboardhtml/approvals.html" class="btn btn-ghost">Review Special Plans (Admin)</a>
         </div>
       </div>
       <div id="plansWrap" class="grid-mincard"></div>
@@ -551,10 +556,10 @@
       if (!schoolId || schoolId === 'socrates-school' || schoolId === 'default') return clean;
       return `schools/${schoolId}/${clean}`;
     }
-    const reader = (path) => db.ref(path).once('value').then((snap) => snap.val());
+    const reader = (path) => db.ref(scopedDataPath(path)).once('value').then((snap) => snap.val());
     const scopedReader = (path) => db.ref(scopedDataPath(path)).once('value').then((snap) => snap.val());
-    const writer = (path, payload) => db.ref(path).set(payload);
-    const updater = (path, payload) => db.ref(path).update(payload);
+    const writer = (path, payload) => db.ref(scopedDataPath(path)).set(payload);
+    const updater = (path, payload) => db.ref(scopedDataPath(path)).update(payload);
 
     function opSet(path, value) {
       return { op: 'set', path, value: value === undefined ? null : value };
@@ -613,7 +618,7 @@
       const operations = Array.isArray(change.operations) ? change.operations.filter((op) => op && op.path) : [];
       if (!operations.length) throw new Error('No config changes to queue.');
       const year = String(change.year || state.year || window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR);
-      const approvalRef = db.ref('approvalsPending').push();
+      const approvalRef = db.ref(scopedDataPath('approvalsPending')).push();
       const approvalId = approvalRef.key;
       const studentIdentity = change.studentId
         ? await getStudentApprovalIdentity(change.studentId, year)
@@ -632,6 +637,7 @@
         : rawSummary;
       await approvalRef.set({
         approvalId,
+        schoolId: resolveSchoolId(),
         sourceModule: 'financeconfig',
         source: 'Finance Config',
         status: 'pending',
@@ -673,7 +679,7 @@
         at: now(),
         by: currentUser()
       };
-      const ref = db.ref(`${pathHistory(year)}/${category}/${id}`).push();
+      const ref = db.ref(scopedDataPath(`${pathHistory(year)}/${category}/${id}`)).push();
       await ref.set(entry);
     }
 
@@ -726,8 +732,8 @@
     async function ensureYearScaffold(year) {
       try {
         const [feesSnap, plansSnap] = await Promise.all([
-          db.ref(pathFees(year)).once('value').catch(() => ({ val: () => null })),
-          db.ref(pathPlans(year)).once('value').catch(() => ({ val: () => null }))
+          db.ref(scopedDataPath(pathFees(year))).once('value').catch(() => ({ val: () => null })),
+          db.ref(scopedDataPath(pathPlans(year))).once('value').catch(() => ({ val: () => null }))
         ]);
         let fees = canonicalizeFees(feesSnap?.val() || {});
         let plans = plansSnap?.val() || {};
@@ -798,10 +804,10 @@
       });
 
         if (Object.keys(updates).length) {
-          await db.ref().update(updates);
+          await db.ref().update(Object.fromEntries(Object.entries(updates).map(([path, value]) => [scopedDataPath(path), value])));
           const [feesRefreshed, plansRefreshed] = await Promise.all([
-            db.ref(pathFees(year)).once('value').catch(() => ({ val: () => null })),
-            db.ref(pathPlans(year)).once('value').catch(() => ({ val: () => null }))
+            db.ref(scopedDataPath(pathFees(year))).once('value').catch(() => ({ val: () => null })),
+            db.ref(scopedDataPath(pathPlans(year))).once('value').catch(() => ({ val: () => null }))
           ]);
           fees = canonicalizeFees(feesRefreshed?.val() || {});
           plans = plansRefreshed?.val() || {};
@@ -890,7 +896,7 @@
                 <div>
                   <p class="font-semibold text-sm">${inst?.label || 'Installment'}</p>
                   <p class="text-[11px] text-slate-400">
-                    ${inst?.window?.from ? `Due ${String(inst.window.from[0]).padStart(2, '0')}/${String(inst.window.from[1]).padStart(2, '0')} â€“ ${String(inst.window.to?.[0] ?? '').padStart(2, '0')}/${String(inst.window.to?.[1] ?? '').padStart(2, '0')}` : 'No window set'}
+                    ${inst?.window?.from ? `Due ${String(inst.window.from[0]).padStart(2, '0')}/${String(inst.window.from[1]).padStart(2, '0')} - ${String(inst.window.to?.[0] ?? '').padStart(2, '0')}/${String(inst.window.to?.[1] ?? '').padStart(2, '0')}` : 'No window set'}
                   </p>
                 </div>
                 <div class="text-right space-y-1">
@@ -1025,6 +1031,8 @@
         const hint = $('#somapYearHint');
         const year = String(window.somapYearContext?.getSelectedYear() || SOMAP_DEFAULT_YEAR);
         state.year = year;
+        window.financePlansService?.invalidateCache?.(year);
+        window.SomapSpecialPlans.autoReview(year);
         if (hint) hint.textContent = year;
         $('#plansWrap').innerHTML = '<div class="text-sm text-slate-300">Loading…</div>';
         $('#classesWrap').innerHTML = '<div class="text-sm text-slate-300">Loading…</div>';
@@ -1189,7 +1197,7 @@
         const fromParts = ($('#instFrom').value || '').split('-').map((s) => Number(s.trim()));
         const toParts = ($('#instTo').value || '').split('-').map((s) => Number(s.trim()));
         const path = `${pathFees(year)}/${className}/installments`;
-        const ref = db.ref(path).push();
+        const ref = db.ref(scopedDataPath(path)).push();
         const id = ref.key;
         const payload = {
           label,
@@ -1853,9 +1861,11 @@
           
           const effectiveIsMonthly = isMonthlyPlanValue(effectivePlanId, effectivePlan?.name, planName);
           const hasCustomSchedule = !effectiveIsMonthly && customSchedule && Array.isArray(customSchedule.rows) && customSchedule.rows.length > 0;
+          const complianceNotice = await window.SomapSpecialPlans.notice(year, id).catch(() => '');
           
           return `
             <article class="glass-panel-light border border-slate-700/45 space-y-3" data-student="${id}">
+              ${complianceNotice}
               <div class="flex items-start justify-between gap-3">
                 <div>
                   <h3 class="text-sm font-semibold text-slate-100">${full || adm}</h3>
@@ -1942,7 +1952,7 @@
 
     async function setOverrideFee(studentId) {
       const year = state.year;
-      const student = await db.ref(`students/${studentId}`).once('value').then(s => s.val());
+      const student = await scopedReader(`students/${studentId}`);
       const studentClass = student?.classLevel || student?.className || '';
       const classFee = await window.financePlansService.getClassFeePerYear(studentClass);
       const currentOverride = await window.financePlansService.getStudentFee(studentId);
@@ -1992,7 +2002,7 @@
 
     async function setOverridePlan(studentId) {
       const year = state.year;
-      const student = await db.ref(`students/${studentId}`).once('value').then(s => s.val());
+      const student = await scopedReader(`students/${studentId}`);
       const studentClass = student?.classLevel || student?.className || '';
       const classPlanId = await window.financePlansService.getClassDefaultPlanId(studentClass);
       const classPlan = classPlanId ? (await window.financePlansService.getPlan(classPlanId)) : null;
@@ -2273,7 +2283,7 @@
       if (action === 'override-custom') setOverrideCustom(studentId);
       if (action === 'override-monthly') {
         (async () => {
-          const studentData = await db.ref(`students/${studentId}`).once('value').then(s => s.val()).catch(() => null);
+          const studentData = await scopedReader(`students/${studentId}`).catch(() => null);
           const studentName = studentData ? `${studentData.firstName || ''} ${studentData.middleName || ''} ${studentData.lastName || ''}`.replace(/\s+/g, ' ').trim() : studentId;
           const year = state.year || window.somapYearContext?.getSelectedYear() || SOMAP_DEFAULT_YEAR;
           const studentClass = await window.financePlansService.resolveClassForYearSimple(studentId, year);
@@ -2404,7 +2414,7 @@
           : `Target: Student ${studentName || studentId} · Year ${year}`;
         if (attachTo === 'student' && studentId && window.financePlansService) {
           try {
-            const studentClass = (await db.ref(`students/${studentId}`).once('value')).val()?.classLevel || '';
+            const studentClass = (await scopedReader(`students/${studentId}`))?.classLevel || '';
             const classPlanId = studentClass ? await window.financePlansService.getClassDefaultPlanId(studentClass) : null;
             const overridePlanId = await window.financePlansService.getStudentPlan(studentId);
             const effectivePlanId = overridePlanId || classPlanId;

@@ -474,6 +474,7 @@
     renderHistory();
     schedulePendingRebuild();
     if (changed) {
+      window.SomapSpecialPlans?.watchYear(normalized).catch(err => console.warn(err.message));
       setTimeout(() => {
         loadHistorySnapshot().catch((err) => console.warn('Approvals: history refresh failed', err));
         loadSummaries().catch((err) => console.warn('Approvals: summary refresh failed', err));
@@ -638,6 +639,8 @@
     }
   }
   async function loadAllData(options = {}) {
+    window.SomapSpecialPlans?.autoReview(state.selectedYear);
+    window.SomapSpecialPlans?.watchYear(state.selectedYear).catch(err => console.warn(err.message));
     const foreground = options.foreground !== false;
     const showForegroundLoader = foreground && !state.hasFirstLoadCompleted;
     if (state.loadInFlight) return state.loadInFlight;
@@ -1367,7 +1370,7 @@
       ? buildTransportChangeRows(entries).slice(0, 18)
       : entries.slice(0, 6).map((entry) => ({
         action: entry.action || 'change',
-        detail: entry.category || '',
+        detail: record.modulePayload?.compliance ? 'Fee, plan and custom schedule' : entry.category || '',
         before: summarizeConfigValue(entry.before),
         after: summarizeConfigValue(entry.after),
       }));
@@ -1378,7 +1381,7 @@
         <td class="border-b border-slate-700/40 px-3 py-2 text-slate-300">${escapeHtml(entry.before)}</td>
         <td class="border-b border-slate-700/40 px-3 py-2 text-slate-100">${escapeHtml(entry.after)}</td>
       </tr>`).join('');
-    return `
+    return (window.SomapSpecialPlans?.details(record) || '') + `
       <div class="rounded-2xl border border-slate-600/40 bg-slate-900/40">
         <div class="border-b border-slate-600/40 px-4 py-3 text-xs uppercase tracking-[0.3em] text-slate-400/70">
           Requested Change
@@ -1683,6 +1686,12 @@
     }).then((result) => {
       if (!result.isConfirmed) return;
       (async () => {
+        if (record.modulePayload?.compliance) {
+          await window.SomapSpecialPlans.decide(record, 'rejected', actorEmail());
+          toast('Special plan review rejected. Agreement retained.', 'warning');
+          hideDetailModal();
+          return;
+        }
         if (record.sourceModule === 'admission') {
           const year = String(record.modulePayload?.year || record.forYear || state.selectedYear || getContextYear());
           const draftId = record.modulePayload?.admissionDraftId;
@@ -1721,6 +1730,13 @@
   }
 
   async function processApproval(record) {
+    if (record.modulePayload?.compliance) {
+      await window.SomapSpecialPlans.decide(record, 'approved', actorEmail());
+      toast('Special plan review approved. Class defaults restored; payments preserved.', 'success');
+      hideDetailModal();
+      await loadSummaries();
+      return;
+    }
     // Captured before any of the awaited commit work below, so that filing
     // this approval into history afterwards (moveApprovalToHistory) targets
     // the same school this approval started on, even if the active-school
@@ -1999,8 +2015,11 @@
     });
   }
 
-  async function commitFinanceConfig(record, targetYear) {
+  async function commitFinanceConfig(record, targetYear, agreementLocked = false) {
     if (record.sourceModule !== 'financeconfig') return;
+    if (!agreementLocked && window.SomapSpecialPlans) {
+      return window.SomapSpecialPlans.withConfigurationLock(record, targetYear, () => commitFinanceConfig(record, targetYear, true));
+    }
     const payload = record.modulePayload || {};
     const operations = Array.isArray(payload.operations) ? payload.operations : [];
     if (!operations.length) throw new Error('Missing finance config operations.');
@@ -2853,6 +2872,21 @@
 
   function init() {
     attachListeners();
+    window.SomapSpecialPlans.setAuthorizer(async (schoolId) => {
+      if (schoolId !== resolveSchoolId() || !auth.currentUser) return false;
+      return guardAccess(auth.currentUser);
+    });
+    document.getElementById('reviewSpecialPlans')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const counts = await window.SomapSpecialPlans.review(state.selectedYear);
+        const labels = { compliant: 'Compliant', breached: 'Breached', queued: 'New requests', alreadyQueued: 'Already queued', alreadyReviewed: 'Already reviewed', skipped: 'Skipped' };
+        document.getElementById('specialPlanReviewResult').textContent = Object.entries(counts).filter(([, n]) => typeof n === 'number').map(([key, n]) => `${labels[key] || key}: ${n}`).join(' · ')
+          + (counts.skippedDetails?.length ? ' — ' + counts.skippedDetails.slice(0, 5).map(row => `${row.student}: ${row.reason}`).join('; ') : '');
+      } catch (err) { toast(err.message, 'danger'); }
+      finally { button.disabled = false; }
+    });
     auth.onAuthStateChanged(async (user) => {
       const allowed = await guardAccess(user);
       if (!allowed) return;

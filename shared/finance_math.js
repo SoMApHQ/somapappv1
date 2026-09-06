@@ -1566,7 +1566,13 @@ function buildFinanceStudents(
     Object.keys(approvalsCache).forEach((k) => delete approvalsCache[k]);
   }
 
+  global.SomapFinanceComplianceMath = { buildFinanceStudentsForCompliance: buildFinanceStudents, computeStudentFinancials };
+  // Finance already owns its roster/loading flow. Loading the pure adapter must not
+  // activate optional shared-roster fallbacks on that page.
+  if (global.document?.currentScript?.hasAttribute('data-compliance-only')) return;
   const api = {
+    // Pure adapter for scoped compliance inputs; performs no database reads.
+    buildFinanceStudentsForCompliance: buildFinanceStudents,
     loadStudentFinance,
     loadStudentFinanceAtCutoff,
     loadSchoolTotals,
