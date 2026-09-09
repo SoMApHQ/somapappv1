@@ -402,6 +402,9 @@
       const name = String(book && book.fileName || '').toLowerCase();
       return type === 'docx' || mime.includes('wordprocessingml') || name.endsWith('.docx');
     }
+    function isGoogleDocumentUrl(value){
+      return /^https:\/\/docs\.google\.com\/document\/d\//i.test(String(value || ''));
+    }
     function normalizeEmailKey(email){ if(!email) return ''; return email.replace(/\./g,'_'); } // matches your DB keys
     function activeStatus(book){ return String(book && book.status ? book.status : 'active').toLowerCase(); }
     function isHiddenBook(book){ const s = activeStatus(book); return s === 'archived' || s === 'deleted'; }
@@ -1459,6 +1462,7 @@
           </div>
           <div class="manager-actions">
              <a class="chip" href="${escapeHtml(bookUrl(book))}" target="_blank">Open</a>
+             ${isWordBookRecord(book) && !isGoogleDocumentUrl(bookUrl(book)) ? `<button class="chip" data-action="migrateWord" data-id="${escapeHtml(id)}">Make Browser Reading Copy</button>` : ''}
              ${isWordBookRecord(book) ? `<button class="chip" data-action="protectWord" data-id="${escapeHtml(id)}">Disable Word Download</button>` : ''}
              <button class="chip" data-action="replace" data-id="${escapeHtml(id)}">Replace</button>
             ${isArchived ? `<span class="chip">Hidden from SoMAp</span>` : `<button class="chip" data-action="archive" data-id="${escapeHtml(id)}">Archive / Hide</button>`}
@@ -1487,6 +1491,7 @@
           if (action === 'delete') await deleteWholeBook(entry);
            if (action === 'deletePrevious') await chooseAndDeletePreviousAsset(entry);
            if (action === 'protectWord') await protectWordBook(entry);
+           if (action === 'migrateWord') await migrateWordBook(entry);
         } catch (error) {
           console.error(error);
           showError(error.message || String(error));
@@ -1534,6 +1539,58 @@
       await firebase.database().ref(`books/${entry.id}`).update(protectedBook);
       await writeClassBookIndexes(entry.id, protectedBook, book);
       showSuccess(`Word download disabled for <strong>${escapeHtml(book.title || entry.id)}</strong>.`);
+      await loadBookManager();
+    }
+
+    async function migrateWordBook(entry){
+      const book = entry.book || {};
+      const sourceUrl = bookUrl(book);
+      if (!sourceUrl) throw new Error('This Word book has no source file URL. Replace it using Upload Book.');
+      const ok = await confirmDanger({
+        title: 'Make browser reading copy',
+        body: `Create a Google Document reading copy of <strong>${escapeHtml(book.title || entry.id)}</strong>? The original Word file will be kept, but learners will read the browser copy.`,
+        requiredText: '',
+        buttonText: 'Create Reading Copy'
+      });
+      if (!ok) return;
+      showMessage(el('<div class="small">Creating a browser-readable copy of the Word book...</div>'));
+      const response = await fetch(sourceUrl);
+      if (!response.ok) throw new Error(`Could not retrieve the Word book (HTTP ${response.status}). Please use Replace instead.`);
+      const blob = await response.blob();
+      const sourceName = book.fileName || `${book.title || 'Book'}.docx`;
+      const wordFile = new File([blob], /\.docx$/i.test(sourceName) ? sourceName : `${sourceName}.docx`, {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        lastModified: Date.now()
+      });
+      const accessToken = await requestDriveAccessToken();
+      const driveData = await uploadBookFileToDrive(accessToken, wordFile, {
+        title: book.title || 'Book',
+        className: book.class || '',
+        subject: book.subject || '',
+        year: getBookYear(book)
+      });
+      const migratedBook = {
+        ...book,
+        url: driveData.driveWebViewLink,
+        storageProvider: 'google_drive',
+        driveFileId: driveData.driveFileId,
+        driveFolderId: driveData.driveFolderId,
+        driveWebViewLink: driveData.driveWebViewLink,
+        driveWebContentLink: driveData.driveWebContentLink,
+        driveDownloadLink: '',
+        fileName: driveData.fileName,
+        fileSize: driveData.fileSize,
+        mimeType: driveData.mimeType,
+        primary_file_type: 'docx',
+        convertedFromUrl: sourceUrl,
+        convertedAt: Date.now(),
+        updatedAt: Date.now(),
+        updatedBy: currentUserKey(),
+        updatedByEmail: currentUserEmail()
+      };
+      await firebase.database().ref(`books/${entry.id}`).update(migratedBook);
+      await writeClassBookIndexes(entry.id, migratedBook, book);
+      showSuccess(`Browser reading copy created for <strong>${escapeHtml(book.title || entry.id)}</strong>.`);
       await loadBookManager();
     }
 
