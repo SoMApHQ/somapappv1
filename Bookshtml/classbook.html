@@ -96,6 +96,8 @@
     /* Maintain A4 aspect when scaling to container width */
     .page-inner { position:relative; margin:0 auto; width:min(96%, 1000px); background:#111827; border:1px solid #1f2937; border-radius:12px; box-shadow: 0 10px 24px rgba(0,0,0,.25); overflow:hidden; }
     .page-canvas { display:block; width:100%; height:auto; }
+    .text-book { width:min(96%, 900px); margin:18px auto; padding:clamp(20px,4vw,48px); background:#fff; color:#172033; border-radius:12px; line-height:1.75; font-family:Georgia, 'Times New Roman', serif; font-size:clamp(1rem, 2.4vw, 1.2rem); white-space:pre-wrap; user-select:text; -webkit-user-select:text; }
+    .text-book-title { margin:0 0 20px; font-family:Inter,system-ui,Arial; font-size:1.35rem; font-weight:900; color:#312e81; }
 
     /* Watermarks */
     .wm-overlay { pointer-events:none; position:absolute; inset:0; display:grid; place-items:center; opacity:.08; color:#fff; font-weight:900; font-size:7vw; transform:rotate(-16deg); }
@@ -603,7 +605,7 @@ async function fetchBooks(cls){
     </div>
 
     <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
-       <button class="read-btn book-read-btn" style="flex:1" data-url="${url}" data-title="${escapeHtml(t)}" data-file-type="${fileType}">
+       <button class="read-btn book-read-btn" style="flex:1" data-id="${escapeHtml(id)}" data-url="${url}" data-title="${escapeHtml(t)}" data-file-type="${fileType}">
          <i class="fa fa-book-open mr-1"></i>Read Book
        </button>
        ${downloadUrl ? `<a href="${downloadUrl}" download class="read-btn"
@@ -619,7 +621,7 @@ async function fetchBooks(cls){
 
     grid.querySelectorAll('.book-read-btn').forEach(btn=>{
       btn.addEventListener('click', ()=>{
-        openViewer(btn.getAttribute('data-url'), btn.getAttribute('data-title'), btn.getAttribute('data-file-type'));
+        openViewer(btn.getAttribute('data-url'), btn.getAttribute('data-title'), btn.getAttribute('data-file-type'), btn.getAttribute('data-id'));
       });
     });
   }
@@ -689,20 +691,51 @@ async function fetchBooks(cls){
     document.querySelectorAll('.wm-line').forEach(el=> el.textContent = `SoMAp • ${who} • ${now}`);
   }
 
-  async function openViewer(rawUrl, title, declaredFileType){
+  async function openWordTextBook(bookId, title){
+    titleEl.textContent = title || 'Book';
+    viewer.classList.add('show');
+    document.body.style.overflow = 'hidden';
+    pagesEl.innerHTML = '';
+    railEl.innerHTML = '';
+    pageRecords = new Map();
+    activeDoc = { type:'text' };
+    try {
+      const snap = await db.ref(`book_texts/${bookId}`).once('value');
+      const record = snap.val() || {};
+      const text = String(record.text || '').trim();
+      if (!text) throw new Error('No extracted Word text is available for this book.');
+      const article = document.createElement('article');
+      article.className = 'text-book';
+      const heading = document.createElement('h3');
+      heading.className = 'text-book-title';
+      heading.textContent = title || record.title || 'Book';
+      const content = document.createElement('div');
+      content.textContent = text;
+      article.append(heading, content);
+      pagesEl.appendChild(article);
+    } catch (error) {
+      const message = document.createElement('div');
+      message.className = 'text-book';
+      message.textContent = 'This older Word book has no saved reading text yet. Please replace it once using Upload Book: select a PDF as the main book and add the Word file as the optional lesson-notes source. New Word uploads save the readable text automatically.';
+      pagesEl.appendChild(message);
+      console.warn('Word book text unavailable', error);
+    }
+    [zinBtn, zoutBtn, rotBtn, fitBtn, fitPageBtn, clarityBtn].forEach(button => { button.disabled = true; });
+  }
+
+  async function openViewer(rawUrl, title, declaredFileType, bookId){
     const url = (rawUrl||'').trim(); if (!url) return;
     const fileType = String(declaredFileType || '').toLowerCase();
+    // Word books are read from the text captured by SoMAp during upload. This
+    // works on every browser and does not expose the original Word file.
+    if (fileType === 'docx' || isDocx(url)) {
+      await openWordTextBook(bookId, title);
+      return;
+    }
     // Drive opens its web reader in the browser. No Drive app is required.
     // This is intentionally a view link, never the download link.
     if (/drive\.google\.com|googleusercontent\.com/i.test(url)) {
       window.open(url, '_blank', 'noopener');
-      return;
-    }
-    // Non-Drive DOCX files cannot be rendered by PDF.js. Office's web viewer
-    // displays them in a normal browser tab rather than downloading them.
-    if (fileType === 'docx' || isDocx(url)) {
-      const officeViewer = `https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(url)}`;
-      window.open(officeViewer, '_blank', 'noopener');
       return;
     }
     titleEl.textContent = title || 'Book';
@@ -746,6 +779,7 @@ async function fetchBooks(cls){
     if (observer) { observer.disconnect(); observer = null; }
     pageRecords.forEach(rec=> rec.renderTask && rec.renderTask.cancel?.());
     activeDoc = null; pageRecords.clear();
+    [zinBtn, zoutBtn, rotBtn, fitBtn, fitPageBtn, clarityBtn].forEach(button => { button.disabled = false; });
   }
 
   // ===== PDF: skeleton + lazy rendering =====
