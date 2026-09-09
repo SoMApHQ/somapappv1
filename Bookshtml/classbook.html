@@ -96,7 +96,6 @@
     /* Maintain A4 aspect when scaling to container width */
     .page-inner { position:relative; margin:0 auto; width:min(96%, 1000px); background:#111827; border:1px solid #1f2937; border-radius:12px; box-shadow: 0 10px 24px rgba(0,0,0,.25); overflow:hidden; }
     .page-canvas { display:block; width:100%; height:auto; }
-    .document-frame { display:block; width:100%; height:100%; min-height:72vh; border:0; background:#fff; }
 
     /* Watermarks */
     .wm-overlay { pointer-events:none; position:absolute; inset:0; display:grid; place-items:center; opacity:.08; color:#fff; font-weight:900; font-size:7vw; transform:rotate(-16deg); }
@@ -404,15 +403,6 @@
 
   function isPdf(url){ return /\.pdf(\?|#|$)/i.test(url||''); }
   function isDocx(url){ return /\.docx(\?|#|$)/i.test(url||''); }
-  function driveFileIdFrom(value){
-    const url = String(value || '');
-    // Older uploads stored only a Drive "view" or "open?id=" link. Recover
-    // the ID so their actual file, rather than Google's unembeddable page,
-    // is sent to the browser reader.
-    const pathMatch = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
-    if (pathMatch) return pathMatch[1];
-    try { return new URL(url).searchParams.get('id') || ''; } catch (_e) { return ''; }
-  }
   function bookFileType(book){
     const declared = String(book?.primary_file_type || '').toLowerCase();
     const mime = String(book?.mimeType || '').toLowerCase();
@@ -591,7 +581,6 @@ async function fetchBooks(cls){
       const subClass = subjectClass(s);
 
       const url = b.url || b.driveWebViewLink || b.cloudinaryUrl || '';
-      const driveFileId = b.driveFileId || driveFileIdFrom(url);
       // A Drive viewer URL does not include .pdf/.docx. Always use the stored
       // type, otherwise a Word book is incorrectly sent to the image renderer.
       const fileType = bookFileType(b);
@@ -614,7 +603,7 @@ async function fetchBooks(cls){
     </div>
 
     <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
-       <button class="read-btn book-read-btn" style="flex:1" data-url="${url}" data-drive-id="${escapeHtml(driveFileId)}" data-title="${escapeHtml(t)}" data-file-type="${fileType}">
+       <button class="read-btn book-read-btn" style="flex:1" data-url="${url}" data-title="${escapeHtml(t)}" data-file-type="${fileType}">
          <i class="fa fa-book-open mr-1"></i>Read Book
        </button>
        ${downloadUrl ? `<a href="${downloadUrl}" download class="read-btn"
@@ -630,7 +619,7 @@ async function fetchBooks(cls){
 
     grid.querySelectorAll('.book-read-btn').forEach(btn=>{
       btn.addEventListener('click', ()=>{
-        openViewer(btn.getAttribute('data-url'), btn.getAttribute('data-title'), btn.getAttribute('data-file-type'), btn.getAttribute('data-drive-id'));
+        openViewer(btn.getAttribute('data-url'), btn.getAttribute('data-title'), btn.getAttribute('data-file-type'));
       });
     });
   }
@@ -700,38 +689,20 @@ async function fetchBooks(cls){
     document.querySelectorAll('.wm-line').forEach(el=> el.textContent = `SoMAp • ${who} • ${now}`);
   }
 
-  function googleDocumentViewerUrl(rawUrl, driveFileId){
-    const sourceUrl = driveFileId
-      ? `https://drive.google.com/uc?export=download&id=${encodeURIComponent(driveFileId)}`
-      : rawUrl;
-    return `https://docs.google.com/gview?embedded=1&url=${encodeURIComponent(sourceUrl)}`;
-  }
-
-  function showEmbeddedDocument(rawUrl, title, driveFileId){
-    titleEl.textContent = title || 'Book';
-    viewer.classList.add('show');
-    document.body.style.overflow = 'hidden';
-    pagesEl.innerHTML = '';
-    railEl.innerHTML = '';
-    pageRecords = new Map();
-    activeDoc = { type:'embedded' };
-    const frame = document.createElement('iframe');
-    frame.className = 'document-frame';
-    frame.title = `${title || 'Book'} reader`;
-    frame.allow = 'fullscreen';
-    frame.src = googleDocumentViewerUrl(rawUrl, driveFileId);
-    pagesEl.appendChild(frame);
-    // Page/image controls do not apply to the browser document viewer.
-    [zinBtn, zoutBtn, rotBtn, fitBtn, fitPageBtn, clarityBtn].forEach(button => { button.disabled = true; });
-  }
-
-  async function openViewer(rawUrl, title, declaredFileType, driveFileId){
+  async function openViewer(rawUrl, title, declaredFileType){
     const url = (rawUrl||'').trim(); if (!url) return;
     const fileType = String(declaredFileType || '').toLowerCase();
-    // The browser viewer works on phones and computers without a Drive app.
-    // It also prevents a Read action from navigating directly to a download URL.
-    if (fileType === 'docx' || isDocx(url) || /drive\.google\.com|googleusercontent\.com/i.test(url)) {
-      showEmbeddedDocument(url, title, driveFileId);
+    // Drive opens its web reader in the browser. No Drive app is required.
+    // This is intentionally a view link, never the download link.
+    if (/drive\.google\.com|googleusercontent\.com/i.test(url)) {
+      window.open(url, '_blank', 'noopener');
+      return;
+    }
+    // Non-Drive DOCX files cannot be rendered by PDF.js. Office's web viewer
+    // displays them in a normal browser tab rather than downloading them.
+    if (fileType === 'docx' || isDocx(url)) {
+      const officeViewer = `https://view.officeapps.live.com/op/view.aspx?src=${encodeURIComponent(url)}`;
+      window.open(officeViewer, '_blank', 'noopener');
       return;
     }
     titleEl.textContent = title || 'Book';
@@ -775,7 +746,6 @@ async function fetchBooks(cls){
     if (observer) { observer.disconnect(); observer = null; }
     pageRecords.forEach(rec=> rec.renderTask && rec.renderTask.cancel?.());
     activeDoc = null; pageRecords.clear();
-    [zinBtn, zoutBtn, rotBtn, fitBtn, fitPageBtn, clarityBtn].forEach(button => { button.disabled = false; });
   }
 
   // ===== PDF: skeleton + lazy rendering =====
