@@ -395,6 +395,12 @@
       if (type === 'pdf' || url.includes('.pdf')) return 'PDF book';
       return 'Book file';
     }
+    function isWordBookRecord(book){
+      const type = String(book && book.primary_file_type || '').toLowerCase();
+      const mime = String(book && book.mimeType || '').toLowerCase();
+      const name = String(book && book.fileName || '').toLowerCase();
+      return type === 'docx' || mime.includes('wordprocessingml') || name.endsWith('.docx');
+    }
     function normalizeEmailKey(email){ if(!email) return ''; return email.replace(/\./g,'_'); } // matches your DB keys
     function activeStatus(book){ return String(book && book.status ? book.status : 'active').toLowerCase(); }
     function isHiddenBook(book){ const s = activeStatus(book); return s === 'archived' || s === 'deleted'; }
@@ -431,10 +437,12 @@
         storageProvider: book.storageProvider || (book.driveFileId ? 'google_drive' : 'cloudinary'),
         driveFileId: book.driveFileId || '',
         driveWebViewLink: book.driveWebViewLink || '',
-        driveDownloadLink: book.driveDownloadLink || '',
+        // Do not publish a Word download URL in the class-book index.
+        driveDownloadLink: String(book.primary_file_type || '').toLowerCase() === 'docx' ? '' : (book.driveDownloadLink || ''),
         fileName: book.fileName || '',
         fileSize: book.fileSize || 0,
         mimeType: book.mimeType || '',
+        primary_file_type: book.primary_file_type || '',
         uploadedAt: book.uploadedAt || Date.now(),
         updatedAt: book.updatedAt || Date.now(),
         year: getBookYear(book),
@@ -792,6 +800,15 @@
       return driveApiJson(accessToken, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size,webViewLink,webContentLink`);
     }
 
+    async function preventDriveDownload(accessToken, fileId){
+      // Word files are lesson-note sources and must remain read-only. This
+      // disables Drive's download, print and copy actions for readers.
+      return driveApiJson(accessToken, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,copyRequiresWriterPermission`, {
+        method: 'PATCH',
+        body: JSON.stringify({ copyRequiresWriterPermission: true })
+      });
+    }
+
     function driveDownloadUrl(fileId){
       return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
     }
@@ -806,6 +823,7 @@
         description: `SoMAp book upload: ${details.title || file.name}`
       }, onProgress);
       const shared = await shareDriveFileByLink(accessToken, uploaded.id);
+      if (isDocxFile(file)) await preventDriveDownload(accessToken, shared.id);
       return {
         storageProvider: 'google_drive',
         driveFileId: shared.id,
@@ -1150,7 +1168,8 @@
           cloudinary_public_id: publicId,
           word_url: wordUploadData ? (wordUploadData.driveWebViewLink || wordUploadData.secure_url || wordUploadData.url || '') : '',
           word_drive_file_id: wordUploadData ? (wordUploadData.driveFileId || '') : '',
-          word_drive_download_link: wordUploadData ? (wordUploadData.driveDownloadLink || '') : '',
+          // Never expose a downloadable Word source in public book metadata.
+          word_drive_download_link: '',
           word_public_id: wordUploadData ? (wordUploadData.public_id || '') : '',
           word_asset_id: wordUploadData ? (wordUploadData.asset_id || '') : '',
           word_file_name: selectedWordFile ? selectedWordFile.name : '',
@@ -1434,8 +1453,9 @@
             <div class="small muted">Book ID: <code>${escapeHtml(id)}</code>${previousAssets.length ? ` &bull; Previous assets: ${previousAssets.length}` : ''}</div>
           </div>
           <div class="manager-actions">
-            <a class="chip" href="${escapeHtml(bookUrl(book))}" target="_blank">Open</a>
-            <button class="chip" data-action="replace" data-id="${escapeHtml(id)}">Replace</button>
+             <a class="chip" href="${escapeHtml(bookUrl(book))}" target="_blank">Open</a>
+             ${isWordBookRecord(book) ? `<button class="chip" data-action="protectWord" data-id="${escapeHtml(id)}">Disable Word Download</button>` : ''}
+             <button class="chip" data-action="replace" data-id="${escapeHtml(id)}">Replace</button>
             ${isArchived ? `<span class="chip">Hidden from SoMAp</span>` : `<button class="chip" data-action="archive" data-id="${escapeHtml(id)}">Archive / Hide</button>`}
             <button class="chip danger-btn" data-action="delete" data-id="${escapeHtml(id)}" ${isArchived ? '' : 'disabled'} title="${escapeHtml(deleteHelp)}">${escapeHtml(deleteHelp)}</button>
             ${previousAssets.length ? `<button class="chip" data-action="deletePrevious" data-id="${escapeHtml(id)}">Delete Previous Asset</button>` : ''}
@@ -1460,7 +1480,8 @@
           if (action === 'replace') startReplaceFlow(entry);
           if (action === 'archive') await archiveBook(entry);
           if (action === 'delete') await deleteWholeBook(entry);
-          if (action === 'deletePrevious') await chooseAndDeletePreviousAsset(entry);
+           if (action === 'deletePrevious') await chooseAndDeletePreviousAsset(entry);
+           if (action === 'protectWord') await protectWordBook(entry);
         } catch (error) {
           console.error(error);
           showError(error.message || String(error));
@@ -1482,6 +1503,33 @@
       updateReplaceBanner();
       window.scrollTo({ top: 0, behavior: 'smooth' });
       showMessage(el('<div class="warn-box">Choose the new clean PDF, then click <strong>Upload & Replace Book</strong>. The same Firebase book ID will be kept.</div>'));
+    }
+
+    async function protectWordBook(entry){
+      const book = entry.book || {};
+      const fileIds = [...new Set([book.driveFileId, book.word_drive_file_id].filter(Boolean))];
+      if (!fileIds.length) throw new Error('This Word book has no Google Drive file ID to protect. Replace it with a PDF plus Word source.');
+      const ok = await confirmDanger({
+        title: 'Disable Word download',
+        body: `Disable Google Drive download, print and copy for <strong>${escapeHtml(book.title || entry.id)}</strong>? Learners can still read it, but will no longer receive a Word download.`,
+        requiredText: '',
+        buttonText: 'Disable Word Download'
+      });
+      if (!ok) return;
+      const accessToken = await requestDriveAccessToken();
+      await Promise.all(fileIds.map(fileId => preventDriveDownload(accessToken, fileId)));
+      const protectedBook = {
+        ...book,
+        driveDownloadLink: '',
+        word_drive_download_link: '',
+        updatedAt: Date.now(),
+        updatedBy: currentUserKey(),
+        updatedByEmail: currentUserEmail()
+      };
+      await firebase.database().ref(`books/${entry.id}`).update(protectedBook);
+      await writeClassBookIndexes(entry.id, protectedBook, book);
+      showSuccess(`Word download disabled for <strong>${escapeHtml(book.title || entry.id)}</strong>.`);
+      await loadBookManager();
     }
 
     async function archiveBook(entry){
