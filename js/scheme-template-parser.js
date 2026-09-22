@@ -136,13 +136,33 @@
     return out;
   }
 
+  const SUSPICIOUS_TEXT_PATTERN = /SCHEME OF WORK NAME|Objectives of Primary Education|MAIN SPECIFIC|Teaching & learning tools|Teaching & learning methods|S\/N Main Competence|NAME OF .?S NAME|MONTH WEEK PERIO|DISTRICT COUNCIL|TEACHER'?S NAME|SCHOOL NAME\s*:|\d\s*\|\s*P\s*A\s*G\s*E\b|\bCOMPREHENDI\b/i;
+
+  function looksSuspiciousText(value) {
+    return SUSPICIOUS_TEXT_PATTERN.test(String(value || ''));
+  }
+
+  function stripDistrictCouncilHeader(text) {
+    return String(text || '')
+      .replace(/\b(?:[a-z][a-z'.-]*\s+){0,6}district\s+council\s+scheme\s+of\s+work\s+subject\s*:?[\s\S]{0,600}?(?:\d+\s*\|\s*p\s*a\s*g\s*e\b|main\s+specific\s+teaching\s+activities\b|main\s+competence\b)/gi, ' ')
+      .replace(/\d+\s*\|\s*p\s*a\s*g\s*e\b/gi, ' ');
+  }
+
+  function stripGarbledColumnHeader(text) {
+    const stopWords = COMPETENCE_STARTERS.concat(['Comprehendi', 'Listening', 'Speaking', 'Reading', 'Writing']).join('|');
+    const stopLookahead = new RegExp(`main\\s+specific\\s+teaching\\s+activities[\\s\\S]{0,400}?(?=\\b(?:${stopWords})\\b)`, 'gi');
+    return String(text || '').replace(stopLookahead, ' ');
+  }
+
   function stripHeaderNoise(text) {
-    return compactText(text)
+    return compactText(stripGarbledColumnHeader(stripDistrictCouncilHeader(compactText(text))))
       .replace(/official scheme table\s*\(.*?\)/gi, ' ')
       .replace(/s\s*\/?\s*n\s+main competence[\s\S]*?remarks/gi, ' ')
       .replace(/main competence\s+specific competence\s+learning activities[\s\S]*?remarks/gi, ' ')
       .replace(/president'?s office[\s\S]*?scheme of work/gi, ' ')
       .replace(/prepared by\s*[:\-]\s*[a-z .]+/gi, ' ')
+      .replace(/teacher'?s?\s*name\s*[:\-][\s\S]{0,120}?(?=school\s*name|\bmonth\b|\bweek\b|$)/gi, ' ')
+      .replace(/school\s*name\s*[:\-][\s\S]{0,120}?(?=\d+\s*\|\s*p\s*a\s*g\s*e|\bmain\b|$)/gi, ' ')
       .replace(/teacher\s*[:\-]\s*[a-z .]+/gi, ' ')
       .replace(/school\s*[:\-]\s*[a-z0-9 ._-]+/gi, ' ')
       .replace(/\bterm\s+[123]\b/gi, ' ')
@@ -507,6 +527,73 @@
     );
   }
 
+  function parseRowsByMonthOnly(text) {
+    const tableText = isolateTableText(text)
+      .replace(/main competence/gi, ' ')
+      .replace(/specific competence/gi, ' ')
+      .replace(/learning activities/gi, ' ')
+      .replace(/specific activities\s*\/?\s*content/gi, ' ')
+      .replace(/teaching and learning methods/gi, ' ')
+      .replace(/teaching and learning resources/gi, ' ')
+      .replace(/assessment tools(?:\s*\/\s*criteria)?/gi, ' ')
+      .replace(/references?/gi, ' ')
+      .replace(/remarks/gi, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
+    const anchorRegex = new RegExp(`\\b(${MONTHS.join('|')})\\b`, 'gi');
+    const anchors = findAllMatches(tableText, anchorRegex).filter((match) => match.index !== undefined);
+    if (!anchors.length) return [];
+
+    const rows = [];
+    let previousRow = null;
+    anchors.forEach((anchor) => {
+      const anchorIndex = anchors.indexOf(anchor);
+      const nextAnchor = anchors[anchorIndex + 1];
+      const start = anchor.index + anchor[0].length;
+      const end = nextAnchor ? nextAnchor.index : tableText.length;
+      const segment = compactText(tableText.slice(start, end)).slice(0, 600);
+      if (!segment) return;
+
+      const learningIndex = segment.search(/to (?:facilitate|guide) pupils? to/i);
+      const competenceHead = learningIndex === -1 ? segment : segment.slice(0, learningIndex);
+      const activityBody = learningIndex === -1 ? '' : segment.slice(learningIndex);
+      // Each month anchor starts an independent section, so competence must never
+      // be inherited from the previous month (unlike within-table week rows).
+      const competence = splitCompetenceHead(competenceHead, null);
+      const activities = splitLearningAndSpecific(activityBody);
+      const refParts = extractReference(segment);
+      const methodsTools = splitMethodsToolsAssessment(refParts.remaining);
+
+      const row = {
+        sn: rows.length + 1,
+        mainCompetence: compactText(competence.mainCompetence || '').slice(0, 240),
+        specificCompetence: compactText(competence.specificCompetence || '').slice(0, 240),
+        learningActivities: activities.learningActivities || '',
+        specificActivities: activities.specificActivities || '',
+        month: titleCaseMonth(anchor[1] || anchor[0]),
+        week: '',
+        periods: '',
+        methods: methodsTools.methods || '',
+        tools: methodsTools.tools || '',
+        assessment: methodsTools.assessment || '',
+        reference: refParts.reference || previousRow?.reference || '',
+        remarks: 'Recovered from month section (no week/period anchor found in source)'
+      };
+
+      if (!row.learningActivities && row.specificActivities) {
+        row.learningActivities = `To guide pupil to ${row.specificActivities}`;
+      }
+
+      const hasContent = row.mainCompetence || row.specificCompetence || row.learningActivities || row.specificActivities;
+      if (!hasContent) return;
+      rows.push(row);
+      previousRow = row;
+    });
+
+    return rows;
+  }
+
   function rowsToMap(rows) {
     return (rows || []).reduce((acc, row, index) => {
       acc[`row${index + 1}`] = { ...row, sn: index + 1 };
@@ -587,6 +674,10 @@
   function parseStructuredText(text) {
     const cleanedText = normalizeSpacedMonths(cleanWhitespace(text));
     const rows = parseRows(cleanedText);
+    if (!rows.length) {
+      const monthOnlyRows = parseRowsByMonthOnly(cleanedText);
+      if (monthOnlyRows.length) rows.push(...monthOnlyRows);
+    }
     const generalObjectives = extractObjectives(cleanedText);
     const explicitAssessment = extractNamedSection(cleanedText, /assessment methods?/i);
     const explicitResources = extractNamedSection(cleanedText, /teaching resources?(?:\s*\/\s*materials?)?/i);
@@ -801,6 +892,8 @@
     parseArrayBuffer,
     parseStructuredText,
     parseDocxTableRows,
-    mergeTemplateData
+    mergeTemplateData,
+    stripHeaderNoise,
+    looksSuspiciousText
   };
 })(window);

@@ -804,6 +804,18 @@
       </div>
     </div>
 
+    <!-- Scheme Match Repair -->
+    <div class="controls" id="fixSchemeMatchesSection">
+      <h3 style="color: white; margin-bottom: 8px; font-size: 1.2rem;">🛠️ Fix Scheme Matches</h3>
+      <p style="color: rgba(255,255,255,0.7); margin-bottom: 12px; font-size: 0.85rem;">
+        Scans the lesson plans below for ones filled with raw scheme-document text instead of the correct topic, and re-matches them against the current scheme of work for their own month/week.
+      </p>
+      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+        <button class="btn btn-secondary" id="lpFixSchemeMatches" style="background: linear-gradient(135deg, #f59e0b, #d97706);">🛠️ Fix All Scheme Matches</button>
+        <span id="lpFixSchemeMatchesStatus" style="color: rgba(255,255,255,0.75); font-size: 0.85rem;"></span>
+      </div>
+    </div>
+
     <!-- Lesson Plans List -->
     <div id="plansList">
       <div class="empty-state">
@@ -1737,14 +1749,17 @@
     }
 
     function deriveSchemeTopic(row) {
-      return (
-        toTitleTopic(row?.bookTopic) ||
-        toTitleTopic(row?.bookSubtopic) ||
-        toTitleTopic(row?.learningActivities) ||
-        toTitleTopic(row?.specificActivities) ||
-        sentenceCase(row?.specificCompetence) ||
+      const candidates = [
+        toTitleTopic(row?.bookTopic),
+        toTitleTopic(row?.bookSubtopic),
+        toTitleTopic(row?.learningActivities),
+        toTitleTopic(row?.specificActivities),
+        sentenceCase(row?.specificCompetence),
         sentenceCase(row?.mainCompetence)
-      );
+      ];
+      // Never surface raw scheme-document header/boilerplate text as a lesson topic,
+      // even if it slipped through as a candidate from an unexpected data shape.
+      return candidates.find((value) => value && !isSuspiciousSchemeText(value)) || '';
     }
 
     function formatRowOptionLabel(entry) {
@@ -1850,19 +1865,82 @@
       return '';
     }
 
+    function findMonthSlice(text, monthName) {
+      const months = [
+        'january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december'
+      ];
+      const target = L(monthName);
+      if (!target) return '';
+      const monthPattern = new RegExp(`\\b(${months.join('|')})\\b`, 'gi');
+      const matches = [];
+      let match;
+      while ((match = monthPattern.exec(text)) !== null) {
+        matches.push({ index: match.index, end: match.index + match[0].length, month: L(match[1]) });
+        if (match[0].length === 0) monthPattern.lastIndex += 1;
+      }
+      const hitPos = matches.findIndex((entry) => entry.month === target);
+      if (hitPos === -1) return '';
+      const next = matches[hitPos + 1];
+      return text.slice(matches[hitPos].end, next ? next.index : text.length);
+    }
+
+    function isSuspiciousSchemeText(value) {
+      const parser = window.SomapSchemeTemplateParser;
+      if (parser?.looksSuspiciousText) return parser.looksSuspiciousText(value);
+      return /district council|teacher'?s name|school name\s*:|main specific teaching/i.test(String(value || ''));
+    }
+
+    // Recovery fallback used only when the saved scheme could not be parsed into
+    // proper structured rows (e.g. a scheme saved as a free-form "editable document"
+    // copy of a scanned PDF). Always scopes to the lesson's own month first, since
+    // scheme documents lay content out sequentially by month and each month has its
+    // own main competence/topic — never blindly grabs text from the whole document,
+    // which is how raw document-header boilerplate used to leak into lesson plans.
     function buildRecoveredRowsMap(sourceData, lessonDate) {
       if (!sourceData) return null;
       const lessonMonth = getMonthName(lessonDate);
       const lessonWeek = getWeekOfMonth(lessonDate);
-      const editableText = editableDocumentToText(sourceData?.editableDocument);
-      const objectiveText = compactTextBlock(sourceData?.generalObjectives || sourceData?.parsedTemplate?.generalObjectives || '');
-      const competenceText = firstMeaningfulSentence(objectiveText || editableText);
-      const activityText = extractRecoveredActivity(editableText || objectiveText);
-      const specificText = stripTeacherLead(activityText) || firstMeaningfulSentence(editableText);
-      const topic = toTitleTopic(specificText || sourceData?.subjectName || sourceData?.subject || 'Scheme item');
+      const parser = window.SomapSchemeTemplateParser;
+
+      const rawText = compactTextBlock(
+        `${editableDocumentToText(sourceData?.editableDocument)} ${compactTextBlock(sourceData?.generalObjectives || sourceData?.parsedTemplate?.generalObjectives || '')}`
+      );
+      const cleanedText = parser?.stripHeaderNoise ? parser.stripHeaderNoise(rawText) : rawText;
+      if (!cleanedText) return null;
+
+      const monthSlice = lessonMonth ? findMonthSlice(cleanedText, lessonMonth) : '';
+      const baseSlice = monthSlice || cleanedText;
+
+      // The main competence/topic for the month can appear before a "Week N" marker,
+      // so it must always be read from the whole month section — only the specific
+      // activity text should be narrowed down to the week-specific portion.
+      let weekSlice = '';
+      if (monthSlice && lessonWeek) {
+        const weekMatch = monthSlice.match(new RegExp(`week\\s*${lessonWeek}\\b`, 'i'));
+        if (weekMatch && weekMatch.index !== undefined) {
+          weekSlice = monthSlice.slice(weekMatch.index);
+        }
+      }
+
+      let competenceText = firstMeaningfulSentence(baseSlice);
+      let activityText = extractRecoveredActivity(weekSlice) || extractRecoveredActivity(baseSlice);
+      if (isSuspiciousSchemeText(competenceText)) competenceText = '';
+      if (isSuspiciousSchemeText(activityText)) activityText = '';
+
+      // Nothing usable found for this month/week and no month section could even be
+      // located: refuse to fabricate a row rather than surfacing raw document noise.
+      if (!monthSlice && !competenceText && !activityText) return null;
+
+      const specificText = stripTeacherLead(activityText) || (monthSlice ? firstMeaningfulSentence(monthSlice) : '');
+      const topic = toTitleTopic(specificText || sourceData?.subjectName || sourceData?.subject || '');
+
       const row = {
         sn: 1,
-        mainCompetence: competenceText || `${sourceData?.subjectName || sourceData?.subject || 'Subject'} scheme guidance`,
+        mainCompetence: competenceText ||
+          (monthSlice
+            ? `${sourceData?.subjectName || sourceData?.subject || 'Subject'} scheme guidance for ${sentenceCase(lessonMonth)}`
+            : 'Scheme topic not found for this month — please edit manually'),
         specificCompetence: competenceText || topic,
         learningActivities: activityText || (topic ? `To facilitate pupil to ${topic.toLowerCase()}` : ''),
         specificActivities: specificText || topic,
@@ -1873,11 +1951,10 @@
         tools: compactTextBlock(sourceData?.teachingResources || sourceData?.parsedTemplate?.teachingResources || ''),
         assessment: compactTextBlock(sourceData?.assessmentMethods || sourceData?.parsedTemplate?.assessmentMethods || ''),
         reference: sourceData?.sourcePdf?.fileName || sourceData?.pdf?.fileName || '',
-        remarks: 'Recovered from saved editable scheme copy'
+        remarks: monthSlice
+          ? `Recovered from the ${sentenceCase(lessonMonth)} section of the saved scheme document`
+          : 'Recovered from saved scheme document (month section not found — please verify)'
       };
-      const hasContent = row.learningActivities || row.specificActivities || row.mainCompetence || row.tools || row.assessment ||
-        (sourceData?.subjectName || sourceData?.subject);
-      if (!hasContent) return null;
       return { recovered1: row };
     }
 
@@ -3788,6 +3865,207 @@ ${plan.reflection || 'N/A'}
 
       alert(details);
     };
+
+    // ========== FIX SCHEME MATCHES (repair plans contaminated with raw scheme-document text) ==========
+    function isPlanContentContaminated(plan) {
+      const snapshot = plan?.schemeTracking?.rowSnapshot || {};
+      const fields = [plan?.topic, plan?.objectives, snapshot.mainCompetence, snapshot.specificCompetence];
+      if (fields.some((value) => isSuspiciousSchemeText(value))) return true;
+
+      // A strong secondary signal: topic/objectives/competence all being the same
+      // blob of text (which is what happens when a single recovered row got copied
+      // into every field) even if it doesn't match a known boilerplate phrase.
+      const nonEmpty = fields.map((value) => compactTextBlock(value).slice(0, 80).toLowerCase()).filter(Boolean);
+      if (nonEmpty.length >= 3 && new Set(nonEmpty).size === 1) return true;
+
+      return false;
+    }
+
+    async function resolveSchemeBundleForPlan(plan) {
+      const className = plan.className || plan.class || '';
+      const subjectName = plan.subject || '';
+      const termKey = termToSchemeKey(plan.term || '');
+      const lessonDate = plan.date || '';
+      if (!className || !subjectName || !termKey || !lessonDate) return null;
+      const targetYear = String(plan.year || new Date(lessonDate).getFullYear());
+
+      const cacheKey = [targetYear, className, subjectName, termKey].join('::');
+      const cached = schemeLookupCache.get(cacheKey);
+      if (cached) {
+        return buildSchemeBundle(cached.sourceData, cached.sourceType, lessonDate);
+      }
+
+      const teacherSchemeRaw = await fetchLatestTeacherScheme(targetYear, className, subjectName, termKey);
+      const teacherResult = await ensureStructuredSchemeData(teacherSchemeRaw, { lessonDate });
+      const teacherScheme = teacherResult?.data || null;
+      let teacherRows = getStructuredRowsMap(teacherScheme);
+      let teacherRowsSource = teacherResult?.rowsSource || null;
+      let fallbackTemplateData = null;
+      let fallbackTemplateRowsSource = null;
+
+      if (!teacherRows && teacherScheme?.fromTemplateId) {
+        const templateRaw = await fetchTemplateById(targetYear, className, subjectName, termKey, teacherScheme.fromTemplateId);
+        const templateResult = await ensureStructuredSchemeData(templateRaw, { lessonDate });
+        fallbackTemplateData = templateResult?.data || null;
+        fallbackTemplateRowsSource = templateResult?.rowsSource || null;
+        teacherRows = getStructuredRowsMap(fallbackTemplateData);
+        if (teacherRows) teacherRowsSource = 'fromTemplateId';
+      }
+
+      let templateScheme = null;
+      let templateRowsSource = null;
+      if (hasStructuredRows(fallbackTemplateData)) {
+        templateScheme = fallbackTemplateData;
+        templateRowsSource = fallbackTemplateRowsSource;
+      } else {
+        const templateRaw = await fetchLatestTemplate(targetYear, className, subjectName, termKey);
+        const templateResult = await ensureStructuredSchemeData(templateRaw, { lessonDate });
+        templateScheme = templateResult?.data || null;
+        templateRowsSource = templateResult?.rowsSource || null;
+      }
+
+      const teacherSource = teacherScheme && teacherRows ? { ...teacherScheme, rows: teacherRows } : null;
+      const templateSource = hasStructuredRows(templateScheme) ? templateScheme : null;
+      const sourceData = teacherSource || templateSource || teacherScheme || templateScheme;
+      const sourceType = teacherSource
+        ? 'teacher_scheme'
+        : templateSource
+          ? 'academic_template'
+          : teacherScheme
+            ? 'teacher_scheme'
+            : templateScheme
+              ? 'academic_template'
+              : 'none';
+
+      if (!sourceData) return null;
+
+      const bundle = buildSchemeBundle(sourceData, sourceType, lessonDate);
+      schemeLookupCache.set(cacheKey, bundle);
+      return bundle;
+    }
+
+    async function buildSchemeRepairForPlan(plan) {
+      const bundle = await resolveSchemeBundleForPlan(plan);
+      if (!bundle || !bundle.rows.length) return null;
+
+      let entry = bundle.weekEntries?.[0] || null;
+      if (!entry) {
+        const planMonth = normalizeSchemeMonth(getMonthName(plan.date));
+        entry = bundle.rows.find((item) => item.month === planMonth) || null;
+      }
+      if (!entry) return null;
+
+      const row = entry.row || {};
+      const topic = deriveSchemeTopic(row);
+      if (!topic) return null;
+
+      return {
+        fields: {
+          topic,
+          objectives: buildObjectivesFromRow(row),
+          intro: buildIntroFromRow(row),
+          activities: buildActivitiesFromRow(row, entry, bundle.weekEntries || []),
+          resources: buildResourcesFromRow(row),
+          assessment: buildAssessmentFromRow(row)
+        },
+        rowSnapshot: {
+          mainCompetence: row.mainCompetence || '',
+          specificCompetence: row.specificCompetence || '',
+          learningActivities: row.learningActivities || '',
+          specificActivities: row.specificActivities || '',
+          bookLinkKey: row.bookLinkKey || '',
+          bookId: row.bookId || '',
+          bookTitle: row.bookTitle || '',
+          bookChapter: row.bookChapter || '',
+          bookTopic: row.bookTopic || '',
+          bookSubtopic: row.bookSubtopic || '',
+          bookPage: row.bookPage || '',
+          bookPageStart: row.bookPageStart || row.bookPage || '',
+          bookPageEnd: row.bookPageEnd || row.bookPage || '',
+          bookSectionStart: row.bookSectionStart || '',
+          bookSectionEnd: row.bookSectionEnd || '',
+          methods: row.methods || '',
+          tools: row.tools || '',
+          assessment: row.assessment || '',
+          reference: row.reference || '',
+          remarks: row.remarks || ''
+        },
+        sourceLabel: bundle.sourceLabel,
+        entryId: entry.id,
+        rowKey: entry.rowKey,
+        plannedMonth: row.month || '',
+        plannedWeek: entry.week || ''
+      };
+    }
+
+    window.fixAllPlanSchemeMatches = async function() {
+      const statusEl = document.getElementById('lpFixSchemeMatchesStatus');
+      const btn = document.getElementById('lpFixSchemeMatches');
+      const candidates = Object.entries(lessonPlans || {}).filter(
+        ([, plan]) => plan && typeof plan === 'object' && isPlanContentContaminated(plan)
+      );
+
+      if (!candidates.length) {
+        if (statusEl) statusEl.textContent = 'No contaminated lesson plans found in the currently loaded list.';
+        toast('No contaminated lesson plans found.', 'success');
+        return;
+      }
+
+      const confirmed = window.confirm(
+        `${candidates.length} lesson plan(s) appear to contain raw scheme-document text instead of the correct topic. Re-match them against the current scheme of work now? Only the topic/objectives/intro/activities/resources/assessment fields will be replaced — attendance, homework, and everything else you already entered stays untouched.`
+      );
+      if (!confirmed) return;
+
+      if (btn) btn.disabled = true;
+      let fixed = 0;
+      let skipped = 0;
+      const basePath = getLessonPlanBasePath();
+
+      for (let i = 0; i < candidates.length; i += 1) {
+        const [id, plan] = candidates[i];
+        if (statusEl) statusEl.textContent = `Fixing ${i + 1} / ${candidates.length}...`;
+        try {
+          const repair = await buildSchemeRepairForPlan(plan);
+          if (!repair) {
+            skipped += 1;
+          } else {
+            const year = plan.year || getYear();
+            const cls = plan.className || plan.class;
+            const date = plan.date;
+            const updates = {
+              ...repair.fields,
+              schemeTracking: {
+                ...(plan.schemeTracking || {}),
+                rowSnapshot: repair.rowSnapshot,
+                sourceLabel: repair.sourceLabel,
+                entryId: repair.entryId,
+                rowKey: repair.rowKey,
+                plannedMonth: repair.plannedMonth,
+                plannedWeek: repair.plannedWeek,
+                repairedAt: Date.now(),
+                repairNote: 'Auto-repaired: previous scheme match contained raw document text'
+              }
+            };
+            await db.ref(`${basePath}/${year}/${cls}/${date}/${id}`).update(updates);
+            lessonPlans[id] = { ...plan, ...updates };
+            fixed += 1;
+          }
+        } catch (error) {
+          console.error('Failed to repair lesson plan', id, error);
+          skipped += 1;
+        }
+      }
+
+      if (btn) btn.disabled = false;
+      renderPlans();
+      const summary = `Fixed ${fixed} of ${candidates.length} plan(s)${skipped ? `; ${skipped} had no matching scheme item and were left unchanged` : ''}.`;
+      if (statusEl) statusEl.textContent = summary;
+      toast(summary, fixed ? 'success' : 'error');
+    };
+
+    document.getElementById('lpFixSchemeMatches')?.addEventListener('click', () => {
+      window.fixAllPlanSchemeMatches();
+    });
 
     // Edit plan
     window.editPlan = function(planId) {
