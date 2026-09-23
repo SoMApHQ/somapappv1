@@ -1768,7 +1768,9 @@
 
     function formatRowOptionLabel(entry) {
       const theme = deriveSchemeTopic(entry.row);
-      return `${entry.row.month || 'Month'} | Week ${entry.week || '-'} | ${theme || entry.row.learningActivities || entry.row.mainCompetence || 'Scheme item'}`;
+      const fallback = [entry.row?.learningActivities, entry.row?.mainCompetence]
+        .find((value) => value && !isSuspiciousSchemeText(value));
+      return `${entry.row.month || 'Month'} | Week ${entry.week || '-'} | ${theme || fallback || 'Scheme item'}`;
     }
 
     function buildObjectivesFromRow(row) {
@@ -1907,14 +1909,35 @@
       const lessonWeek = getWeekOfMonth(lessonDate);
       const parser = window.SomapSchemeTemplateParser;
 
-      const rawText = compactTextBlock(
-        `${editableDocumentToText(sourceData?.editableDocument)} ${compactTextBlock(sourceData?.generalObjectives || sourceData?.parsedTemplate?.generalObjectives || '')}`
-      );
-      const normalizedText = parser?.normalizeSpacedMonths ? parser.normalizeSpacedMonths(rawText) : rawText;
-      const cleanedText = parser?.stripHeaderNoise ? parser.stripHeaderNoise(normalizedText) : normalizedText;
+      // Vertical-month reconstruction needs line breaks intact, so it must run
+      // before anything compacts the text down to a single line.
+      const editableTextRaw = editableDocumentToText(sourceData?.editableDocument);
+      const objectivesRaw = compactTextBlock(sourceData?.generalObjectives || sourceData?.parsedTemplate?.generalObjectives || '');
+      const normalizedEditableText = parser?.normalizeSpacedMonths ? parser.normalizeSpacedMonths(editableTextRaw) : editableTextRaw;
+      const verticalResult = parser?.reconstructVerticalMonths
+        ? parser.reconstructVerticalMonths(normalizedEditableText)
+        : { text: normalizedEditableText, sections: [] };
+
+      const rawText = compactTextBlock(`${verticalResult.text} ${objectivesRaw}`);
+      const cleanedText = parser?.stripHeaderNoise ? parser.stripHeaderNoise(rawText) : rawText;
       if (!cleanedText) return null;
 
-      const monthSlice = lessonMonth ? findMonthSlice(cleanedText, lessonMonth) : '';
+      // A month rendered as a vertical letter column (one letter per row) gives
+      // an exact row-range for that month — prefer it over the plain horizontal
+      // word search, which can't find a month that was never written sideways.
+      const verticalSection = lessonMonth
+        ? (verticalResult.sections || []).find((section) => L(section.month) === L(lessonMonth))
+        : null;
+
+      let monthSlice = '';
+      if (verticalSection) {
+        const sectionText = compactTextBlock(verticalSection.content);
+        monthSlice = parser?.stripHeaderNoise ? parser.stripHeaderNoise(sectionText) : sectionText;
+      }
+      if (!monthSlice && lessonMonth) {
+        monthSlice = findMonthSlice(cleanedText, lessonMonth);
+      }
+
       const baseSlice = monthSlice || cleanedText;
 
       // The main competence/topic for the month can appear before a "Week N" marker,

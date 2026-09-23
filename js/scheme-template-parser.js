@@ -136,6 +136,74 @@
     return out;
   }
 
+  // Some scanned scheme documents render the month label as a vertically
+  // stacked column — one letter per table row (e.g. "S" beside week 1's row,
+  // "E" beside week 2's row, ... spelling "SEPTEMBER" top-to-bottom) — rather
+  // than as a normal horizontal word. When such a document is flattened to
+  // block-per-line text, those single-letter "cells" show up as their own
+  // isolated one-character lines, interleaved with the row content next to
+  // which they were positioned. This reconstructs the month name from that
+  // pattern, reports which line range it spans (so that range's row content
+  // can be treated as "this month's section"), and strips the stray letter
+  // lines out of the text so they stop leaking into row content as noise.
+  function reconstructVerticalMonths(text) {
+    const lines = String(text || '').split('\n');
+    const singleLetterLines = [];
+    lines.forEach((line, idx) => {
+      const trimmed = line.trim();
+      if (/^[A-Za-z]$/.test(trimmed)) {
+        singleLetterLines.push({ idx, char: trimmed.toUpperCase() });
+      }
+    });
+    if (!singleLetterLines.length) return { text, sections: [] };
+
+    const letterSequence = singleLetterLines.map((entry) => entry.char).join('');
+    const consumedIdx = new Set();
+    const sections = [];
+
+    MONTHS.forEach((month) => {
+      let searchFrom = 0;
+      let matchPos;
+      while ((matchPos = letterSequence.indexOf(month, searchFrom)) !== -1) {
+        const startEntry = singleLetterLines[matchPos];
+        const endEntry = singleLetterLines[matchPos + month.length - 1];
+        for (let i = matchPos; i < matchPos + month.length; i += 1) {
+          consumedIdx.add(singleLetterLines[i].idx);
+        }
+        sections.push({ month: titleCaseMonth(month), startLine: startEntry.idx, endLine: endEntry.idx });
+        searchFrom = matchPos + month.length;
+      }
+    });
+
+    if (!sections.length) return { text, sections: [] };
+
+    sections.forEach((section) => {
+      section.content = lines
+        .slice(section.startLine, section.endLine + 1)
+        .filter((_, offset) => !consumedIdx.has(section.startLine + offset))
+        .join(' ');
+    });
+
+    const cleanedLines = lines.filter((_, idx) => !consumedIdx.has(idx));
+
+    // Also produce a version with the reconstructed month word reinserted as a
+    // single line at the position of the label's first letter (and every other
+    // letter of that label dropped) — this is a drop-in replacement for `text`
+    // that downstream horizontal month-anchor parsing can consume unchanged.
+    const startLineToMonth = new Map(sections.map((section) => [section.startLine, section.month.toUpperCase()]));
+    const reconstructedLines = [];
+    lines.forEach((line, idx) => {
+      if (startLineToMonth.has(idx)) {
+        reconstructedLines.push(startLineToMonth.get(idx));
+        return;
+      }
+      if (consumedIdx.has(idx)) return;
+      reconstructedLines.push(line);
+    });
+
+    return { text: cleanedLines.join('\n'), reconstructedText: reconstructedLines.join('\n'), sections };
+  }
+
   const SUSPICIOUS_TEXT_PATTERN = /SCHEME OF WORK NAME|Objectives of Primary Education|MAIN SPECIFIC|Teaching & learning tools|Teaching & learning methods|S\/N Main Competence|NAME OF .?S NAME|MONTH WEEK PERIO|DISTRICT COUNCIL|TEACHER'?S NAME|SCHOOL NAME\s*:|\d\s*\|\s*P\s*A\s*G\s*E\b|\bCOMPREHENDI\b/i;
 
   function looksSuspiciousText(value) {
@@ -552,23 +620,73 @@
       const nextAnchor = anchors[anchorIndex + 1];
       const start = anchor.index + anchor[0].length;
       const end = nextAnchor ? nextAnchor.index : tableText.length;
-      const segment = compactText(tableText.slice(start, end)).slice(0, 600);
+      const segment = compactText(tableText.slice(start, end)).slice(0, 2000);
       if (!segment) return;
 
-      const learningIndex = segment.search(/to (?:facilitate|guide) pupils? to/i);
-      const competenceHead = learningIndex === -1 ? segment : segment.slice(0, learningIndex);
-      const activityBody = learningIndex === -1 ? '' : segment.slice(learningIndex);
+      // If this month's section has "Week N" markers, split it into one row per
+      // week instead of one blob covering the whole month — the main/specific
+      // competence (usually stated once, before the first week marker) is shared
+      // across those weeks, but each week's own activity text stays distinct.
+      const weekMarkerRegex = /\bweek\s*([1-9]|1[0-2])\b/gi;
+      const weekMatches = findAllMatches(segment, weekMarkerRegex).filter((match) => match.index !== undefined);
+
+      const monthHead = weekMatches.length >= 2 ? segment.slice(0, weekMatches[0].index) : segment;
+      const headLearningIndex = monthHead.search(/to (?:facilitate|guide) pupils? to/i);
+      const headCompetenceText = headLearningIndex === -1 ? monthHead : monthHead.slice(0, headLearningIndex);
       // Each month anchor starts an independent section, so competence must never
       // be inherited from the previous month (unlike within-table week rows).
-      const competence = splitCompetenceHead(competenceHead, null);
+      const monthCompetence = splitCompetenceHead(headCompetenceText, null);
+
+      if (weekMatches.length >= 2) {
+        weekMatches.forEach((weekMatch, weekIdx) => {
+          const weekStart = weekMatch.index;
+          const weekEnd = weekMatches[weekIdx + 1] ? weekMatches[weekIdx + 1].index : segment.length;
+          const weekBody = compactText(segment.slice(weekStart, weekEnd)).slice(0, 600);
+          if (!weekBody) return;
+
+          const learningIndex = weekBody.search(/to (?:facilitate|guide) pupils? to/i);
+          const activityBody = learningIndex === -1 ? weekBody : weekBody.slice(learningIndex);
+          const activities = splitLearningAndSpecific(activityBody);
+          const refParts = extractReference(weekBody);
+          const methodsTools = splitMethodsToolsAssessment(refParts.remaining);
+
+          const row = {
+            sn: rows.length + 1,
+            mainCompetence: compactText(monthCompetence.mainCompetence || '').slice(0, 240),
+            specificCompetence: compactText(monthCompetence.specificCompetence || '').slice(0, 240),
+            learningActivities: activities.learningActivities || '',
+            specificActivities: activities.specificActivities || '',
+            month: titleCaseMonth(anchor[1] || anchor[0]),
+            week: weekMatch[1],
+            periods: '',
+            methods: methodsTools.methods || '',
+            tools: methodsTools.tools || '',
+            assessment: methodsTools.assessment || '',
+            reference: refParts.reference || '',
+            remarks: 'Recovered from month section, split by "Week N" markers'
+          };
+
+          if (!row.learningActivities && row.specificActivities) {
+            row.learningActivities = `To guide pupil to ${row.specificActivities}`;
+          }
+
+          const hasContent = row.mainCompetence || row.specificCompetence || row.learningActivities || row.specificActivities;
+          if (!hasContent) return;
+          rows.push(row);
+        });
+        return;
+      }
+
+      const learningIndex = segment.search(/to (?:facilitate|guide) pupils? to/i);
+      const activityBody = learningIndex === -1 ? '' : segment.slice(learningIndex);
       const activities = splitLearningAndSpecific(activityBody);
       const refParts = extractReference(segment);
       const methodsTools = splitMethodsToolsAssessment(refParts.remaining);
 
       const row = {
         sn: rows.length + 1,
-        mainCompetence: compactText(competence.mainCompetence || '').slice(0, 240),
-        specificCompetence: compactText(competence.specificCompetence || '').slice(0, 240),
+        mainCompetence: compactText(monthCompetence.mainCompetence || '').slice(0, 240),
+        specificCompetence: compactText(monthCompetence.specificCompetence || '').slice(0, 240),
         learningActivities: activities.learningActivities || '',
         specificActivities: activities.specificActivities || '',
         month: titleCaseMonth(anchor[1] || anchor[0]),
@@ -672,7 +790,11 @@
   }
 
   function parseStructuredText(text) {
-    const cleanedText = normalizeSpacedMonths(cleanWhitespace(text));
+    let cleanedText = normalizeSpacedMonths(cleanWhitespace(text));
+    const verticalMonths = reconstructVerticalMonths(cleanedText);
+    if (verticalMonths.sections.length) {
+      cleanedText = verticalMonths.reconstructedText;
+    }
     const rows = parseRows(cleanedText);
     if (!rows.length) {
       const monthOnlyRows = parseRowsByMonthOnly(cleanedText);
@@ -895,6 +1017,7 @@
     mergeTemplateData,
     stripHeaderNoise,
     looksSuspiciousText,
-    normalizeSpacedMonths
+    normalizeSpacedMonths,
+    reconstructVerticalMonths
   };
 })(window);
