@@ -1748,14 +1748,18 @@
       });
     }
 
+    // Topic priority follows how the scheme of work is actually written: the
+    // Main Competence column is the lesson topic; Specific Competence is the
+    // fallback when Main Competence is missing. Activity text is a last resort,
+    // used only when neither competence field has anything usable.
     function deriveSchemeTopic(row) {
       const candidates = [
         toTitleTopic(row?.bookTopic),
         toTitleTopic(row?.bookSubtopic),
-        toTitleTopic(row?.learningActivities),
-        toTitleTopic(row?.specificActivities),
+        sentenceCase(row?.mainCompetence),
         sentenceCase(row?.specificCompetence),
-        sentenceCase(row?.mainCompetence)
+        toTitleTopic(row?.learningActivities),
+        toTitleTopic(row?.specificActivities)
       ];
       // Never surface raw scheme-document header/boilerplate text as a lesson topic,
       // even if it slipped through as a candidate from an unexpected data shape.
@@ -1906,7 +1910,8 @@
       const rawText = compactTextBlock(
         `${editableDocumentToText(sourceData?.editableDocument)} ${compactTextBlock(sourceData?.generalObjectives || sourceData?.parsedTemplate?.generalObjectives || '')}`
       );
-      const cleanedText = parser?.stripHeaderNoise ? parser.stripHeaderNoise(rawText) : rawText;
+      const normalizedText = parser?.normalizeSpacedMonths ? parser.normalizeSpacedMonths(rawText) : rawText;
+      const cleanedText = parser?.stripHeaderNoise ? parser.stripHeaderNoise(normalizedText) : normalizedText;
       if (!cleanedText) return null;
 
       const monthSlice = lessonMonth ? findMonthSlice(cleanedText, lessonMonth) : '';
@@ -2862,7 +2867,7 @@
       }
 
       maybeSyncWeekFromDate();
-      const cacheKey = [targetYear, className, subjectName, termKey].join('::');
+      const cacheKey = [targetYear, className, subjectName, termKey, getMonthName(lessonDate), getWeekOfMonth(lessonDate)].join('::');
       let cacheEntry = schemeLookupCache.get(cacheKey);
 
       if (!cacheEntry || options.force) {
@@ -2880,7 +2885,7 @@
           fallbackTemplateData = templateResult?.data || null;
           fallbackTemplateRowsSource = templateResult?.rowsSource || null;
           teacherRows = getStructuredRowsMap(fallbackTemplateData);
-          if (teacherRows) teacherRowsSource = 'fromTemplateId';
+          if (teacherRows) teacherRowsSource = fallbackTemplateRowsSource === 'synthetic' ? 'synthetic' : 'fromTemplateId';
         }
 
         let templateScheme = null;
@@ -2899,17 +2904,32 @@
           ? { ...teacherScheme, rows: teacherRows }
           : null;
         const templateSource = hasStructuredRows(templateScheme) ? templateScheme : null;
-        const sourceData = teacherSource || templateSource || teacherScheme || templateScheme;
-        const sourceType = teacherSource
-          ? 'teacher_scheme'
-          : templateSource
-            ? 'academic_template'
-            : teacherScheme
-              ? 'teacher_scheme'
-              : templateScheme
-                ? 'academic_template'
-                : 'none';
-        const chosenRowsSource = teacherRowsSource || templateRowsSource;
+        // A recovered/synthesized row (built from a messy scanned document) must
+        // never outrank a real, properly-structured main competence that already
+        // exists — whether in the teacher's own scheme or the school's academic
+        // template. Only fall back to synthetic content when nothing real exists
+        // anywhere.
+        const teacherIsReal = Boolean(teacherSource) && teacherRowsSource && teacherRowsSource !== 'synthetic';
+        const templateIsReal = Boolean(templateSource) && templateRowsSource && templateRowsSource !== 'synthetic';
+
+        let sourceData;
+        let sourceType;
+        if (teacherIsReal) {
+          sourceData = teacherSource; sourceType = 'teacher_scheme';
+        } else if (templateIsReal) {
+          sourceData = templateSource; sourceType = 'academic_template';
+        } else if (teacherSource) {
+          sourceData = teacherSource; sourceType = 'teacher_scheme';
+        } else if (templateSource) {
+          sourceData = templateSource; sourceType = 'academic_template';
+        } else if (teacherScheme) {
+          sourceData = teacherScheme; sourceType = 'teacher_scheme';
+        } else {
+          sourceData = templateScheme; sourceType = templateScheme ? 'academic_template' : 'none';
+        }
+        const chosenRowsSource = teacherIsReal || templateIsReal
+          ? (teacherIsReal ? teacherRowsSource : templateRowsSource)
+          : (teacherRowsSource || templateRowsSource);
 
         if (typeof console !== 'undefined' && console.log) {
           console.log('[LessonPlan Scheme Lookup]', {
@@ -3889,7 +3909,7 @@ ${plan.reflection || 'N/A'}
       if (!className || !subjectName || !termKey || !lessonDate) return null;
       const targetYear = String(plan.year || new Date(lessonDate).getFullYear());
 
-      const cacheKey = [targetYear, className, subjectName, termKey].join('::');
+      const cacheKey = [targetYear, className, subjectName, termKey, getMonthName(lessonDate), getWeekOfMonth(lessonDate)].join('::');
       const cached = schemeLookupCache.get(cacheKey);
       if (cached) {
         return buildSchemeBundle(cached.sourceData, cached.sourceType, lessonDate);
@@ -3909,7 +3929,7 @@ ${plan.reflection || 'N/A'}
         fallbackTemplateData = templateResult?.data || null;
         fallbackTemplateRowsSource = templateResult?.rowsSource || null;
         teacherRows = getStructuredRowsMap(fallbackTemplateData);
-        if (teacherRows) teacherRowsSource = 'fromTemplateId';
+        if (teacherRows) teacherRowsSource = fallbackTemplateRowsSource === 'synthetic' ? 'synthetic' : 'fromTemplateId';
       }
 
       let templateScheme = null;
@@ -3926,16 +3946,26 @@ ${plan.reflection || 'N/A'}
 
       const teacherSource = teacherScheme && teacherRows ? { ...teacherScheme, rows: teacherRows } : null;
       const templateSource = hasStructuredRows(templateScheme) ? templateScheme : null;
-      const sourceData = teacherSource || templateSource || teacherScheme || templateScheme;
-      const sourceType = teacherSource
-        ? 'teacher_scheme'
-        : templateSource
-          ? 'academic_template'
-          : teacherScheme
-            ? 'teacher_scheme'
-            : templateScheme
-              ? 'academic_template'
-              : 'none';
+      // Same priority as loadSchemeGuidance: real structured rows (teacher or
+      // template) always outrank a recovered/synthesized row.
+      const teacherIsReal = Boolean(teacherSource) && teacherRowsSource && teacherRowsSource !== 'synthetic';
+      const templateIsReal = Boolean(templateSource) && templateRowsSource && templateRowsSource !== 'synthetic';
+
+      let sourceData;
+      let sourceType;
+      if (teacherIsReal) {
+        sourceData = teacherSource; sourceType = 'teacher_scheme';
+      } else if (templateIsReal) {
+        sourceData = templateSource; sourceType = 'academic_template';
+      } else if (teacherSource) {
+        sourceData = teacherSource; sourceType = 'teacher_scheme';
+      } else if (templateSource) {
+        sourceData = templateSource; sourceType = 'academic_template';
+      } else if (teacherScheme) {
+        sourceData = teacherScheme; sourceType = 'teacher_scheme';
+      } else {
+        sourceData = templateScheme; sourceType = templateScheme ? 'academic_template' : 'none';
+      }
 
       if (!sourceData) return null;
 

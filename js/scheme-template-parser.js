@@ -894,6 +894,7 @@
     parseDocxTableRows,
     mergeTemplateData,
     stripHeaderNoise,
-    looksSuspiciousText
+    looksSuspiciousText,
+    normalizeSpacedMonths
   };
 })(window);
