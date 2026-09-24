@@ -1201,16 +1201,26 @@ function buildRegisterStats(studentMap, attendanceByClass) {
       ]),
       !foodInvoice
         ? h('p', { className: 'workers-card__subtitle' }, 'Hakuna invoice bado. Bonyeza "Hifadhi Ripoti" kwanza.')
-        : h('div', { className: 'workers-card__content' }, [
-            h('div', { className: 'register-summary' }, [
-              h('span', null, `Status: ${foodInvoice.status}`),
-              h('span', null, `Total: ${formatTzs(foodInvoice.totalAmount)}`),
-              h('span', null, `Missing Items: ${(foodInvoice.missingLines || []).length}`)
-            ]),
-            h('div', { className: 'expected-list' }, (foodInvoice.lines || []).map(line =>
-              h('div', { key: `inv-${line.itemId}`, className: 'expected-chip' }, `${line.name}: ${line.requiredQty} ${line.unit || ''} · ${formatTzs(line.total)} · ${line.shopName || 'No shop'}`)
-            ))
-          ])
+        : (() => {
+            const breakdown = computeInStoreBreakdown(foodInvoice.lines || []);
+            return h('div', { className: 'workers-card__content' }, [
+              h('div', { className: 'register-summary' }, [
+                h('span', null, `Status: ${foodInvoice.status}`),
+                h('span', null, `Total: ${formatTzs(foodInvoice.totalAmount)}`),
+                h('span', null, `Missing Items: ${(foodInvoice.missingLines || []).length}`),
+                h('span', { className: 'invoice-needed-badge' }, `Needed Today: ${formatTzs(breakdown.amountNeededToday)}`)
+              ]),
+              h('div', { className: 'expected-list' }, (foodInvoice.lines || []).map(line =>
+                h('div', { key: `inv-${line.itemId}`, className: 'expected-chip' }, `${line.name}: ${line.requiredQty} ${line.unit || ''} · ${formatTzs(line.total)} · ${line.shopName || 'No shop'}`)
+              )),
+              h('h3', { className: 'workers-card__subtitle', style: { marginTop: '10px', fontWeight: 700 } }, '📦 Zilizopo Stoo (Hazihitaji Kununuliwa Leo)'),
+              breakdown.inStoreLines.length
+                ? h('div', { className: 'expected-list' }, breakdown.inStoreLines.map(line =>
+                    h('div', { key: `instock-${line.name}`, className: 'expected-chip expected-chip--instock' }, `${line.name}: ${line.coveredQty} ${line.unit || ''} · ${formatTzs(line.coveredValue)}`)
+                  ))
+                : h('p', { className: 'workers-card__subtitle' }, 'Hakuna bidhaa iliyopo stoo kwa siku hii.')
+            ]);
+          })()
     ]);
   }
 
@@ -1334,6 +1344,36 @@ function buildRegisterStats(studentMap, attendanceByClass) {
       })),
       createdAt: Date.now()
     });
+  }
+
+  // Splits each invoice line into the portion already covered by store stock
+  // (no need to buy) and the portion that still needs to be purchased today.
+  // Applies to any school/date: coveredQty caps at onHand, so partially-stocked
+  // items are only deducted for the part actually available.
+  function computeInStoreBreakdown(lines) {
+    const arr = Array.isArray(lines) ? lines : [];
+    const inStoreLines = [];
+    let inStoreValue = 0;
+    let amountNeededToday = 0;
+    arr.forEach(line => {
+      const required = Number(line.requiredQty || 0);
+      const onHand = Number(line.onHand || 0);
+      const unitPrice = Number(line.unitPrice || 0);
+      const coveredQty = Number(Math.min(onHand, required).toFixed(2));
+      const buyQty = Number(Math.max(required - onHand, 0).toFixed(2));
+      const coveredValue = Number((coveredQty * unitPrice).toFixed(2));
+      const buyValue = Number((buyQty * unitPrice).toFixed(2));
+      if (coveredQty > 0) {
+        inStoreLines.push({ name: line.name, unit: line.unit || '', coveredQty, unitPrice, coveredValue });
+      }
+      inStoreValue += coveredValue;
+      amountNeededToday += buyValue;
+    });
+    return {
+      inStoreLines,
+      inStoreValue: Number(inStoreValue.toFixed(2)),
+      amountNeededToday: Number(amountNeededToday.toFixed(2))
+    };
   }
 
   function buildFoodInvoiceObject(cookPayload = {}, { markDraft = false } = {}) {
@@ -1549,6 +1589,11 @@ function buildRegisterStats(studentMap, attendanceByClass) {
     const missingXml = (invoice.missingLines || []).length
       ? (invoice.missingLines || []).map(line => `<text:p text:style-name="Standard">- ${line.name}: upungufu ${Number((line.requiredQty - line.onHand).toFixed(2))} ${line.unit || ''}</text:p>`).join('')
       : `<text:p text:style-name="Standard">Hakuna upungufu wa bidhaa.</text:p>`;
+    const breakdown = computeInStoreBreakdown(invoice.lines || []);
+    const instockXml = breakdown.inStoreLines.length
+      ? breakdown.inStoreLines.map(line => `<text:p text:style-name="Standard">- ${line.name}: ${line.coveredQty} ${line.unit || ''} (${formatTzs(line.coveredValue)})</text:p>`).join('')
+        + `<text:p text:style-name="Standard">Jumla ya Thamani ya Stoo (Imepunguzwa): ${formatTzs(breakdown.inStoreValue)}</text:p>`
+      : `<text:p text:style-name="Standard">Hakuna bidhaa iliyopo stoo kwa siku hii.</text:p>`;
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.2">
   <office:body>
@@ -1560,6 +1605,9 @@ function buildRegisterStats(studentMap, attendanceByClass) {
       ${linesXml}
       <text:p text:style-name="Standard">------------------------------------------------------------</text:p>
       <text:p text:style-name="Standard">TOTAL: ${formatTzs(invoice.totalAmount)}</text:p>
+      <text:h text:style-name="Heading_20_2" text:outline-level="2">Bidhaa Zilizopo Stoo (Hazihitaji Kununuliwa Leo)</text:h>
+      ${instockXml}
+      <text:p text:style-name="Standard">KIASI KINACHOHITAJIKA LEO (AMOUNT NEEDED TODAY): ${formatTzs(breakdown.amountNeededToday)}</text:p>
       <text:h text:style-name="Heading_20_2" text:outline-level="2">Stock Alerts</text:h>
       ${missingXml}
       <text:p text:style-name="Standard">Assistant Headteacher Signature: ______________________</text:p>

@@ -173,6 +173,30 @@
         .spending-icon { font-size: 1.3rem; }
         .spending-body-hidden { display: none; }
         .spending-btns { display: flex; gap: 0.4rem; align-items: center; }
+        /* Needed-Today accent stat card */
+        .food-stat-card--needed {
+          border-color: rgba(217,119,6,0.35);
+          background: linear-gradient(145deg, #fff7ed 0%, #fffbeb 100%);
+        }
+        .food-stat-card--needed .food-stat-label { color: #92400e; }
+        .food-stat-card--needed .food-stat-value { color: #7c2d12; }
+        .food-stat-card--needed .food-stat-note { color: #92400e !important; }
+        /* In-Store (deducted items) card */
+        .instock-card {
+          border: 1px solid rgba(5,150,105,0.25);
+          background: linear-gradient(180deg, #ecfdf5 0%, #f0fdfa 100%);
+          border-radius: 1.1rem;
+          box-shadow: 0 10px 20px rgba(15,23,42,0.06);
+          padding: 1rem;
+          margin-top: 1rem;
+        }
+        .instock-title { color: #065f46; font-weight: 800; }
+        .instock-table { width: 100%; border-collapse: collapse; min-width: 560px; }
+        .instock-table th { background: linear-gradient(135deg,#059669,#0d9488); color:#f0fdf4; font-size:0.78rem; text-transform:uppercase; padding:0.65rem 0.7rem; }
+        .instock-table td { padding:0.65rem 0.7rem; border-bottom:1px solid #d1fae5; color:#064e3b; font-size:0.88rem; }
+        .instock-table tbody tr:nth-child(even){ background:#f0fdfa; }
+        .instock-total-row td { font-weight:800; background:#d1fae5 !important; color:#064e3b; }
+        .instock-empty { color:#065f46; font-style:italic; padding:0.5rem 0; }
     </style>
 </head>
 <body>
@@ -191,7 +215,7 @@
                 </div>
                 <img src="../images/somap-logo.png.jpg" alt="SoMAp Logo" class="food-invoice-logo" />
             </div>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 food-invoice-stats">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 food-invoice-stats">
                 <div class="food-stat-card">
                     <h3 class="food-stat-label">Invoice Status</h3>
                     <p id="food-invoice-status" class="food-stat-value">-</p>
@@ -206,6 +230,11 @@
                     <h3 class="food-stat-label">Missing Items</h3>
                     <p id="food-invoice-missing" class="food-stat-value">0</p>
                     <small class="food-stat-note">Items below required stock.</small>
+                </div>
+                <div class="food-stat-card food-stat-card--needed">
+                    <h3 class="food-stat-label">Amount Needed Today</h3>
+                    <p id="food-invoice-needed" class="food-stat-value">TSh 0</p>
+                    <small class="food-stat-note">Total Amount minus items already in store.</small>
                 </div>
             </div>
             <p class="food-invoice-swahili">
@@ -257,6 +286,31 @@
                         </thead>
                         <tbody id="food-invoice-table">
                             <tr><td colspan="7">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- In-Store Deductions Card -->
+            <div class="instock-card" id="instock-card">
+                <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+                    <h3 class="text-lg instock-title">📦 Bidhaa Zilizopo Stoo (Hazihitaji Kununuliwa Leo)</h3>
+                </div>
+                <p class="spending-note" style="margin-bottom:0.5rem;">
+                    Bidhaa hizi tayari zipo stoo ya shule kwa kiasi kinachohitajika, hivyo hazihitaji kununuliwa tena leo. Thamani yake imeondolewa kwenye Total Amount ili kupata Kiasi Kinachohitajika Leo (Amount Needed Today) kwa usahihi, bila kuhitaji kukokotoa kwa mkono.
+                </p>
+                <div class="food-table-wrap">
+                    <table class="instock-table">
+                        <thead>
+                            <tr>
+                                <th>Item</th>
+                                <th>Kiasi Kilichopo Stoo</th>
+                                <th>Bei kwa Kipimo</th>
+                                <th>Thamani (Imepunguzwa)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="food-instock-table">
+                            <tr><td colspan="4">Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -362,6 +416,58 @@
     function uniqueList(arr) { return Array.from(new Set((arr||[]).filter(Boolean))); }
 
     let latestFoodInvoice = null;
+
+    // Splits each invoice line into the portion already covered by store stock
+    // (no need to buy) and the portion that still needs to be purchased today.
+    // Works for any school/date: coveredQty caps at onHand, so partially-stocked
+    // items are only deducted for the part actually available.
+    function computeInStoreBreakdown(lines) {
+        const arr = Array.isArray(lines) ? lines : [];
+        const inStoreLines = [];
+        let inStoreValue = 0;
+        let amountNeededToday = 0;
+        arr.forEach(line => {
+            const required = Number(line.requiredQty || 0);
+            const onHand = Number(line.onHand || 0);
+            const unitPrice = Number(line.unitPrice || 0);
+            const coveredQty = Number(Math.min(onHand, required).toFixed(2));
+            const buyQty = Number(Math.max(required - onHand, 0).toFixed(2));
+            const coveredValue = Number((coveredQty * unitPrice).toFixed(2));
+            const buyValue = Number((buyQty * unitPrice).toFixed(2));
+            if (coveredQty > 0) {
+                inStoreLines.push({ name: line.name, unit: line.unit || '', coveredQty, unitPrice, coveredValue });
+            }
+            inStoreValue += coveredValue;
+            amountNeededToday += buyValue;
+        });
+        return {
+            inStoreLines,
+            inStoreValue: Number(inStoreValue.toFixed(2)),
+            amountNeededToday: Number(amountNeededToday.toFixed(2))
+        };
+    }
+
+    function renderInStoreTable(breakdown) {
+        const body = document.getElementById('food-instock-table');
+        if (!body) return;
+        if (!breakdown.inStoreLines.length) {
+            body.innerHTML = '<tr><td colspan="4" class="instock-empty">Hakuna bidhaa iliyopo stoo kwa siku hii — bidhaa zote zinahitaji kununuliwa.</td></tr>';
+            return;
+        }
+        body.innerHTML = breakdown.inStoreLines.map(l => `
+            <tr>
+                <td>${l.name||'-'}</td>
+                <td>${l.coveredQty} ${l.unit||''}</td>
+                <td>${formatTsh(l.unitPrice)}</td>
+                <td>${formatTsh(l.coveredValue)}</td>
+            </tr>
+        `).join('') + `
+            <tr class="instock-total-row">
+                <td colspan="3">Jumla ya Thamani ya Stoo (Imepunguzwa)</td>
+                <td>${formatTsh(breakdown.inStoreValue)}</td>
+            </tr>
+        `;
+    }
 
     function buildAttendanceKeys(dateStr) {
         const normalized = normalizeDateCandidates(dateStr)[0] || todayYmdLocal();
@@ -559,6 +665,84 @@
         doc.setFontSize(12);
         doc.text(`TOTAL AMOUNT: ${formatTsh(invoice.totalAmount||0)}`, margin+12, y+21);
         y += 46;
+
+        // ── IN-STORE DEDUCTIONS + AMOUNT NEEDED TODAY ──
+        const breakdown = computeInStoreBreakdown(lines);
+        ensureSpace(28);
+        doc.setFillColor(6,95,70);          // emerald-800 header
+        doc.roundedRect(margin, y, contentWidth, 26, 6, 6, 'F');
+        doc.setTextColor(240,253,250);
+        doc.setFont('helvetica','bold');
+        doc.setFontSize(11);
+        doc.text('BIDHAA ZILIZOPO STOO (HAZIHITAJI KUNUNULIWA LEO)', margin+10, y+17);
+        y += 34;
+
+        if (!breakdown.inStoreLines.length) {
+            ensureSpace(22);
+            doc.setFillColor(254,242,242);
+            doc.setDrawColor(252,165,165);
+            doc.roundedRect(margin, y, contentWidth, 22, 5, 5, 'FD');
+            doc.setTextColor(153,27,27);
+            doc.setFont('helvetica','normal');
+            doc.setFontSize(9.5);
+            doc.text('Hakuna bidhaa iliyopo stoo kwa siku hii — bidhaa zote zinahitaji kununuliwa.', margin+10, y+14);
+            y += 30;
+        } else {
+            const sColW = [150, 100, 90, contentWidth - 150 - 100 - 90];
+            const sCols = ['Item', 'Kiasi Kilichopo Stoo', 'Bei kwa Kipimo', 'Thamani (Imepunguzwa)'];
+            ensureSpace(24);
+            doc.setFillColor(5,150,105);    // emerald-600
+            doc.rect(margin, y, contentWidth, 24, 'F');
+            doc.setTextColor(240,253,250);
+            doc.setFont('helvetica','bold');
+            doc.setFontSize(8.5);
+            let sx = margin;
+            sCols.forEach((l,i)=>{ doc.text(l, sx+5, y+15); sx += sColW[i]; });
+            y += 24;
+
+            breakdown.inStoreLines.forEach((line, i) => {
+                const cells = [
+                    `${i+1}. ${line.name||'-'}`,
+                    `${line.coveredQty} ${line.unit||''}`,
+                    formatTsh(line.unitPrice),
+                    formatTsh(line.coveredValue)
+                ];
+                const split = cells.map((c,ci) => doc.splitTextToSize(String(c||''), sColW[ci]-8));
+                const rowH = Math.max(1,...split.map(a=>a.length))*11 + 8;
+                ensureSpace(rowH+2);
+                if (y+rowH+2 > pageHeight-margin) { doc.addPage(); y=margin; drawHeader(true); }
+                if (i%2===0) { doc.setFillColor(236,253,245); doc.rect(margin,y,contentWidth,rowH,'F'); }
+                else { doc.setFillColor(209,250,229); doc.rect(margin,y,contentWidth,rowH,'F'); }
+                doc.setDrawColor(110,231,183);
+                doc.rect(margin,y,contentWidth,rowH);
+                doc.setFont('helvetica','normal');
+                doc.setTextColor(6,78,59);
+                doc.setFontSize(9);
+                sx = margin;
+                split.forEach((arr,ci)=>{ doc.text(arr, sx+4, y+12); sx += sColW[ci]; });
+                y += rowH;
+            });
+
+            ensureSpace(30);
+            doc.setFillColor(6,95,70);
+            doc.roundedRect(margin, y, contentWidth, 28, 5, 5, 'F');
+            doc.setTextColor(240,253,250);
+            doc.setFont('helvetica','bold');
+            doc.setFontSize(10.5);
+            doc.text(`JUMLA YA THAMANI YA STOO (IMEPUNGUZWA): ${formatTsh(breakdown.inStoreValue)}`, margin+10, y+18);
+            y += 36;
+        }
+
+        ensureSpace(34);
+        doc.setFillColor(255,251,235);
+        doc.setDrawColor(217,119,6);
+        doc.roundedRect(margin, y, contentWidth, 34, 8, 8, 'FD');
+        doc.setTextColor(146,64,14);
+        doc.setFont('helvetica','bold');
+        doc.setFontSize(12);
+        doc.text(`KIASI KINACHOHITAJIKA LEO (AMOUNT NEEDED TODAY): ${formatTsh(breakdown.amountNeededToday)}`, margin+12, y+21);
+        y += 46;
+
         // ── STOCK ALERTS / RESTOCK TABLE ──
         ensureSpace(28);
         doc.setFillColor(146,64,14);        // amber-800 header
@@ -700,12 +884,16 @@
         const statusEl = document.getElementById('food-invoice-status');
         const totalEl = document.getElementById('food-invoice-total');
         const missingEl = document.getElementById('food-invoice-missing');
+        const neededEl = document.getElementById('food-invoice-needed');
         const tbody = document.getElementById('food-invoice-table');
+        const instockBody = document.getElementById('food-instock-table');
         if (!statusEl||!totalEl||!missingEl||!tbody) return;
         statusEl.textContent = 'Loading...';
         totalEl.textContent = formatTsh(0);
         missingEl.textContent = '0';
+        if (neededEl) neededEl.textContent = formatTsh(0);
         tbody.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
+        if (instockBody) instockBody.innerHTML = '<tr><td colspan="4">Loading...</td></tr>';
         try {
             const school = getCurrentSchoolId();
             const aliases = schoolAliasList(school);
@@ -765,6 +953,7 @@
             if (!invoice) {
                 statusEl.textContent = 'No invoice';
                 tbody.innerHTML = `<tr><td colspan="7">No food invoice saved for selected date (${dateCandidates.join(' / ')}).</td></tr>`;
+                if (instockBody) instockBody.innerHTML = '<tr><td colspan="4" class="instock-empty">Hakuna data ya invoice kwa tarehe hii.</td></tr>';
                 return;
             }
             const dateInput = document.getElementById('food-invoice-date');
@@ -784,6 +973,9 @@
                     <td>${line.shopName||'-'}<br/><small>${line.shopPhone||'-'}</small></td>
                 </tr>
             `).join('') : '<tr><td colspan="7">No invoice lines.</td></tr>';
+            const breakdown = computeInStoreBreakdown(invoiceLines);
+            if (neededEl) neededEl.textContent = formatTsh(breakdown.amountNeededToday);
+            renderInStoreTable(breakdown);
         } catch (err) {
             console.error('Failed to load food invoice', err);
             statusEl.textContent = 'Error';
