@@ -295,6 +295,85 @@
       color: white;
     }
 
+    .role-manage-toggle {
+      margin-top: 10px;
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 4px 0;
+    }
+
+    .role-manager {
+      margin-top: 10px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 12px;
+      padding: 16px;
+    }
+
+    .role-add-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .role-add-row input {
+      flex: 1 1 220px;
+    }
+
+    .role-add-row .btn {
+      padding: 10px 18px;
+    }
+
+    .role-chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .role-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 999px;
+      padding: 6px 12px;
+      color: white;
+      font-size: 0.85rem;
+    }
+
+    .role-chip.custom {
+      border-color: var(--accent);
+    }
+
+    .role-chip button {
+      background: rgba(239, 68, 68, 0.8);
+      color: white;
+      border: none;
+      border-radius: 50%;
+      width: 20px;
+      height: 20px;
+      line-height: 20px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      padding: 0;
+    }
+
+    .role-chip button:hover {
+      background: rgba(239, 68, 68, 1);
+    }
+
+    .role-manager-note {
+      margin-top: 10px;
+      color: rgba(255, 255, 255, 0.65);
+      font-size: 0.8rem;
+    }
+
     .class-mapping-card {
       background: rgba(255, 255, 255, 0.08);
       border: 1px solid rgba(255, 255, 255, 0.2);
@@ -1192,6 +1271,15 @@
           <option value="Class Teacher">Class Teacher</option>
           <option value="Teacher">Teacher</option>
         </select>
+        <button type="button" class="role-manage-toggle" id="roleManageToggle">⚙️ Manage roles (add / remove)</button>
+        <div class="role-manager hidden" id="roleManager">
+          <div class="role-add-row">
+            <input type="text" id="newRoleInput" maxlength="60" placeholder="e.g. Internal Quality Assurer">
+            <button type="button" class="btn btn-secondary" id="addRoleBtn">➕ Add Role</button>
+          </div>
+          <div class="role-chip-list" id="roleChipList"></div>
+          <p class="role-manager-note">Built-in roles (🔒) cannot be removed. Custom roles are shared by every teacher in this school.</p>
+        </div>
       </div>
 
       <div class="form-group" style="margin-top: 24px;">
@@ -3336,9 +3424,141 @@
         });
       }
 
+      // ---- Teacher role list: built-in roles (hard-coded rules depend on them) + school-defined custom roles ----
+      const BUILTIN_TEACHER_ROLES = ['Head Teacher', 'Management Teacher', 'Academic Teacher', 'Assistant Headteacher', 'Class Teacher', 'Teacher'];
+      const roleManageToggle = document.getElementById('roleManageToggle');
+      const roleManager = document.getElementById('roleManager');
+      const newRoleInput = document.getElementById('newRoleInput');
+      const addRoleBtn = document.getElementById('addRoleBtn');
+      const roleChipList = document.getElementById('roleChipList');
+      let customTeacherRoles = {}; // { key: { label, createdBy, createdAt } }
+
+      const normalizeRoleLabel = (label) => String(label || '').trim().replace(/\s+/g, ' ');
+      const roleKeyFor = (label) => normalizeRoleLabel(label).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      const isBuiltinRole = (label) => BUILTIN_TEACHER_ROLES.some((r) => r.toLowerCase() === normalizeRoleLabel(label).toLowerCase());
+
+      async function loadCustomTeacherRoles() {
+        try {
+          const snap = await schoolRef('settings/teacherRoles').once('value');
+          customTeacherRoles = snap.exists() ? (snap.val() || {}) : {};
+        } catch (error) {
+          console.warn('Failed to load custom teacher roles', error);
+          customTeacherRoles = {};
+        }
+        renderTeacherRoleOptions();
+      }
+
+      function renderTeacherRoleOptions() {
+        if (!teacherTypeSelect) return;
+        const selected = teacherTypeSelect.value || teacherConfig?.teacherType || '';
+        const customLabels = Object.values(customTeacherRoles)
+          .map((r) => normalizeRoleLabel(r?.label))
+          .filter((label) => label && !isBuiltinRole(label))
+          .sort((a, b) => a.localeCompare(b));
+        const labels = [...BUILTIN_TEACHER_ROLES, ...customLabels];
+        // Keep a teacher's saved role visible even if it was later removed from the list
+        if (selected && !labels.some((l) => l.toLowerCase() === selected.toLowerCase())) labels.push(selected);
+
+        teacherTypeSelect.innerHTML = '<option value="">-- Select Your Role --</option>';
+        labels.forEach((label) => {
+          const opt = document.createElement('option');
+          opt.value = label;
+          opt.textContent = label;
+          teacherTypeSelect.appendChild(opt);
+        });
+        teacherTypeSelect.value = selected;
+
+        if (!roleChipList) return;
+        roleChipList.innerHTML = '';
+        BUILTIN_TEACHER_ROLES.forEach((label) => {
+          const chip = document.createElement('span');
+          chip.className = 'role-chip';
+          chip.textContent = `🔒 ${label}`;
+          roleChipList.appendChild(chip);
+        });
+        Object.entries(customTeacherRoles)
+          .filter(([, r]) => normalizeRoleLabel(r?.label) && !isBuiltinRole(r.label))
+          .sort(([, a], [, b]) => normalizeRoleLabel(a.label).localeCompare(normalizeRoleLabel(b.label)))
+          .forEach(([key, r]) => {
+            const chip = document.createElement('span');
+            chip.className = 'role-chip custom';
+            chip.appendChild(document.createTextNode(normalizeRoleLabel(r.label)));
+            const del = document.createElement('button');
+            del.type = 'button';
+            del.title = 'Remove role';
+            del.textContent = '✕';
+            del.addEventListener('click', () => deleteCustomTeacherRole(key, normalizeRoleLabel(r.label)));
+            chip.appendChild(del);
+            roleChipList.appendChild(chip);
+          });
+      }
+
+      async function addCustomTeacherRole() {
+        const label = normalizeRoleLabel(newRoleInput?.value);
+        if (!label) {
+          toast('Type the role name first', 'warning');
+          return;
+        }
+        const key = roleKeyFor(label);
+        if (!key) {
+          toast('Role name must contain letters or numbers', 'warning');
+          return;
+        }
+        const exists = isBuiltinRole(label) || Object.values(customTeacherRoles)
+          .some((r) => normalizeRoleLabel(r?.label).toLowerCase() === label.toLowerCase());
+        if (exists) {
+          toast(`"${label}" is already in the list`, 'warning');
+          return;
+        }
+        try {
+          await schoolRef(`settings/teacherRoles/${key}`).set({
+            label,
+            createdBy: currentWorkerId || '',
+            createdAt: firebase.database.ServerValue.TIMESTAMP
+          });
+          if (newRoleInput) newRoleInput.value = '';
+          await loadCustomTeacherRoles();
+          if (teacherTypeSelect) teacherTypeSelect.value = label;
+          toast(`Role "${label}" added`, 'success');
+        } catch (error) {
+          console.error('Failed to add teacher role', error);
+          toast('Failed to add role. Please try again.', 'error');
+        }
+      }
+
+      async function deleteCustomTeacherRole(key, label) {
+        const inUse = Object.values(allTeacherConfigsCache || {})
+          .filter((cfg) => normalizeRoleLabel(cfg?.teacherType).toLowerCase() === label.toLowerCase()).length;
+        const warning = inUse
+          ? `${inUse} teacher(s) currently have the role "${label}". They keep it until they change it, but it will no longer be offered to others.\n\nRemove "${label}"?`
+          : `Remove the role "${label}"?`;
+        if (!window.confirm(warning)) return;
+        try {
+          await schoolRef(`settings/teacherRoles/${key}`).remove();
+          if (teacherTypeSelect && teacherTypeSelect.value === label && teacherConfig?.teacherType !== label) {
+            teacherTypeSelect.value = '';
+          }
+          await loadCustomTeacherRoles();
+          toast(`Role "${label}" removed`, 'success');
+        } catch (error) {
+          console.error('Failed to remove teacher role', error);
+          toast('Failed to remove role. Please try again.', 'error');
+        }
+      }
+
+      roleManageToggle?.addEventListener('click', () => roleManager?.classList.toggle('hidden'));
+      addRoleBtn?.addEventListener('click', addCustomTeacherRole);
+      newRoleInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          addCustomTeacherRole();
+        }
+      });
+
       function populateSetupFormFromConfig() {
         if (!teacherTypeSelect || !classSubjectMappings) return;
         teacherTypeSelect.value = teacherConfig?.teacherType || '';
+        renderTeacherRoleOptions();
         classSubjectMap = [];
         classSubjectMappings.innerHTML = '';
         const mappings = teacherConfig?.classSubjectMappings || [];
@@ -4050,7 +4270,8 @@
           loadCustomSubjectCatalogForYear(),
           loadWorkerNameCacheForYear(currentYear),
           loadAllTeacherConfigsForYear(currentYear),
-          loadSharedClassStreamsForYear(currentYear)
+          loadSharedClassStreamsForYear(currentYear),
+          loadCustomTeacherRoles()
         ]);
         mergeSharedClassStreamsFromTeacherConfigs();
         initYearSelector();
