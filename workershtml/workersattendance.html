@@ -15,6 +15,7 @@
   <script src="../firebase.js"></script>
   <script src="../shared/academic-class-utils.js"></script>
   <script src="../shared/teacher-assignment-utils.js"></script>
+  <script src="../shared/quality-assurance-utils.js"></script>
   <script src="../shared/school_calendar.js"></script>
   <script src="../shared/payroll_core.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -3649,6 +3650,176 @@
       });
     }
 
+    // ── Internal Quality Assurance (IQA) gate ──
+    // Added on top of every existing check-out rule: lesson plans, lesson notes and class journals
+    // rejected by the Internal Quality Assurer must be edited and resubmitted before check-out.
+    // Optional stricter rules (pending-today, missing class journal) are switched on in the IQA Hub settings.
+    function qaPageUrl(page, year) {
+      const qp = new URLSearchParams({ school: state.schoolId || '', year: year || state.year || '' });
+      return `Toworkertaskshtml/${page}?${qp.toString()}`;
+    }
+
+    async function collectQualityAssuranceOutstanding(referenceYmd, rules) {
+      const QA = window.SomapQA;
+      const result = { rejected: [], pendingToday: [], missingJournals: [] };
+      if (!QA || !state.workerId) return result;
+      const myId = String(state.workerId);
+      const refDate = new Date(`${referenceYmd}T00:00:00`);
+      const fromDate = new Date(refDate.getTime() - (rules.lookbackDays || 14) * 86400000);
+      const fromYmd = todayYMD(fromDate);
+      const years = Array.from(new Set([String(fromDate.getFullYear()), String(refDate.getFullYear())]));
+      const inWindow = (ymd) => !!ymd && ymd >= fromYmd && ymd <= referenceYmd;
+      const push = (item, status, ymd) => {
+        if (status === 'rejected' && inWindow(ymd)) result.rejected.push(item);
+        else if (status === 'pending' && ymd === referenceYmd) result.pendingToday.push(item);
+      };
+
+      for (const year of years) {
+        const [planSnap, noteSnap] = await Promise.all([
+          schoolRef(`lessonPlans/${year}`).once('value').catch(() => null),
+          schoolRef(`lessonNotes/${year}/${myId}`).once('value').catch(() => null)
+        ]);
+        Object.entries(planSnap?.val?.() || {}).forEach(([storedClass, byDate]) => {
+          Object.entries(byDate || {}).forEach(([dateKey, byId]) => {
+            if (!inWindow(dateKey)) return;
+            Object.entries(byId || {}).forEach(([id, plan]) => {
+              if (!plan || typeof plan !== 'object' || String(plan.teacherId || '') !== myId) return;
+              const status = QA.normalizeStatus(plan.qa);
+              push({
+                kind: 'Lesson Plan',
+                label: `${plan.className || storedClass} · ${plan.subject || ''} · ${plan.topic || 'Untitled'}`,
+                date: dateKey,
+                comment: plan.qa?.comment || '',
+                href: qaPageUrl('lessonplan.html', year)
+              }, status, dateKey);
+            });
+          });
+        });
+        Object.entries(noteSnap?.val?.() || {}).forEach(([id, note]) => {
+          if (!note || typeof note !== 'object') return;
+          const ymd = QA.noteDate(note);
+          push({
+            kind: 'Lesson Notes',
+            label: `${note.class || ''} · ${note.subject || ''} · ${note.topic || 'Untitled'}`,
+            date: ymd,
+            comment: note.qa?.comment || '',
+            href: qaPageUrl('lessonnotes.html', year)
+          }, QA.normalizeStatus(note.qa), ymd);
+        });
+      }
+
+      const journalSnap = await db.ref(`class_journals/${myId}`).once('value').catch(() => null);
+      const journals = Object.values(journalSnap?.val?.() || {}).filter((j) => j && typeof j === 'object');
+      journals.forEach((journal) => {
+        const ymd = String(journal.date || '');
+        push({
+          kind: 'Class Journal',
+          label: `${journal.class || journal.className || ''} · ${ymd}`,
+          date: ymd,
+          comment: journal.qa?.comment || '',
+          href: qaPageUrl('classjournal.html', ymd.slice(0, 4))
+        }, QA.normalizeStatus(journal.qa), ymd);
+      });
+
+      if (rules.blockMissingJournal && isVerifiedTeachingRole()) {
+        const timetable = await loadTeacherTimetableLessonsForDate(referenceYmd.slice(0, 4), referenceYmd);
+        const taughtClasses = [];
+        (timetable.lessons || []).forEach((lesson) => {
+          if (!taughtClasses.some((cls) => classesEquivalent(cls, lesson.className))) taughtClasses.push(lesson.className);
+        });
+        taughtClasses.forEach((className) => {
+          const hasJournal = journals.some((journal) =>
+            String(journal.date || '') === referenceYmd &&
+            classesEquivalent(journal.class || journal.className || '', className));
+          if (!hasJournal) {
+            result.missingJournals.push({
+              kind: 'Class Journal',
+              label: `${className} · ${referenceYmd} (haijaandikwa)`,
+              date: referenceYmd,
+              comment: '',
+              href: qaPageUrl('classjournal.html', referenceYmd.slice(0, 4))
+            });
+          }
+        });
+      }
+      return result;
+    }
+
+    async function validateQualityAssuranceCheckout(year, dayKey) {
+      try {
+        if (!window.SomapQA) return { valid: true };
+        const rules = await window.SomapQA.loadCheckoutRules(schoolRef);
+        if (!rules.enabled) return { valid: true };
+        const dateYmd = dateFromDayKey(dayKey);
+        if (!dateYmd) return { valid: true };
+        const outstanding = await collectQualityAssuranceOutstanding(dateYmd, rules);
+        const blocking = [
+          ...(rules.blockRejected ? outstanding.rejected : []),
+          ...(rules.blockPendingToday ? outstanding.pendingToday : []),
+          ...(rules.blockMissingJournal ? outstanding.missingJournals : [])
+        ];
+        if (!blocking.length) return { valid: true };
+        return {
+          valid: false,
+          items: blocking,
+          message: `Internal Quality Assurer: una nyaraka ${blocking.length} ambazo hazijaidhinishwa (zimekataliwa, zinasubiri, au hazijaandikwa). Zirekebishe na uzitume tena kabla ya check-out.`
+        };
+      } catch (error) {
+        console.warn('IQA checkout validation skipped', error);
+        return { valid: true };
+      }
+    }
+
+    function showQualityAssuranceBlock(info, { title, closeLabel } = {}) {
+      return new Promise((resolve) => {
+        const cards = (info.items || []).map((item) => `
+          <div style="background:rgba(251,113,133,0.12);border:1px solid rgba(251,113,133,0.45);border-radius:10px;padding:12px;margin-top:8px;">
+            <div style="font-weight:700;color:#fecdd3;">${escapeAttendanceHtml(item.kind)} &middot; ${escapeAttendanceHtml(item.label)}</div>
+            <div style="color:var(--muted);font-size:0.86rem;margin-top:3px;">Tarehe: ${escapeAttendanceHtml(item.date || '-')}</div>
+            ${item.comment ? `<div style="color:#fecaca;font-size:0.88rem;margin-top:6px;"><strong>Sababu ya kukataliwa:</strong> ${escapeAttendanceHtml(item.comment)}</div>` : ''}
+            <a href="${escapeAttendanceHtml(item.href)}" target="_blank" rel="noopener"
+               style="display:inline-block;margin-top:8px;padding:7px 12px;background:rgba(251,113,133,0.22);border:1px solid rgba(251,113,133,0.6);border-radius:8px;color:#fb7185;text-decoration:none;font-weight:700;font-size:0.85rem;">
+              Fungua, rekebisha na utume tena
+            </a>
+          </div>`).join('');
+        const overlay = document.createElement('div');
+        overlay.className = 'mini-modal-overlay';
+        overlay.innerHTML = `
+          <div class="mini-modal-card" role="dialog" aria-modal="true" style="width:min(640px,100%);max-height:82vh;overflow-y:auto;display:grid;gap:0;">
+            <h3 style="color:#fb7185;">${escapeAttendanceHtml(title || 'Idhini ya Internal Quality Assurer Inahitajika')}</h3>
+            <p style="color:var(--muted);font-size:0.92rem;margin-bottom:8px;">${escapeAttendanceHtml(info.message || '')}</p>
+            ${cards}
+            <div class="mini-modal-actions" style="margin-top:16px;">
+              <button type="button" class="mini-modal-btn primary" data-act="close">${escapeAttendanceHtml(closeLabel || 'Sawa')}</button>
+            </div>
+          </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', (event) => {
+          if (event.target.closest('[data-act="close"]') || event.target === overlay) {
+            overlay.remove();
+            resolve();
+          }
+        });
+      });
+    }
+
+    // Check-in reminder (does not block): lists anything the IQA rejected so the teacher fixes it today.
+    async function remindQualityAssuranceRejections(referenceTs) {
+      try {
+        if (!window.SomapQA) return;
+        const rules = await window.SomapQA.loadCheckoutRules(schoolRef);
+        if (!rules.enabled) return;
+        const outstanding = await collectQualityAssuranceOutstanding(todayYMD(new Date(referenceTs)), { ...rules, blockMissingJournal: false });
+        if (!outstanding.rejected.length) return;
+        await showQualityAssuranceBlock({
+          items: outstanding.rejected,
+          message: `Internal Quality Assurer amekataa nyaraka ${outstanding.rejected.length} zako. Unaweza kuendelea na check-in, lakini HUTAWEZA kufanya check-out mpaka uzirekebishe na kuzituma tena.`
+        }, { title: 'Nyaraka Zilizokataliwa na Internal Quality Assurer', closeLabel: 'Nimeelewa, endelea na check-in' });
+      } catch (error) {
+        console.warn('IQA check-in reminder skipped', error);
+      }
+    }
+
     function showTeacherBlockModal(result) {
       const somap = getSomap();
       const schoolId = state.schoolId || '';
@@ -4280,6 +4451,8 @@
               toast('Check-in imezuiwa mpaka uhifadhi lesson plan hizo kamili.', 'error', 7000);
               return;
             }
+            if (btn) btn.textContent = 'Inaangalia idhini ya Quality Assurer...';
+            await remindQualityAssuranceRejections(timestamp);
             if (btn) btn.textContent = 'Inathibitisha mahitaji...';
             try {
               const readiness = await checkTeacherReadiness();
@@ -4405,6 +4578,13 @@
             if (!lessonFinalization.valid) {
               showTeacherLessonFinalizationBlock(lessonFinalization);
               toast(lessonFinalization.message, 'error', 7000);
+              return;
+            }
+            if (btn) btn.textContent = 'Inaangalia idhini ya Quality Assurer...';
+            const qaValidation = await validateQualityAssuranceCheckout(systemYear, dayKey);
+            if (!qaValidation.valid) {
+              showQualityAssuranceBlock(qaValidation);
+              toast(qaValidation.message, 'error', 7000);
               return;
             }
           }

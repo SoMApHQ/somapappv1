@@ -10,6 +10,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="../../firebase.js"></script>
   <script src="../../shared/academic-class-utils.js"></script>
+  <script src="../../shared/quality-assurance-utils.js"></script>
   <script src="../../shared/finance_math.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
@@ -1818,9 +1819,11 @@
                 <span class="meta-tag">👥 ${normalizedJournal.studentsPresent}/${normalizedJournal.totalEnrolled} Present</span>
                 <span class="meta-tag">${normalizedJournal.classMood || 'Mood N/A'}</span>
                 <span class="meta-tag">Teacher ${normalizedJournal.teacherName || 'N/A'}</span>
+                ${window.SomapQA ? window.SomapQA.badgeHtml(journal.qa, 'meta-tag') : ''}
               </div>
             </div>
           </div>
+          ${window.SomapQA ? window.SomapQA.rejectionNoteHtml(journal.qa) : ''}
           <div class="journal-highlight-grid">
             <div class="journal-highlight">
               <span class="journal-highlight-label">Time In</span>
@@ -1851,6 +1854,7 @@
           </div>
           <div class="journal-actions">
             <button class="btn btn-export" onclick="exportSingleJournalPdf('${id}')">📄 Export PDF</button>
+            <button class="btn btn-secondary" onclick="editJournal('${id}')">✏️ Edit &amp; Resubmit</button>
             <button class="btn btn-secondary" onclick="deleteJournal('${id}')">🗑️ Delete</button>
           </div>
         </div>
@@ -1874,6 +1878,43 @@
         console.error('Single journal export failed:', error);
         toast('Error exporting journal PDF', 'error');
       }
+    };
+
+    // Edit an existing entry (e.g. one rejected by the Internal Quality Assurer) and resubmit it.
+    let editingJournalId = null;
+    const JOURNAL_TEXT_FIELDS = ['classMood', 'topicsCovered', 'keyActivities', 'studentProgress', 'behavioralIssues',
+      'achievements', 'homeworkGiven', 'materialsUsed', 'challenges', 'reminders', 'timeIn', 'timeOut'];
+
+    function resetJournalEditMode() {
+      editingJournalId = null;
+      saveJournalBtn.textContent = '💾 Save Journal Entry';
+    }
+
+    window.editJournal = async function(journalId) {
+      const journal = journals[journalId];
+      if (!journal) {
+        toast('That journal entry could not be found.', 'warning');
+        return;
+      }
+      const classEl = document.getElementById('journalClass');
+      const journalClassValue = journal.class || journal.className || '';
+      if (classEl && journalClassValue && !Array.from(classEl.options).some((opt) => opt.value === journalClassValue)) {
+        classEl.add(new Option(journalClassValue, journalClassValue));
+      }
+      if (classEl) classEl.value = journalClassValue;
+      journalDateInput.value = journal.date || '';
+      journalDateInput.dispatchEvent(new Event('change'));
+      // Attendance and linked lesson plans are re-read for the class/date; the teacher's text is restored after.
+      await recomputeJournalAttendance();
+      JOURNAL_TEXT_FIELDS.forEach((fieldId) => {
+        const el = document.getElementById(fieldId);
+        if (el && journal[fieldId] !== undefined) el.value = journal[fieldId] || '';
+      });
+      editingJournalId = journalId;
+      saveJournalBtn.textContent = '💾 Update & Resubmit to IQA';
+      saveJournalBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      document.getElementById('topicsCovered')?.focus();
+      toast('Journal loaded for editing. Save to resubmit it for IQA approval.', 'success');
     };
 
     window.deleteJournal = async function(journalId) {
@@ -1951,11 +1992,27 @@
         schoolLogoUrl: compactTextBlock(localStorage.getItem('somap.currentSchoolLogoUrl') || schoolResolved?.logoUrl || '')
       };
 
+      const editingExisting = editingJournalId && journals[editingJournalId] ? editingJournalId : null;
+      // Every save (new or edited) goes to the Internal Quality Assurer for approval.
+      if (window.SomapQA) {
+        journalData.qa = window.SomapQA.buildSubmission(editingExisting ? journals[editingExisting]?.qa : null, {
+          teacherId: workerId,
+          teacherName: journalData.teacherName
+        });
+      }
+
       try {
-        const newRef = db.ref(`class_journals/${workerId}`).push();
-        await newRef.set(journalData);
-        journals[newRef.key] = journalData;
-        toast('Journal entry saved successfully!', 'success');
+        if (editingExisting) {
+          await db.ref(`class_journals/${workerId}/${editingExisting}`).update(journalData);
+          journals[editingExisting] = { ...journals[editingExisting], ...journalData };
+          resetJournalEditMode();
+          toast('Journal entry updated and resubmitted for IQA approval!', 'success');
+        } else {
+          const newRef = db.ref(`class_journals/${workerId}`).push();
+          await newRef.set(journalData);
+          journals[newRef.key] = journalData;
+          toast('Journal entry saved successfully!', 'success');
+        }
 
         // Clear form
         document.getElementById('journalClass').value = '';
