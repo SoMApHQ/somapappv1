@@ -806,7 +806,7 @@
         <td>
           <span class="pill pill-pending">${MODULE_LABELS[row.sourceModule] || row.sourceModule}</span>
         </td>
-        <td class="font-semibold text-emerald-200">${isConfig ? configDisplay.summary : formatCurrency(row.amountPaidNow)}</td>
+        <td class="font-semibold text-emerald-200">${isConfig ? configDisplay.summary : (row.changeSummary ? `<span class="text-amber-200">${escapeHtml(row.changeSummary)}</span>` : formatCurrency(row.amountPaidNow))}</td>
         <td>${row.recordedBy || '--'}</td>
         <td>
           <span class="pill pill-pending">${(row.status || 'pending').toUpperCase()}</span>
@@ -1466,7 +1466,10 @@
         ? `<p class="text-slate-600">You are about to approve <strong>${configDisplay.summary || 'a configuration change'}</strong>.</p>
              <p class="mt-2 text-sm text-slate-500">Student: <strong>${configDisplay.studentName || '--'}</strong> (${configDisplay.studentAdm || '--'}), Class: <strong>${configDisplay.className || '--'}</strong>.</p>
              <p class="mt-2 text-sm text-slate-500">The system will apply the queued ${MODULE_LABELS[record.sourceModule] || 'configuration'} writes and archive the approval.</p>`
-        : `<p class="text-slate-600">You are about to approve <strong>${formatCurrency(record.amountPaidNow)}</strong> for <strong>${record.studentName || record.studentAdm}</strong>.</p>
+        : record.changeSummary
+          ? `<p class="text-slate-600">You are about to approve <strong>${escapeHtml(record.changeSummary)}</strong> for <strong>${escapeHtml(record.studentName || record.studentAdm || '')}</strong>.</p>
+             <p class="mt-2 text-sm text-slate-500">The change will be applied to <strong>${MODULE_LABELS[record.sourceModule] || record.sourceModule}</strong> and the approval archived.</p>`
+          : `<p class="text-slate-600">You are about to approve <strong>${formatCurrency(record.amountPaidNow)}</strong> for <strong>${record.studentName || record.studentAdm}</strong>.</p>
              <p class="mt-2 text-sm text-slate-500">The system will write this payment to <strong>${MODULE_LABELS[record.sourceModule] || record.sourceModule}</strong> and archive the approval.</p>`,
       showCancelButton: true,
       confirmButtonColor: '#22c55e',
@@ -1836,7 +1839,12 @@
         }
       }
       await moveApprovalToHistory(record, 'approved', lockedSchoolId);
-      toast(record.sourceModule === 'financeconfig' ? 'Finance config approved and applied.' : 'Student approved. Payment saved.', 'success');
+      toast(
+        record.sourceModule === 'financeconfig'
+          ? 'Finance config approved and applied.'
+          : record.changeSummary ? `Approved and applied: ${record.changeSummary}` : 'Student approved. Payment saved.',
+        'success'
+      );
       hideDetailModal();
     } catch (err) {
       if (financeLock?.committed && financeLock?.fingerprintKey) {
@@ -2232,29 +2240,110 @@
     await db.ref().update(updates);
   }
 
+  // Preform One finance requests (prefonefinance.html). Every change on that
+  // page is queued here and only written when approved:
+  //   payment           -> new payment on the learner
+  //   editPayment       -> change one existing payment (only if it still
+  //                        matches what the accountant saw when requesting)
+  //   deleteAllPayments -> archive then remove the learner's payments (only if
+  //                        they still match the count/total that was requested)
+  //   expense           -> new Preform One expense
   async function commitPrefonePayment(record) {
-    const basePath = record.modulePayload?.basePath;
-    const admission = record.modulePayload?.admission;
-    const paymentData = record.modulePayload?.payment;
-    if (!basePath || !admission || !paymentData) throw new Error('Missing Preform One payload.');
+    const payload = record.modulePayload || {};
+    const action = payload.action || 'payment';
+    const basePath = payload.basePath;
+    const approvalId = record.approvalId || payload.approvalId;
+    if (!basePath) throw new Error('Missing Preform One payload.');
 
-    // Keyed by the approval ID so one approval can only ever write one
-    // payment, even if it is approved twice (two admins / two tabs).
-    const paymentsRef = db.ref(`${basePath}/students/${admission}/payments`);
-    const paymentRef = record.approvalId ? paymentsRef.child(record.approvalId) : paymentsRef.push();
-    const result = await paymentRef.transaction((current) => {
-      if (current) return; // already saved by an earlier approval of this request
-      return {
-        ...paymentData,
-        approvalId: record.approvalId || paymentRef.key,
-        approvedAt: Date.now(),
-        approvedBy: actorEmail(),
-      };
-    });
-    if (!result.committed) {
-      console.warn('Approvals: Preform One payment already saved for approval', record.approvalId);
+    if (action === 'expense') {
+      const expense = payload.expense;
+      if (!expense || !Number(expense.amount)) throw new Error('Missing Preform One expense details.');
+      const expensesRef = db.ref(`${basePath}/expenses`);
+      const expenseRef = approvalId ? expensesRef.child(approvalId) : expensesRef.push();
+      await expenseRef.transaction((current) => {
+        if (current) return; // already saved by an earlier approval of this request
+        return {
+          ...expense,
+          amount: Number(expense.amount),
+          approvalId: approvalId || expenseRef.key,
+          requestedBy: record.recordedBy || '',
+          approvedAt: Date.now(),
+          approvedBy: actorEmail(),
+        };
+      });
+      return;
     }
-    await db.ref(`${basePath}/students/${admission}`).update({
+
+    const admission = payload.admission;
+    if (!admission) throw new Error('Missing Preform One learner.');
+    const studentRef = db.ref(`${basePath}/students/${admission}`);
+
+    if (action === 'editPayment') {
+      const { paymentId, before = {}, after } = payload;
+      if (!paymentId || !after) throw new Error('Missing Preform One edit details.');
+      const paymentRef = studentRef.child(`payments/${paymentId}`);
+      const snap = await paymentRef.once('value');
+      const current = snap.val();
+      if (!current) {
+        throw new Error('This payment no longer exists. Reject this request and ask for a new one.');
+      }
+      const unchanged = Number(current.amount || 0) === Number(before.amount || 0)
+        && String(current.date || '') === String(before.date || '');
+      if (!unchanged) {
+        throw new Error('This payment was changed after the edit was requested. Reject this request and ask for a new one.');
+      }
+      await paymentRef.update({
+        amount: Number(after.amount),
+        date: after.date || current.date || '',
+        method: after.method || '',
+        collector: after.collector || '',
+        note: after.note || '',
+        editedAt: Date.now(),
+        editedBy: actorEmail(),
+        editApprovalId: approvalId || '',
+        editRequestedBy: record.recordedBy || '',
+        previousValues: before,
+      });
+    } else if (action === 'deleteAllPayments') {
+      const paymentsRef = studentRef.child('payments');
+      const snap = await paymentsRef.once('value');
+      const existing = snap.val() || {};
+      const count = Object.keys(existing).length;
+      const total = Object.values(existing).reduce((sum, p) => sum + Number(p?.amount || 0), 0);
+      if (count !== Number(payload.expectedCount) || total !== Number(payload.expectedTotal)) {
+        throw new Error(`Payments changed after this deletion was requested (now ${count} payments, ${formatCurrency(total)}). Reject this request and ask for a new one.`);
+      }
+      // Keep a copy so a mistaken deletion can be recovered.
+      await db.ref(`${basePath}/deletedPayments/${admission}/${approvalId || Date.now()}`).set({
+        payments: existing,
+        count,
+        total,
+        requestedBy: record.recordedBy || '',
+        deletedAt: Date.now(),
+        deletedBy: actorEmail(),
+      });
+      await paymentsRef.remove();
+    } else {
+      const paymentData = payload.payment;
+      if (!paymentData) throw new Error('Missing Preform One payment details.');
+      // Keyed by the approval ID so one approval can only ever write one
+      // payment, even if it is approved twice (two admins / two tabs).
+      const paymentsRef = studentRef.child('payments');
+      const paymentRef = approvalId ? paymentsRef.child(approvalId) : paymentsRef.push();
+      const result = await paymentRef.transaction((current) => {
+        if (current) return; // already saved by an earlier approval of this request
+        return {
+          ...paymentData,
+          approvalId: approvalId || paymentRef.key,
+          approvedAt: Date.now(),
+          approvedBy: actorEmail(),
+        };
+      });
+      if (!result.committed) {
+        console.warn('Approvals: Preform One payment already saved for approval', approvalId);
+      }
+    }
+    await studentRef.update({
       updatedAt: firebase.database.ServerValue.TIMESTAMP,
     });
   }
@@ -2728,7 +2817,7 @@
   }
 
   async function detectPrefoneBasePath() {
-    const year = new Date().getFullYear();
+    const year = normalizeYearValue(state.selectedYear || getContextYear());
     try {
       const schoolsSnap = await db.ref('/schools').once('value');
       const schools = schoolsSnap.val() || {};
@@ -2747,8 +2836,14 @@
   }
 
   async function computePrefoneSummary() {
+    // Same lookup as prefonefinance.html: the selected year's records, falling
+    // back to the year-less path when that year has no learners.
     const basePath = await detectPrefoneBasePath();
-    const snap = await db.ref(`${basePath}/students`).once('value');
+    let snap = await db.ref(`${basePath}/students`).once('value');
+    if (!snap.exists()) {
+      const yearless = basePath.replace(/\/\d{4}$/, '');
+      if (yearless !== basePath) snap = await db.ref(`${yearless}/students`).once('value');
+    }
     const students = snap.val() || {};
     let required = 0;
     let approved = 0;

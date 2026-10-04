@@ -108,6 +108,8 @@
       <article class="stat"><span class="text-xs uppercase tracking-widest text-slate-300">Net Balance</span><p id="netBal" class="mt-2 text-2xl font-semibold text-indigo-100">TSh 0</p><p class="mt-4 text-xs text-slate-400">Collections − Expenses.</p></article>
     </section>
 
+    <div id="pendingApprovalsBanner" class="hidden rounded-3xl border border-amber-400/40 bg-amber-500/10 p-5 text-sm text-amber-100"></div>
+
     <!-- Learners -->
     <section class="glass px-6 py-8 sm:px-8 sm:py-10">
       <div class="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
@@ -186,7 +188,7 @@
           </select>
           <input id="expenseDescription" type="text" placeholder="Description" class="w-full rounded-full border border-slate-500/40 bg-slate-900/60 px-4 py-2 text-sm text-slate-100 outline-none transition focus:border-sky-400 focus:ring-1 focus:ring-sky-500 md:w-56" required />
           <input id="expenseAmount" type="number" min="1" placeholder="Amount" class="w-full rounded-full border border-slate-500/40 bg-slate-900/60 px-4 py-2 text-sm text-slate-100 outline-none transition focus:border-sky-400 focus:ring-1 focus:ring-sky-500 md:w-40" required />
-          <button type="submit" class="inline-flex items-center justify-center gap-2 rounded-full border border-indigo-400/40 bg-indigo-500/20 px-4 py-2 text-sm font-semibold text-indigo-100 transition hover:border-indigo-300 hover:bg-indigo-500/30 md:w-auto"><i class="fas fa-plus-circle"></i> Add Expense</button>
+          <button type="submit" class="inline-flex items-center justify-center gap-2 rounded-full border border-indigo-400/40 bg-indigo-500/20 px-4 py-2 text-sm font-semibold text-indigo-100 transition hover:border-indigo-300 hover:bg-indigo-500/30 md:w-auto"><i class="fas fa-paper-plane"></i> Send Expense for Approval</button>
         </form>
       </div>
 
@@ -253,7 +255,7 @@
         </div>
         <div class="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
           <button type="button" onclick="closeModal('paymentModal')" class="inline-flex items-center justify-center gap-2 rounded-full border border-slate-500/40 px-4 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-300 hover:text-white">Cancel</button>
-          <button type="submit" class="inline-flex items-center justify-center gap-2 rounded-full border border-sky-400/40 bg-sky-500/25 px-5 py-2 text-sm font-semibold text-sky-100 transition hover:border-sky-300 hover:bg-sky-500/35"><i class="fas fa-save"></i> Save Payment</button>
+          <button type="submit" class="inline-flex items-center justify-center gap-2 rounded-full border border-sky-400/40 bg-sky-500/25 px-5 py-2 text-sm font-semibold text-sky-100 transition hover:border-sky-300 hover:bg-sky-500/35"><i class="fas fa-paper-plane"></i> Send for Approval</button>
         </div>
       </form>
     </div>
@@ -308,8 +310,8 @@
         <div class="flex flex-col-reverse gap-3 sm:flex-row sm:justify-between">
           <button type="button" onclick="closeModal('editPaymentModal')" class="inline-flex items-center justify-center gap-2 rounded-full border border-slate-500/40 px-4 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-300 hover:text-white">Cancel</button>
           <div class="flex flex-col-reverse gap-3 sm:flex-row">
-            <button type="button" onclick="deleteAllPayments()" class="inline-flex items-center justify-center gap-2 rounded-full border border-rose-400/50 bg-rose-500/20 px-4 py-2 text-sm font-semibold text-rose-100 transition hover:border-rose-300 hover:bg-rose-500/30"><i class="fas fa-trash-alt"></i> Delete All Payments</button>
-            <button id="editPaymentSubmit" type="submit" class="inline-flex items-center justify-center gap-2 rounded-full border border-amber-400/40 bg-amber-500/25 px-5 py-2 text-sm font-semibold text-amber-100 transition hover:border-amber-300 hover:bg-amber-500/35"><i class="fas fa-save"></i> Update Payment</button>
+            <button type="button" onclick="deleteAllPayments()" class="inline-flex items-center justify-center gap-2 rounded-full border border-rose-400/50 bg-rose-500/20 px-4 py-2 text-sm font-semibold text-rose-100 transition hover:border-rose-300 hover:bg-rose-500/30"><i class="fas fa-trash-alt"></i> Request: Delete All Payments</button>
+            <button id="editPaymentSubmit" type="submit" class="inline-flex items-center justify-center gap-2 rounded-full border border-amber-400/40 bg-amber-500/25 px-5 py-2 text-sm font-semibold text-amber-100 transition hover:border-amber-300 hover:bg-amber-500/35"><i class="fas fa-paper-plane"></i> Send Edit for Approval</button>
           </div>
         </div>
       </form>
@@ -348,6 +350,7 @@
     let showingDebtors = false;
     let selectedAdm = '';
     let selectedPaymentId = '';
+    let dataBase = ''; // path the learners were actually loaded from (requests target the same records)
     const todayStr = () => new Date().toISOString().split('T')[0];
     const resolveYear = () => {
       if (typeof window.currentYear === 'number' && !Number.isNaN(window.currentYear)) {
@@ -449,6 +452,7 @@
     async function loadFinance(base){
       try{
         const resolved = await resolveDataBase(base);
+        dataBase = resolved.base;
         const val = resolved.students;
         const list = Object.entries(val);
         let due=0, coll=0;
@@ -776,8 +780,91 @@
       document.getElementById('editPaymentModal').style.display='flex';
     }
 
+    // --- Approval queue ---
+    // Every change made on this page (new payment, payment edit, deleting
+    // payments, new expense) is only REQUESTED here. Nothing is written to the
+    // learner or expense records until an admin approves it in
+    // Todashboardhtml/approvals.html (commitPrefonePayment applies it).
+    async function currentDataBase(){
+      if(dataBase) return dataBase;
+      const resolved = await resolveDataBase(await detectPrefoneBase());
+      dataBase = resolved.base;
+      return dataBase;
+    }
+
+    function currentRecorder(fallback){
+      let recordedBy = '';
+      try{
+        if(window.currentUserEmail) recordedBy = window.currentUserEmail;
+        else if(firebase.auth){
+          const user = firebase.auth().currentUser;
+          if(user && user.email) recordedBy = user.email;
+        }
+      }catch(_){}
+      return recordedBy || fallback || 'unknown';
+    }
+
+    async function queuePrefoneApproval(request){
+      const pendingRef = db.ref('approvalsPending').push();
+      await pendingRef.set({
+        approvalId: pendingRef.key,
+        sourceModule: 'prefonefinance',
+        status: 'pending',
+        createdAt: firebase.database.ServerValue.TIMESTAMP,
+        ...request,
+        modulePayload: { ...(request.modulePayload || {}), approvalId: pendingRef.key },
+      });
+      return pendingRef.key;
+    }
+
+    async function withSubmitLock(form, task){
+      const btn = form.querySelector('button[type="submit"]');
+      if(btn?.disabled) return;
+      if(btn) btn.disabled = true;
+      try{ await task(); }
+      finally{ if(btn) btn.disabled = false; }
+    }
+
+    async function loadStudentForRequest(base, adm){
+      const snap = await db.ref(`${base}/students/${adm}`).once('value');
+      return snap.val() || {};
+    }
+
+    function studentIdentity(student, row, adm){
+      return {
+        studentAdm: adm,
+        studentName: row?.name || `${student.firstName || student.firstname || ''} ${student.lastName || student.lastname || ''}`.trim() || adm,
+        className: student.classLevel || student.class || student.grade || '',
+        parentContact: row?.contact || student.parentContact || student.parentPhone || student.guardianPhone || student.phone || '--',
+      };
+    }
+
+    // Pending requests from this page, so nobody submits the same thing twice.
+    // When a request leaves the queue (approved or rejected) the page reloads
+    // its figures so approved changes show up without a manual refresh.
+    let knownPendingIds = null;
+    function watchPendingRequests(){
+      const banner = document.getElementById('pendingApprovalsBanner');
+      if(!banner) return;
+      db.ref('approvalsPending').on('value', (snap)=>{
+        const items = Object.entries(snap.val() || {})
+          .map(([id, r]) => ({ ...(r || {}), _id: id }))
+          .filter(r => r.sourceModule === 'prefonefinance' && String(r.status || 'pending').toLowerCase() === 'pending');
+        const ids = new Set(items.map(r => r._id));
+        if(knownPendingIds && [...knownPendingIds].some(id => !ids.has(id))) loadAll();
+        knownPendingIds = ids;
+        if(!items.length){ banner.classList.add('hidden'); banner.innerHTML = ''; return; }
+        items.sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0));
+        const lines = items.slice(0, 8).map(r=>`<li>${safe(r.changeSummary || `Payment ${fmt(r.amountPaidNow)}`)} &mdash; ${safe(r.studentName || '')}</li>`).join('');
+        banner.innerHTML = `<p class="font-semibold"><i class="fas fa-hourglass-half mr-2"></i>${items.length} change${items.length===1?'':'s'} waiting for approval in Approvals. They are not counted on this page until approved.</p><ul class="mt-2 list-disc space-y-1 pl-6 text-amber-100/90">${lines}</ul>${items.length>8?`<p class="mt-1 text-xs">…and ${items.length-8} more.</p>`:''}`;
+        banner.classList.remove('hidden');
+      }, (err)=> console.warn('Pending approvals watch failed', err));
+    }
+
+    // --- New payment ---
     document.getElementById('paymentForm').addEventListener('submit', async (e)=>{
       e.preventDefault();
+      const form = e.target;
       const amount = Number(document.getElementById('paymentAmount').value);
       const method = document.getElementById('paymentMethod').value;
       const reference = (document.getElementById('paymentReference').value || '').trim();
@@ -792,72 +879,51 @@
         return Swal.fire('Angalizo','THIS IS MORE THAN WHAT THE CHILD SHOULD PAY.','warning');
       }
 
-      // Block double-clicks from queuing the same payment twice.
-      const submitBtn = e.target.querySelector('button[type="submit"]');
-      if(submitBtn?.disabled) return;
-      if(submitBtn) submitBtn.disabled = true;
-      try{
-        const base = await detectPrefoneBase();
-        const studentSnap = await db.ref(`${base}/students/${selectedAdm}`).once('value');
-        const student = studentSnap.val() || {};
-        const totalRequired = Number(student.totalFee || student.required || row?.totalFee || 0);
-        const totalPaidBefore = row ? Number(row.paid || 0) : Object.values(student.payments || {}).reduce((sum,p)=>sum+Number(p.amount||0),0);
-        const newBalance = Math.max(0, totalRequired - Math.min(totalRequired, totalPaidBefore + amount));
-        const fullName = row?.name || `${student.firstName || student.firstname || ''} ${student.lastName || student.lastname || ''}`.trim() || selectedAdm;
-        const parentContact = row?.contact || student.parentContact || student.parentPhone || student.guardianPhone || student.phone || '--';
-        let recordedBy = 'unknown';
+      await withSubmitLock(form, async ()=>{
         try{
-          if(window.currentUserEmail) recordedBy = window.currentUserEmail;
-          else if(firebase.auth){
-            const user = firebase.auth().currentUser;
-            if(user && user.email) recordedBy = user.email;
-          }
-        }catch(_){}
-        if(!recordedBy || recordedBy === 'unknown') recordedBy = collector || 'unknown';
-        const timestamp = date ? new Date(date).getTime() : Date.now();
+          const base = await currentDataBase();
+          const student = await loadStudentForRequest(base, selectedAdm);
+          const totalRequired = Number(student.totalFee || student.required || row?.totalFee || 0);
+          const totalPaidBefore = Object.values(student.payments || {}).reduce((sum,p)=>sum+Number(p.amount||0),0);
+          const newBalance = Math.max(0, totalRequired - Math.min(totalRequired, totalPaidBefore + amount));
+          const recordedBy = currentRecorder(collector);
+          const timestamp = date ? new Date(date).getTime() : Date.now();
 
-        const pendingRef = db.ref('approvalsPending').push();
-        await pendingRef.set({
-          approvalId: pendingRef.key,
-          sourceModule: 'prefonefinance',
-          studentAdm: selectedAdm,
-          studentName: fullName,
-          className: student.classLevel || student.class || student.grade || '',
-          parentContact,
-          amountPaidNow: amount,
-          paymentMethod: method,
-          paymentReferenceCode: reference || 'N/A',
-          datePaid: timestamp,
-          recordedBy,
-          status: 'pending',
-          notes: note,
-          totalRequired,
-          totalPaidBefore,
-          newBalanceAfterThis: newBalance,
-          createdAt: firebase.database.ServerValue.TIMESTAMP,
-          modulePayload: {
-            basePath: base,
-            admission: selectedAdm,
-            payment: { amount, method, note, date, collector, reference, recordedBy, timestamp },
-            breakdown: [
-              { label: 'Collector', value: collector || 'Not set' },
-              { label: 'Received On', value: date ? formatLocalDate(date) : new Date(timestamp).toLocaleDateString('en-GB') },
-              { label: 'Fee (Year)', value: fmt(totalRequired) },
-              { label: 'Paid Before', value: fmt(totalPaidBefore) },
-              { label: 'Balance After Approval', value: fmt(newBalance) },
-            ],
-          },
-        });
+          await queuePrefoneApproval({
+            ...studentIdentity(student, row, selectedAdm),
+            amountPaidNow: amount,
+            paymentMethod: method,
+            paymentReferenceCode: reference || 'N/A',
+            datePaid: timestamp,
+            recordedBy,
+            notes: note,
+            totalRequired,
+            totalPaidBefore,
+            newBalanceAfterThis: newBalance,
+            changeSummary: `New payment ${fmt(amount)}`,
+            modulePayload: {
+              action: 'payment',
+              basePath: base,
+              admission: selectedAdm,
+              payment: { amount, method, note, date, collector, reference, recordedBy, timestamp },
+              breakdown: [
+                { label: 'Request', value: 'New payment' },
+                { label: 'Collector', value: collector || 'Not set' },
+                { label: 'Received On', value: formatLocalDate(date) },
+                { label: 'Fee (Year)', value: fmt(totalRequired) },
+                { label: 'Paid Before', value: fmt(totalPaidBefore) },
+                { label: 'Balance After Approval', value: fmt(newBalance) },
+              ],
+            },
+          });
 
-        Swal.fire('Submitted','Payment sent to admin for approval.','success');
-        closeModal('paymentModal');
-        e.target.reset();
-        await loadFinance(base);
-      }catch(err){
-        Swal.fire('Error','Failed to add payment: '+err.message,'error');
-      }finally{
-        if(submitBtn) submitBtn.disabled = false;
-      }
+          Swal.fire('Submitted','Payment sent to admin for approval. It will show here once approved.','success');
+          closeModal('paymentModal');
+          form.reset();
+        }catch(err){
+          Swal.fire('Error','Failed to submit payment: '+err.message,'error');
+        }
+      });
     });
 
     document.getElementById('editPaymentSelect').addEventListener('change', (e)=>{
@@ -872,8 +938,10 @@
       fillEditPaymentForm(payment);
     });
 
+    // --- Edit one payment (approval required) ---
     document.getElementById('editPaymentForm').addEventListener('submit', async (e)=>{
       e.preventDefault();
+      const form = e.target;
       if(!selectedAdm || !selectedPaymentId){
         return Swal.fire('Error','Chagua malipo ya kuhariri kwanza.','error');
       }
@@ -898,19 +966,68 @@
         return Swal.fire('Angalizo','THIS IS MORE THAN WHAT THE CHILD SHOULD PAY.','warning');
       }
 
-      try{
-        const base = await detectPrefoneBase();
-        await db.ref(`${base}/students/${selectedAdm}/payments/${selectedPaymentId}`).update({ amount, method, date, collector, note });
-        await db.ref(`${base}/students/${selectedAdm}`).update({ updatedAt: Date.now() });
-        Swal.fire('Success','Payment updated','success');
-        closeModal('editPaymentModal');
-        e.target.reset();
-        await loadFinance(base);
-      }catch(err){
-        Swal.fire('Error','Failed to update payment: '+err.message,'error');
-      }
+      const paymentId = selectedPaymentId;
+      await withSubmitLock(form, async ()=>{
+        try{
+          const base = await currentDataBase();
+          const student = await loadStudentForRequest(base, selectedAdm);
+          const stored = (student.payments || {})[paymentId];
+          if(!stored){
+            return Swal.fire('Error','This payment no longer exists. Reload the page.','error');
+          }
+          const before = {
+            amount: Number(stored.amount || 0),
+            date: stored.date || '',
+            method: stored.method || '',
+            collector: stored.collector || stored.recorder || '',
+            note: stored.note || '',
+          };
+          const after = { amount, date, method, collector, note };
+          const changes = [];
+          if(before.amount !== after.amount) changes.push({ label: 'Amount', value: `${fmt(before.amount)} → ${fmt(after.amount)}` });
+          if(String(before.date) !== String(after.date)) changes.push({ label: 'Date', value: `${formatLocalDate(before.date)} → ${formatLocalDate(after.date)}` });
+          if(before.method !== after.method) changes.push({ label: 'Method', value: `${before.method || '--'} → ${after.method || '--'}` });
+          if(before.collector !== after.collector) changes.push({ label: 'Collector', value: `${before.collector || '--'} → ${after.collector || '--'}` });
+          if(before.note !== after.note) changes.push({ label: 'Note', value: `${before.note || '--'} → ${after.note || '--'}` });
+          if(!changes.length){
+            return Swal.fire('Hakuna mabadiliko','Nothing was changed in this payment.','info');
+          }
+          const delta = after.amount - before.amount;
+          const totalPaidBefore = Object.values(student.payments || {}).reduce((sum,p)=>sum+Number(p.amount||0),0);
+          await queuePrefoneApproval({
+            ...studentIdentity(student, row, selectedAdm),
+            amountPaidNow: delta,
+            paymentMethod: method,
+            paymentReferenceCode: stored.reference || 'N/A',
+            datePaid: new Date(date).getTime(),
+            recordedBy: currentRecorder(collector),
+            notes: note,
+            totalRequired: Number(student.totalFee || student.required || 0),
+            totalPaidBefore,
+            newBalanceAfterThis: Math.max(0, Number(student.totalFee || student.required || 0) - (totalPaidBefore + delta)),
+            changeSummary: before.amount !== after.amount
+              ? `Edit payment ${fmt(before.amount)} → ${fmt(after.amount)}`
+              : `Edit payment of ${fmt(before.amount)} (${changes.map(c=>c.label.toLowerCase()).join(', ')})`,
+            modulePayload: {
+              action: 'editPayment',
+              basePath: base,
+              admission: selectedAdm,
+              paymentId,
+              before,
+              after,
+              breakdown: [{ label: 'Request', value: 'Edit an approved payment' }, ...changes],
+            },
+          });
+          Swal.fire('Submitted','The edit was sent to admin for approval. The payment stays unchanged until approved.','success');
+          closeModal('editPaymentModal');
+          form.reset();
+        }catch(err){
+          Swal.fire('Error','Failed to submit the edit: '+err.message,'error');
+        }
+      });
     });
 
+    // --- Delete all payments (approval required) ---
     async function deleteAllPayments(){
       if(!selectedAdm){
         return Swal.fire('Error','No student selected.','error');
@@ -919,15 +1036,18 @@
       if(!row){
         return Swal.fire('Error','Student not found.','error');
       }
+      if(!row.payments.length){
+        return Swal.fire('Hakuna malipo','This learner has no payments to delete.','info');
+      }
 
       const result = await Swal.fire({
-        title: 'ARE YOU SURE?',
-        html: `<p class="text-slate-300">Delete ALL payment records for <strong>${safe(row.name)}</strong>?</p><p class="text-rose-300 mt-2">This will reset their paid amount to TSh 0 and cannot be undone!</p>`,
+        title: 'Request deletion?',
+        html: `<p class="text-slate-300">Ask admin to delete ALL payment records for <strong>${safe(row.name)}</strong> (${row.payments.length} payments, ${fmt(row.paid)})?</p><p class="text-amber-300 mt-2">Nothing is deleted until the request is approved in Approvals. The deleted payments are archived.</p>`,
         icon: 'warning',
         showCancelButton: true,
         confirmButtonColor: '#f43f5e',
         cancelButtonColor: '#475569',
-        confirmButtonText: 'Yes, Delete All',
+        confirmButtonText: 'Send for approval',
         cancelButtonText: 'Cancel',
         background: 'rgba(15,23,42,0.95)',
         color: '#e2e8f0',
@@ -936,20 +1056,50 @@
       if(!result.isConfirmed) return;
 
       try{
-        const base = await detectPrefoneBase();
-        await db.ref(`${base}/students/${selectedAdm}/payments`).remove();
-        await db.ref(`${base}/students/${selectedAdm}`).update({ updatedAt: Date.now() });
+        const base = await currentDataBase();
+        const student = await loadStudentForRequest(base, selectedAdm);
+        const payments = student.payments || {};
+        const count = Object.keys(payments).length;
+        const total = Object.values(payments).reduce((sum,p)=>sum+Number(p.amount||0),0);
+        if(!count){
+          return Swal.fire('Hakuna malipo','This learner has no payments to delete.','info');
+        }
+        const totalRequired = Number(student.totalFee || student.required || 0);
+        await queuePrefoneApproval({
+          ...studentIdentity(student, row, selectedAdm),
+          amountPaidNow: -total,
+          paymentMethod: '--',
+          paymentReferenceCode: 'N/A',
+          datePaid: Date.now(),
+          recordedBy: currentRecorder(),
+          totalRequired,
+          totalPaidBefore: total,
+          newBalanceAfterThis: totalRequired,
+          changeSummary: `Delete all ${count} payments (${fmt(total)})`,
+          modulePayload: {
+            action: 'deleteAllPayments',
+            basePath: base,
+            admission: selectedAdm,
+            expectedCount: count,
+            expectedTotal: total,
+            breakdown: [
+              { label: 'Request', value: 'Delete ALL payments of this learner' },
+              { label: 'Payments to delete', value: String(count) },
+              { label: 'Amount to remove', value: fmt(total) },
+              { label: 'Balance After Approval', value: fmt(totalRequired) },
+            ],
+          },
+        });
         Swal.fire({
-          title: 'Deleted!',
-          text: 'All payment records have been deleted. You can now start fresh.',
+          title: 'Submitted',
+          text: 'The deletion was sent to admin for approval. Payments stay until it is approved.',
           icon: 'success',
           background: 'rgba(15,23,42,0.95)',
           color: '#e2e8f0',
         });
         closeModal('editPaymentModal');
-        await loadFinance(base);
       }catch(err){
-        Swal.fire('Error','Failed to delete payments: '+err.message,'error');
+        Swal.fire('Error','Failed to submit the deletion: '+err.message,'error');
       }
     }
 
@@ -978,23 +1128,49 @@
       document.getElementById('detailsModal').style.display='flex';
     }
 
-    // --- Expenses submit ---
+    // --- Expenses submit (approval required) ---
     document.getElementById('expenseForm').addEventListener('submit', async (e)=>{
       e.preventDefault();
+      const form = e.target;
       const category = document.getElementById('expenseCategory').value;
       const description = document.getElementById('expenseDescription').value;
       const amount = parseInt(document.getElementById('expenseAmount').value,10);
       if(!category || !description || !amount) return Swal.fire('Error','Fill all fields','error');
-      try{
-        const base = await detectPrefoneBase();
-        await db.ref(`${base}/expenses`).push({ category, description, amount, date: todayStr() });
-        Swal.fire('Success','Expense added','success');
-        e.target.reset();
-        await loadExpenses(base);
-        await loadFinance(base);
-      }catch(err){
-        Swal.fire('Error','Failed to add expense: '+err.message,'error');
-      }
+      await withSubmitLock(form, async ()=>{
+        try{
+          const base = await currentDataBase();
+          const date = todayStr();
+          await queuePrefoneApproval({
+            studentAdm: 'EXPENSE',
+            studentName: `Expense: ${category}`,
+            className: 'Preform One',
+            parentContact: '--',
+            amountPaidNow: 0,
+            paymentMethod: '--',
+            paymentReferenceCode: 'N/A',
+            datePaid: Date.now(),
+            recordedBy: currentRecorder(),
+            notes: description,
+            changeSummary: `New expense ${fmt(amount)} (${category})`,
+            modulePayload: {
+              action: 'expense',
+              basePath: base,
+              expense: { category, description, amount, date },
+              breakdown: [
+                { label: 'Request', value: 'New Preform One expense' },
+                { label: 'Category', value: category },
+                { label: 'Description', value: description },
+                { label: 'Amount', value: fmt(amount) },
+                { label: 'Date', value: formatLocalDate(date) },
+              ],
+            },
+          });
+          Swal.fire('Submitted','Expense sent to admin for approval. It will show here once approved.','success');
+          form.reset();
+        }catch(err){
+          Swal.fire('Error','Failed to submit expense: '+err.message,'error');
+        }
+      });
     });
 
     // --- Toggles ---
@@ -1107,6 +1283,7 @@
 
     // Boot
     loadAll();
+    watchPendingRequests();
   </script>
 </body>
 </html>
