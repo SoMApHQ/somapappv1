@@ -12,21 +12,41 @@ function uploadToCloudinary(file, folder = 'preformone', preset = 'somap_unsigne
 }
 
 // Year Selector (global)
-let currentYear = new Date().getFullYear();
-const storedYearPreference = typeof localStorage !== 'undefined'
-  ? parseInt(localStorage.getItem('prefone_year'), 10)
-  : Number.NaN;
-if (!Number.isNaN(storedYearPreference)) {
-  currentYear = storedYearPreference;
+// Every fresh visit (new tab / new browser session) opens on the current
+// calendar year, so the module rolls over to 2026, 2027... on its own. A past
+// year picked on any Preform One page is kept only while moving between pages
+// in the same tab; it is never carried into a later visit. Pages that read
+// localStorage 'prefone_year' directly see the normalised value.
+const PREFONE_YEAR_KEY_GLOBAL = 'prefone_year';
+const PREFONE_SESSION_KEY = 'prefone_year_session_active';
+function resolvePrefoneYear() {
+  const calendarYear = new Date().getFullYear();
+  let stored = Number.NaN;
+  let sessionActive = false;
+  try {
+    stored = parseInt(localStorage.getItem(PREFONE_YEAR_KEY_GLOBAL), 10);
+    sessionActive = sessionStorage.getItem(PREFONE_SESSION_KEY) === '1';
+    sessionStorage.setItem(PREFONE_SESSION_KEY, '1');
+  } catch (err) {
+    return calendarYear;
+  }
+  const valid = !Number.isNaN(stored) && stored >= 2024 && stored <= calendarYear + 1;
+  const year = valid && (sessionActive || stored >= calendarYear) ? stored : calendarYear;
+  try { localStorage.setItem(PREFONE_YEAR_KEY_GLOBAL, String(year)); } catch (err) { /* storage blocked */ }
+  return year;
+}
+let currentYear = resolvePrefoneYear();
+window.prefoneYear = currentYear;
+function setPrefoneYear(year) {
+  const parsed = parseInt(year, 10);
+  if (Number.isNaN(parsed)) return currentYear;
+  currentYear = parsed;
+  window.prefoneYear = parsed;
+  try { localStorage.setItem(PREFONE_YEAR_KEY_GLOBAL, String(parsed)); } catch (err) { /* storage blocked */ }
+  return parsed;
 }
 function loadYear(year) {
-  const parsed = Number(year);
-  if (!Number.isNaN(parsed)) {
-    currentYear = parsed;
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem('prefone_year', currentYear);
-    }
-  }
+  setPrefoneYear(year);
   // Reload data for all components
   location.reload(); // Simple for HTML
 }

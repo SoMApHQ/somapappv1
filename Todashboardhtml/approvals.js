@@ -2238,12 +2238,22 @@
     const paymentData = record.modulePayload?.payment;
     if (!basePath || !admission || !paymentData) throw new Error('Missing Preform One payload.');
 
-    const pushRef = db.ref(`${basePath}/students/${admission}/payments`).push();
-    await pushRef.set({
-      ...paymentData,
-      approvedAt: firebase.database.ServerValue.TIMESTAMP,
-      approvedBy: actorEmail(),
+    // Keyed by the approval ID so one approval can only ever write one
+    // payment, even if it is approved twice (two admins / two tabs).
+    const paymentsRef = db.ref(`${basePath}/students/${admission}/payments`);
+    const paymentRef = record.approvalId ? paymentsRef.child(record.approvalId) : paymentsRef.push();
+    const result = await paymentRef.transaction((current) => {
+      if (current) return; // already saved by an earlier approval of this request
+      return {
+        ...paymentData,
+        approvalId: record.approvalId || paymentRef.key,
+        approvedAt: Date.now(),
+        approvedBy: actorEmail(),
+      };
     });
+    if (!result.committed) {
+      console.warn('Approvals: Preform One payment already saved for approval', record.approvalId);
+    }
     await db.ref(`${basePath}/students/${admission}`).update({
       updatedAt: firebase.database.ServerValue.TIMESTAMP,
     });
