@@ -151,6 +151,82 @@
     </div>
   </div>
 
+  <!-- Admissions PDF Report Options -->
+  <div id="admissionsReportModal" class="modal" aria-hidden="true">
+    <div class="modal-content" style="max-width: 640px; height: auto; max-height: 92vh;">
+      <span id="closeAdmissionsReportModal" class="close" title="Close">&times;</span>
+      <h2 class="text-xl font-semibold text-indigo-600 mb-1">Admissions PDF Report</h2>
+      <p class="text-sm text-gray-500 mb-4">Choose what the report covers. The first page summarises the selection: totals, boys and girls, classes, months and joining fees. The full pupil list follows.</p>
+      <div class="space-y-4">
+        <fieldset>
+          <legend class="block text-sm font-medium text-gray-700 mb-2">Report type</legend>
+          <label class="flex items-start gap-2 text-sm mb-2 cursor-pointer">
+            <input type="radio" name="rptMode" value="admissions" checked class="mt-1"/>
+            <span><b>New admissions</b> &mdash; pupils whose date of registration falls within the period</span>
+          </label>
+          <label class="flex items-start gap-2 text-sm cursor-pointer">
+            <input type="radio" name="rptMode" value="register" class="mt-1"/>
+            <span><b>Full register</b> &mdash; every pupil in working year <b id="rptRegisterYear">--</b> (continuing and new)</span>
+          </label>
+        </fieldset>
+        <div id="rptPeriodWrap" class="space-y-3">
+          <div>
+            <label for="rptPreset" class="block text-sm text-gray-600">Period</label>
+            <select id="rptPreset" class="border p-2 rounded w-full">
+              <option value="thisWeek">This week</option>
+              <option value="thisMonth">This month</option>
+              <option value="lastMonth">Last month</option>
+              <option value="specificMonth">A specific month&hellip;</option>
+              <option value="last3Months">Last 3 months</option>
+              <option value="yearToDate" selected>This year so far (1 Jan to today)</option>
+              <option value="workingYear">Whole working year</option>
+              <option value="last12Months">Last 12 months</option>
+              <option value="last2Years">Last 2 years</option>
+              <option value="allTime">All time</option>
+              <option value="custom">Custom dates (e.g. July to date)</option>
+            </select>
+          </div>
+          <div id="rptMonthWrap" class="hidden">
+            <label for="rptMonth" class="block text-sm text-gray-600">Month</label>
+            <input type="month" id="rptMonth" class="border p-2 rounded w-full"/>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label for="rptFrom" class="block text-sm text-gray-600">From</label>
+              <input type="date" id="rptFrom" class="border p-2 rounded w-full"/>
+            </div>
+            <div>
+              <label for="rptTo" class="block text-sm text-gray-600">To</label>
+              <input type="date" id="rptTo" class="border p-2 rounded w-full"/>
+            </div>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label for="rptClass" class="block text-sm text-gray-600">Class</label>
+            <select id="rptClass" class="border p-2 rounded w-full"><option value="">All classes</option></select>
+          </div>
+          <div>
+            <label for="rptGender" class="block text-sm text-gray-600">Gender</label>
+            <select id="rptGender" class="border p-2 rounded w-full">
+              <option value="">Boys and girls</option>
+              <option value="M">Boys only</option>
+              <option value="F">Girls only</option>
+            </select>
+          </div>
+        </div>
+        <p id="rptSearchNote" class="hint hidden"></p>
+        <div id="rptPreview" class="rounded-lg border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-900">&hellip;</div>
+        <div class="flex gap-2">
+          <button type="button" id="rptGenerateBtn" class="flex-1 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed">
+            <i class="fas fa-file-pdf"></i> Download PDF
+          </button>
+          <button type="button" id="rptCancelBtn" class="flex-1 py-2 bg-gray-300 text-gray-800 rounded-lg hover:bg-gray-400">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Registration Modal -->
   <div id="registrationModal" class="modal" aria-hidden="true">
     <div class="modal-content">
@@ -391,7 +467,7 @@
         <div class="flex items-start justify-between gap-4">
           <div>
             <h3 class="font-semibold">Search Students</h3>
-            <p class="hint">Type to filter students for the current working year. The PDF report will respect this filter.</p>
+            <p class="hint">Type to filter students for the current working year. The PDF report lets you pick a period (this week, this month, July to date, last 2 years&hellip;), class and gender, and also applies this search.</p>
           </div>
           <button
             type="button"
@@ -1295,28 +1371,41 @@
 
   queueRender();
 
-  function parseDateFromStudent(student) {
+  // ---- Admissions PDF report: registration dates, periods and filters ----
+  const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const MONTH_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+  function parseLocalDateString(text) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(text || '').trim());
+    return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+  }
+
+  // When the pupil actually joined: the manually entered Date of Registration
+  // first, then creation timestamps, then the joining-fee payment date.
+  // updatedAt is deliberately ignored — editing a pupil is not an admission.
+  function registrationDateOf(student) {
     if (!student) return null;
+    const manual = parseLocalDateString(student.dateOfRegistration) || parseLocalDateString(student.dateRegistered);
+    if (manual) return manual;
     const joining = student.joiningFormPayment || {};
     const candidates = [
+      student.registeredAt,
       student.createdAt,
-      student.updatedAt,
+      student.timestamp,
+      student.regTimestamp,
+      student.dateRegistered,
+      student.dateOfRegistration,
       joining.paidAt,
       joining.approvedAt
-    ].filter(Boolean);
+    ];
     for (const value of candidates) {
-      if (!value) continue;
-      if (typeof value === 'number') {
-        const d = new Date(value);
+      if (value === null || value === undefined || value === '') continue;
+      const local = typeof value === 'string' ? parseLocalDateString(value) : null;
+      if (local) return local;
+      const ms = (typeof value === 'object' && typeof value.seconds === 'number') ? value.seconds * 1000 : toMs(value);
+      if (ms && ms > 946684800000) {
+        const d = new Date(ms);
         if (!Number.isNaN(d.getTime())) return d;
-      } else if (typeof value === 'string') {
-        const d = new Date(value);
-        if (!Number.isNaN(d.getTime())) return d;
-      } else if (typeof value === 'object' && value !== null) {
-        if (typeof value.seconds === 'number') {
-          const d = new Date(value.seconds * 1000);
-          if (!Number.isNaN(d.getTime())) return d;
-        }
       }
     }
     return null;
@@ -1324,11 +1413,127 @@
 
   function formatDateForReport(date) {
     if (!date) return '';
-    try {
-      return date.toISOString().slice(0, 10);
-    } catch {
-      return '';
+    return `${String(date.getDate()).padStart(2, '0')} ${MONTH_SHORT[date.getMonth()]} ${date.getFullYear()}`;
+  }
+
+  function toDateInputValue(date) {
+    if (!date) return '';
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+
+  function genderCodeOf(student) {
+    const g = String(student?.gender || '').trim().toLowerCase();
+    if (!g) return '';
+    if (g.startsWith('f') || g === 'girl' || g === 'kike' || g === 'mke') return 'F';
+    if (g.startsWith('m') || g === 'boy' || g === 'kiume') return 'M';
+    return '';
+  }
+
+  function matchesSearchTerm(student, term) {
+    if (!term) return true;
+    const full = `${student.firstName || ''} ${student.middleName || ''} ${student.lastName || ''}`.toLowerCase();
+    return (
+      full.includes(term) ||
+      String(student.pupilId || '').toLowerCase().includes(term) ||
+      String(student.admissionNumber || '').toLowerCase().includes(term)
+    );
+  }
+
+  // Date range for a period preset. `to` is the last day included.
+  function reportPresetRange(preset, workingYear, monthValue) {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth();
+    const d = now.getDate();
+    const today = new Date(y, m, d);
+    switch (preset) {
+      case 'thisWeek': {
+        const sinceMonday = (today.getDay() + 6) % 7;
+        return { from: new Date(y, m, d - sinceMonday), to: today };
+      }
+      case 'thisMonth': return { from: new Date(y, m, 1), to: today };
+      case 'lastMonth': return { from: new Date(y, m - 1, 1), to: new Date(y, m, 0) };
+      case 'specificMonth': {
+        const match = /^(\d{4})-(\d{2})$/.exec(String(monthValue || ''));
+        if (!match) return null;
+        const my = Number(match[1]);
+        const mm = Number(match[2]) - 1;
+        return { from: new Date(my, mm, 1), to: new Date(my, mm + 1, 0) };
+      }
+      case 'last3Months': return { from: new Date(y, m - 2, 1), to: today };
+      case 'yearToDate': return { from: new Date(y, 0, 1), to: today };
+      case 'workingYear': {
+        const wy = Number(workingYear) || y;
+        return { from: new Date(wy, 0, 1), to: new Date(wy, 11, 31) };
+      }
+      case 'last12Months': return { from: new Date(y - 1, m, d + 1), to: today };
+      case 'last2Years': return { from: new Date(y - 2, m, d + 1), to: today };
+      case 'allTime': return { from: null, to: null };
+      default: return null;
     }
+  }
+
+  // Every non-deleted pupil on record (any year) — the pool for "new admissions"
+  // reports, which select by registration date rather than by working year.
+  function admissionsReportPool() {
+    const map = new Map();
+    const legacy = shouldUseLegacyFallback(getWorkingYear()) ? legacyStudents : [];
+    [...allStudents, ...legacy].forEach((rec) => {
+      if (!rec || !rec.key) return;
+      map.set(rec.key, { ...(map.get(rec.key) || {}), ...rec });
+    });
+    return Array.from(map.values()).filter((s) => !looksDeleted(s));
+  }
+
+  function selectReportStudents(opts, rangeOverride) {
+    const year = getWorkingYear();
+    const range = rangeOverride || { from: opts.from, to: opts.to };
+    const base = opts.mode === 'register' ? cachedStudents.slice() : admissionsReportPool();
+    const rows = [];
+    let undated = 0;
+    base.forEach((stu) => {
+      if (!matchesSearchTerm(stu, opts.term)) return;
+      const fallbackClass = stu.classLevel || stu.className || '';
+      const displayClass = resolveClassForStudentYear(stu.key, fallbackClass, year) || fallbackClass || 'N/A';
+      const gender = genderCodeOf(stu);
+      if (opts.classFilter && L(displayClass) !== L(opts.classFilter)) return;
+      if (opts.genderFilter && gender !== opts.genderFilter) return;
+      const regDate = registrationDateOf(stu);
+      if (opts.mode === 'admissions' && (range.from || range.to)) {
+        if (!regDate) { undated += 1; return; }
+        if (range.from && regDate < range.from) return;
+        if (range.to && regDate > range.to) return;
+      }
+      const classLabel = displayClass === 'GRADUATED' ? `Graduated (${year})` : displayClass;
+      rows.push({ stu, regDate, displayClass, classLabel, gender });
+    });
+    rows.sort((a, b) => {
+      if (a.regDate && b.regDate && a.regDate - b.regDate) return a.regDate - b.regDate;
+      if (!a.regDate !== !b.regDate) return a.regDate ? -1 : 1;
+      return studentFullNameOf(a.stu).localeCompare(studentFullNameOf(b.stu));
+    });
+    return { rows, undated };
+  }
+
+  function studentFullNameOf(stu) {
+    return `${stu.firstName || ''} ${stu.middleName || ''} ${stu.lastName || ''}`.replace(/\s+/g, ' ').trim() || 'Unnamed Student';
+  }
+
+  // Same-length window immediately before the selected period (for comparison).
+  function previousPeriodRange(from, to) {
+    if (!from || !to) return null;
+    const days = Math.round((startOfDayOf(to) - startOfDayOf(from)) / 86400000) + 1;
+    const prevTo = new Date(from.getFullYear(), from.getMonth(), from.getDate() - 1);
+    const prevFrom = new Date(from.getFullYear(), from.getMonth(), from.getDate() - days);
+    return { from: prevFrom, to: endOfDayOf(prevTo) };
+  }
+
+  function startOfDayOf(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+  function endOfDayOf(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999); }
+
+  function classSortIndex(label) {
+    const i = CLASS_ORDER.findIndex((c) => L(c) === L(label));
+    return i < 0 ? CLASS_ORDER.length + 1 : i;
   }
 
   async function loadLogoDataUrl() {
@@ -1360,337 +1565,889 @@
     }
   }
 
-  async function downloadAdmissionsPdfReport() {
+  async function downloadAdmissionsPdfReport(opts) {
     const workingYear = String(getWorkingYear());
     const { jsPDF } = window.jspdf || {};
     if (!jsPDF) {
       alert('PDF library not available. Please try again later.');
-      return;
+      return false;
     }
-    if (!cachedStudents || !Array.isArray(cachedStudents)) {
-      alert('No students available for this year.');
-      return;
+    const { rows: selected, undated } = selectReportStudents(opts);
+    if (!selected.length) {
+      alert('No pupils match the selected period and filters.');
+      return false;
     }
-
-    const doc = new jsPDF();
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const marginX = 14;
-    let cursorY = 16;
+    const isAdmissions = opts.mode === 'admissions';
+    const hasRange = isAdmissions && !!(opts.from || opts.to);
 
     let profileLine = '';
     try {
       const profileSnap = await schoolRef('profile').get();
       const profile = profileSnap.exists() ? profileSnap.val() || {} : {};
       const parts = [];
-      if (profile.poBox || profile.po_box || profile.POBox) {
-        const po =
-          profile.poBox ||
-          profile.po_box ||
-          profile.POBox;
-        parts.push(`P.O. Box ${po}`);
-      }
-      if (profile.tel || profile.phone || profile.telephone) {
-        const tel =
-          profile.tel ||
-          profile.phone ||
-          profile.telephone;
-        parts.push(`Tel ${tel}`);
-      }
-      if (profile.location || profile.address || profile.city) {
-        const loc =
-          profile.location ||
-          profile.address ||
-          profile.city;
-        parts.push(String(loc));
-      }
-      profileLine = parts.join(' | ');
+      const po = profile.poBox || profile.po_box || profile.POBox;
+      if (po) parts.push(`P.O. Box ${po}`);
+      const tel = profile.tel || profile.phone || profile.telephone;
+      if (tel) parts.push(`Tel ${tel}`);
+      const loc = profile.location || profile.address || profile.city;
+      if (loc) parts.push(String(loc));
+      profileLine = parts.join('  |  ');
     } catch (err) {
       console.warn('Failed to load school profile for PDF', err);
     }
-
+    let logoDataUrl = null;
     try {
-      const logoDataUrl = await loadLogoDataUrl();
-      if (logoDataUrl) {
-        const logoWidth = 18;
-        const logoHeight = 18;
-        doc.addImage(logoDataUrl, 'PNG', marginX, cursorY - 8, logoWidth, logoHeight);
-      }
+      logoDataUrl = await loadLogoDataUrl();
     } catch (err) {
-      console.warn('Header logo rendering failed', err);
+      console.warn('Header logo load failed', err);
     }
 
-    const schoolName = currentSchool.name || schoolId || 'School';
-    doc.setFontSize(14);
-    doc.setFont(undefined, 'bold');
-    doc.text(schoolName, marginX, cursorY);
-    cursorY += 6;
-
-    doc.setFontSize(12);
-    doc.setFont(undefined, 'normal');
-    doc.text(`Registered Pupils Report — Academic Year ${workingYear}`, marginX, cursorY);
-    cursorY += 6;
-
-    const generatedAt = new Date();
-    doc.setFontSize(10);
-    doc.text(`Generated on: ${generatedAt.toLocaleString()}`, marginX, cursorY);
-    cursorY += 5;
-
-    if (profileLine) {
-      const split = doc.splitTextToSize(profileLine, pageWidth - marginX * 2);
-      doc.text(split, marginX, cursorY);
-      cursorY += split.length * 5;
-    }
-
-    cursorY += 4;
-
-    const searchBoxEl = document.getElementById('search-box');
-    const term = (searchBoxEl ? searchBoxEl.value || '' : '').toLowerCase().trim();
-    const students = !term
-      ? cachedStudents.slice()
-      : cachedStudents.filter((s) => {
-          const full = `${s.firstName || ''} ${s.middleName || ''} ${s.lastName || ''}`.toLowerCase();
-          return (
-            full.includes(term) ||
-            String(s.pupilId || '').toLowerCase().includes(term) ||
-            String(s.admissionNumber || '').toLowerCase().includes(term)
-          );
-        });
-
-    if (!students.length) {
-      alert('No students match the current filter for this working year.');
-      return;
-    }
-
-    const currentYear = workingYear;
     const enriched = await Promise.all(
-      students.map(async (stu) => {
+      selected.map(async (row) => {
+        const stu = row.stu;
         const fallbackClass = stu.classLevel || stu.className || '';
-        const displayClass = resolveClassForStudentYear(stu.key, fallbackClass, currentYear) || fallbackClass || 'N/A';
         const anchorClass =
           anchorEnrollments[stu.key]?.className ||
           anchorEnrollments[stu.key]?.classLevel ||
           fallbackClass;
-
         let finance = { fee: 0, planId: null, feeOverride: null };
         try {
-          finance = await resolveEffectiveFinance(stu.key, displayClass, { anchorClass, year: currentYear });
+          finance = await resolveEffectiveFinance(stu.key, row.displayClass, { anchorClass, year: workingYear });
         } catch (err) {
           console.error('resolveEffectiveFinance error (PDF)', stu.key, err);
         }
-
         let planLabel = '';
         try {
-          planLabel = await planLabelFor(finance.planId, currentYear);
+          planLabel = await planLabelFor(finance.planId, workingYear);
         } catch (err) {
           console.warn('Plan label fetch failed (PDF)', finance.planId, err);
         }
-
-        return { stu, displayClass, finance, planLabel };
+        const joining = stu.joiningFormPayment || {};
+        const amount = Number(joining.amount || 0);
+        const joinAmount = Number.isFinite(amount) && amount > 0 ? amount : 0;
+        const approved = !!(joining.approvedInOffice || joining.approvedBy);
+        const confirmed = !!(joining.confirmedBy || joining.confirmedAt);
+        const joinStatus = !joinAmount ? 'none' : approved ? 'approved' : confirmed ? 'confirmed' : 'pending';
+        return { ...row, finance, planLabel, joining, joinAmount, joinStatus };
       })
     );
 
-    const rows = [];
-    let totalPupils = 0;
-    let boysCount = 0;
-    let girlsCount = 0;
-    let totalJoiningFees = 0;
-    const classCounts = new Map();
-    const receiverStats = new Map();      // Only PENDING (not yet approved in office)
-    const approvedInOfficeStats = new Map();  // Approved - money received in office
+    // ---- Statistics ----
+    const total = enriched.length;
+    const newCounter = () => ({ boys: 0, girls: 0, total: 0 });
+    const bump = (counter, gender) => {
+      counter.total += 1;
+      if (gender === 'M') counter.boys += 1;
+      else if (gender === 'F') counter.girls += 1;
+    };
+    const overall = newCounter();
+    const classStats = new Map();
+    const periodStats = new Map(); // YYYY-MM (admissions) or YYYY (register)
+    const undatedStats = newCounter();
+    const statusStats = {
+      approved: { count: 0, amount: 0 },
+      confirmed: { count: 0, amount: 0 },
+      pending: { count: 0, amount: 0 },
+      none: { count: 0, amount: 0 }
+    };
+    const methodStats = new Map();
+    const receiverStats = new Map();
+    const approverStats = new Map();
+    const addMoney = (map, key, amount) => {
+      if (!map.has(key)) map.set(key, { count: 0, amount: 0 });
+      const stat = map.get(key);
+      stat.count += 1;
+      stat.amount += amount;
+    };
+    let joiningTotal = 0;
+    let joiningCount = 0;
+    let annualFees = 0;
 
-    enriched.forEach(({ stu, displayClass, finance, planLabel }, index) => {
-      totalPupils += 1;
-      const genderVal = String(stu.gender || '').toLowerCase();
-      if (genderVal.startsWith('m') || genderVal === 'boy' || genderVal === 'male') boysCount += 1;
-      if (genderVal.startsWith('f') || genderVal === 'girl' || genderVal === 'female') girlsCount += 1;
-
-      const joining = stu.joiningFormPayment || {};
-      const joinAmount = Number(joining.amount || 0);
-      if (Number.isFinite(joinAmount)) totalJoiningFees += joinAmount;
-      const receiverName = (joining.receivedBy || 'Unknown').trim().toUpperCase() || 'UNKNOWN';
-      const isApproved = !!(joining.approvedInOffice || joining.approvedBy);
-      if (isApproved) {
-        const officeKey = (joining.approvedBy || 'Office').trim().toUpperCase();
-        if (!approvedInOfficeStats.has(officeKey)) {
-          approvedInOfficeStats.set(officeKey, { count: 0, amount: 0 });
-        }
-        const stat = approvedInOfficeStats.get(officeKey);
-        stat.count += 1;
-        stat.amount += joinAmount;
+    enriched.forEach((r) => {
+      bump(overall, r.gender);
+      const classKey = r.classLabel || 'N/A';
+      if (!classStats.has(classKey)) classStats.set(classKey, { label: classKey, sortClass: r.displayClass, ...newCounter() });
+      bump(classStats.get(classKey), r.gender);
+      if (r.regDate) {
+        const yr = r.regDate.getFullYear();
+        const mo = r.regDate.getMonth();
+        const key = isAdmissions ? `${yr}-${String(mo + 1).padStart(2, '0')}` : String(yr);
+        if (!periodStats.has(key)) periodStats.set(key, { key, year: yr, month: mo, ...newCounter() });
+        bump(periodStats.get(key), r.gender);
       } else {
-        if (!receiverStats.has(receiverName)) {
-          receiverStats.set(receiverName, { count: 0, amount: 0 });
+        bump(undatedStats, r.gender);
+      }
+      statusStats[r.joinStatus].count += 1;
+      statusStats[r.joinStatus].amount += r.joinAmount;
+      if (r.joinAmount) {
+        joiningTotal += r.joinAmount;
+        joiningCount += 1;
+        addMoney(methodStats, String(r.joining.method || 'Not stated').trim().toUpperCase() || 'NOT STATED', r.joinAmount);
+        if (r.joinStatus === 'approved') {
+          addMoney(approverStats, String(r.joining.approvedBy || 'Office').trim().toUpperCase() || 'OFFICE', r.joinAmount);
+        } else {
+          addMoney(receiverStats, String(r.joining.receivedBy || 'Unknown').trim().toUpperCase() || 'UNKNOWN', r.joinAmount);
         }
-        const stat = receiverStats.get(receiverName);
-        stat.count += 1;
-        stat.amount += joinAmount;
       }
-
-      const classLabel = displayClass === 'GRADUATED' ? `Graduated (${currentYear})` : displayClass;
-      const classKey = classLabel || 'N/A';
-      classCounts.set(classKey, (classCounts.get(classKey) || 0) + 1);
-
-      const fullName = `${stu.firstName || ''} ${stu.middleName || ''} ${stu.lastName || ''}`
-        .replace(/\s+/g, ' ')
-        .trim() || 'Unnamed Student';
-      const admission = stu.admissionNumber || stu.pupilId || '';
-      const parentContact = stu.primaryParentContact || '';
-      const dateObj = parseDateFromStudent(stu);
-      const dateRegistered = formatDateForReport(dateObj);
-      const feeLabel = `TSh ${currencyFormatter.format(Number(finance.fee || 0))}`;
-      const planDisplay = planLabel || (finance.planId ? finance.planId : 'Class default');
-      const joiningFeeLabel = joinAmount ? `TSh ${currencyFormatter.format(joinAmount)}` : '';
-
-      rows.push([
-        index + 1,
-        fullName,
-        admission,
-        stu.gender || '',
-        classLabel || '',
-        parentContact,
-        dateRegistered,
-        feeLabel,
-        planDisplay,
-        joiningFeeLabel,
-        joining.reference || '',
-        joining.method || '',
-        joining.receivedBy || ''
-      ]);
+      annualFees += Number(r.finance.fee || 0) || 0;
     });
+    const unknownGender = total - overall.boys - overall.girls;
 
-    const head = [
-      [
-        '#',
-        'Student Name',
-        'Admission',
-        'Gender',
-        `Class (${currentYear})`,
-        'Parent Contact',
-        'Date Registered',
-        'Fee/Year',
-        'Payment Plan',
-        'Joining Fee',
-        'Ref',
-        'Method',
-        'Received By'
-      ]
-    ];
+    const classEntries = Array.from(classStats.values()).sort(
+      (a, b) => classSortIndex(a.sortClass) - classSortIndex(b.sortClass) || a.label.localeCompare(b.label)
+    );
+    const byCount = classEntries.slice().sort((a, b) => b.total - a.total);
+    const topClass = byCount[0];
+    const lowClass = byCount[byCount.length - 1];
 
-    doc.autoTable({
-      head,
-      body: rows,
-      startY: cursorY,
-      styles: { fontSize: 8 },
-      headStyles: { fillColor: [238, 242, 255], textColor: [11, 105, 255] }
-    });
-
-    let finalY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 6 : cursorY + 10;
-
-    let highestClass = 'N/A';
-    let lowestClass = 'N/A';
-    if (classCounts.size > 0) {
-      const entries = Array.from(classCounts.entries());
-      entries.sort((a, b) => b[1] - a[1]);
-      highestClass = `${entries[0][0]} (${entries[0][1]})`;
-      const nonZeroSorted = entries
-        .filter(([, count]) => count > 0)
-        .sort((a, b) => a[1] - b[1]);
-      if (nonZeroSorted.length) {
-        lowestClass = `${nonZeroSorted[0][0]} (${nonZeroSorted[0][1]})`;
-      }
+    let prevCount = null;
+    if (isAdmissions && opts.from && opts.to) {
+      const prev = previousPeriodRange(opts.from, opts.to);
+      if (prev) prevCount = selectReportStudents(opts, prev).rows.length;
     }
 
-    let topReceiverText = 'N/A';
-    if (receiverStats.size > 0) {
-      const receiverEntries = Array.from(receiverStats.entries());
-      receiverEntries.sort((a, b) => b[1].amount - a[1].amount || b[1].count - a[1].count);
-      const [name, info] = receiverEntries[0];
-      topReceiverText = `${name} — ${info.count} pupils, TSh ${currencyFormatter.format(info.amount)} (pending collection)`;
-    }
+    // ---- Labels ----
+    const schoolName = currentSchool.name || schoolId || 'School';
+    const generatedAt = new Date();
+    const generatedTime = `${String(generatedAt.getHours()).padStart(2, '0')}:${String(generatedAt.getMinutes()).padStart(2, '0')}`;
+    let periodName = '';
+    if (!isAdmissions) periodName = `Full register ${workingYear}`;
+    else if (opts.preset === 'specificMonth' && opts.from) periodName = `${MONTH_LONG[opts.from.getMonth()]} ${opts.from.getFullYear()}`;
+    else if (opts.preset === 'custom') periodName = 'Custom period';
+    else periodName = opts.presetLabel || 'Selected period';
+    const periodText = !isAdmissions
+      ? `All pupils in academic year ${workingYear}`
+      : !hasRange
+        ? 'All recorded admissions'
+        : `${opts.from ? formatDateForReport(opts.from) : 'Earliest record'} to ${opts.to ? formatDateForReport(opts.to) : 'today'}`;
+    const genderText = opts.genderFilter === 'M' ? 'Boys only' : opts.genderFilter === 'F' ? 'Girls only' : 'Boys and girls';
+    const filtersText = [
+      `Period: ${periodText}`,
+      `Class: ${opts.classFilter || 'All classes'}`,
+      `Gender: ${genderText}`,
+      `Search: ${opts.term ? `"${opts.term}"` : 'none'}`
+    ].join('     |     ');
 
-    const summaryBody = [
-      ['Total pupils registered', String(totalPupils)],
-      ['Boys', String(boysCount)],
-      ['Girls', String(girlsCount)],
-      ['Total joining fees collected (TZS)', `TSh ${currencyFormatter.format(totalJoiningFees)}`],
-      ['Highest registration class', highestClass],
-      ['Lowest registration class', lowestClass],
-      ['Top receiver', topReceiverText]
-    ];
-
-    doc.autoTable({
-      head: [['Summary', 'Value']],
-      body: summaryBody,
-      startY: finalY,
-      styles: { fontSize: 9 },
-      headStyles: { fillColor: [15, 23, 42], textColor: [255, 255, 255] },
-      columnStyles: {
-        0: { cellWidth: 70 }
-      }
-    });
-
-    finalY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 6 : finalY + 10;
-
-    if (receiverStats.size > 0) {
-      const receiverEntries = Array.from(receiverStats.entries());
-      receiverEntries.sort((a, b) => b[1].amount - a[1].amount);
-      const receiverBody = receiverEntries.map(([name, info]) => [
-        name,
-        String(info.count),
-        `TSh ${currencyFormatter.format(info.amount)}`
-      ]);
-
-      doc.autoTable({
-        head: [['Received By Pupils (Pending Collection)', 'Pupils', 'Amount (TZS)']],
-        body: receiverBody,
-        startY: finalY,
-        styles: { fontSize: 9 },
-        headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255] }
-      });
-
-      finalY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 10 : finalY + 10;
-    }
-
-    if (approvedInOfficeStats.size > 0) {
-      if (finalY + 30 > doc.internal.pageSize.getHeight()) {
+    // ---- Drawing helpers ----
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    const W = doc.internal.pageSize.getWidth();
+    const H = doc.internal.pageSize.getHeight();
+    const M = 12;
+    const CW = W - M * 2;
+    const C = {
+      indigo: [67, 56, 202],
+      indigoDark: [49, 46, 129],
+      indigoLight: [238, 242, 255],
+      indigoSoft: [199, 210, 254],
+      blue: [37, 99, 235],
+      blueLight: [219, 234, 254],
+      pink: [219, 39, 119],
+      pinkLight: [252, 231, 243],
+      emerald: [5, 150, 105],
+      emeraldLight: [209, 250, 229],
+      amber: [217, 119, 6],
+      amberLight: [254, 243, 199],
+      rose: [225, 29, 72],
+      slate900: [15, 23, 42],
+      slate600: [71, 85, 105],
+      slate400: [148, 163, 184],
+      slate300: [203, 213, 225],
+      slate200: [226, 232, 240],
+      slate100: [241, 245, 249],
+      slate50: [248, 250, 252],
+      white: [255, 255, 255]
+    };
+    const fill = (c) => doc.setFillColor(c[0], c[1], c[2]);
+    const ink = (c) => doc.setTextColor(c[0], c[1], c[2]);
+    const font = (style, size) => {
+      doc.setFont('helvetica', style);
+      doc.setFontSize(size);
+    };
+    const fmtTsh = (n) => `TSh ${currencyFormatter.format(Math.round(Number(n) || 0))}`;
+    const pct = (n, d) => (d ? `${Math.round((n * 100) / d)}%` : '0%');
+    const fitText = (text, maxW) => {
+      let t = String(text || '');
+      if (doc.getTextWidth(t) <= maxW) return t;
+      while (t.length > 1 && doc.getTextWidth(`${t}...`) > maxW) t = t.slice(0, -1);
+      return `${t}...`;
+    };
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const baseTable = {
+      theme: 'grid',
+      styles: {
+        font: 'helvetica',
+        fontSize: 8,
+        cellPadding: { top: 1.6, bottom: 1.6, left: 2, right: 2 },
+        textColor: C.slate900,
+        lineColor: C.slate200,
+        lineWidth: 0.15,
+        valign: 'middle',
+        overflow: 'linebreak'
+      },
+      headStyles: { fillColor: C.indigo, textColor: C.white, fontStyle: 'bold', fontSize: 8, valign: 'middle' },
+      alternateRowStyles: { fillColor: C.slate50 },
+      margin: { left: M, right: M, top: 14, bottom: 16 }
+    };
+    const totalRowStyle = { fillColor: C.indigoLight, textColor: C.indigoDark, fontStyle: 'bold' };
+    const sectionRowStyle = { fillColor: C.slate100, textColor: C.slate600, fontStyle: 'bold', fontSize: 7 };
+    // Stacked boys/girls bar inside a table cell, scaled to the largest row.
+    const genderBarDrawer = (metaRows, max, colIndex) => (data) => {
+      if (data.section !== 'body' || data.column.index !== colIndex) return;
+      const meta = metaRows[data.row.index];
+      if (!meta || !meta.total) return;
+      const pad = 2;
+      const h = 3.4;
+      const w = ((data.cell.width - pad * 2) * meta.total) / Math.max(1, max);
+      const x = data.cell.x + pad;
+      const yy = data.cell.y + (data.cell.height - h) / 2;
+      const bw = (w * meta.boys) / meta.total;
+      const gw = (w * meta.girls) / meta.total;
+      if (bw > 0) { fill(C.blue); doc.rect(x, yy, bw, h, 'F'); }
+      if (gw > 0) { fill(C.pink); doc.rect(x + bw, yy, gw, h, 'F'); }
+      if (w - bw - gw > 0.05) { fill(C.slate300); doc.rect(x + bw + gw, yy, w - bw - gw, h, 'F'); }
+    };
+    const sectionTitle = (title, subtitle, y) => {
+      if (y > H - 45) {
         doc.addPage();
-        finalY = 20;
+        y = 16;
       }
-      const approvedEntries = Array.from(approvedInOfficeStats.entries());
-      approvedEntries.sort((a, b) => b[1].amount - a[1].amount);
-      const approvedBody = approvedEntries.map(([name, info]) => [
-        name,
-        String(info.count),
-        `TSh ${currencyFormatter.format(info.amount)}`
-      ]);
-      doc.autoTable({
-        head: [['Received in Office (Approved)', 'Pupils', 'Amount (TZS)']],
-        body: approvedBody,
-        startY: finalY,
-        styles: { fontSize: 9 },
-        headStyles: { fillColor: [59, 130, 246], textColor: [255, 255, 255] }
+      fill(C.indigo);
+      doc.rect(M, y - 3.6, 1.4, 5, 'F');
+      font('bold', 11);
+      ink(C.slate900);
+      doc.text(title, M + 4, y);
+      if (subtitle) {
+        const tw = doc.getTextWidth(title);
+        font('normal', 8);
+        ink(C.slate600);
+        doc.text(subtitle, M + 4 + tw + 4, y);
+      }
+      return y + 4;
+    };
+
+    // ---- Page 1: header band ----
+    fill(C.indigo);
+    doc.rect(0, 0, W, 32, 'F');
+    fill(C.indigoDark);
+    doc.rect(0, 32, W, 1.2, 'F');
+    let textX = M;
+    if (logoDataUrl) {
+      try {
+        fill(C.white);
+        doc.roundedRect(M, 6, 20, 20, 3, 3, 'F');
+        doc.addImage(logoDataUrl, 'PNG', M + 1.5, 7.5, 17, 17);
+        textX = M + 25;
+      } catch (err) {
+        console.warn('Header logo rendering failed', err);
+      }
+    }
+    const leftW = CW * 0.56 - (textX - M);
+    font('bold', 17);
+    ink(C.white);
+    doc.text(fitText(schoolName, leftW), textX, 13.5);
+    font('normal', 10.5);
+    doc.text(isAdmissions ? 'ADMISSIONS REPORT  -  New pupils admitted' : `PUPIL REGISTER  -  Academic year ${workingYear}`, textX, 20.5);
+    if (profileLine) {
+      font('normal', 8);
+      ink(C.indigoSoft);
+      doc.text(fitText(profileLine, leftW), textX, 26.5);
+    }
+    font('bold', 12);
+    ink(C.white);
+    doc.text(fitText(periodName, CW * 0.4), W - M, 13.5, { align: 'right' });
+    font('normal', 9.5);
+    doc.text(periodText, W - M, 20, { align: 'right' });
+    font('normal', 8);
+    ink(C.indigoSoft);
+    doc.text(`Generated ${formatDateForReport(generatedAt)} at ${generatedTime}  |  Working year ${workingYear}`, W - M, 26.5, { align: 'right' });
+
+    // Filters strip
+    let y = 38;
+    fill(C.indigoLight);
+    doc.roundedRect(M, y, CW, 9, 2, 2, 'F');
+    font('bold', 7.5);
+    ink(C.indigo);
+    doc.text('FILTERS', M + 4, y + 5.8);
+    font('normal', 8);
+    ink(C.slate600);
+    doc.text(fitText(filtersText, CW - 26), M + 20, y + 5.8);
+    y += 13;
+
+    // KPI cards
+    let firstSub;
+    if (prevCount !== null) {
+      const diff = total - prevCount;
+      firstSub = `Previous period: ${prevCount} (${diff >= 0 ? '+' : ''}${diff})`;
+    } else {
+      firstSub = isAdmissions ? 'All recorded admissions' : `Academic year ${workingYear}`;
+    }
+    const cards = [
+      { label: isAdmissions ? 'NEW PUPILS ADMITTED' : 'PUPILS IN REGISTER', value: String(total), sub: firstSub, color: C.indigo, tint: C.indigoLight },
+      { label: 'BOYS', value: String(overall.boys), sub: `${pct(overall.boys, total)} of all pupils`, color: C.blue, tint: C.blueLight },
+      { label: 'GIRLS', value: String(overall.girls), sub: `${pct(overall.girls, total)} of all pupils`, color: C.pink, tint: C.pinkLight },
+      { label: 'JOINING FEES RECEIVED', value: fmtTsh(joiningTotal), sub: `Paid by ${joiningCount} of ${total} pupils`, color: C.emerald, tint: C.emeraldLight },
+      {
+        label: isAdmissions ? 'CLASS WITH MOST ADMISSIONS' : 'LARGEST CLASS',
+        value: topClass ? topClass.label : 'N/A',
+        sub: topClass ? `${plural(topClass.total, 'pupil')}${lowClass && lowClass !== topClass ? `; fewest: ${lowClass.label} (${lowClass.total})` : ''}` : '',
+        color: C.amber,
+        tint: C.amberLight
+      }
+    ];
+    const gap = 4;
+    const cardW = (CW - gap * 4) / 5;
+    const cardH = 26;
+    cards.forEach((card, i) => {
+      const x = M + i * (cardW + gap);
+      fill(card.tint);
+      doc.roundedRect(x, y, cardW, cardH, 2.5, 2.5, 'F');
+      fill(card.color);
+      doc.rect(x, y + 3, 1.6, cardH - 6, 'F');
+      font('bold', 7);
+      ink(C.slate600);
+      doc.text(fitText(card.label, cardW - 8), x + 5, y + 6.5);
+      font('bold', card.value.length > 11 ? 13 : 19);
+      ink(card.color);
+      doc.text(fitText(card.value, cardW - 8), x + 5, y + 16);
+      font('normal', 7.5);
+      ink(C.slate600);
+      doc.text(fitText(card.sub, cardW - 8), x + 5, y + 22.5);
+    });
+    y += cardH + 7;
+
+    // Gender split bar
+    font('bold', 9);
+    ink(C.slate900);
+    doc.text('Boys and girls', M, y + 4.3);
+    const barX = M + 28;
+    const barW = CW - 28;
+    const barH = 6.5;
+    fill(C.slate300);
+    doc.rect(barX, y, barW, barH, 'F');
+    const bw = total ? (barW * overall.boys) / total : 0;
+    const gw = total ? (barW * overall.girls) / total : 0;
+    if (bw > 0) { fill(C.blue); doc.rect(barX, y, bw, barH, 'F'); }
+    if (gw > 0) { fill(C.pink); doc.rect(barX + bw, y, gw, barH, 'F'); }
+    font('bold', 7.5);
+    ink(C.white);
+    const boysLabel = `Boys ${overall.boys} (${pct(overall.boys, total)})`;
+    const girlsLabel = `Girls ${overall.girls} (${pct(overall.girls, total)})`;
+    if (bw > doc.getTextWidth(boysLabel) + 4) doc.text(boysLabel, barX + 2.5, y + 4.4);
+    if (gw > doc.getTextWidth(girlsLabel) + 4) doc.text(girlsLabel, barX + bw + 2.5, y + 4.4);
+    if (unknownGender > 0) {
+      const restW = barW - bw - gw;
+      const restLabel = `Not recorded ${unknownGender}`;
+      ink(C.slate600);
+      if (restW > doc.getTextWidth(restLabel) + 4) doc.text(restLabel, barX + bw + gw + 2.5, y + 4.4);
+    }
+    y += barH + 9;
+
+    // ---- Class table + joining fee table ----
+    const classBody = classEntries.map((e) => [e.label, String(e.boys), String(e.girls), String(e.total), pct(e.total, total), '']);
+    const classMeta = classEntries.slice();
+    classBody.push([
+      { content: 'Total', styles: totalRowStyle },
+      { content: String(overall.boys), styles: totalRowStyle },
+      { content: String(overall.girls), styles: totalRowStyle },
+      { content: String(total), styles: totalRowStyle },
+      { content: '100%', styles: totalRowStyle },
+      { content: '', styles: totalRowStyle }
+    ]);
+    classMeta.push(null);
+    const classMax = Math.max(1, ...classEntries.map((e) => e.total));
+
+    const feeBody = [];
+    const feeTone = [];
+    const section = (label) => {
+      feeBody.push([{ content: label, colSpan: 3, styles: sectionRowStyle }]);
+      feeTone.push(null);
+    };
+    const moneyRow = (label, stat, tone) => {
+      feeBody.push([label, String(stat.count), stat.amount ? fmtTsh(stat.amount) : '-']);
+      feeTone.push(tone || null);
+    };
+    section('JOINING FEE STATUS');
+    moneyRow('Approved in office', statusStats.approved, C.emerald);
+    moneyRow('Confirmed by staff, awaiting office', statusStats.confirmed, C.amber);
+    moneyRow('Received, not yet confirmed', statusStats.pending, C.rose);
+    moneyRow('No joining fee recorded', statusStats.none, C.slate400);
+    const sortedMoney = (map) => Array.from(map.entries()).sort((a, b) => b[1].amount - a[1].amount || b[1].count - a[1].count);
+    if (methodStats.size) {
+      section('BY PAYMENT METHOD');
+      sortedMoney(methodStats).forEach(([name, stat]) => moneyRow(name, stat));
+    }
+    if (receiverStats.size) {
+      section('HELD BY RECEIVER (NOT YET APPROVED IN OFFICE)');
+      sortedMoney(receiverStats).forEach(([name, stat]) => moneyRow(name, stat));
+    }
+    if (approverStats.size) {
+      section('APPROVED IN OFFICE BY');
+      sortedMoney(approverStats).forEach(([name, stat]) => moneyRow(name, stat));
+    }
+    feeBody.push([
+      { content: 'Total joining fees received', styles: totalRowStyle },
+      { content: String(joiningCount), styles: totalRowStyle },
+      { content: fmtTsh(joiningTotal), styles: totalRowStyle }
+    ]);
+    feeTone.push(null);
+    feeBody.push([
+      { content: `Annual school fees ${workingYear} (these pupils)`, styles: { fontStyle: 'bold' } },
+      String(total),
+      { content: fmtTsh(annualFees), styles: { fontStyle: 'bold' } }
+    ]);
+    feeTone.push(null);
+
+    const classTableOpts = (left, width) => ({
+      ...baseTable,
+      head: [[`Class (${workingYear})`, 'Boys', 'Girls', 'Total', 'Share', 'Boys / girls']],
+      body: classBody,
+      margin: { ...baseTable.margin, left, right: W - left - width },
+      tableWidth: width,
+      columnStyles: {
+        0: { cellWidth: 34, fontStyle: 'bold' },
+        1: { cellWidth: 13, halign: 'center', textColor: C.blue },
+        2: { cellWidth: 13, halign: 'center', textColor: C.pink },
+        3: { cellWidth: 13, halign: 'center', fontStyle: 'bold' },
+        4: { cellWidth: 14, halign: 'center' },
+        5: { cellWidth: 'auto' }
+      },
+      didDrawCell: genderBarDrawer(classMeta, classMax, 5)
+    });
+    const feeTableOpts = (left, width) => ({
+      ...baseTable,
+      head: [['Details', 'Pupils', 'Amount']],
+      body: feeBody,
+      margin: { ...baseTable.margin, left, right: W - left - width },
+      tableWidth: width,
+      columnStyles: {
+        0: { cellWidth: 'auto' },
+        1: { cellWidth: 16, halign: 'center' },
+        2: { cellWidth: 32, halign: 'right' }
+      },
+      didParseCell: (data) => {
+        if (data.section !== 'body' || data.column.index !== 0) return;
+        const tone = feeTone[data.row.index];
+        if (tone) {
+          data.cell.styles.textColor = tone;
+          data.cell.styles.fontStyle = 'bold';
+        }
+      }
+    });
+
+    // ---- Month (or year) table ----
+    const periodEntries = Array.from(periodStats.values()).sort((a, b) => a.key.localeCompare(b.key));
+    const periodBody = [];
+    const periodMeta = [];
+    const periodMax = Math.max(1, undatedStats.total, ...periodEntries.map((e) => e.total));
+    const years = Array.from(new Set(periodEntries.map((e) => e.year)));
+    const multiYear = isAdmissions && years.length > 1;
+    years.forEach((yr) => {
+      const inYear = periodEntries.filter((e) => e.year === yr);
+      inYear.forEach((e) => {
+        const label = isAdmissions ? `${MONTH_LONG[e.month]} ${e.year}` : `Admitted in ${e.year}`;
+        periodBody.push([label, String(e.boys), String(e.girls), String(e.total), pct(e.total, total), '']);
+        periodMeta.push(e);
       });
-      finalY = doc.lastAutoTable ? doc.lastAutoTable.finalY + 10 : finalY + 10;
+      if (multiYear) {
+        const sum = inYear.reduce((acc, e) => ({ boys: acc.boys + e.boys, girls: acc.girls + e.girls, total: acc.total + e.total }), newCounter());
+        periodBody.push([
+          { content: `${yr} subtotal`, styles: totalRowStyle },
+          { content: String(sum.boys), styles: totalRowStyle },
+          { content: String(sum.girls), styles: totalRowStyle },
+          { content: String(sum.total), styles: totalRowStyle },
+          { content: pct(sum.total, total), styles: totalRowStyle },
+          { content: '', styles: totalRowStyle }
+        ]);
+        periodMeta.push(null);
+      }
+    });
+    if (undatedStats.total) {
+      periodBody.push(['Date not recorded', String(undatedStats.boys), String(undatedStats.girls), String(undatedStats.total), pct(undatedStats.total, total), '']);
+      periodMeta.push(undatedStats);
+    }
+    const grandStyle = { fillColor: C.indigo, textColor: C.white, fontStyle: 'bold' };
+    periodBody.push([
+      { content: 'Total', styles: grandStyle },
+      { content: String(overall.boys), styles: grandStyle },
+      { content: String(overall.girls), styles: grandStyle },
+      { content: String(total), styles: grandStyle },
+      { content: '100%', styles: grandStyle },
+      { content: '', styles: grandStyle }
+    ]);
+    periodMeta.push(null);
+    const periodTableOpts = (left, width) => ({
+      ...baseTable,
+      head: [[isAdmissions ? 'Month' : 'Year', 'Boys', 'Girls', 'Total', 'Share', 'Boys / girls']],
+      body: periodBody,
+      margin: { ...baseTable.margin, left, right: W - left - width },
+      tableWidth: width,
+      columnStyles: {
+        0: { cellWidth: 34, fontStyle: 'bold' },
+        1: { cellWidth: 13, halign: 'center', textColor: C.blue },
+        2: { cellWidth: 13, halign: 'center', textColor: C.pink },
+        3: { cellWidth: 13, halign: 'center', fontStyle: 'bold' },
+        4: { cellWidth: 14, halign: 'center' },
+        5: { cellWidth: 'auto' }
+      },
+      didDrawCell: genderBarDrawer(periodMeta, periodMax, 5)
+    });
+
+    const busiest = periodEntries.slice().sort((a, b) => b.total - a.total)[0];
+    const busiestText = busiest
+      ? `Busiest ${isAdmissions ? 'month' : 'year'}: ${isAdmissions ? `${MONTH_LONG[busiest.month]} ${busiest.year}` : busiest.year} (${plural(busiest.total, 'pupil')})`
+      : '';
+    const breakdownTitle = isAdmissions ? 'Admissions by class and by month' : 'Pupils by class and by year of admission';
+    y = sectionTitle(breakdownTitle, busiestText, y);
+    const halfW = (CW - 6) / 2;
+    const rowsThatFit = Math.floor((H - 18 - y) / 6.4) - 1;
+    if (Math.max(classBody.length, periodBody.length) <= rowsThatFit) {
+      // Side by side on the summary page.
+      const startPage = doc.internal.getCurrentPageInfo().pageNumber;
+      doc.autoTable({ ...classTableOpts(M, halfW), startY: y });
+      const leftEnd = doc.lastAutoTable.finalY;
+      doc.setPage(startPage);
+      doc.autoTable({ ...periodTableOpts(M + halfW + 6, halfW), startY: y });
+      y = Math.max(leftEnd, doc.lastAutoTable.finalY) + 10;
+    } else {
+      doc.autoTable({ ...classTableOpts(M, CW), startY: y });
+      y = doc.lastAutoTable.finalY + 10;
+      if (y > H - 60) {
+        doc.addPage();
+        y = 18;
+      }
+      y = sectionTitle(isAdmissions ? 'Admissions by month' : 'Pupils by year of admission', busiestText, y);
+      doc.autoTable({ ...periodTableOpts(M, CW), startY: y });
+      y = doc.lastAutoTable.finalY + 10;
     }
 
-    const pageHeight = doc.internal.pageSize.getHeight();
-    if (finalY + 20 > pageHeight) {
+    // ---- Joining fees (kept whole on one page when it fits) ----
+    const feeHeight = (feeBody.length + 1) * 6.4 + 8;
+    if (y + feeHeight > H - 16 && feeHeight < H - 40) {
       doc.addPage();
-      finalY = 20;
+      y = 18;
     }
-    doc.setFontSize(10);
-    doc.text('Head Teacher: ________________________', marginX, finalY);
-    doc.text('Signature: ________________________', marginX, finalY + 6);
-    doc.text('Date: ________________________', marginX, finalY + 12);
+    y = sectionTitle('Joining fee collection', `${fmtTsh(joiningTotal)} received from ${plural(joiningCount, 'pupil')}`, y);
+    doc.autoTable({ ...feeTableOpts(M, CW), startY: y });
+    y = doc.lastAutoTable.finalY + 6;
 
-    const yyyy = generatedAt.getFullYear();
-    const mm = String(generatedAt.getMonth() + 1).padStart(2, '0');
-    const dd = String(generatedAt.getDate()).padStart(2, '0');
-    const datePart = `${yyyy}${mm}${dd}`;
+    if (hasRange && undated > 0) {
+      if (y > H - 24) { doc.addPage(); y = 18; }
+      fill(C.amberLight);
+      doc.roundedRect(M, y, CW, 9, 2, 2, 'F');
+      font('normal', 8);
+      ink(C.amber);
+      doc.text(
+        `Note: ${plural(undated, 'pupil')} matching these filters ${undated === 1 ? 'has' : 'have'} no registration date recorded, so ${undated === 1 ? 'it is' : 'they are'} not counted in this period. Choose "All time" to include them.`,
+        M + 4,
+        y + 5.8
+      );
+    }
+
+    // ---- Pupil details (always starts on a new page) ----
+    doc.addPage();
+    fill(C.indigo);
+    doc.rect(0, 0, W, 20, 'F');
+    font('bold', 13);
+    ink(C.white);
+    doc.text('Pupil details', M, 9.5);
+    font('normal', 8.5);
+    ink(C.indigoSoft);
+    doc.text(fitText(`${schoolName}  |  ${periodName}: ${periodText}  |  ${plural(total, 'pupil')}`, CW * 0.62), M, 15.5);
+    // Legend for joining-fee colours
+    const legend = [['Approved in office', C.emerald], ['Confirmed, awaiting office', C.amber], ['Not yet confirmed', C.rose]];
+    font('normal', 7.5);
+    let lx = W - M;
+    for (let i = legend.length - 1; i >= 0; i -= 1) {
+      const [label, color] = legend[i];
+      const tw = doc.getTextWidth(label);
+      lx -= tw;
+      ink(C.white);
+      doc.text(label, lx, 15.5);
+      lx -= 4.5;
+      fill(color);
+      doc.rect(lx, 13.1, 3, 3, 'F');
+      lx -= 5;
+    }
+    font('bold', 7.5);
+    ink(C.indigoSoft);
+    doc.text('Joining fee colour:', lx - doc.getTextWidth('Joining fee colour:') + 2, 15.5);
+
+    const groups = new Map();
+    enriched.forEach((r) => {
+      let key;
+      let label;
+      if (isAdmissions) {
+        if (r.regDate) {
+          key = `${r.regDate.getFullYear()}-${String(r.regDate.getMonth() + 1).padStart(2, '0')}`;
+          label = `${MONTH_LONG[r.regDate.getMonth()].toUpperCase()} ${r.regDate.getFullYear()}`;
+        } else {
+          key = 'zzzz';
+          label = 'DATE OF REGISTRATION NOT RECORDED';
+        }
+      } else {
+        key = `${String(classSortIndex(r.displayClass)).padStart(3, '0')}-${r.classLabel}`;
+        label = String(r.classLabel || 'N/A').toUpperCase();
+      }
+      if (!groups.has(key)) groups.set(key, { key, label, rows: [] });
+      groups.get(key).rows.push(r);
+    });
+    const orderedGroups = Array.from(groups.values()).sort((a, b) => a.key.localeCompare(b.key));
+    if (!isAdmissions) {
+      orderedGroups.forEach((g) => g.rows.sort((a, b) => studentFullNameOf(a.stu).localeCompare(studentFullNameOf(b.stu))));
+    }
+
+    const detailBody = [];
+    const detailMeta = [];
+    let n = 0;
+    orderedGroups.forEach((g) => {
+      const gb = g.rows.filter((r) => r.gender === 'M').length;
+      const gg = g.rows.filter((r) => r.gender === 'F').length;
+      detailBody.push([
+        {
+          content: `${g.label}     ${plural(g.rows.length, 'pupil')}  (${plural(gb, 'boy')}, ${plural(gg, 'girl')})`,
+          colSpan: 12,
+          styles: { fillColor: C.indigoLight, textColor: C.indigo, fontStyle: 'bold', fontSize: 8.5, cellPadding: { top: 2.2, bottom: 2.2, left: 3, right: 2 } }
+        }
+      ]);
+      detailMeta.push(null);
+      g.rows.forEach((r) => {
+        n += 1;
+        const j = r.joining;
+        const method = String(j.method || '').trim();
+        const ref = String(j.reference || '').trim();
+        const methodRef = method && ref && method.toLowerCase() !== ref.toLowerCase()
+          ? `${method.toUpperCase()}\n${ref}`
+          : (method || ref).toUpperCase();
+        detailBody.push([
+          String(n),
+          formatDateForReport(r.regDate) || '-',
+          studentFullNameOf(r.stu),
+          String(r.stu.admissionNumber || r.stu.pupilId || '-'),
+          r.gender || '-',
+          r.classLabel || '-',
+          String(r.stu.primaryParentContact || '-'),
+          currencyFormatter.format(Number(r.finance.fee || 0)),
+          r.planLabel || (r.finance.planId ? String(r.finance.planId) : 'Class default'),
+          r.joinAmount ? currencyFormatter.format(r.joinAmount) : '-',
+          methodRef || '-',
+          j.receivedBy ? String(j.receivedBy).toUpperCase() : '-'
+        ]);
+        detailMeta.push(r);
+      });
+    });
+
+    const statusColor = { approved: C.emerald, confirmed: C.amber, pending: C.rose };
+    doc.autoTable({
+      ...baseTable,
+      startY: 25,
+      showHead: 'everyPage',
+      head: [['#', 'Reg. date', 'Student name', 'Admission no.', 'Sex', `Class (${workingYear})`, 'Parent contact', 'Fee/year (TSh)', 'Payment plan', 'Joining (TSh)', 'Method / ref', 'Received by']],
+      body: detailBody,
+      styles: { ...baseTable.styles, fontSize: 7.5, cellPadding: { top: 1.5, bottom: 1.5, left: 1.8, right: 1.8 } },
+      headStyles: { ...baseTable.headStyles, fontSize: 7.5, minCellHeight: 9 },
+      columnStyles: {
+        0: { cellWidth: 8, halign: 'center', textColor: C.slate400 },
+        1: { cellWidth: 19 },
+        2: { cellWidth: 43, fontStyle: 'bold' },
+        3: { cellWidth: 32 },
+        4: { cellWidth: 9, halign: 'center', fontStyle: 'bold' },
+        5: { cellWidth: 22 },
+        6: { cellWidth: 25 },
+        7: { cellWidth: 22, halign: 'right' },
+        8: { cellWidth: 32 },
+        9: { cellWidth: 19, halign: 'right', fontStyle: 'bold' },
+        10: { cellWidth: 24 },
+        11: { cellWidth: 18 }
+      },
+      didParseCell: (data) => {
+        if (data.section !== 'body') return;
+        const meta = detailMeta[data.row.index];
+        if (!meta) return;
+        if (data.column.index === 4) {
+          if (meta.gender === 'M') data.cell.styles.textColor = C.blue;
+          else if (meta.gender === 'F') data.cell.styles.textColor = C.pink;
+        }
+        if (data.column.index === 9 && statusColor[meta.joinStatus]) {
+          data.cell.styles.textColor = statusColor[meta.joinStatus];
+        }
+      }
+    });
+
+    // Sign-off
+    let endY = doc.lastAutoTable.finalY + 18;
+    if (endY + 12 > H - 16) {
+      doc.addPage();
+      endY = 30;
+    }
+    const sigW = CW / 3;
+    ['Prepared by (name & signature)', 'Head Teacher (name & signature)', 'Date & school stamp'].forEach((label, i) => {
+      const x = M + i * sigW;
+      doc.setDrawColor(C.slate400[0], C.slate400[1], C.slate400[2]);
+      doc.setLineWidth(0.3);
+      doc.line(x, endY, x + sigW - 14, endY);
+      font('normal', 8);
+      ink(C.slate600);
+      doc.text(label, x, endY + 5);
+    });
+
+    // Footer on every page
+    const pageCount = doc.internal.getNumberOfPages();
+    const footerLeft = `${schoolName}  |  ${isAdmissions ? 'Admissions report' : `Pupil register ${workingYear}`}  |  ${periodText}`;
+    for (let p = 1; p <= pageCount; p += 1) {
+      doc.setPage(p);
+      doc.setDrawColor(C.slate200[0], C.slate200[1], C.slate200[2]);
+      doc.setLineWidth(0.3);
+      doc.line(M, H - 10, W - M, H - 10);
+      font('normal', 7.5);
+      ink(C.slate400);
+      doc.text(fitText(footerLeft, CW - 30), M, H - 6);
+      doc.text(`Page ${p} of ${pageCount}`, W - M, H - 6, { align: 'right' });
+    }
+
+    const datePart = toDateInputValue(generatedAt).replace(/-/g, '');
     const safeSchoolName = String(schoolName).replace(/[^A-Za-z0-9]+/g, '_');
-    const filename = `Admissions_${safeSchoolName}_${workingYear}_${datePart}.pdf`;
+    const slug = !isAdmissions
+      ? `Register_${workingYear}`
+      : hasRange
+        ? `${opts.from ? toDateInputValue(opts.from) : 'start'}_to_${opts.to ? toDateInputValue(opts.to) : 'today'}`
+        : 'All_time';
+    doc.save(`Admissions_${safeSchoolName}_${slug}_${datePart}.pdf`);
+    return true;
+  }
 
-    doc.save(filename);
+  // ---- Report options modal ----
+  const rptModal = document.getElementById('admissionsReportModal');
+  const rptEls = {
+    preset: document.getElementById('rptPreset'),
+    month: document.getElementById('rptMonth'),
+    monthWrap: document.getElementById('rptMonthWrap'),
+    from: document.getElementById('rptFrom'),
+    to: document.getElementById('rptTo'),
+    periodWrap: document.getElementById('rptPeriodWrap'),
+    cls: document.getElementById('rptClass'),
+    gender: document.getElementById('rptGender'),
+    preview: document.getElementById('rptPreview'),
+    searchNote: document.getElementById('rptSearchNote'),
+    generate: document.getElementById('rptGenerateBtn'),
+    cancel: document.getElementById('rptCancelBtn'),
+    close: document.getElementById('closeAdmissionsReportModal'),
+    registerYear: document.getElementById('rptRegisterYear')
+  };
+
+  function readReportOptions() {
+    const searchBoxEl = document.getElementById('search-box');
+    const mode = document.querySelector('input[name="rptMode"]:checked')?.value === 'register' ? 'register' : 'admissions';
+    const fromDate = parseLocalDateString(rptEls.from.value);
+    const toDate = parseLocalDateString(rptEls.to.value);
+    return {
+      mode,
+      preset: rptEls.preset.value,
+      presetLabel: rptEls.preset.options[rptEls.preset.selectedIndex]?.text || '',
+      from: fromDate ? startOfDayOf(fromDate) : null,
+      to: toDate ? endOfDayOf(toDate) : null,
+      classFilter: rptEls.cls.value,
+      genderFilter: rptEls.gender.value,
+      term: (searchBoxEl ? searchBoxEl.value || '' : '').toLowerCase().trim()
+    };
+  }
+
+  function updateReportPreview() {
+    const opts = readReportOptions();
+    rptEls.periodWrap.classList.toggle('hidden', opts.mode === 'register');
+    if (opts.term) {
+      rptEls.searchNote.textContent = `The search "${opts.term}" from the student search box is also applied.`;
+      rptEls.searchNote.classList.remove('hidden');
+    } else {
+      rptEls.searchNote.classList.add('hidden');
+    }
+    if (opts.mode === 'admissions' && opts.from && opts.to && opts.from > opts.to) {
+      rptEls.preview.innerHTML = '<span class="text-rose-700">The "From" date is after the "To" date.</span>';
+      rptEls.generate.disabled = true;
+      return;
+    }
+    const { rows, undated } = selectReportStudents(opts);
+    const boys = rows.filter((r) => r.gender === 'M').length;
+    const girls = rows.filter((r) => r.gender === 'F').length;
+    const other = rows.length - boys - girls;
+    let html = `<b>${rows.length}</b> pupil${rows.length === 1 ? '' : 's'} will be in this report: <b class="text-blue-700">${boys}</b> boys, <b class="text-pink-700">${girls}</b> girls`;
+    if (other) html += `, ${other} with gender not recorded`;
+    if (opts.mode === 'admissions' && (opts.from || opts.to) && undated) {
+      html += `<div class="text-xs text-amber-700 mt-1">${undated} pupil${undated === 1 ? ' has' : 's have'} no registration date and can't be placed in a period. Choose "All time" to include them.</div>`;
+    }
+    rptEls.preview.innerHTML = html;
+    rptEls.generate.disabled = rows.length === 0;
+  }
+
+  function applyReportPreset() {
+    const preset = rptEls.preset.value;
+    rptEls.monthWrap.classList.toggle('hidden', preset !== 'specificMonth');
+    if (preset === 'specificMonth' && !rptEls.month.value) {
+      const now = new Date();
+      rptEls.month.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    }
+    const range = reportPresetRange(preset, getWorkingYear(), rptEls.month.value);
+    if (range) {
+      rptEls.from.value = toDateInputValue(range.from);
+      rptEls.to.value = toDateInputValue(range.to);
+    }
+    updateReportPreview();
+  }
+
+  function populateReportClassOptions() {
+    const year = getWorkingYear();
+    const previous = rptEls.cls.value;
+    const labels = new Set(CLASS_ORDER);
+    [...cachedStudents, ...admissionsReportPool()].forEach((stu) => {
+      const fallbackClass = stu.classLevel || stu.className || '';
+      const displayClass = resolveClassForStudentYear(stu.key, fallbackClass, year) || fallbackClass;
+      if (displayClass) labels.add(displayClass);
+    });
+    const ordered = Array.from(labels).sort((a, b) => classSortIndex(a) - classSortIndex(b) || a.localeCompare(b));
+    rptEls.cls.innerHTML = '<option value="">All classes</option>' +
+      ordered.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c === 'GRADUATED' ? `Graduated (${year})` : c)}</option>`).join('');
+    rptEls.cls.value = ordered.includes(previous) ? previous : '';
+  }
+
+  function openAdmissionsReportModal() {
+    if (!rptModal) return;
+    rptEls.registerYear.textContent = String(getWorkingYear());
+    populateReportClassOptions();
+    applyReportPreset();
+    rptModal.style.display = 'block';
+  }
+
+  function closeAdmissionsReportModal() {
+    if (rptModal) rptModal.style.display = 'none';
+  }
+
+  if (rptModal) {
+    rptEls.preset.addEventListener('change', applyReportPreset);
+    rptEls.month.addEventListener('change', applyReportPreset);
+    [rptEls.from, rptEls.to].forEach((el) => el.addEventListener('change', () => {
+      rptEls.preset.value = 'custom';
+      rptEls.monthWrap.classList.add('hidden');
+      updateReportPreview();
+    }));
+    [rptEls.cls, rptEls.gender].forEach((el) => el.addEventListener('change', updateReportPreview));
+    document.querySelectorAll('input[name="rptMode"]').forEach((el) => el.addEventListener('change', updateReportPreview));
+    rptEls.cancel.addEventListener('click', closeAdmissionsReportModal);
+    rptEls.close.addEventListener('click', closeAdmissionsReportModal);
+    rptModal.addEventListener('click', (e) => { if (e.target === rptModal) closeAdmissionsReportModal(); });
+    rptEls.generate.addEventListener('click', async () => {
+      const original = rptEls.generate.innerHTML;
+      rptEls.generate.disabled = true;
+      rptEls.generate.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating&hellip;';
+      try {
+        const done = await downloadAdmissionsPdfReport(readReportOptions());
+        if (done) closeAdmissionsReportModal();
+      } catch (err) {
+        console.error('PDF generation failed', err);
+        alert('Failed to generate PDF report. Please try again.');
+      } finally {
+        rptEls.generate.innerHTML = original;
+        rptEls.generate.disabled = false;
+      }
+    });
   }
 
   async function renderSearchList(students) {
@@ -1763,8 +2520,8 @@
       const joiningInfoHtml = joiningAmount ? `
         <div class="mt-1 text-xs text-slate-600">
           Joining fee: ${escapeHtml(joiningAmount)}
-          ${joiningPayment.reference ? ` â€¢ Ref: ${escapeHtml(joiningPayment.reference)}` : ''}
-          ${joiningPayment.receivedBy ? ` â€¢ Received by: ${escapeHtml(joiningPayment.receivedBy)}` : ''}
+          ${joiningPayment.reference ? ` &bull; Ref: ${escapeHtml(joiningPayment.reference)}` : ''}
+          ${joiningPayment.receivedBy ? ` &bull; Received by: ${escapeHtml(joiningPayment.receivedBy)}` : ''}
           ${isApproved ? ' <span class="text-emerald-600 font-medium">&#10003; Approved in office</span>' : isConfirmed ? ' <span class="text-amber-600">&#10003; Confirmed by staff</span>' : ''}
         </div>
         ${joiningAmount && !isApproved ? `
@@ -1852,12 +2609,7 @@
   if (searchBox) searchBox.addEventListener('input', queueRender);
   const downloadPdfBtn = document.getElementById('downloadAdmissionsPdf');
   if (downloadPdfBtn) {
-    downloadPdfBtn.addEventListener('click', () => {
-      downloadAdmissionsPdfReport().catch((err) => {
-        console.error('PDF generation failed', err);
-        alert('Failed to generate PDF report. Please try again.');
-      });
-    });
+    downloadPdfBtn.addEventListener('click', openAdmissionsReportModal);
   }
 
   // ---- Edit flow ----
