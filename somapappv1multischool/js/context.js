@@ -77,6 +77,35 @@
     return getSchool();
   }
 
-  const SOMAP = { getSchoolId, setSchoolId, setSchool, getSchool, getActiveSchool, onSchoolChange, P };
+  // Resolve the school a page should work on when it was opened with a
+  // ?school= link. The school already selected in this browser (at worker
+  // login / the school picker) is authoritative: a link carrying a different
+  // school must never silently switch the session — that is how a stale
+  // "school=socrates-school" link used to turn another school's worker
+  // session into Socrates. The URL value is only adopted when no school has
+  // been selected yet. A mismatching URL is rewritten so reloads stay correct.
+  function adoptSchoolFromUrl(paramName) {
+    const key = paramName || 'school';
+    let requested = '';
+    try {
+      requested = String(new URLSearchParams(window.location.search || '').get(key) || '').trim();
+    } catch (_) { /* ignore */ }
+    const current = getSchoolId();
+    if (!current) {
+      if (requested) setSchoolId(requested);
+      return requested;
+    }
+    if (requested && requested !== current) {
+      console.warn(`Ignoring ?${key}=${requested}; this session belongs to ${current}.`);
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.set(key, current);
+        window.history.replaceState(window.history.state, '', url.toString());
+      } catch (_) { /* ignore */ }
+    }
+    return current;
+  }
+
+  const SOMAP = { getSchoolId, setSchoolId, setSchool, getSchool, getActiveSchool, onSchoolChange, P, adoptSchoolFromUrl };
   window.SOMAP = SOMAP;
 })();

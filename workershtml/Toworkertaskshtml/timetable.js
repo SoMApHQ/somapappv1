@@ -306,11 +306,8 @@
 
   function syncContextFromQuery() {
     const params = new URLSearchParams(window.location.search || '');
-    const schoolId = params.get('school');
     const year = params.get('year');
-    if (schoolId && window.SOMAP?.setSchoolId) {
-      window.SOMAP.setSchoolId(schoolId);
-    }
+    window.SOMAP?.adoptSchoolFromUrl?.('school');
     if (year && window.somapYearContext?.setSelectedYear) {
       window.somapYearContext.setSelectedYear(normalizeYear(year), { manual: false, forceDispatch: true });
     }
@@ -353,7 +350,7 @@
     if (!window.history?.replaceState) return;
     try {
       const url = new URL(window.location.href);
-      url.searchParams.set('school', state.schoolId || 'socrates-school');
+      if (state.schoolId) url.searchParams.set('school', state.schoolId);
       url.searchParams.set('year', state.year || normalizeYear(new Date().getFullYear()));
       url.searchParams.set('term', normalizeTermKey(state.activeTerm));
       window.history.replaceState({}, '', url.toString());
