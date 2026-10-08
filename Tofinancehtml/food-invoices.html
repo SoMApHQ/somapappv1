@@ -406,14 +406,30 @@
         return Array.from(s).filter(Boolean);
     }
 
-    async function getAllSchoolIds() {
-        try {
-            const snap = await db.ref('schools').once('value');
-            return Object.keys(snap.val() || {});
-        } catch (_) { return []; }
+    function uniqueList(arr) { return Array.from(new Set((arr||[]).filter(Boolean))); }
+
+    // Candidate RTDB paths for `subPath` that belong to the CURRENT school only,
+    // mirroring how writers store it (SOMAP.P): Socrates lives at the root, every
+    // other school under schools/{id}. Other schools' nodes are never consulted —
+    // borrowing them mixed one school's attendance with another's worker profiles.
+    function ownSchoolPaths(school, subPath) {
+        const raw = String(school||'').trim();
+        const k = raw.toLowerCase();
+        if (['socrates','socrates-school','default'].includes(k)) {
+            return uniqueList([subPath, ...schoolAliasList(k).map(s=>`schools/${s}/${subPath}`)]);
+        }
+        return uniqueList([raw, k].map(s=>s ? `schools/${s}/${subPath}` : ''));
     }
 
-    function uniqueList(arr) { return Array.from(new Set((arr||[]).filter(Boolean))); }
+    function isSocratesSchool(school) {
+        return ['socrates','socrates-school','default'].includes(String(school||'').trim().toLowerCase());
+    }
+
+    function workerDisplayName(entry) {
+        const p = entry?.profile || {};
+        const joined = [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' ');
+        return String(p.fullNameUpper || p.fullName || p.name || joined || entry?.fullNameUpper || entry?.name || '').trim();
+    }
 
     let latestFoodInvoice = null;
 
@@ -483,36 +499,47 @@
         try {
             const year = getSelectedYear();
             const school = getCurrentSchoolId();
-            const aliases = schoolAliasList(school);
-            const allSchools = await getAllSchoolIds();
-            const candidates = uniqueList([...aliases, ...allSchools]);
             const { monthKey, dayKey } = buildAttendanceKeys(dateStr);
+            const legacy = isSocratesSchool(school);
 
             const attendanceRead = await readFirstExisting([
-                ...candidates.map(s => `schools/${s}/years/${year}/workerAttendance`),
-                `years/${year}/workerAttendance`,
-                'attendance'
+                ...ownSchoolPaths(school, `years/${year}/workerAttendance`),
+                legacy ? 'attendance' : ''
             ]);
-            const workersRead = await readFirstExisting([
-                ...candidates.map(s => `schools/${s}/years/${year}/workers`),
-                `years/${year}/workers`,
-                'workers'
-            ]);
-
             const attendanceData = attendanceRead.snap?.exists() ? (attendanceRead.snap.val() || {}) : {};
-            const workersData = workersRead.snap?.exists() ? (workersRead.snap.val() || {}) : {};
-            const approved = [];
 
+            const approvedIds = [];
             Object.entries(attendanceData).forEach(([id, months]) => {
                 const record = months?.[monthKey]?.[dayKey] || null;
                 if (!record?.checkInTs) return;
                 const inStatus = String(record.checkInStatus || (record.approved === true ? 'approved' : '')).toLowerCase();
                 if (inStatus !== 'approved') return;
-                const profile = workersData[id]?.profile || {};
-                const name = String(profile.fullNameUpper || profile.name || id || '').trim();
-                if (name) approved.push(name);
+                approvedIds.push(id);
             });
+            if (!approvedIds.length) return [];
 
+            // Resolve names from the same school's worker registry, preferring the
+            // registry that sits beside the attendance node that was actually read.
+            const attendanceBase = attendanceRead.path.endsWith('/workerAttendance')
+                ? attendanceRead.path.slice(0, -'workerAttendance'.length) + 'workers' : '';
+            const workerPaths = uniqueList([
+                attendanceBase,
+                ...ownSchoolPaths(school, `years/${year}/workers`),
+                legacy ? 'workers' : ''
+            ]);
+            const names = {};
+            for (const p of workerPaths) {
+                if (approvedIds.every(id => names[id])) break;
+                try {
+                    const snap = await db.ref(p).once('value');
+                    const data = snap.exists() ? (snap.val() || {}) : {};
+                    approvedIds.forEach(id => {
+                        if (!names[id] && data[id]) names[id] = workerDisplayName(data[id]);
+                    });
+                } catch (_) { /* try next path */ }
+            }
+
+            const approved = approvedIds.map(id => names[id] || id);
             return uniqueList(approved).sort((a, b) => a.localeCompare(b));
         } catch (e) {
             console.error('fetchApprovedWorkers', e);
@@ -897,27 +924,22 @@
         try {
             const school = getCurrentSchoolId();
             const aliases = schoolAliasList(school);
-            const allSchools = await getAllSchoolIds();
-            const candidates = uniqueList([...aliases, ...allSchools]);
             let snap = null, matchedDate = '';
 
             for (const dk of dateCandidates) {
-                const paths = candidates.map(s=>`schools/${s}/years/${year}/foodInvoices/${dk}`);
-                paths.push(`years/${year}/foodInvoices/${dk}`);
+                const paths = ownSchoolPaths(school, `years/${year}/foodInvoices/${dk}`);
                 const found = await readFirstExisting(paths);
                 if (found.snap?.exists()) { snap = found.snap; matchedDate = dk; break; }
             }
 
             if (!snap?.exists()) {
                 for (const dk of dateCandidates) {
-                    const cookPaths = candidates.map(s=>`schools/${s}/years/${year}/workerRoles/cook/daily/${dk}`);
-                    cookPaths.push(`years/${year}/workerRoles/cook/daily/${dk}`);
+                    const cookPaths = ownSchoolPaths(school, `years/${year}/workerRoles/cook/daily/${dk}`);
                     const cookRead = await readFirstExisting(cookPaths);
                     const cookRoot = cookRead.snap?.exists() ? (cookRead.snap.val()||{}) : {};
                     const firstCook = Object.values(cookRoot)[0] || null;
                     if (firstCook && Array.isArray(firstCook.expected?.items) && firstCook.expected.items.length) {
-                        const invPaths = candidates.map(s=>`schools/${s}/years/${year}/workers_inventory/items`);
-                        invPaths.push(`years/${year}/workers_inventory/items`);
+                        const invPaths = ownSchoolPaths(school, `years/${year}/workers_inventory/items`);
                         const invRead = await readFirstExisting(invPaths);
                         const invMap = invRead.snap?.exists() ? (invRead.snap.val()||{}) : {};
                         const lines = (firstCook.expected.items||[]).map(item=>{
@@ -1021,31 +1043,13 @@
         try {
             const year = getSelectedYear();
             const school = getCurrentSchoolId();
-            const aliases = schoolAliasList(school);
-            const allSchools = await getAllSchoolIds();
-            const candidates = uniqueList([...aliases, ...allSchools]);
+            // Load all food invoices for the year (current school only)
+            const invoicesRead = await readFirstExisting(ownSchoolPaths(school, `years/${year}/foodInvoices`));
+            const invoicesVal = invoicesRead.snap?.exists() ? invoicesRead.snap.val() : null;
 
-            // Load all food invoices for the year
-            let invoicesVal = null;
-            for (const s of candidates) {
-                const snap = await db.ref(`schools/${s}/years/${year}/foodInvoices`).once('value');
-                if (snap.exists()) { invoicesVal = snap.val(); break; }
-            }
-            if (!invoicesVal) {
-                const snap = await db.ref(`years/${year}/foodInvoices`).once('value');
-                if (snap.exists()) invoicesVal = snap.val();
-            }
-
-            // Load current inventory
-            let invVal = null;
-            for (const s of candidates) {
-                const snap = await db.ref(`schools/${s}/years/${year}/workers_inventory/items`).once('value');
-                if (snap.exists()) { invVal = snap.val(); break; }
-            }
-            if (!invVal) {
-                const snap = await db.ref(`years/${year}/workers_inventory/items`).once('value');
-                if (snap.exists()) invVal = snap.val();
-            }
+            // Load current inventory (current school only)
+            const invRead = await readFirstExisting(ownSchoolPaths(school, `years/${year}/workers_inventory/items`));
+            const invVal = invRead.snap?.exists() ? invRead.snap.val() : null;
 
             const invoices = invoicesVal || {};
             const invMap = invVal || {};
