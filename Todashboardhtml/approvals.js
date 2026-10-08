@@ -520,6 +520,18 @@
   ]);
 
   async function guardAccess(user) {
+    // Secretary Desk sessions never reach approvals, for any school.
+    if (window.SomapSecretary?.getSession?.()) {
+      await Swal.fire({
+        icon: 'error',
+        title: 'Restricted',
+        text: 'Approvals are not part of Secretary access.',
+        confirmButtonColor: '#0ea5e9',
+      });
+      window.SomapSecretary.restoreHomeSchool();
+      window.location.href = '../workershtml/secretary/secretaryhub.html';
+      return false;
+    }
     if (!user) {
       window.location.href = '../index.html';
       return false;

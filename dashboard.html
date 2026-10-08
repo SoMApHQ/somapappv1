@@ -12,6 +12,7 @@
     <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-analytics-compat.js"></script>
     <script src="somapappv1multischool/js/context.js"></script>
     <script src="Todashboardhtml/yearContext.js"></script>
+    <script src="js/secretary_access.js?v=20261008"></script>
     <title>SoMAp - Society Management App</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link
@@ -4579,9 +4580,66 @@
         });
       bindRemedialUi();
       // Initial
+      // Secretary Desk (js/secretary_access.js): a verified secretary may manage the
+      // dashboards of the schools linked to their desk (e.g. MAU, MAP) — never their
+      // own school's dashboard and never any approvals. Without a secretary session in
+      // this tab the gate returns "none" and the dashboard behaves exactly as before.
+      function enterSecretaryDashboardMode() {
+        const session = SomapSecretary.getSession() || {};
+        const hubUrl = "workershtml/secretary/secretaryhub.html";
+        document.body.classList.add("secretary-desk-mode");
+        const style = document.createElement("style");
+        style.textContent = `
+          .secretary-desk-mode .role-specific,
+          .secretary-desk-mode #approvalsShortcut,
+          .secretary-desk-mode #schoolApprovalsShortcut,
+          .secretary-desk-mode a[href*="approvals"],
+          .secretary-desk-mode a[href*="view=review"] { display: none !important; }`;
+        document.head.appendChild(style);
+        document.addEventListener(
+          "click",
+          (event) => {
+            const link = event.target.closest && event.target.closest("a[href]");
+            if (!link || !SomapSecretary.isApprovalsUrl(link.getAttribute("href"))) return;
+            event.preventDefault();
+            event.stopPropagation();
+            Swal.fire({ icon: "error", title: "Hairuhusiwi", text: "Approvals are not part of Secretary access.", confirmButtonColor: "#db2777" });
+          },
+          true
+        );
+        const sidebarEl = document.getElementById("sidebar");
+        if (sidebarEl) sidebarEl.classList.remove("hidden");
+        const workspace = document.querySelector(".workspace");
+        if (workspace && !document.getElementById("secretary-banner")) {
+          const banner = document.createElement("div");
+          banner.id = "secretary-banner";
+          banner.style.cssText =
+            "display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#db2777,#7c3aed);color:#fff;padding:14px 20px;border-radius:14px;margin-bottom:20px;font-weight:600;box-shadow:0 8px 24px rgba(124,58,237,0.35);position:sticky;top:0;z-index:100;";
+          const schoolLabel = (currentSchool && (currentSchool.name || currentSchool.id)) || "";
+          banner.innerHTML = `
+            <div>SECRETARY DESK · ${schoolLabel}<br><small style="font-weight:500;opacity:.9">${session.name || ""} — usimamizi wa shule (approvals hazipo)</small></div>
+            <button type="button" id="secretary-back-btn" style="padding:8px 16px;background:#fff;color:#7c3aed;border:none;border-radius:10px;cursor:pointer;font-weight:700;">← Secretary Hub</button>`;
+          workspace.insertBefore(banner, workspace.firstChild);
+          document.getElementById("secretary-back-btn").addEventListener("click", () => {
+            SomapSecretary.restoreHomeSchool();
+            window.location.href = hubUrl;
+          });
+        }
+        refreshDashboard("admin", null);
+        bindYearChangeListener();
+      }
+
       auth.onAuthStateChanged(async (user) => {
+        const secretaryGate = window.SomapSecretary
+          ? await SomapSecretary.dashboardGate(db, "workershtml/secretary/secretaryhub.html")
+          : "none";
+        if (secretaryGate === "blocked") return;
+        if (secretaryGate === "linked") {
+          enterSecretaryDashboardMode();
+          return;
+        }
         if (user) {
-          
+
           const ADMIN_EMAILS = SHARED_SOCRATES_ADMIN_EMAILS;
 
           if (user.email && ADMIN_EMAILS.has(user.email.toLowerCase())) {

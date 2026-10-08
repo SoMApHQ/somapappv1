@@ -414,7 +414,38 @@
   }
 
   function canRecordPayment() {
-    return state.access?.mode === 'admin' || state.access?.mode === 'teacher';
+    return state.access?.mode === 'admin' || state.access?.mode === 'teacher' || state.access?.mode === 'secretary';
+  }
+
+  // Secretary Desk access (js/secretary_access.js): a verified secretary of this
+  // school whose desk includes graduation may view the roster and submit payments,
+  // which still go to approvals before counting as paid.
+  async function resolveSecretaryAccess() {
+    const S = window.SomapSecretary;
+    if (!S || !S.getSession()) return null;
+    const session = await S.verifySession(db()).catch(() => null);
+    if (!session || !S.deskFor(session.homeSchoolId).graduation) return null;
+    if (S.canonicalSchoolId(getCurrentSchoolId()) !== S.canonicalSchoolId(session.homeSchoolId)) return null;
+    return {
+      user: { email: `Secretary - ${session.name}`, displayName: session.name, uid: session.workerId, isSecretary: true },
+      access: { mode: 'secretary', teacherClass: '', teacherEmail: '', secretaryName: session.name, workerId: session.workerId },
+    };
+  }
+
+  function renderSecretaryBanner() {
+    if (state.access?.mode !== 'secretary' || document.getElementById('secretaryGradBanner')) return;
+    const hero = document.querySelector('.hero');
+    if (!hero) return;
+    const banner = document.createElement('div');
+    banner.id = 'secretaryGradBanner';
+    banner.style.cssText = 'margin-top:16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;padding:12px 16px;border-radius:16px;background:linear-gradient(135deg,rgba(244,114,182,0.22),rgba(167,139,250,0.18));border:1px solid rgba(244,114,182,0.4);';
+    banner.innerHTML = `
+      <div style="font-size:0.9rem;"><b>Secretary Desk</b> · ${toStr(state.access.secretaryName)} — malipo yote yanasubiri idhini (approval) kabla ya kuhesabiwa.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <a href="../workershtml/secretary/graduation_followup.html" style="padding:8px 14px;border-radius:12px;background:#db2777;color:#fff;font-weight:600;text-decoration:none;">📞 Simu za Wazazi</a>
+        <a href="../workershtml/secretary/secretaryhub.html" style="padding:8px 14px;border-radius:12px;background:rgba(15,23,42,0.7);color:#fff;font-weight:600;text-decoration:none;border:1px solid rgba(255,255,255,0.2);">← Secretary Hub</a>
+      </div>`;
+    hero.appendChild(banner);
   }
 
   async function resolveTeacherAccess(user) {
@@ -456,7 +487,10 @@
   }
 
   function applyAccessUi() {
-    const teacherMode = state.access?.mode === 'teacher';
+    const secretaryMode = state.access?.mode === 'secretary';
+    // Secretaries get the same restricted surface as teachers (no expenses,
+    // certificates, galleries, audit or delete tools), across all classes.
+    const teacherMode = state.access?.mode === 'teacher' || secretaryMode;
     document.body.classList.toggle('teacher-grad-view', teacherMode);
     document.querySelectorAll('[data-link="expenses"], [data-link="certificates"], [data-link="galleries"]').forEach((node) => {
       node.style.display = teacherMode ? 'none' : '';
@@ -474,7 +508,12 @@
     });
     const teacherClass = toStr(state.access?.teacherClass).trim();
     const title = document.querySelector('.hero h1');
-    if (title) title.textContent = teacherMode && teacherClass ? `Graduation Control Center - ${teacherClass}` : 'Graduation Control Center';
+    if (title) {
+      title.textContent = secretaryMode
+        ? 'Graduation Control Center - Secretary Desk'
+        : teacherMode && teacherClass ? `Graduation Control Center - ${teacherClass}` : 'Graduation Control Center';
+    }
+    renderSecretaryBanner();
   }
 
   function getSelectedYear() {
@@ -601,6 +640,16 @@
   // ---------- AUTH & YEAR BOOTSTRAP ----------
   async function handleAuthChange(user) {
     console.log('handleAuthChange:', user ? user.email : 'No user');
+    const secretaryAccess = await resolveSecretaryAccess();
+    if (secretaryAccess) {
+      state.user = secretaryAccess.user;
+      state.access = secretaryAccess.access;
+      state.readOnly = true;
+      showAuthGate(true);
+      applyAccessUi();
+      startYearLoad('Loading graduation data for Secretary Desk...');
+      return;
+    }
     state.user = user;
     state.access = { mode: 'none', teacherClass: '', teacherEmail: '' };
     const allowed = isAuthorized(user?.email || '');
@@ -622,7 +671,11 @@
       return;
     }
 
-    showToast(teacherAccess ? `Loading ${teacherAccess.teacherClass} graduation data...` : 'Loading graduation data...', 'info');
+    startYearLoad(teacherAccess ? `Loading ${teacherAccess.teacherClass} graduation data...` : 'Loading graduation data...');
+  }
+
+  function startYearLoad(message) {
+    showToast(message, 'info');
 
     ensureYearReady(state.currentYear)
       .then(() => {
