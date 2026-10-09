@@ -18,6 +18,9 @@
   <script src="../shared/quality-assurance-utils.js"></script>
   <script src="../shared/school_calendar.js"></script>
   <script src="../shared/payroll_core.js"></script>
+  <script src="../js/secretary_access.js?v=20261009"></script>
+  <script src="secretary/secretary_graduation.js?v=20261009"></script>
+  <script src="../js/secretary_duties.js?v=20261009"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
   <script>
@@ -515,6 +518,34 @@
 
     function getSomap() {
       return window.SOMAP || null;
+    }
+
+    function isSecretaryAttendanceRole() {
+      return Boolean(state.profile && window.SecretaryDuties?.isSecretaryRole(state.profile.role));
+    }
+
+    // Everything the secretary duty gates need from this page, bound to the worker's home school.
+    function secretaryDutyContext(todayYmd) {
+      return {
+        db,
+        schoolId: state.schoolId,
+        workerId: state.workerId,
+        workerName: state.profile?.fullNameUpper || '',
+        todayYmd,
+        schoolRef,
+        schoolRootRef,
+        toast,
+        resolveWorkerCalendar: (ymd) => resolveWorkerCalendarStatus(ymd, ymd.slice(0, 4)),
+        getDayRecord: async (ymd) => {
+          const monthKey = ymd.slice(0, 7).replace('-', '');
+          const dayKey = ymd.replace(/-/g, '');
+          const { snap } = await scopedOrSocratesLegacy(
+            scopedPathForYear(ymd.slice(0, 4), `workerAttendance/${state.workerId}/${monthKey}/${dayKey}`),
+            `attendance/${state.workerId}/${monthKey}/${dayKey}`
+          );
+          return snap?.val() || null;
+        },
+      };
     }
 
     function isSocratesLegacySchool() {
@@ -4244,9 +4275,9 @@
       const currentExpectedSalary = salary.basicSalary + summary.remainingResponsibilityAllowance;
       const activeEvents = Object.values(events).filter(event => !['cancelled', 'dismissed'].includes(String(event.reviewStatus || '').toLowerCase()));
       const latest = activeEvents.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))[0] || null;
-      const eventLabel = latest?.eventType === 'approved_permission' ? `${latest.originalEventType || 'attendance'} — approved permission — no deduction` : latest?.eventType === 'no_sign_in' ? 'did not sign in' : `late-coming number ${latest?.lateCount || summary.lateCount}`;
+      const eventLabel = latest?.eventType === 'approved_permission' ? `${latest.originalEventType || 'attendance'} — approved permission — no deduction` : latest?.eventType === 'no_sign_in' ? 'did not sign in' : latest?.eventType === 'manual_adjustment' ? (latest.eventLabel || 'responsibility adjustment') : `late-coming number ${latest?.lateCount || summary.lateCount}`;
       const reason = latest ? `<div style="margin-top:14px;padding:12px;border-radius:12px;background:#091528"><strong>Latest attendance event</strong><br>${escapeHtml(latest.date || '')}: ${escapeHtml(eventLabel)}${latest.deductionAmount ? ` · ${payrollMoney(latest.deductionAmount)}` : latest.eventType === 'approved_permission' ? '' : ' · warning only'}</div>` : '';
-      const body = `<p>Your current salary position for <strong>${escapeHtml(monthText)}</strong> is shown below.</p><div style="display:grid;grid-template-columns:1fr 1fr;gap:9px"><div style="padding:12px;background:#091528;border-radius:11px"><small>Basic Salary (unchanged)</small><br><strong>${payrollMoney(salary.basicSalary)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Special Responsibility Allowance</small><br><strong>${payrollMoney(summary.allowance)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Allowance Deductions</small><br><strong>${payrollMoney(summary.totalResponsibilityDeduction)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Remaining Allowance</small><br><strong>${payrollMoney(summary.remainingResponsibilityAllowance)}</strong></div></div><p style="font-size:1.08rem"><strong>Current Expected Salary: ${payrollMoney(currentExpectedSalary)}</strong></p>${reason}<p style="color:#cbd5e1">First 3 late days are warnings; the 4th deducts TZS 1,000; each later late day deducts TZS 500. A no-sign-in day without approved permission deducts TZS 2,000. Deductions apply only to this allowance and never exceed TZS 50,000.</p>${summary.totalResponsibilityDeduction ? '<p style="color:#fbbf24">You may accept this position or reject it and submit an explanation for review.</p>' : '<p style="color:#86efac">Your responsibility allowance is currently intact. Please confirm that you have seen this salary position.</p>'}`;
+      const body = `<p>Your current salary position for <strong>${escapeHtml(monthText)}</strong> is shown below.</p><div style="display:grid;grid-template-columns:1fr 1fr;gap:9px"><div style="padding:12px;background:#091528;border-radius:11px"><small>Basic Salary (unchanged)</small><br><strong>${payrollMoney(salary.basicSalary)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Special Responsibility Allowance</small><br><strong>${payrollMoney(summary.allowance)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Allowance Deductions</small><br><strong>${payrollMoney(summary.totalResponsibilityDeduction)}</strong></div><div style="padding:12px;background:#091528;border-radius:11px"><small>Remaining Allowance</small><br><strong>${payrollMoney(summary.remainingResponsibilityAllowance)}</strong></div></div><p style="font-size:1.08rem"><strong>Current Expected Salary: ${payrollMoney(currentExpectedSalary)}</strong></p>${reason}<p style="color:#cbd5e1">First 3 late days are warnings; the 4th deducts TZS 1,000; each later late day deducts TZS 500. A no-sign-in day without approved permission deducts TZS 2,000.${isSecretaryAttendanceRole() ? ' Secretary: every 3rd working day in a month without the daily graduation parent calls deducts TZS 1,000.' : ''} Deductions apply only to this allowance and never exceed TZS 50,000.</p>${summary.totalResponsibilityDeduction ? '<p style="color:#fbbf24">You may accept this position or reject it and submit an explanation for review.</p>' : '<p style="color:#86efac">Your responsibility allowance is currently intact. Please confirm that you have seen this salary position.</p>'}`;
       return openAttendanceGateDialog({
         title: 'SALARY RESPONSIBILITY ALLOWANCE CONFIRMATION', body,
         actions: [
@@ -4557,6 +4588,18 @@
               await saveAccountantCheckinPlan(systemYear, dayKey, callList, result);
             }
           }
+
+          // ── Secretary desk duties (graduation calls, Preform One, MAU/MAP attendance) ──
+          if (isSecretaryAttendanceRole()) {
+            if (btn) { btn.disabled = false; btn.textContent = 'Inaangalia kazi za Katibu...'; }
+            const secretaryResult = await window.SecretaryDuties.runCheckIn(secretaryDutyContext(ymd));
+            if (!secretaryResult.ok) {
+              if (btn) { btn.disabled = false; btn.textContent = initialText || 'Check-In Sasa'; }
+              toast(secretaryResult.message, 'warning', 6500);
+              return;
+            }
+            if (btn) { btn.disabled = true; btn.textContent = 'Inahifadhi...'; }
+          }
         }
 
         if (direction === 'out' && !existing.checkInTs) {
@@ -4609,6 +4652,16 @@
             toast(validation.message, 'error');
             await new Promise(r => setTimeout(r, 2500));
             window.location.href = '../mhasibu.html';
+            return;
+          }
+        }
+
+        // ── Secretary checkout gate: today's graduation calls + MAU/MAP attendance ──
+        if (direction === 'out' && isSecretaryAttendanceRole()) {
+          if (btn) btn.textContent = 'Inaangalia kazi za Katibu...';
+          const secretaryResult = await window.SecretaryDuties.runCheckOut(secretaryDutyContext(ymd));
+          if (!secretaryResult.ok) {
+            toast(secretaryResult.message, 'warning', 6500);
             return;
           }
         }
