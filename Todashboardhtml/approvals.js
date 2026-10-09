@@ -442,19 +442,63 @@
     });
   }
 
+  // Approvals decided in this tab: hidden at once, before the listener catches up.
+  const handledPendingKeys = new Set();
+  const pendingKey = (record) => resolvePendingRecordPath(record) || record?.approvalId || '';
+  let pendingRebuildGeneration = 0;
+
+  function applyPendingList(rows) {
+    state.pendingList = rows.filter((row) => !handledPendingKeys.has(pendingKey(row)));
+    renderPendingTable();
+    recomputePendingSummaries();
+  }
+
+  function removePendingLocally(record) {
+    const key = pendingKey(record);
+    if (!key) return;
+    handledPendingKeys.add(key);
+    applyPendingList(state.pendingList);
+  }
+
   function rebuildPendingListFromState() {
     const flattened = flattenPendingTree(state.pending, state.selectedYear);
+    const liveKeys = new Set(flattened.map(pendingKey));
+    handledPendingKeys.forEach((key) => { if (!liveKeys.has(key)) handledPendingKeys.delete(key); });
+    // Enrichment is async and slow; an older rebuild finishing late must not
+    // re-show a row that a newer snapshot already removed.
+    const generation = ++pendingRebuildGeneration;
     markPendingDuplicates(flattened).then((visibleRows) => enrichFinanceConfigRows(visibleRows)).then((visibleRows) => {
-      state.pendingList = visibleRows;
-      renderPendingTable();
-      recomputePendingSummaries();
+      if (generation !== pendingRebuildGeneration) return;
+      applyPendingList(visibleRows);
     }).catch((err) => {
       if (err) console.warn('Approvals: pending duplicate mark failed', err);
-      state.pendingList = flattened;
-      renderPendingTable();
-      recomputePendingSummaries();
+      if (generation !== pendingRebuildGeneration) return;
+      applyPendingList(flattened);
     });
   }
+
+  async function pendingRecordStillExists(record) {
+    const pendingPath = resolvePendingRecordPath(record);
+    if (!pendingPath) return true;
+    const paths = [P(pendingPath)];
+    if (shouldUseScopedShadow('approvalsPending')) paths.push(scopedPath(pendingPath));
+    const snaps = await Promise.all(paths.map((path) => db.ref(path).once('value').catch(() => null)));
+    // If the check itself fails, let the normal flow decide.
+    if (snaps.some((snap) => !snap)) return true;
+    return snaps.some((snap) => snap.exists());
+  }
+
+  // Lets several admins work the same queue: whoever acts second is told the item
+  // is already done instead of applying it twice.
+  async function ensureStillPending(record) {
+    if (await pendingRecordStillExists(record)) return true;
+    removePendingLocally(record);
+    hideDetailModal();
+    toast('Already handled by another admin. Removed from your list.', 'info');
+    return false;
+  }
+
+  const processingApprovals = new Set();
 
   function schedulePendingRebuild() {
     if (state.pendingRefreshTimer) clearTimeout(state.pendingRefreshTimer);
@@ -651,7 +695,7 @@
     }
   }
   function formatSpecialPlanCounts(counts) {
-    const labels = { compliant: 'Compliant', breached: 'Breached', queued: 'New requests', alreadyQueued: 'Already queued', alreadyReviewed: 'Already reviewed', skipped: 'Skipped' };
+    const labels = { compliant: 'Compliant', breached: 'Breached', queued: 'New requests', alreadyQueued: 'Already queued', alreadyReviewed: 'Already reviewed', busy: 'Being updated (next scan)', skipped: 'Skipped' };
     return Object.entries(counts).filter(([, n]) => typeof n === 'number').map(([key, n]) => `${labels[key] || key}: ${n}`).join(' · ')
       + (counts.skippedDetails?.length ? ' — ' + counts.skippedDetails.slice(0, 5).map(row => `${row.student}: ${row.reason}`).join('; ') : '');
   }
@@ -1491,7 +1535,7 @@
       if (!result.isConfirmed) return;
       processApproval(record).catch((err) => {
         console.error('Approvals: approval failed', err);
-        toast(err?.message || 'Failed to approve payment. Check console.', 'danger');
+        toast(err?.message || 'Failed to approve. Check console.', 'danger');
       });
     });
   }
@@ -1718,20 +1762,29 @@
     // rejection filed under the school it was actually shown for even if the
     // active-school context drifts while the dialog is open.
     const lockedSchoolId = resolveSchoolId();
+    const isConfigChange = CONFIG_STYLE_MODULES.has(record.sourceModule);
     Swal.fire({
       icon: 'warning',
-      title: 'Reject this payment?',
-      html: `<p class="text-slate-600">This will remove the pending item and log it as rejected. The payment will <strong>NOT</strong> be written to any module.</p>`,
+      title: isConfigChange ? 'Reject this change?' : 'Reject this payment?',
+      html: isConfigChange
+        ? `<p class="text-slate-600">This will remove the pending change and log it as rejected. Nothing will be applied.</p>`
+        : `<p class="text-slate-600">This will remove the pending item and log it as rejected. The payment will <strong>NOT</strong> be written to any module.</p>`,
       showCancelButton: true,
       confirmButtonColor: '#ef4444',
-      confirmButtonText: 'Reject Payment',
+      confirmButtonText: isConfigChange ? 'Reject Change' : 'Reject Payment',
     }).then((result) => {
       if (!result.isConfirmed) return;
+      const key = pendingKey(record);
+      if (processingApprovals.has(key)) return;
+      processingApprovals.add(key);
+      showLoader(true);
       (async () => {
+        if (!(await ensureStillPending(record))) return;
         if (record.modulePayload?.compliance) {
           await window.SomapSpecialPlans.decide(record, 'rejected', actorEmail());
-          toast('Special plan review rejected. Agreement retained.', 'warning');
+          removePendingLocally(record);
           hideDetailModal();
+          toast('Rejected successfully. Special plan agreement retained.', 'success');
           return;
         }
         if (record.sourceModule === 'admission') {
@@ -1762,21 +1815,40 @@
           }
         }
         await moveApprovalToHistory(record, 'rejected', lockedSchoolId);
-        toast('Payment rejected. Record archived for audit.', 'warning');
+        removePendingLocally(record);
         hideDetailModal();
+        toast(isConfigChange ? 'Rejected successfully. Change was not applied.' : 'Rejected successfully. Record archived for audit.', 'success');
       })().catch((err) => {
         console.error('Approvals: rejection failed', err);
         toast(err?.message || 'Rejection failed', 'danger');
+      }).finally(() => {
+        processingApprovals.delete(key);
+        showLoader(false);
       });
     });
   }
 
   async function processApproval(record) {
+    const key = pendingKey(record);
+    if (processingApprovals.has(key)) return;
+    processingApprovals.add(key);
+    try {
+      showLoader(true);
+      if (!(await ensureStillPending(record))) return;
+      await processApprovalUnchecked(record);
+    } finally {
+      processingApprovals.delete(key);
+      showLoader(false);
+    }
+  }
+
+  async function processApprovalUnchecked(record) {
     if (record.modulePayload?.compliance) {
       await window.SomapSpecialPlans.decide(record, 'approved', actorEmail());
-      toast('Special plan review approved. Class defaults restored; payments preserved.', 'success');
+      removePendingLocally(record);
       hideDetailModal();
-      await loadSummaries();
+      toast('Approved successfully. Class defaults restored; payments preserved.', 'success');
+      loadSummaries().catch((err) => console.warn('Approvals: summary refresh failed', err));
       return;
     }
     // Captured before any of the awaited commit work below, so that filing
@@ -1800,6 +1872,7 @@
             financeLock.fingerprint,
             financeLock.lockValue?.approvalId || ''
           );
+          removePendingLocally(record);
           toast('Duplicate payment blocked', 'warning');
           hideDetailModal();
           return;
@@ -1810,6 +1883,7 @@
             record,
             'Same student, year, module, amount, reference and date already approved in ledger.'
           );
+          removePendingLocally(record);
           toast('THIS STUDENT AND DETAILS HAVE ALREADY BEEN APPROVED. DUPLICATE REJECTED.', 'warning');
           hideDetailModal();
           return;
@@ -1851,13 +1925,14 @@
         }
       }
       await moveApprovalToHistory(record, 'approved', lockedSchoolId);
+      removePendingLocally(record);
+      hideDetailModal();
       toast(
         record.sourceModule === 'financeconfig'
-          ? 'Finance config approved and applied.'
-          : record.changeSummary ? `Approved and applied: ${record.changeSummary}` : 'Student approved. Payment saved.',
+          ? 'Approved successfully. Finance config change applied.'
+          : record.changeSummary ? `Approved successfully: ${record.changeSummary}` : 'Approved successfully. Payment saved.',
         'success'
       );
-      hideDetailModal();
     } catch (err) {
       if (financeLock?.committed && financeLock?.fingerprintKey) {
         const year = normalizeYearValue(financeLock.year || targetYear || state.selectedYear || getContextYear());

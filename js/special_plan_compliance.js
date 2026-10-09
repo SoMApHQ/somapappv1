@@ -192,19 +192,46 @@
     ctx.check();
   }
   function reviewPath(ctx, id) { return `specialPlanCompliance/${ctx.year}/${id}`; }
-  async function withStudentLock(ctx, id, work) {
+  // Short-lived per-student write lock. Several admins may work the queue at once:
+  // a busy lock is waited for (holders finish in seconds), never reported as an error
+  // unless it stays held past LOCK_WAIT_MS.
+  const LOCK_STALE_MS = 60000;
+  const LOCK_WAIT_MS = 20000;
+  let serverOffset = 0;
+  function serverNow() { return Date.now() + serverOffset; }
+  function trackServerOffset(database) {
+    if (trackServerOffset.done) return;
+    trackServerOffset.done = true;
+    database.ref('.info/serverTimeOffset').on('value', snap => { serverOffset = Number(snap.val()) || 0; });
+  }
+  async function withStudentLock(ctx, id, work, { wait = true } = {}) {
+    trackServerOffset(ctx.database);
     const lockRef = ctx.database.ref(ctx.path(`${reviewPath(ctx, id)}/decisionLock`));
     const token = global.crypto.randomUUID();
-    const at = Date.now();
-    const lock = await lockRef.transaction(current => current && at - current.at < 300000 ? undefined : { token, at });
-    if (!lock.committed) throw new Error('Another administrator is reviewing this student. Refresh shortly.');
+    const deadline = Date.now() + (wait ? LOCK_WAIT_MS : 0);
+    for (let attempt = 0; ; attempt++) {
+      const at = serverNow();
+      const lock = await lockRef.transaction(current => current && at - current.at < LOCK_STALE_MS ? undefined : { token, at });
+      if (lock.committed) break;
+      if (Date.now() >= deadline) {
+        const err = new Error('This student is still being updated by another session. Please try again in a minute.');
+        err.code = 'lock-busy';
+        throw err;
+      }
+      await new Promise(resolve => setTimeout(resolve, Math.min(400 * (attempt + 1), 2000)));
+    }
     try {
       return await work(async () => {
         ctx.check();
         const held = (await lockRef.once('value')).val();
         if (held?.token !== token) throw new Error('Review lock expired. Run review again.');
       });
-    } finally { await lockRef.transaction(current => current?.token === token ? null : undefined); }
+    } finally {
+      // A transaction's first pass sees the local cache, which is usually empty here;
+      // returning undefined for null would abort and leave the lock behind.
+      await lockRef.transaction(current => (!current || current.token === token) ? null : undefined)
+        .catch(err => console.warn('Special plan lock release:', err.message));
+    }
   }
   async function withConfigurationLock(record, year, work) {
     if (Number(year) < 2026) return work();
@@ -223,9 +250,13 @@
     return next(0);
   }
   async function queue(ctx, input, evaluation) {
+    // Background scans skip a student another session is updating; the next scan picks it up.
     return withStudentLock(ctx, input.studentId, async checkLock => {
       await checkLock();
       return queueLocked(ctx, input, evaluation);
+    }, { wait: false }).catch(err => {
+      if (err.code === 'lock-busy') return 'busy';
+      throw err;
     });
   }
   async function queueLocked(ctx, input, evaluation) {
@@ -261,7 +292,7 @@
     if (scanning) return scanning;
     scanning = (async () => {
       const inputs = await load(ctx);
-      const counts = { compliant: 0, breached: 0, queued: 0, alreadyQueued: 0, alreadyReviewed: 0, skipped: 0, skippedDetails: [] };
+      const counts = { compliant: 0, breached: 0, queued: 0, alreadyQueued: 0, alreadyReviewed: 0, busy: 0, skipped: 0, skippedDetails: [] };
       for (const input of Object.values(inputs)) {
         const result = evaluate(input);
         if (result.status !== 'breached') {
