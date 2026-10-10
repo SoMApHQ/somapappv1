@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.0/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
   <script src="prefonecommon.js"></script>
   <style>
@@ -26,7 +27,10 @@
     <a href="prefoneattendance.html" class="bg-gray-500 p-2 rounded mb-4 inline-block"><i class="fas fa-arrow-left"></i> Back to Attendance Dashboard</a>
     
     <!-- Date Select -->
-    <input type="date" id="attDate" class="p-2 rounded bg-white/20 text-white mb-4" onchange="loadClassAtt()">
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+      <input type="date" id="attDate" class="p-2 rounded bg-white/20 text-white" onchange="loadClassAtt()">
+      <span id="attSavedBadge" class="px-3 py-1 rounded-full text-sm font-semibold bg-white/20">—</span>
+    </div>
     
     <table class="w-full bg-white/10 rounded table">
       <thead class="bg-white/20">
@@ -76,9 +80,32 @@
       currentYear = new Date().getFullYear(); // Fallback to current year
     }
 
+    // Attendance codes are stored as one letter (P, A, S, L, E, M, T, G). Older
+    // saves stored the option text ("P (Present)"), so reads keep only the letter.
+    const ATT_CODES = ['P', 'A', 'S', 'L', 'E', 'M', 'T', 'G'];
+    const attCode = (v) => {
+      const c = String(v || '').trim().charAt(0).toUpperCase();
+      return ATT_CODES.includes(c) ? c : 'P';
+    };
+    // Present = attended both sessions (on time or late).
+    const isPresent = (am, pm) => ['P', 'L'].includes(am) && ['P', 'L'].includes(pm);
+    // Today in East Africa time (toISOString is UTC and is "yesterday" before 03:00).
+    function localToday() {
+      const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Africa/Nairobi', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()).split('/');
+      return `${parts[2]}-${parts[1]}-${parts[0]}`;
+    }
+    function markedBy() {
+      try {
+        const s = JSON.parse(sessionStorage.getItem('somap.secretarySession') || 'null');
+        if (s && s.workerId) return { workerId: s.workerId, name: s.name || '', role: 'secretary' };
+      } catch (_) { /* ignore */ }
+      const workerId = localStorage.getItem('workerId') || '';
+      return { workerId, name: '', role: workerId ? 'worker' : 'staff' };
+    }
+
     // Set default date to today
     document.addEventListener('DOMContentLoaded', () => {
-      document.getElementById('attDate').value = new Date().toISOString().split('T')[0];
+      document.getElementById('attDate').value = localToday();
       loadClassAtt();
     });
 
@@ -88,13 +115,26 @@
       db.ref(`/schools/Socrates School Preform one/${currentYear}/students`).once('value').then(snap => {
         const studentsObj = snap.val() || {};
         const students = Object.entries(studentsObj);
+        let savedCount = 0;
         classData = students.map(([adm, s], idx) => {
           const attRecords = Object.values(s.attendance || {});
-          const att = attRecords.find(a => a.date === date) || { am: 'P', pm: 'P', notes: '', present: true };
+          const stored = attRecords.find(a => a && a.date === date);
+          if (stored) savedCount++;
+          const am = attCode(stored?.am);
+          const pm = attCode(stored?.pm);
+          const att = { am, pm, notes: stored?.notes || '', present: isPresent(am, pm), saved: Boolean(stored) };
           const paymentsArray = Object.values(s.payments || {});
           const bal = Number(s.totalFee || 0) - paymentsArray.reduce((sum, p) => sum + Number(p.amount || 0), 0);
           return { idx: idx + 1, adm, name: `${s.firstName || ''} ${s.lastName || ''}`.trim(), bal, ...att };
         });
+        const badge = document.getElementById('attSavedBadge');
+        if (badge) {
+          const all = classData.length && savedCount >= classData.length;
+          badge.textContent = savedCount
+            ? (all ? `✓ Imehifadhiwa (${savedCount}/${classData.length})` : `⚠ Imehifadhiwa kwa ${savedCount}/${classData.length}`)
+            : '✗ Bado haijahifadhiwa — bonyeza Save Changes';
+          badge.className = `px-3 py-1 rounded-full text-sm font-semibold ${all ? 'bg-green-500' : savedCount ? 'bg-yellow-500 text-black' : 'bg-red-500'}`;
+        }
         renderClassTable();
       }).catch(err => {
         console.error('Load error:', err);
@@ -116,26 +156,26 @@
           <td ${row.bal > 0 ? 'class="text-yellow-300"' : ''}>TSh ${row.bal.toLocaleString()}</td>
           <td>
             <select class="status-select" onchange="updateStatus('${row.adm}', 'am', this.value)">
-              <option ${row.am === 'P' ? 'selected' : ''}>P (Present)</option>
-              <option ${row.am === 'A' ? 'selected' : ''}>A (Absent)</option>
-              <option ${row.am === 'S' ? 'selected' : ''}>S (Sick)</option>
-              <option ${row.am === 'L' ? 'selected' : ''}>L (Late)</option>
-              <option ${row.am === 'E' ? 'selected' : ''}>E (Excused)</option>
-              <option ${row.am === 'M' ? 'selected' : ''}>M (Medical)</option>
-              <option ${row.am === 'T' ? 'selected' : ''}>T (Travel)</option>
-              <option ${row.am === 'G' ? 'selected' : ''}>G (Guardian)</option>
+              <option value="P" ${row.am === 'P' ? 'selected' : ''}>P (Present)</option>
+              <option value="A" ${row.am === 'A' ? 'selected' : ''}>A (Absent)</option>
+              <option value="S" ${row.am === 'S' ? 'selected' : ''}>S (Sick)</option>
+              <option value="L" ${row.am === 'L' ? 'selected' : ''}>L (Late)</option>
+              <option value="E" ${row.am === 'E' ? 'selected' : ''}>E (Excused)</option>
+              <option value="M" ${row.am === 'M' ? 'selected' : ''}>M (Medical)</option>
+              <option value="T" ${row.am === 'T' ? 'selected' : ''}>T (Travel)</option>
+              <option value="G" ${row.am === 'G' ? 'selected' : ''}>G (Guardian)</option>
             </select>
           </td>
           <td>
             <select class="status-select" onchange="updateStatus('${row.adm}', 'pm', this.value)">
-              <option ${row.pm === 'P' ? 'selected' : ''}>P (Present)</option>
-              <option ${row.pm === 'A' ? 'selected' : ''}>A (Absent)</option>
-              <option ${row.pm === 'S' ? 'selected' : ''}>S (Sick)</option>
-              <option ${row.pm === 'L' ? 'selected' : ''}>L (Late)</option>
-              <option ${row.pm === 'E' ? 'selected' : ''}>E (Excused)</option>
-              <option ${row.pm === 'M' ? 'selected' : ''}>M (Medical)</option>
-              <option ${row.pm === 'T' ? 'selected' : ''}>T (Travel)</option>
-              <option ${row.pm === 'G' ? 'selected' : ''}>G (Guardian)</option>
+              <option value="P" ${row.pm === 'P' ? 'selected' : ''}>P (Present)</option>
+              <option value="A" ${row.pm === 'A' ? 'selected' : ''}>A (Absent)</option>
+              <option value="S" ${row.pm === 'S' ? 'selected' : ''}>S (Sick)</option>
+              <option value="L" ${row.pm === 'L' ? 'selected' : ''}>L (Late)</option>
+              <option value="E" ${row.pm === 'E' ? 'selected' : ''}>E (Excused)</option>
+              <option value="M" ${row.pm === 'M' ? 'selected' : ''}>M (Medical)</option>
+              <option value="T" ${row.pm === 'T' ? 'selected' : ''}>T (Travel)</option>
+              <option value="G" ${row.pm === 'G' ? 'selected' : ''}>G (Guardian)</option>
             </select>
           </td>
           <td><input type="text" class="p-1 rounded bg-white text-black" value="${row.notes || ''}" onchange="updateNotes('${row.adm}', this.value)"></td>
@@ -147,8 +187,8 @@
     function updateStatus(adm, period, value) {
       const row = classData.find(r => r.adm === adm);
       if (row) {
-        row[period] = value;
-        row.present = (row.am === 'P' && row.pm === 'P');
+        row[period] = attCode(value);
+        row.present = isPresent(row.am, row.pm);
         // Optionally check for shifted status
       }
     }
@@ -168,29 +208,37 @@
       Swal.fire('Marked!', 'All students marked present.', 'success');
     }
 
-    function saveClassAtt() {
+    async function saveClassAtt() {
       const date = document.getElementById('attDate').value;
       if (!date) return Swal.fire('Error', 'Select a date first.', 'error');
-      
-      let savedCount = 0;
-      const total = classData.length;
-      classData.forEach(row => {
-        const attPath = `/schools/Socrates School Preform one/${currentYear}/students/${row.adm}/attendance`;
-        // Remove existing for date
-        db.ref(attPath).orderByChild('date').equalTo(date).once('value').then(snap => {
-          snap.forEach(child => child.ref.remove());
-        }).then(() => {
-          // Push new
-          db.ref(attPath).push({ date, am: row.am, pm: row.pm, present: row.present, notes: row.notes || '' }).then(() => {
-            savedCount++;
-            if (savedCount === total) {
-              Swal.fire('Saved!', 'All attendance updated. Refresh the dashboard to see changes.', 'success');
-            }
+      if (!classData.length) return Swal.fire('Error', 'No students to save.', 'error');
+      const by = markedBy();
+      const base = `/schools/Socrates School Preform one/${currentYear}`;
+      try {
+        await Promise.all(classData.map(async (row) => {
+          const attPath = `${base}/students/${row.adm}/attendance`;
+          // Replace this date's record for the learner.
+          const snap = await db.ref(attPath).orderByChild('date').equalTo(date).once('value');
+          const removals = [];
+          snap.forEach(child => { removals.push(child.ref.remove()); });
+          await Promise.all(removals);
+          await db.ref(attPath).push({
+            date, am: row.am, pm: row.pm, present: isPresent(row.am, row.pm), notes: row.notes || '',
+            markedAt: Date.now(), markedByWorkerId: by.workerId || '', markedByName: by.name || '',
           });
-        }).catch(err => {
-          console.error('Save error for ' + row.adm + ':', err);
+        }));
+        // Day summary: read by the Secretary Desk check-out gate and work reports.
+        const present = classData.filter(r => isPresent(r.am, r.pm)).length;
+        await db.ref(`${base}/attendanceDays/${date}`).set({
+          date, total: classData.length, present, absent: classData.length - present,
+          savedAt: Date.now(), savedByWorkerId: by.workerId || '', savedByName: by.name || '', savedByRole: by.role,
         });
-      });
+        Swal.fire('Saved!', `Attendance saved for ${classData.length} learners (${present} present, ${classData.length - present} absent).`, 'success');
+        loadClassAtt();
+      } catch (err) {
+        console.error('Save error:', err);
+        Swal.fire('Error', 'Some attendance could not be saved: ' + err.message, 'error');
+      }
     }
 
     function clearAtt(adm) {
@@ -217,8 +265,6 @@
       doc.save(`class_attendance_${document.getElementById('attDate').value}.pdf`);
     }
 
-    // Initial load
-    loadClassAtt();
   </script>
 </body>
 </html>

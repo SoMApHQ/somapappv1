@@ -18,9 +18,9 @@
   <script src="../shared/quality-assurance-utils.js"></script>
   <script src="../shared/school_calendar.js"></script>
   <script src="../shared/payroll_core.js"></script>
-  <script src="../js/secretary_access.js?v=20261009"></script>
-  <script src="secretary/secretary_graduation.js?v=20261009"></script>
-  <script src="../js/secretary_duties.js?v=20261009"></script>
+  <script src="../js/secretary_access.js?v=20261010"></script>
+  <script src="secretary/secretary_graduation.js?v=20261010"></script>
+  <script src="../js/secretary_duties.js?v=20261010"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
   <script>
@@ -529,6 +529,7 @@
       return {
         db,
         schoolId: state.schoolId,
+        schoolName: state.schoolName,
         workerId: state.workerId,
         workerName: state.profile?.fullNameUpper || '',
         todayYmd,
@@ -558,20 +559,29 @@
       return code.includes('permission') || msg.includes('permission');
     }
 
+    // Paths stay bound to the school this page loaded with. The school context is
+    // shared by every tab, so another tab switching school (e.g. the secretary
+    // opening MAU/MAP) must never move this worker's check-in/out to that school.
+    function pinnedP(subPath) {
+      const trimmed = String(subPath || '').replace(/^\/+/, '');
+      if (state.schoolId) return state.schoolId === 'socrates-school' ? trimmed : `schools/${state.schoolId}/${trimmed}`;
+      return getSomap().P(subPath);
+    }
+
     function schoolRef(subPath) {
       const somap = getSomap();
       // Safe fallback: if SOMAP or P helper is missing, use raw path.
       if (!somap || typeof somap.P !== 'function') {
         return db.ref(subPath);
       }
-      return db.ref(somap.P(subPath));
+      return db.ref(pinnedP(subPath));
     }
 
     function schoolRootRef() {
       const somap = getSomap();
       if (!somap || typeof somap.P !== 'function') return db.ref();
       const marker = '__somap_root__';
-      const scoped = somap.P(marker);
+      const scoped = pinnedP(marker);
       const rootPath = scoped.slice(0, scoped.lastIndexOf(marker)).replace(/\/$/, '');
       return rootPath ? db.ref(rootPath) : db.ref();
     }
@@ -602,6 +612,9 @@
     }
 
     function initSchoolContext() {
+      // A secretary visit to a linked school (MAU/MAP) may have left the shared
+      // school context switched; worker attendance always belongs to the home school.
+      try { window.SomapSecretary?.restoreHomeSchool?.(); } catch (_) { /* ignore */ }
       const somap = getSomap();
       const school = (somap && somap.getSchool && somap.getSchool()) || null;
       if (!school || !school.id) {

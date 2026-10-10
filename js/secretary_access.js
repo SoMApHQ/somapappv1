@@ -31,6 +31,21 @@
 
   const EMPTY_DESK = { graduation: false, preformOne: false, linkedSchools: [] };
 
+  // Pages the secretary opens inside a linked school (paths from the app root).
+  // They are reached through the hub (?go=page&school=id) so the school switch
+  // always happens in one place.
+  const LINKED_PAGES = {
+    dashboard: 'dashboard.html?secretary=1',
+    attendance: 'Toattendancehtml/classattendance.html',
+    finance: 'finance.html',
+    expenses: 'finance.html#cashbookSection',
+  };
+  const SCHOOL_KEY = 'somap.currentSchoolId';
+  // App root URL, worked out from this script's own location (js/secretary_access.js).
+  const APP_ROOT = (() => {
+    try { return new URL('../', global.document.currentScript.src).href; } catch (_) { return ''; }
+  })();
+
   function canonicalSchoolId(id) {
     const raw = String(id || '').trim();
     return SOCRATES_IDS.includes(raw.toLowerCase()) ? 'socrates-school' : raw;
@@ -226,6 +241,54 @@
     return h.includes('approvals') || h.includes('view=review');
   }
 
+  // Hub link that opens `page` (a LINKED_PAGES key) inside a linked school.
+  function linkedPageHref(hubUrl, schoolId, page) {
+    return `${hubUrl}?go=${encodeURIComponent(page)}&school=${encodeURIComponent(schoolId)}`;
+  }
+
+  // The school context is shared by all tabs. A page the secretary opened inside
+  // a linked school stops (with a clear overlay) the moment another tab switches
+  // the school, so nothing is ever saved into the wrong school by accident.
+  function guardLinkedTab(options) {
+    const session = getSession();
+    const schoolId = currentSchoolId();
+    if (!session || !isLinkedSchool(session, schoolId)) return false;
+    if (options?.backPill && APP_ROOT && !global.document.getElementById('secretaryBackPill')) {
+      const pill = global.document.createElement('a');
+      pill.id = 'secretaryBackPill';
+      pill.href = `${APP_ROOT}workershtml/secretary/secretaryhub.html`;
+      pill.textContent = '← Secretary Hub';
+      pill.setAttribute('style', 'position:fixed;left:14px;bottom:14px;z-index:2147482000;padding:10px 16px;border-radius:999px;font:700 13px Inter,system-ui,sans-serif;color:#1a0b24;text-decoration:none;background:linear-gradient(135deg,#f472b6,#a78bfa);box-shadow:0 10px 30px -10px rgba(244,114,182,.8)');
+      pill.addEventListener('click', () => restoreHomeSchool());
+      global.document.body.appendChild(pill);
+    }
+    const linked = deskFor(session.homeSchoolId).linkedSchools.find((s) => s.id === schoolId) || { short: schoolId };
+    let meta = {};
+    try { meta = global.SOMAP?.getSchool?.() || {}; } catch (_) { /* ignore */ }
+    let overlay = null;
+    const check = () => {
+      if (currentSchoolId() === schoolId) {
+        if (overlay) { overlay.remove(); overlay = null; }
+        return;
+      }
+      if (overlay) return;
+      overlay = global.document.createElement('div');
+      overlay.setAttribute('style', 'position:fixed;inset:0;z-index:2147483000;display:grid;place-items:center;padding:16px;background:rgba(3,6,18,.85);backdrop-filter:blur(6px);font-family:Inter,system-ui,sans-serif');
+      overlay.innerHTML = `<div style="max-width:440px;background:#0f1630;color:#e7ecff;border:1px solid rgba(251,113,133,.4);border-radius:22px;padding:26px;text-align:center">
+          <div style="font-size:2.4rem">🔁</div>
+          <h2 style="margin:8px 0;font-size:1.2rem">Shule imebadilishwa kwenye tab nyingine</h2>
+          <p style="color:#aab3d6;line-height:1.5;font-size:.92rem">Ukurasa huu ni wa <b>${linked.short}</b>. Ili usihifadhi chochote kwenye shule isiyo sahihi, rudi ${linked.short} kwanza.</p>
+          <button type="button" style="margin-top:8px;padding:11px 18px;border:0;border-radius:12px;font-weight:700;cursor:pointer;background:linear-gradient(135deg,#f472b6,#a78bfa);color:#1a0b24">Rudi ${linked.short} &amp; Pakia upya</button></div>`;
+      overlay.querySelector('button').addEventListener('click', () => {
+        if (enterLinkedSchool(schoolId, meta)) global.location.reload();
+      });
+      global.document.body.appendChild(overlay);
+    };
+    global.addEventListener('storage', (e) => { if (!e.key || e.key === SCHOOL_KEY) check(); });
+    global.addEventListener('focus', check);
+    return true;
+  }
+
   global.SomapSecretary = {
     SESSION_KEY,
     deskFor,
@@ -240,5 +303,9 @@
     restoreHomeSchool,
     dashboardGate,
     isApprovalsUrl,
+    LINKED_PAGES,
+    linkedPageHref,
+    guardLinkedTab,
+    APP_ROOT,
   };
 })(window);
