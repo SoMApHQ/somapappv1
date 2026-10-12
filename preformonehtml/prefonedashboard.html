@@ -15,6 +15,8 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.23/jspdf.plugin.autotable.min.js"></script>
 
   <!-- Shared helpers -->
   <script src="prefonecommon.js"></script>
@@ -137,6 +139,41 @@
     @keyframes spin {
       to { transform: rotate(360deg); }
     }
+    .register-card {
+      position: relative;
+      border-radius: 1.75rem;
+      background:
+        linear-gradient(rgba(15, 23, 42, 0.9), rgba(15, 23, 42, 0.9)) padding-box,
+        linear-gradient(120deg, #6366f1, #22d3ee 45%, #14b8a6 70%, #fb7185) border-box;
+      border: 1.5px solid transparent;
+      box-shadow: 0 35px 65px -35px rgba(99, 102, 241, 0.55);
+    }
+    .register-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 3.25rem;
+      height: 3.25rem;
+      border-radius: 1.1rem;
+      background: linear-gradient(135deg, #4338ca, #14b8a6);
+      color: #fff;
+      font-size: 1.35rem;
+      box-shadow: 0 18px 30px -18px rgba(20, 184, 166, 0.9);
+    }
+    .register-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      border-radius: 0.9rem;
+      padding: 0.6rem 1.1rem;
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: #fff;
+      background: linear-gradient(120deg, #4338ca, #0ea5e9 55%, #14b8a6);
+      transition: transform 160ms ease, box-shadow 200ms ease, opacity 200ms ease;
+    }
+    .register-btn:hover { transform: translateY(-2px); box-shadow: 0 16px 30px -18px rgba(14, 165, 233, 0.9); }
+    .register-btn:disabled { opacity: 0.6; cursor: wait; transform: none; }
     .gradient-blob {
       position: absolute;
       filter: blur(120px);
@@ -189,6 +226,35 @@
           <p id="statusMessage" class="text-sm text-slate-400">
             Fetching latest school insights&hellip;
           </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="register-card p-6 md:p-7">
+      <div class="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+        <div class="flex items-start gap-4">
+          <div class="register-icon"><i class="fa-solid fa-file-pdf"></i></div>
+          <div>
+            <span class="list-title">Admitted learners register</span>
+            <h2 class="text-lg font-semibold text-white md:text-xl">Download the Preform One learners PDF</h2>
+            <p class="mt-1 max-w-2xl text-sm text-slate-300">
+              A full-colour, SoMAp-branded register with every admitted learner's photo, details, parent contact,
+              joining date, fee due, amount paid and balance, so you can trace each child.
+            </p>
+            <p id="registerHint" class="mt-2 text-xs font-semibold uppercase tracking-wider text-cyan-300">Loading learners&hellip;</p>
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <select id="registerFilter" class="rounded-xl border border-slate-600/60 bg-slate-900/80 px-3 py-2 text-sm text-slate-100 shadow-sm focus:border-sky-400 focus:outline-none">
+            <option value="all">All admitted learners</option>
+            <option value="owing">Still owing a balance</option>
+            <option value="cleared">Fully cleared</option>
+            <option value="unpaid">Not paid anything yet</option>
+          </select>
+          <button id="downloadRegisterBtn" type="button" class="register-btn">
+            <i class="fa-solid fa-download"></i>
+            <span>Download PDF</span>
+          </button>
         </div>
       </div>
     </section>
@@ -534,7 +600,10 @@
       recentPaymentsList: document.getElementById('recentPaymentsList'),
       attendanceTrend: document.getElementById('attendanceTrend'),
       absenceReasonsList: document.getElementById('absenceReasonsList'),
-      overlay: document.getElementById('loadingOverlay')
+      overlay: document.getElementById('loadingOverlay'),
+      registerHint: document.getElementById('registerHint'),
+      registerFilter: document.getElementById('registerFilter'),
+      downloadRegisterBtn: document.getElementById('downloadRegisterBtn')
     };
 
     const state = {
@@ -574,6 +643,7 @@
       dom.refreshButton.addEventListener('click', () => {
         loadDashboard(state.year);
       });
+      dom.downloadRegisterBtn.addEventListener('click', downloadLearnersRegister);
     }
 
     function renderYearLabels() {
@@ -594,6 +664,9 @@
         const expenses = expensesSnap.val() || {};
         const metrics = computeMetrics(students, expenses, year);
         hydrateDashboard(metrics);
+        dom.registerHint.textContent = metrics.totals.registered
+          ? `${formatNumber(metrics.totals.registered)} learners ready for ${year}`
+          : `No learners admitted yet for ${year}`;
         dom.statusMessage.textContent = `Live data captured for ${metrics.totals.registered} learners.`;
         dom.lastUpdated.textContent = new Date().toLocaleString('en-GB', {
           hour: '2-digit',
@@ -842,6 +915,631 @@
           `).join('')
         : '<span class="list-empty">No absence reasons logged yet.</span>';
     }
+    // ---------------------------------------------------------------
+    // Admitted learners register (colour PDF)
+    // ---------------------------------------------------------------
+    const PDF = {
+      indigo: [67, 56, 202],
+      violet: [124, 58, 237],
+      sky: [14, 165, 233],
+      teal: [20, 184, 166],
+      emerald: [5, 150, 105],
+      emeraldSoft: [209, 250, 229],
+      amber: [217, 119, 6],
+      amberSoft: [254, 243, 199],
+      rose: [225, 29, 72],
+      roseSoft: [255, 228, 230],
+      pink: [219, 39, 119],
+      pinkSoft: [252, 231, 243],
+      blue: [37, 99, 235],
+      blueSoft: [219, 234, 254],
+      ink: [15, 23, 42],
+      slate: [71, 85, 105],
+      muted: [148, 163, 184],
+      line: [226, 232, 240],
+      paper: [248, 250, 252],
+      white: [255, 255, 255]
+    };
+    const REGISTER_LOGO_PATHS = ['../images/somap-logo.png.jpg', '../images/somap-logo.png'];
+    const REGISTER_FILTERS = {
+      all: { label: 'All admitted learners', test: () => true },
+      owing: { label: 'Learners still owing', test: (l) => l.balance > 0 },
+      cleared: { label: 'Fully cleared learners', test: (l) => l.fee > 0 && l.balance === 0 },
+      unpaid: { label: 'Learners with no payment yet', test: (l) => l.paid <= 0 }
+    };
+
+    async function downloadLearnersRegister() {
+      if (!window.jspdf || !window.jspdf.jsPDF || !window.jspdf.jsPDF.API.autoTable) {
+        Swal.fire('PDF tools not ready', 'Please check your internet connection and reload the page.', 'error');
+        return;
+      }
+      const year = state.year;
+      const filterKey = dom.registerFilter.value || 'all';
+      const filter = REGISTER_FILTERS[filterKey] || REGISTER_FILTERS.all;
+      const btn = dom.downloadRegisterBtn;
+      const btnLabel = btn.querySelector('span');
+      btn.disabled = true;
+      btnLabel.textContent = 'Preparing PDF...';
+      try {
+        const snap = await db.ref(`/schools/Socrates School Preform one/${year}/students`).once('value');
+        const learners = buildRegisterRows(snap.val() || {}).filter(filter.test);
+        if (!learners.length) {
+          Swal.fire('Nothing to print', `No learners match "${filter.label}" for ${year}.`, 'info');
+          return;
+        }
+        btnLabel.textContent = `Loading ${learners.length} photos...`;
+        const [logo, photos] = await Promise.all([loadRegisterLogo(), loadRegisterPhotos(learners)]);
+        btnLabel.textContent = 'Drawing PDF...';
+        const doc = renderLearnersRegister(learners, { year, filterLabel: filter.label, logo, photos });
+        const suffix = filterKey === 'all' ? '' : `_${filterKey}`;
+        doc.save(`SoMAp_PreformOne_Learners_${year}${suffix}.pdf`);
+      } catch (error) {
+        console.error('Learners register PDF error:', error);
+        Swal.fire('PDF Error', error.message || 'Unable to build the learners PDF.', 'error');
+      } finally {
+        btn.disabled = false;
+        btnLabel.textContent = 'Download PDF';
+      }
+    }
+
+    function buildRegisterRows(studentsObj) {
+      return Object.entries(studentsObj || {})
+        .filter(([, student]) => student && typeof student === 'object')
+        .map(([adm, student]) => {
+          const name = [student.firstName, student.middleName, student.lastName]
+            .map((part) => String(part || '').trim())
+            .filter(Boolean)
+            .join(' ') || adm;
+          const payments = normalizeCollection(student.payments).filter((p) => p && typeof p === 'object');
+          const paid = payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+          const fee = Number(student.totalFee || student.feePerYear || student.feeDue || student.required || 0);
+          const lastPayment = payments.map((p) => p.date).filter(Boolean).sort().pop() || '';
+          return {
+            adm,
+            name,
+            gender: String(student.gender || ''),
+            dob: student.dob || '',
+            formerSchool: student.formerSchool || '',
+            parentName: student.parentName || '',
+            parentContact: student.parentContact || '',
+            reportingDate: student.reportingDate || '',
+            registrationDate: student.registrationDate || '',
+            photoUrl: student.photoUrl || '',
+            shifted: Boolean(student.shifted),
+            fee,
+            paid,
+            balance: Math.max(fee - paid, 0),
+            lastPayment
+          };
+        })
+        .sort((a, b) =>
+          (a.reportingDate || '9999').localeCompare(b.reportingDate || '9999') || a.name.localeCompare(b.name));
+    }
+
+    function registerStatus(learner) {
+      if (learner.fee <= 0) return { label: 'NO FEE SET', color: PDF.slate, soft: PDF.line };
+      if (learner.balance === 0) return { label: 'CLEARED', color: PDF.emerald, soft: PDF.emeraldSoft };
+      if (learner.paid > 0) return { label: 'PARTIAL', color: PDF.amber, soft: PDF.amberSoft };
+      return { label: 'NOT PAID', color: PDF.rose, soft: PDF.roseSoft };
+    }
+
+    function cloudinaryThumb(url) {
+      if (!/res\.cloudinary\.com\/.+\/image\/upload\//.test(url)) return url;
+      return url.replace('/image/upload/', '/image/upload/c_thumb,g_face,w_240,h_240,f_jpg,q_auto/');
+    }
+
+    // Loads an image through a canvas and returns a JPEG data URL (square-cropped when asked).
+    function loadImageAsJpeg(url, { size = 240, square = false, timeout = 12000 } = {}) {
+      return new Promise((resolve) => {
+        if (!url) return resolve(null);
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        const timer = setTimeout(() => { img.onload = img.onerror = null; resolve(null); }, timeout);
+        img.onload = () => {
+          clearTimeout(timer);
+          try {
+            const w = img.naturalWidth;
+            const h = img.naturalHeight;
+            if (!w || !h) return resolve(null);
+            let sx = 0, sy = 0, sw = w, sh = h, cw, ch;
+            if (square) {
+              const side = Math.min(w, h);
+              sx = (w - side) / 2;
+              sy = (h - side) * 0.3; // passport photos: keep the face, trim more from the bottom
+              sw = sh = side;
+              cw = ch = size;
+            } else {
+              const scale = Math.min(1, size / Math.max(w, h));
+              cw = Math.round(w * scale);
+              ch = Math.round(h * scale);
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = cw;
+            canvas.height = ch;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, cw, ch);
+            ctx.drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch);
+            resolve({ data: canvas.toDataURL('image/jpeg', 0.88), ratio: cw / ch });
+          } catch (err) {
+            resolve(null); // tainted canvas (no CORS) - fall back to initials
+          }
+        };
+        img.onerror = () => { clearTimeout(timer); resolve(null); };
+        img.src = url;
+      });
+    }
+
+    async function loadRegisterLogo() {
+      for (const path of REGISTER_LOGO_PATHS) {
+        const logo = await loadImageAsJpeg(path, { size: 400 });
+        if (logo) return logo;
+      }
+      return null;
+    }
+
+    async function loadRegisterPhotos(learners) {
+      const photos = {};
+      const queue = learners.filter((l) => l.photoUrl);
+      const worker = async () => {
+        while (queue.length) {
+          const learner = queue.shift();
+          const thumbUrl = cloudinaryThumb(learner.photoUrl);
+          let photo = await loadImageAsJpeg(thumbUrl, { square: true });
+          if (!photo && thumbUrl !== learner.photoUrl) {
+            photo = await loadImageAsJpeg(learner.photoUrl, { square: true });
+          }
+          if (photo) photos[learner.adm] = photo;
+        }
+      };
+      await Promise.all(Array.from({ length: 6 }, worker));
+      return photos;
+    }
+
+    function pdfMoney(value) {
+      return `TSh ${Math.round(Number(value || 0)).toLocaleString('en-US')}`;
+    }
+
+    function pdfDate(value, withYear = true) {
+      if (!value) return '-';
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) return String(value);
+      const opts = withYear ? { day: '2-digit', month: 'short', year: 'numeric' } : { day: '2-digit', month: 'short' };
+      return parsed.toLocaleDateString('en-GB', opts);
+    }
+
+    function pdfPhone(value) {
+      const raw = String(value || '').replace(/\s+/g, '');
+      const match = raw.match(/^\+255(\d{3})(\d{3})(\d{3})$/);
+      return match ? `+255 ${match[1]} ${match[2]} ${match[3]}` : (value || '-');
+    }
+
+    function ageFromDob(dob) {
+      const born = new Date(dob);
+      if (!dob || Number.isNaN(born.getTime())) return '';
+      const now = new Date();
+      let age = now.getFullYear() - born.getFullYear();
+      if (now.getMonth() < born.getMonth() || (now.getMonth() === born.getMonth() && now.getDate() < born.getDate())) age -= 1;
+      return age > 0 && age < 40 ? `${age} yrs` : '';
+    }
+
+    function daysSince(value) {
+      const start = new Date(value);
+      if (!value || Number.isNaN(start.getTime())) return null;
+      return Math.max(Math.floor((Date.now() - start.getTime()) / 86400000), 0);
+    }
+
+    function initialsOf(name) {
+      return name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join('') || '?';
+    }
+
+    function fitText(doc, text, maxWidth) {
+      let value = String(text || '');
+      if (doc.getTextWidth(value) <= maxWidth) return value;
+      while (value.length > 1 && doc.getTextWidth(`${value}...`) > maxWidth) value = value.slice(0, -1);
+      return `${value.trim()}...`;
+    }
+
+    function mixColor(from, to, t) {
+      return from.map((c, i) => Math.round(c + (to[i] - c) * t));
+    }
+
+    function drawGradientBand(doc, x, y, w, h, stops) {
+      const steps = 120;
+      const stripe = w / steps;
+      for (let i = 0; i < steps; i++) {
+        const t = i / (steps - 1);
+        const seg = Math.min(Math.floor(t * (stops.length - 1)), stops.length - 2);
+        const local = t * (stops.length - 1) - seg;
+        doc.setFillColor(...mixColor(stops[seg], stops[seg + 1], local));
+        doc.rect(x + i * stripe, y, stripe + 0.25, h, 'F');
+      }
+    }
+
+    function withOpacity(doc, opacity, draw) {
+      if (doc.GState && doc.setGState) {
+        doc.saveGraphicsState();
+        doc.setGState(new doc.GState({ opacity }));
+        draw();
+        doc.restoreGraphicsState();
+      }
+    }
+
+    function drawLogoBadge(doc, logo, cx, cy, radius) {
+      doc.setFillColor(...PDF.white);
+      doc.circle(cx, cy, radius, 'F');
+      if (logo) {
+        const box = radius * 1.7;
+        const w = logo.ratio >= 1 ? box : box * logo.ratio;
+        const h = logo.ratio >= 1 ? box / logo.ratio : box;
+        doc.addImage(logo.data, 'JPEG', cx - w / 2, cy - h / 2, w, h, 'somap-logo');
+      } else {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(radius * 0.9);
+        doc.setTextColor(...PDF.indigo);
+        doc.text('SoMAp', cx, cy + radius * 0.15, { align: 'center' });
+      }
+    }
+
+    function drawPill(doc, text, x, y, color, soft, { size = 6.5, padX = 2, h = 4.2 } = {}) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(size);
+      const w = doc.getTextWidth(text) + padX * 2;
+      doc.setFillColor(...soft);
+      doc.roundedRect(x, y, w, h, h / 2, h / 2, 'F');
+      doc.setTextColor(...color);
+      doc.text(text, x + w / 2, y + h / 2 + size * 0.13, { align: 'center' });
+      return w;
+    }
+
+    function renderLearnersRegister(learners, { year, filterLabel, logo, photos }) {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      const W = doc.internal.pageSize.getWidth();
+      const H = doc.internal.pageSize.getHeight();
+      const M = 10;
+      const bandStops = [PDF.indigo, PDF.violet, PDF.sky, PDF.teal];
+      const generatedAt = new Date().toLocaleString('en-GB', {
+        day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
+      });
+
+      // ---- Hero header (page 1)
+      drawGradientBand(doc, 0, 0, W, 40, bandStops);
+      withOpacity(doc, 0.12, () => {
+        doc.setFillColor(...PDF.white);
+        doc.circle(W - 40, -6, 30, 'F');
+        doc.circle(W - 8, 34, 18, 'F');
+        doc.circle(120, 46, 22, 'F');
+      });
+      drawLogoBadge(doc, logo, M + 14, 20, 13);
+
+      doc.setTextColor(...PDF.white);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text('SoMAp  ·  SOCRATES SCHOOL  ·  PREFORM ONE', M + 32, 12);
+      doc.setFontSize(21);
+      doc.text('Admitted Learners Register', M + 32, 22);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.text(`Academic year ${year}   ·   ${filterLabel}   ·   Generated ${generatedAt}`, M + 32, 29.5);
+
+      // Learner count badge
+      withOpacity(doc, 0.22, () => {
+        doc.setFillColor(...PDF.white);
+        doc.roundedRect(W - M - 44, 9, 44, 22, 4, 4, 'F');
+      });
+      doc.setTextColor(...PDF.white);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(22);
+      doc.text(String(learners.length), W - M - 22, 21.5, { align: 'center' });
+      doc.setFontSize(7);
+      doc.text(learners.length === 1 ? 'LEARNER' : 'LEARNERS', W - M - 22, 27, { align: 'center' });
+
+      // ---- Summary cards
+      const sum = learners.reduce((acc, l) => {
+        acc.fee += l.fee;
+        acc.paid += l.paid;
+        acc.balance += l.balance;
+        const g = l.gender.toLowerCase();
+        if (g.startsWith('f')) acc.girls += 1; else if (g.startsWith('m')) acc.boys += 1;
+        if (l.fee > 0 && l.balance === 0) acc.cleared += 1;
+        if (l.paid <= 0) acc.unpaid += 1;
+        if (l.photoUrl) acc.withPhoto += 1;
+        return acc;
+      }, { fee: 0, paid: 0, balance: 0, girls: 0, boys: 0, cleared: 0, unpaid: 0, withPhoto: 0 });
+      const collectedPct = sum.fee > 0 ? Math.min(sum.paid / sum.fee, 1) : 0;
+
+      const cards = [
+        { label: 'LEARNERS', value: String(learners.length), sub: `${sum.girls} girls · ${sum.boys} boys`, color: PDF.indigo },
+        { label: 'FEES EXPECTED', value: pdfMoney(sum.fee), sub: 'Programme fee at admission', color: PDF.sky },
+        { label: 'COLLECTED', value: pdfMoney(sum.paid), sub: `${(collectedPct * 100).toFixed(1)}% of expected`, color: PDF.emerald },
+        { label: 'OUTSTANDING', value: pdfMoney(sum.balance), sub: 'Still to be collected', color: PDF.rose },
+        { label: 'FULLY CLEARED', value: String(sum.cleared), sub: 'Learners with no balance', color: PDF.teal },
+        { label: 'NOT PAID YET', value: String(sum.unpaid), sub: 'No payment recorded', color: PDF.amber }
+      ];
+      const gap = 4;
+      const cardW = (W - M * 2 - gap * (cards.length - 1)) / cards.length;
+      const cardY = 46;
+      const cardH = 21;
+      cards.forEach((card, i) => {
+        const x = M + i * (cardW + gap);
+        doc.setFillColor(...PDF.white);
+        doc.setDrawColor(...PDF.line);
+        doc.setLineWidth(0.3);
+        doc.roundedRect(x, cardY, cardW, cardH, 3, 3, 'FD');
+        doc.setFillColor(...card.color);
+        doc.roundedRect(x, cardY, cardW, 2.4, 1.2, 1.2, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(6.5);
+        doc.setTextColor(...card.color);
+        doc.text(card.label, x + 4, cardY + 7.5);
+        doc.setFontSize(12.5);
+        doc.setTextColor(...PDF.ink);
+        doc.text(fitText(doc, card.value, cardW - 8), x + 4, cardY + 14);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(6.8);
+        doc.setTextColor(...PDF.slate);
+        doc.text(fitText(doc, card.sub, cardW - 8), x + 4, cardY + 18.5);
+      });
+
+      // Collection progress bar
+      const barY = cardY + cardH + 5;
+      const barW = W - M * 2;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(...PDF.slate);
+      doc.text('COLLECTION PROGRESS', M, barY);
+      doc.text(`${pdfMoney(sum.paid)} of ${pdfMoney(sum.fee)}  (${(collectedPct * 100).toFixed(1)}%)`, W - M, barY, { align: 'right' });
+      doc.setFillColor(...PDF.line);
+      doc.roundedRect(M, barY + 2, barW, 3, 1.5, 1.5, 'F');
+      if (collectedPct > 0) {
+        const filled = Math.max(barW * collectedPct, 3);
+        drawGradientBand(doc, M, barY + 2, filled, 3, [PDF.teal, PDF.sky, PDF.indigo]);
+      }
+
+      // ---- Learners table
+      const statusOf = learners.map(registerStatus);
+      doc.autoTable({
+        startY: barY + 9,
+        margin: { left: M, right: M, top: 28, bottom: 16 },
+        head: [['#', 'PHOTO', 'LEARNER', 'PARENT / GUARDIAN', 'JOINED', 'FEE DUE', 'PAID', 'BALANCE', 'STATUS']],
+        body: learners.map((l, i) => [String(i + 1), '', '', '', '', pdfMoney(l.fee), pdfMoney(l.paid), pdfMoney(l.balance), '']),
+        theme: 'plain',
+        rowPageBreak: 'avoid',
+        styles: {
+          font: 'helvetica',
+          fontSize: 8.5,
+          textColor: PDF.ink,
+          cellPadding: { top: 2, bottom: 2, left: 2.5, right: 2.5 },
+          valign: 'middle',
+          minCellHeight: 23
+        },
+        headStyles: {
+          fillColor: PDF.ink,
+          textColor: PDF.white,
+          fontStyle: 'bold',
+          fontSize: 7.5,
+          minCellHeight: 9
+        },
+        alternateRowStyles: { fillColor: PDF.paper },
+        columnStyles: {
+          0: { cellWidth: 9, halign: 'center', textColor: PDF.muted, fontStyle: 'bold' },
+          1: { cellWidth: 22 },
+          2: { cellWidth: 62 },
+          3: { cellWidth: 52 },
+          4: { cellWidth: 35 },
+          5: { cellWidth: 24, halign: 'right' },
+          6: { cellWidth: 24, halign: 'right', textColor: PDF.emerald, fontStyle: 'bold' },
+          7: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
+          8: { cellWidth: 25 }
+        },
+        didParseCell: (data) => {
+          if (data.section === 'head' && [5, 6, 7].includes(data.column.index)) data.cell.styles.halign = 'right';
+          if (data.section === 'head' && data.column.index === 0) data.cell.styles.halign = 'center';
+          if (data.section === 'body' && data.column.index === 6 && learners[Number(data.row.raw[0]) - 1].paid <= 0) {
+            data.cell.styles.textColor = PDF.muted;
+          }
+          if (data.section === 'body' && data.column.index === 7) {
+            data.cell.styles.textColor = learners[Number(data.row.raw[0]) - 1].balance > 0 ? PDF.rose : PDF.emerald;
+          }
+        },
+        didDrawCell: (data) => {
+          if (data.section !== 'body') return;
+          const rowIndex = Number(data.row.raw[0]) - 1;
+          const learner = learners[rowIndex];
+          if (!learner) return;
+          const status = statusOf[rowIndex];
+          const { x, y, width: w, height: h } = data.cell;
+
+          // row separator
+          doc.setDrawColor(...PDF.line);
+          doc.setLineWidth(0.25);
+          doc.line(x, y + h, x + w, y + h);
+
+          switch (data.column.index) {
+            case 0: {
+              doc.setFillColor(...status.color);
+              doc.rect(x, y, 1.3, h, 'F');
+              break;
+            }
+            case 1: {
+              const size = 17;
+              const px = x + (w - size) / 2;
+              const py = y + (h - size) / 2;
+              doc.setFillColor(...PDF.white);
+              doc.setDrawColor(...status.color);
+              doc.setLineWidth(0.6);
+              doc.roundedRect(px - 1, py - 1, size + 2, size + 2, 2.2, 2.2, 'FD');
+              const photo = photos[learner.adm];
+              if (photo) {
+                doc.addImage(photo.data, 'JPEG', px, py, size, size, `photo-${learner.adm}`);
+              } else {
+                const girl = learner.gender.toLowerCase().startsWith('f');
+                doc.setFillColor(...(girl ? PDF.pinkSoft : PDF.blueSoft));
+                doc.roundedRect(px, py, size, size, 1.6, 1.6, 'F');
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(13);
+                doc.setTextColor(...(girl ? PDF.pink : PDF.blue));
+                doc.text(initialsOf(learner.name), px + size / 2, py + size / 2 + 1.8, { align: 'center' });
+                doc.setFontSize(4.8);
+                doc.setFont('helvetica', 'normal');
+                doc.text('NO PHOTO', px + size / 2, py + size - 1.6, { align: 'center' });
+              }
+              break;
+            }
+            case 2: {
+              const left = x + 2.5;
+              const maxW = w - 5;
+              doc.setFont('helvetica', 'bold');
+              doc.setFontSize(9.5);
+              doc.setTextColor(...PDF.ink);
+              doc.text(fitText(doc, learner.name, maxW), left, y + 6);
+              doc.setFont('helvetica', 'normal');
+              doc.setFontSize(7);
+              doc.setTextColor(...PDF.muted);
+              doc.text(fitText(doc, `ADM ${learner.adm}`, maxW), left, y + 10);
+              let pillX = left;
+              const g = learner.gender.toLowerCase();
+              if (g.startsWith('f')) pillX += drawPill(doc, 'GIRL', pillX, y + 11.8, PDF.pink, PDF.pinkSoft) + 1.5;
+              else if (g.startsWith('m')) pillX += drawPill(doc, 'BOY', pillX, y + 11.8, PDF.blue, PDF.blueSoft) + 1.5;
+              const age = ageFromDob(learner.dob);
+              if (age) pillX += drawPill(doc, age.toUpperCase(), pillX, y + 11.8, PDF.violet, [237, 233, 254]) + 1.5;
+              if (learner.shifted) drawPill(doc, 'SHIFTED', pillX, y + 11.8, PDF.amber, PDF.amberSoft);
+              if (learner.formerSchool) {
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(6.8);
+                doc.setTextColor(...PDF.slate);
+                doc.text(fitText(doc, `From: ${learner.formerSchool}`, maxW), left, y + 20);
+              }
+              break;
+            }
+            case 3: {
+              const left = x + 2.5;
+              const maxW = w - 5;
+              doc.setFont('helvetica', 'bold');
+              doc.setFontSize(8.5);
+              doc.setTextColor(...PDF.ink);
+              doc.text(fitText(doc, learner.parentName || 'Parent not recorded', maxW), left, y + 7.5);
+              doc.setFillColor(...PDF.blueSoft);
+              doc.roundedRect(left, y + 10.5, maxW, 6.5, 1.6, 1.6, 'F');
+              doc.setFontSize(6.2);
+              doc.setTextColor(...PDF.indigo);
+              doc.text('TEL', left + 2, y + 14.7);
+              doc.setFontSize(8.8);
+              doc.text(fitText(doc, pdfPhone(learner.parentContact), maxW - 10), left + 8.5, y + 14.9);
+              break;
+            }
+            case 4: {
+              const left = x + 2.5;
+              doc.setFont('helvetica', 'bold');
+              doc.setFontSize(8.8);
+              doc.setTextColor(...PDF.teal);
+              doc.text(pdfDate(learner.reportingDate), left, y + 7);
+              doc.setFont('helvetica', 'normal');
+              doc.setFontSize(6.8);
+              doc.setTextColor(...PDF.slate);
+              doc.text(`Registered ${pdfDate(learner.registrationDate, false)}`, left, y + 11.5);
+              const days = daysSince(learner.reportingDate);
+              if (days !== null) doc.text(`${days} day${days === 1 ? '' : 's'} in school`, left, y + 15.3);
+              doc.setTextColor(...PDF.muted);
+              doc.text(`Last paid ${learner.lastPayment ? pdfDate(learner.lastPayment, false) : '-'}`, left, y + 19.1);
+              break;
+            }
+            case 8: {
+              const left = x + 2.5;
+              const pillW = w - 5;
+              doc.setFillColor(...status.soft);
+              doc.roundedRect(left, y + 5, pillW, 5.2, 2.6, 2.6, 'F');
+              doc.setFont('helvetica', 'bold');
+              doc.setFontSize(6.6);
+              doc.setTextColor(...status.color);
+              doc.text(status.label, left + pillW / 2, y + 8.5, { align: 'center' });
+              const pct = learner.fee > 0 ? Math.min(learner.paid / learner.fee, 1) : 0;
+              doc.setFillColor(...PDF.line);
+              doc.roundedRect(left, y + 13, pillW, 2.2, 1.1, 1.1, 'F');
+              if (pct > 0) {
+                doc.setFillColor(...status.color);
+                doc.roundedRect(left, y + 13, Math.max(pillW * pct, 2.2), 2.2, 1.1, 1.1, 'F');
+              }
+              doc.setFont('helvetica', 'normal');
+              doc.setFontSize(6.5);
+              doc.setTextColor(...PDF.slate);
+              doc.text(`${Math.round(pct * 100)}% paid`, left + pillW / 2, y + 19, { align: 'center' });
+              break;
+            }
+            default:
+              break;
+          }
+        },
+        didDrawPage: (data) => {
+          if (data.pageNumber === 1) return;
+          drawGradientBand(doc, 0, 0, W, 20, bandStops);
+          drawLogoBadge(doc, logo, M + 8, 10, 7);
+          doc.setTextColor(...PDF.white);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(12);
+          doc.text('Admitted Learners Register', M + 19, 10);
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(7.5);
+          doc.text(`SoMAp · Preform One · ${year} · ${filterLabel}`, M + 19, 15);
+        }
+      });
+
+      // ---- Notes & verification block
+      let endY = doc.lastAutoTable.finalY + 8;
+      if (endY + 26 > H - 16) {
+        doc.addPage();
+        drawGradientBand(doc, 0, 0, W, 20, bandStops);
+        drawLogoBadge(doc, logo, M + 8, 10, 7);
+        doc.setTextColor(...PDF.white);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(12);
+        doc.text('Admitted Learners Register', M + 19, 12);
+        endY = 30;
+      }
+      doc.setFillColor(...PDF.paper);
+      doc.setDrawColor(...PDF.line);
+      doc.setLineWidth(0.3);
+      doc.roundedRect(M, endY, W - M * 2, 24, 3, 3, 'FD');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(...PDF.indigo);
+      doc.text('NOTES', M + 5, endY + 6.5);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.2);
+      doc.setTextColor(...PDF.slate);
+      doc.text([
+        `Fee due is the programme fee recorded at admission (based on the joining date). Paid is the total of all payments posted for ${year}.`,
+        `Learners are listed by joining date. ${sum.withPhoto} of ${learners.length} have a passport photo on file; others show their initials.`
+      ], M + 5, endY + 11.5);
+      const sigX = W - M - 95;
+      doc.setDrawColor(...PDF.muted);
+      doc.line(sigX, endY + 18, sigX + 42, endY + 18);
+      doc.line(sigX + 50, endY + 18, sigX + 90, endY + 18);
+      doc.setFontSize(6.8);
+      doc.text('Verified by (name & signature)', sigX, endY + 21.5);
+      doc.text('Date', sigX + 50, endY + 21.5);
+
+      // ---- Footer on every page
+      const pages = doc.internal.getNumberOfPages();
+      for (let page = 1; page <= pages; page++) {
+        doc.setPage(page);
+        drawGradientBand(doc, M, H - 11, W - M * 2, 0.8, bandStops);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7);
+        doc.setTextColor(...PDF.indigo);
+        doc.text('SoMAp', M, H - 6);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(...PDF.slate);
+        doc.text(`  ·  Preform One admitted learners · ${year}`, M + doc.getTextWidth('SoMAp') + 1.5, H - 6);
+        doc.text(`Generated ${generatedAt}`, W / 2, H - 6, { align: 'center' });
+        doc.setFont('helvetica', 'bold');
+        doc.text(`Page ${page} of ${pages}`, W - M, H - 6, { align: 'right' });
+      }
+
+      return doc;
+    }
+
     function toggleLoading(show) {
       state.loading = show;
       dom.overlay.classList.toggle('hidden', !show);
