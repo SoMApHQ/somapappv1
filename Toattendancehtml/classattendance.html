@@ -1057,6 +1057,42 @@
           return null;
         };
 
+        // Day the pupil joined (YYYY-MM-DD), so registers never list a child
+        // for days before they were registered. A manually entered Date of
+        // Registration wins; otherwise the earliest creation/approval stamp,
+        // including the AUTO-<ms> admission number minted on the form.
+        function inferJoinDateKey(raw = {}, admissionNo = "") {
+          const manual = String(raw.dateOfRegistration || raw.dateRegistered || "").trim();
+          if (/^\d{4}-\d{2}-\d{2}$/.test(manual)) return manual;
+          const toMs = (value) => {
+            if (value === null || value === undefined || value === "") return null;
+            if (typeof value === "object" && typeof value.seconds === "number") return value.seconds * 1000;
+            const text = String(value).trim();
+            const n = /^\d{10,13}$/.test(text) ? Number(text) : Date.parse(text);
+            if (!Number.isFinite(n)) return null;
+            return n < 1e12 && n > 1e9 ? n * 1000 : n;
+          };
+          const joining = raw.joiningFormPayment || {};
+          const autoMatch = /^AUTO-(\d{13})$/i.exec(String(admissionNo || raw.admissionNumber || "").trim());
+          const stamps = [
+            raw.registeredAt,
+            raw.createdAt,
+            raw.timestamp,
+            raw.regTimestamp,
+            joining.paidAt,
+            joining.approvedAt,
+            autoMatch ? autoMatch[1] : null,
+          ]
+            .map(toMs)
+            .filter((ms) => Number.isFinite(ms) && ms > 946684800000 && ms <= Date.now() + 86400000);
+          if (!stamps.length) return "";
+          return fmtDate(new Date(Math.min(...stamps)));
+        }
+        // True when the pupil was already registered on dateKey (unknown join → always).
+        function isEnrolledOn(student, dateKey) {
+          return !student?.joinDateKey || !dateKey || dateKey >= student.joinDateKey;
+        }
+
         function mapFinanceRosterRows(roster = []) {
           return (roster || []).filter((row) => {
             const raw = row.rawStudent || {};
@@ -1105,6 +1141,7 @@
               parentName: raw.primaryParentName || raw.parentName || raw.guardianName || "",
               parentContact: row.parentContact || raw.primaryParentContact || raw.parentPhone || raw.guardianPhone || "",
               status: row.status || raw.status || "active",
+              joinDateKey: inferJoinDateKey(raw, admissionNo),
             };
           });
         }
@@ -1205,6 +1242,7 @@
                 ? classMatches(currentClass, s.class)
                 : s.class === currentClass
             )
+            .filter((s) => isEnrolledOn(s, currentDateStr))
             .filter(
               (s) =>
                 !q ||
@@ -1753,13 +1791,15 @@
           }
           return dates;
         }
-        function getStudentsForExport() {
+        // enrolledBy: only pupils registered on or before this YYYY-MM-DD.
+        function getStudentsForExport(enrolledBy) {
           if (!currentClass) return [];
           const key = canonicalClassKey(currentClass);
           return students
             .filter((s) =>
               key ? classMatches(currentClass, s.class) : s.class === currentClass
             )
+            .filter((s) => isEnrolledOn(s, enrolledBy))
             .sort((a, b) => {
               const order = { M: 0, F: 1, U: 2 };
               const ga = order[a.gender] ?? 2;
@@ -2544,7 +2584,8 @@
         }
         async function exportMonthlyPDF() {
           if (!currentClass) return alert("Pick a class first");
-          const studentsList = getStudentsForExport();
+          const days = getDaysForMonth(currentDateStr);
+          const studentsList = getStudentsForExport(days.length ? days[days.length - 1].date : currentDateStr);
           if (!studentsList.length)
             return alert("No students found in the selected class");
           const assignment = getAttendanceTeacherAssignment({ class: currentClass, stream: currentStream });
@@ -2555,9 +2596,7 @@
             format: "a4",
           });
           const logo = await resolveSchoolLogoData();
-          const days = getDaysForMonth(currentDateStr);
-          const workdays = days.filter((d) => d.isWorkingDay).length;
-          const possiblePerStudent = workdays * 2;
+          let possibleSessionsTotal = 0;
           let seq = 1;
           const groups = { BOYS: [], GIRLS: [], UNSPECIFIED: [] };
           let totalAmPresent = 0;
@@ -2569,7 +2608,15 @@
             let absentSessions = 0;
             let amPresent = 0;
             let pmPresent = 0;
+            // Days before the pupil joined stay blank and don't count as possible sessions.
+            const possiblePerStudent =
+              days.filter((d) => d.isWorkingDay && isEnrolledOn(student, d.date)).length * 2;
+            possibleSessionsTotal += possiblePerStudent;
             days.forEach((day) => {
+              if (!isEnrolledOn(student, day.date)) {
+                records.push({ am: "", pm: "" });
+                return;
+              }
               const rec = getAttendanceRecord(student.id, day.date);
               const am = (rec.am || "").toUpperCase();
               const pm = (rec.pm || "").toUpperCase();
@@ -2618,9 +2665,9 @@
           });
           const totalStudents = studentsList.length;
           const overallPercent =
-            totalStudents && possiblePerStudent
+            totalStudents && possibleSessionsTotal
               ? Math.round(
-                  (totalPresentSessions / (possiblePerStudent * totalStudents)) *
+                  (totalPresentSessions / possibleSessionsTotal) *
                     10
                 ) / 10
               : 0;
@@ -2632,7 +2679,7 @@
             totalAmPresent,
             totalPmPresent,
             totalPresentSessions,
-            possibleSessions: possiblePerStudent * totalStudents,
+            possibleSessions: possibleSessionsTotal,
             overallPercent,
             teacherLine: teacherContactLine(assignment?.classTeacher, "Class teacher"),
             assistantLine: assignment?.assistantTeacher
@@ -2685,7 +2732,9 @@
           });
           dates.forEach((dateKey, index) => {
             if (index) doc.addPage();
-            const rows = studentsList.map((student, idx) => {
+            const rows = studentsList
+              .filter((student) => isEnrolledOn(student, dateKey))
+              .map((student, idx) => {
               const record = getAttendanceRecord(student.id, dateKey);
               const am = (record.am || "").toUpperCase();
               const pm = (record.pm || "").toUpperCase();
