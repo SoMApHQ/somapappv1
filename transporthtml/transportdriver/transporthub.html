@@ -131,8 +131,8 @@
       <article class="stat"><div class="k">Waliopo</div><div class="v good" id="kPresent">0</div></article>
       <article class="stat"><div class="k">Hawapo</div><div class="v bad" id="kAbsent">0</div></article>
       <article class="stat"><div class="k">Bado Kumark</div><div class="v" id="kUnmarked">0</div></article>
-      <article class="stat"><div class="k">Wamelipa (Mwezi)</div><div class="v good" id="kPaid">0</div></article>
-      <article class="stat"><div class="k">Wanaodaiwa (Mwezi)</div><div class="v bad" id="kDebt">0</div></article>
+      <article class="stat"><div class="k">Hawana Deni</div><div class="v good" id="kPaid">0</div></article>
+      <article class="stat"><div class="k">Wanaodaiwa (Hadi Sasa)</div><div class="v bad" id="kDebt">0</div></article>
     </section>
 
     <section class="panel">
@@ -233,6 +233,7 @@
   <script src="../modules/transport_helpers.js"></script>
   <script src="../modules/transport_context.js"></script>
   <script src="../modules/transport_pricing.js"></script>
+  <script src="../modules/transport_debt_engine.js"></script>
   <script src="../modules/transportauto_tracker.js" defer></script>
   <script>
     const urlParams = new URLSearchParams(window.location.search);
@@ -260,6 +261,7 @@
       assignments:[],
       attendanceMap:{},
       ledgerMap:{},
+      debtEngine:null,
       driverHint:{ uid:"", name:"", vehicle:"" }
     };
 
@@ -429,7 +431,8 @@
         let s=null;
         try { s=await firebase.database().ref(p).get(); } catch(_err) { continue; }
         if(!s||!s.exists())continue;
-        s.forEach(c=>{if(!sMap[c.key])sMap[c.key]=c.val()||{};});
+        // years/{y}/students holds `true` index flags; only real student records count
+        s.forEach(c=>{const v=c.val();if(!sMap[c.key]&&v&&typeof v==="object")sMap[c.key]=v;});
       }
       state.students=sMap;
     }
@@ -466,33 +469,27 @@
       let merged={};for(const p of paths){const s=await firebase.database().ref(p).get();if(s.exists()&&s.val())merged={...merged,...s.val()};}state.attendanceMap=merged;
     }
 
+    // Debt comes from TransportDebtEngine: identical to transportpayments.html "Transport Debt (TO DATE)".
+    function getDebtEngine(){
+      const year=Number(state.context.year),school=schoolKey();
+      const e=state.debtEngine;
+      if(e&&e.year===year&&e.school===school)return e.promise;
+      const promise=TransportDebtEngine.load({db:firebase.database(),schoolId:school,year});
+      promise.catch(()=>{if(state.debtEngine&&state.debtEngine.promise===promise)state.debtEngine=null;});
+      state.debtEngine={year,school,promise};
+      return promise;
+    }
     async function loadLedgers(){
       state.ledgerMap={};
-      const year=Number(state.context.year),month=Number(state.context.month);
-      const multipliers=(window.TransportPricing&&TransportPricing.loadYearMultipliers)?await TransportPricing.loadYearMultipliers(year).catch(()=>null):null;
-      const tasks=state.assignments.map(st=>{
-        if(!st.studentId)return Promise.resolve();
-        const path=TransportHelpers.paths.ledgerMonth(st.studentId,year,month);
-        return firebase.database().ref(path).get().then(async s=>{
-          const l=s.val()||{};
-          let expected=Number(l.expected||0);
-          const paid=Number(l.paid||0);
-          if(expected<=0 && window.TransportPricing && TransportPricing.dueForMonth){
-            expected=Number(await TransportPricing.dueForMonth({
-              year,
-              month,
-              baseMonthlyFee:Number(st.baseMonthlyFee||0),
-              amStop:st.amStop||"",
-              pmStop:st.pmStop||"",
-              startDate:resolveStartDate(st),
-              multipliers:multipliers||undefined
-            }))||0;
-          }
-          const balance=Number(l.balance!==undefined?l.balance:Math.max(0,expected-paid));
-          state.ledgerMap[st.studentId]={expected:expected,paid:paid,balance:Math.max(0,balance),hasBilling:expected>0};
-        }).catch(()=>{});
-      });
-      await Promise.allSettled(tasks);
+      if(!window.TransportDebtEngine||!state.assignments.length)return;
+      const month=Number(state.context.month);
+      const engine=await getDebtEngine();
+      await Promise.allSettled(state.assignments.filter(st=>st.studentId).map(async st=>{
+        const s=await engine.statusFor(st.studentId);
+        if(!s||!s.listed)return;
+        const m=s.months[month-1]||{};
+        state.ledgerMap[st.studentId]={debt:Number(s.debt||0),expected:Number(m.due||0),paid:Number(m.paid||0),hasBilling:Number(s.totalYearExpected||0)>0,unpaid:s.unpaidMonthsDisplay};
+      }));
     }
 
     function renderVehicle(){
@@ -522,13 +519,13 @@
           let status='<span class="status s-un">• Unmarked</span>';if(isPresent){present++;status='<span class="status s-pres">✓ Present</span>';}else if(isAbsent){absent++;status='<span class="status s-abs">✕ Absent</span>';}else{unmarked++;}
           let pay='<span class="status s-un">No billing data</span>';
           if(l && l.hasBilling){
-            if(Number(l.balance||0)<=0){
+            if(Number(l.debt||0)<=0){
               paid++;
-              pay=`<span class="status s-paid">Paid (This Month)</span><div class="mini">Paid ${esc(tzs(l.paid))} / Due ${esc(tzs(l.expected))}</div>`;
+              pay=`<span class="status s-paid">Hana deni</span><div class="mini">Mwezi huu: Paid ${esc(tzs(l.paid))} / Due ${esc(tzs(l.expected))}</div>`;
             }else{
               debt++;
-              pay=`<span class="status s-debt">Left ${esc(tzs(l.balance))}</span><div class="mini">Paid ${esc(tzs(l.paid))} / Due ${esc(tzs(l.expected))}</div>`;
-              debtors.push({name:st.studentName,amount:l.balance});
+              pay=`<span class="status s-debt">Deni ${esc(tzs(l.debt))}</span><div class="mini">${esc(l.unpaid||"")}</div>`;
+              debtors.push({name:st.studentName,amount:l.debt});
             }
           }
           const route=[];if(st.route)route.push(`Route ${st.route}`);if(st.amStop||st.pmStop)route.push(`AM ${st.amStop||"-"} / PM ${st.pmStop||"-"}`);
@@ -651,6 +648,7 @@
     async function initializeDashboard(){
       setDateFromContext();
       setYearSelectFromContext();
+      state.allEnrollments={};state.ledgerMap={};
       await loadBuses();
       state.vehicleId=pickVehicle();
       if(!state.vehicleId){
@@ -670,13 +668,17 @@
       localStorage.setItem("somap_vehicleId",state.vehicleId);
       state.driverHint.vehicle = state.vehicleId;
       renderVehicle();
-      await loadStudents();
-      await loadAssignments(state.vehicleId);
-      await loadAttendance();
-      await loadLedgers();
+      try{
+        await loadStudents();
+        await loadAssignments(state.vehicleId);
+      }finally{
+        // Whatever happens above, the debt panel must never stay on "Inapakia madeni..."
+        loadFeeData();
+      }
+      await loadAttendance().catch(err=>{console.warn("Attendance load failed",err);state.attendanceMap={};});
       updateAttendanceLink();
       render();
-      loadFeeData();
+      try{await loadLedgers();render();}catch(err){console.warn("Transport debt load failed",err);toast("Imeshindikana kupakia madeni ya usafiri",true);}
     }
 
     async function boot(){
@@ -746,7 +748,7 @@
       amount:document.getElementById("pmAmount"), method:document.getElementById("pmMethod"), reference:document.getElementById("pmReference"),
       payer:document.getElementById("pmPayer"), date:document.getElementById("pmDate"), notes:document.getElementById("pmNotes"), save:document.getElementById("pmSave")
     };
-    const feeState={token:0,rows:{},stopsByName:{},multipliers:null,periods:{},overrides:{},currentSid:"",saving:false};
+    const feeState={token:0,rows:{},currentSid:"",saving:false};
 
     function schoolKey(){return isSoc()?"socrates-school":clean(state.context.school);}
     function isObj(v){return !!v&&typeof v==="object";}
@@ -759,100 +761,30 @@
     function displayDate(iso){if(!iso)return "N/A";const p=String(iso).split("-");return p.length===3?`${p[2]}/${p[1]}/${p[0]}`:String(iso);}
     function focusedFeeMonth(year){const now=new Date();if(Number(year)===now.getFullYear())return now.getMonth()+1;return Number(year)<now.getFullYear()?12:1;}
     function resolveEndDate(en){if(!en)return "";const raw=en.endDate||en.stopDate||en.stoppedAtDate||en.transportEndDate||"";return raw?normalizeDateInput(raw,state.context.year):"";}
-    function enrollmentBaseFee(en){for(const v of [en&&en.baseMonthlyFee,en&&en.monthlyFee,en&&en.transportFee,en&&en.currentMonthTransportFee,en&&en.fee,en&&en.amount]){const n=Number(v);if(Number.isFinite(n)&&n>0)return n;}return 0;}
-    function numOrNull(v){if(v===null||v===undefined||v==="")return null;const n=Number(v);return Number.isFinite(n)?n:null;}
 
-    async function loadFeePricing(year){
-      const sk=schoolKey(),soc=isSoc();
-      const [scStops,lgStops,scMult,lgMult,scPer,lgPer,scOv,lgOv]=await Promise.all([
-        readVal(`schools/${sk}/transportCatalog/${year}/stops`), soc?readVal(`transportCatalog/${year}/stops`):null,
-        readVal(`schools/${sk}/transportSettings/${year}/monthMultipliers`), soc?readVal(`transportSettings/${year}/monthMultipliers`):null,
-        readVal(`schools/${sk}/years/${year}/transportPeriods`), soc?readVal(`transportPeriods/${year}`):null,
-        readVal(`schools/${sk}/transportOverrides/${year}`), soc?readVal(`transportOverrides/${year}`):null
-      ]);
-      const stops={...(isObj(lgStops)?lgStops:{}),...(isObj(scStops)?scStops:{})};
-      const byName={};
-      Object.entries(stops).forEach(([id,s])=>{if(!isObj(s))return;const stop={...s,id,priceHistory:s.priceHistory||{}};[id,s.name,s.routeName,s.stopName].map(normKey).filter(Boolean).forEach(k=>{byName[k]=stop;});});
-      feeState.stopsByName=byName;
-      const mult={...((window.TransportPricing&&TransportPricing.DEFAULT_MULTIPLIERS)||{})};
-      [lgMult,scMult].forEach(src=>{if(isObj(src))Object.keys(src).forEach(k=>{const n=Number(src[k]);if(!Number.isNaN(n))mult[Number(k)]=n;});});
-      feeState.multipliers=mult;
-      feeState.periods={...(isObj(lgPer)?lgPer:{}),...(isObj(scPer)?scPer:{})};
-      feeState.overrides={...(isObj(lgOv)?lgOv:{}),...(isObj(scOv)?scOv:{})};
-    }
-
-    function stopPriceOn(stopName,iso){
-      const key=normKey(stopName);if(!key)return 0;
-      let stop=feeState.stopsByName[key];
-      if(!stop){const partial=Object.keys(feeState.stopsByName).find(k=>key.includes(k)||k.includes(key));stop=partial?feeState.stopsByName[partial]:null;}
-      if(!stop)return 0;
-      return Number(TransportPricing.pickPriceForDate(stop,iso))||0;
-    }
-    function overrideFor(st){
-      const s=state.students[st.studentId]||{};
-      for(const id of [st.studentId,s.admissionNumber,s.admissionNo,s.studentId,st.admissionNumber].filter(Boolean)){const o=feeState.overrides[id];if(isObj(o))return o;}
-      return null;
-    }
-    function overrideApplies(o,year,month){
-      if(!isObj(o))return false;
-      const eff=o.effectiveFrom||o.startDate||o.effectiveDate||"";
-      if(eff){const iso=normalizeDateInput(eff,year);const ey=Number(iso.slice(0,4)),em=Number(iso.slice(5,7));if(year<ey||(year===ey&&month<em))return false;}
-      const months=o.months;if(!isObj(months)||!Object.keys(months).length)return true;
-      return months[`${year}-${String(month).padStart(2,"0")}`]===true||months[String(month)]===true;
-    }
-    function monthBase(st,period,year,month){
-      const am=period.amStop||"",pm=period.pmStop||"";
-      if(!am&&!pm)return enrollmentBaseFee(period)||enrollmentBaseFee(st);
-      const iso=`${year}-${String(month).padStart(2,"0")}-01`;
-      let morning=am?stopPriceOn(am,iso):0,evening=pm?stopPriceOn(pm,iso):0;
-      const o=overrideFor(st);
-      if(overrideApplies(o,year,month)){
-        const applyTo=String(o.applyTo||"both").toLowerCase(),fm=numOrNull(o.feePerMonthMorning),fe=numOrNull(o.feePerMonthEvening);
-        if((applyTo==="both"||applyTo==="morning")&&fm!==null)morning=fm;
-        if((applyTo==="both"||applyTo==="evening")&&fe!==null)evening=fe;
-      }
-      return Math.max(0,morning+evening);
-    }
-    function feePeriods(st){
-      const raw=feeState.periods[st.studentId];
-      const base={...st,amStop:st.amStop||"",pmStop:st.pmStop||""};
-      const list=isObj(raw)?Object.values(raw).filter(isObj).map(p=>{const src={...base,...p};return {...src,amStop:src.amStop||src.morningRouteId||"",pmStop:src.pmStop||src.eveningRouteId||"",startDate:resolveStartDate(src),endDate:resolveEndDate(src)};}).sort((a,b)=>String(a.startDate).localeCompare(String(b.startDate))):[];
-      return list.length?list:[{...base,startDate:resolveStartDate(st),endDate:resolveEndDate(st)}];
-    }
     async function loadStudentPayments(year,sid){
       let raw=await readVal(`schools/${schoolKey()}/years/${year}/transportLedgers/${sid}/payments`);
       if((!isObj(raw)||!Object.keys(raw).length)&&isSoc())raw=await readVal(`transportLedgers/${year}/${sid}/payments`);
       return isObj(raw)?Object.values(raw).filter(isObj):[];
     }
 
-    async function buildFeeRow(st,year,focus){
-      const sid=st.studentId;
-      const pays=await loadStudentPayments(year,sid);
-      const approved=pays.filter(isApprovedPay),pending=pays.filter(p=>!isApprovedPay(p)&&!isRejectedPay(p));
-      const periods=feePeriods(st);
-      const months=[];let totalDue=0;
-      let carry=approved.reduce((s,p)=>s+payAmount(p),0);const paidTotal=carry;
-      for(let m=1;m<=12;m++){
-        let due=0;
-        for(const p of periods){due+=Number(await TransportPricing.dueForMonth({year,month:m,baseMonthlyFee:monthBase(st,p,year,m),startDate:p.startDate,endDate:p.endDate,multipliers:feeState.multipliers}))||0;}
-        due=+due.toFixed(2);const paid=Math.min(due,Math.max(0,carry));carry=Math.max(0,carry-paid);
-        const balance=+Math.max(0,due-paid).toFixed(2);
-        months.push({month:m,due,paid,balance,status:due===0?"SKIP":(paid<=0?"UNPAID":(balance>0?"PARTIAL":"PAID"))});
-        totalDue+=due;
-      }
+    // Debt figures come from TransportDebtEngine (same as transportpayments.html); the ledger read
+    // here is only for payments still waiting for approval.
+    async function buildFeeRow(sid,year,focus,engine){
+      const [status,pays]=await Promise.all([engine.statusFor(sid),loadStudentPayments(year,sid)]);
+      if(!status||!status.listed)return null;
+      const pending=pays.filter(p=>!isApprovedPay(p)&&!isRejectedPay(p));
+      const months=status.months.map(m=>({...m,status:m.due===0?"SKIP":(m.paid<=0?"UNPAID":(m.balance>0?"PARTIAL":"PAID"))}));
       const owing=months.filter(r=>r.status==="UNPAID"||r.status==="PARTIAL");
-      const toDate=owing.filter(r=>r.month<=focus);
-      const s=state.students[sid]||{};
-      const active=periods[periods.length-1];
+      const en=status.enrollment||{};
       return {
-        sid,year,focus,name:st.studentName||sid,className:st.className||s.classLevel||"-",
-        admissionNumber:s.admissionNumber||st.admissionNumber||sid,
-        parentContact:s.primaryParentContact||s.primaryContact||s.guardianPhone||st.parentPhone||"--",
-        amStop:st.amStop||"",pmStop:st.pmStop||"",
-        baseMonthly:monthBase(st,active,year,focus),currentMonthFee:Math.round((months[focus-1]||{}).due||0),
-        totalDue:+totalDue.toFixed(2),paid:paidTotal,yearDebt:Math.max(0,+(totalDue-paidTotal).toFixed(2)),
-        debtToDate:Math.round(toDate.reduce((a,r)=>a+r.balance,0)),toDate,owing,
-        startDate:periods[0].startDate,endDate:active.endDate||"",
+        sid,year,focus,name:status.fullName||status.admissionNumber||sid,className:status.className||"-",
+        admissionNumber:status.admissionNumber||sid,parentContact:status.parentContact||"--",
+        amStop:en.amStop||"",pmStop:en.pmStop||"",stopped:status.transportStatus==="Stopped",
+        baseMonthly:Number(status.baseMonthlyFee||0),currentMonthFee:Math.round((months[focus-1]||{}).due||0),
+        totalDue:Number(status.totalYearExpected||0),paid:Number(status.approvedPaid||0),yearDebt:Number(status.totalYearDebt||0),
+        debtToDate:Number(status.debt||0),toDate:status.unpaidMonths,owing,
+        startDate:resolveStartDate(en),endDate:resolveEndDate(en),
         pendingTotal:pending.reduce((a,p)=>a+payAmount(p),0),pendingCount:pending.length,
         pendingRefs:new Set(pending.map(p=>normKey(p.ref||p.reference)).filter(Boolean))
       };
@@ -861,14 +793,16 @@
     async function loadFeeData(){
       const token=++feeState.token;
       feeState.rows={};feeRefs.sum.innerHTML="";
-      if(!state.vehicleId||!state.assignments.length){feeRefs.body.className="placeholder";feeRefs.body.textContent=state.vehicleId?"Hakuna wanafunzi kwenye gari hili.":"Bado hujapangiwa gari.";return;}
-      if(!schoolKey()||!window.TransportPricing){feeRefs.body.className="placeholder";feeRefs.body.textContent="Shule haijatambulika. Fungua ukurasa kupitia link ya shule yako.";return;}
+      if(!currentDriverUid()&&!currentDriverNames().length){feeRefs.body.className="placeholder";feeRefs.body.textContent="Dereva hajatambulika.";return;}
+      if(!schoolKey()||!window.TransportPricing||!window.TransportDebtEngine){feeRefs.body.className="placeholder";feeRefs.body.textContent="Shule haijatambulika. Fungua ukurasa kupitia link ya shule yako.";return;}
       feeRefs.body.className="placeholder";feeRefs.body.textContent="Inapakia madeni...";
       const year=Number(state.context.year);
       try{
-        await loadFeePricing(year);if(token!==feeState.token)return;
+        const engine=await getDebtEngine();if(token!==feeState.token)return;
         const focus=focusedFeeMonth(year);
-        const results=await Promise.allSettled(state.assignments.filter(st=>st.studentId).map(st=>buildFeeRow(st,year,focus)));
+        // Same pupils transportpayments.html shows under this driver, including stopped pupils who still owe
+        const ids=engine.idsForDriver({uid:currentDriverUid(),names:currentDriverNames()});
+        const results=await Promise.allSettled(ids.map(sid=>buildFeeRow(sid,year,focus,engine)));
         if(token!==feeState.token)return;
         results.forEach(r=>{if(r.status==="fulfilled"&&r.value)feeState.rows[r.value.sid]=r.value;});
         renderFees();
@@ -887,7 +821,7 @@
         const chips=r.toDate.slice(0,6).map(m=>`<span>${MONTH_SHORT[m.month]} ${esc(Math.round(m.balance).toLocaleString("en-US"))}</span>`).join("")+(r.toDate.length>6?`<span>+${r.toDate.length-6}</span>`:"");
         const route=(r.amStop||r.pmStop)?`AM ${r.amStop||"-"} / PM ${r.pmStop||"-"}`:"";
         const pending=r.pendingCount?`<div class="feePending">⏳ ${esc(tzs(r.pendingTotal))} inasubiri idhini (${r.pendingCount})</div>`:"";
-        return `<article class="feeCard"><div class="feeTop"><div><div class="feeName">${esc(r.name)}</div><div class="feeMeta">${esc(r.admissionNumber)} · ${esc(r.className)}</div>${route?`<div class="feeMeta">${esc(route)}</div>`:""}</div><div class="feeDebt"><div class="lbl">Deni hadi sasa</div><div class="amt">${esc(tzs(r.debtToDate))}</div></div></div><div class="feeMonths">${chips}</div>${pending}<button class="btn payBtn" type="button" data-fee-pay="${esc(r.sid)}">💰 Pokea Malipo</button></article>`;
+        return `<article class="feeCard"><div class="feeTop"><div><div class="feeName">${esc(r.name)}</div><div class="feeMeta">${esc(r.admissionNumber)} · ${esc(r.className)}${r.stopped?" · Amesimama usafiri":""}</div>${route?`<div class="feeMeta">${esc(route)}</div>`:""}</div><div class="feeDebt"><div class="lbl">Deni hadi sasa</div><div class="amt">${esc(tzs(r.debtToDate))}</div></div></div><div class="feeMonths">${chips}</div>${pending}<button class="btn payBtn" type="button" data-fee-pay="${esc(r.sid)}">💰 Pokea Malipo</button></article>`;
       }).join("");
     }
 
@@ -910,8 +844,6 @@
     async function saveDriverPayment(){
       if(feeState.saving)return;
       const r=feeState.rows[feeState.currentSid];if(!r)return;
-      const st=state.assignments.find(a=>a.studentId===r.sid);
-      if(!st){toast("Mwanafunzi huyu si wa gari lako.",true);return;}
       const month=parseInt(feeRefs.month.value,10),amount=Number(feeRefs.amount.value),method=feeRefs.method.value;
       const reference=feeRefs.reference.value.trim(),payerName=feeRefs.payer.value.trim(),paymentDate=feeRefs.date.value,notes=feeRefs.notes.value.trim();
       if(!month||!Number.isFinite(amount)||amount<=0||!method||!reference||!payerName||!paymentDate){toast("Jaza sehemu zote za lazima (*).",true);return;}
@@ -955,7 +887,7 @@
         await db.ref().update(updates);
         feeState.saving=false;closePayModal();
         toast("Malipo yamehifadhiwa ✓ Yanasubiri idhini kwenye Approvals.");
-        try{const fresh=await buildFeeRow(st,Number(year),r.focus);if(Number(year)===Number(state.context.year))feeState.rows[sid]=fresh;renderFees();}catch(_){}
+        try{const fresh=await buildFeeRow(sid,Number(year),r.focus,await getDebtEngine());if(Number(year)===Number(state.context.year))feeState.rows[sid]=fresh;renderFees();}catch(_){}
       }catch(err){
         console.error(err);toast("Imeshindikana kuhifadhi malipo. Jaribu tena.",true);
       }finally{

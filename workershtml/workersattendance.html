@@ -30,6 +30,8 @@
   </script>
   <script src="../shared/finance_math.js"></script>
   <script src="../transporthtml/modules/transport_pricing.js"></script>
+  <script src="../transporthtml/modules/transport_debt_engine.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <style>
     :root {
       --bg: #0b1220;
@@ -547,10 +549,6 @@
           return snap?.val() || null;
         },
       };
-    }
-
-    function isSocratesLegacySchool() {
-      return ['socrates-school', 'default', 'socrates'].includes(state.schoolId);
     }
 
     function isPermissionDenied(err) {
@@ -1745,277 +1743,23 @@
       return { uid, names: Array.from(new Set(names)) };
     }
 
-    function transportResolveStartDate(enrollment, year) {
-      const fallback = `${year}-01-01`;
-      const raw = enrollment?.startDate || enrollment?.start_date || enrollment?.dateRegistered || enrollment?.transportStartDate || enrollment?.startTimestamp || '';
-      if (!raw) return fallback;
-      if (typeof raw === 'number') {
-        const date = new Date(raw);
-        return Number.isNaN(date.getTime()) ? fallback : date.toISOString().slice(0, 10);
-      }
-      const text = String(raw).trim();
-      if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
-      const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-      if (slash) {
-        const [, dd, mm, yy] = slash;
-        return `${yy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
-      }
-      const parsed = Date.parse(text);
-      return Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10) : fallback;
-    }
-
-    function transportResolveEndDate(enrollment) {
-      const raw = enrollment?.endDate || enrollment?.stopDate || enrollment?.stoppedAtDate || enrollment?.transportEndDate || '';
-      if (!raw) return '';
-      if (typeof raw === 'number') {
-        const date = new Date(raw);
-        return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10);
-      }
-      const text = String(raw).trim();
-      if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
-      const parsed = Date.parse(text);
-      return Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10) : '';
-    }
-
-    function transportDriverFields(record) {
-      if (!record || typeof record !== 'object') return { uids: [], names: [] };
-      const nested = [record.morningVehicle, record.eveningVehicle].filter(Boolean);
-      const uidValues = [
-        record.driverUid,
-        record.assignedDriverUid,
-        record.driverId,
-        record.assignedDriverId,
-        ...nested.flatMap((item) => [item.driverUid, item.assignedDriverUid, item.driverId, item.assignedDriverId]),
-      ].map((value) => String(value || '').trim()).filter(Boolean);
-      const nameValues = [
-        record.driverName,
-        record.assignedDriverName,
-        record.driverFullName,
-        record.driver,
-        ...nested.flatMap((item) => [item.driverName, item.assignedDriverName, item.driverFullName, item.driver]),
-      ].map(driverNormName).filter(Boolean);
-      return { uids: uidValues, names: nameValues };
-    }
-
-    function transportRecordMatchesDriver(record, identity) {
-      const fields = transportDriverFields(record);
-      if (identity.uid && fields.uids.some((uid) => String(uid) === String(identity.uid))) return true;
-      return fields.names.some((name) => identity.names.includes(name));
-    }
-
-    async function readFirstExisting(paths) {
-      for (const path of paths) {
-        try {
-          const snap = await db.ref(path).once('value');
-          if (snap.exists()) return snap.val() || {};
-        } catch (err) {
-          if (!isPermissionDenied(err)) console.warn('Driver debt read skipped:', path, err);
-        }
-      }
-      return {};
-    }
-
-    async function loadDriverTransportData(year) {
-      const y = String(year);
-      const schoolId = state.schoolId || getSomap()?.getSchool?.()?.id || 'socrates-school';
-      const identity = driverIdentityValues();
-      const socrates = isSocratesLegacySchool();
-      const busPaths = [
-        getSomap()?.P ? getSomap().P(`years/${y}/transport/buses`) : `years/${y}/transport/buses`,
-        `schools/${schoolId}/years/${y}/transport/buses`,
-        `transport/${schoolId}/${y}/buses`,
-        ...(socrates ? [`transport/socrates-school/${y}/buses`, `transport/socrates/${y}/buses`] : []),
-        `transport/-O_HndQaeuNugluTYPdp/${y}/buses`,
-      ].filter(Boolean);
-      const busesRaw = await readFirstExisting(busPaths);
-      const buses = Object.entries(busesRaw || {}).map(([id, bus]) => ({ id, ...(bus || {}) }));
-      const busByRoute = {};
-      const normalizeRoute = (value) => String(value || '').trim().toLowerCase();
-      buses.forEach((bus) => {
-        [bus.assignedRoutes, bus.routes, bus.routeNames, bus.route, bus.routeName, bus.stopNames, bus.stops, bus.amStop, bus.pmStop, bus.morningRoute, bus.eveningRoute].forEach((raw) => {
-          const list = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? Object.values(raw) : String(raw || '').split(','));
-          list.forEach((item) => {
-            const route = normalizeRoute(typeof item === 'object' ? item.name || item.route || item.id : item);
-            if (route && !busByRoute[route]) busByRoute[route] = bus;
-          });
-        });
-      });
-      const driverBusIds = new Set(buses.filter((bus) => transportRecordMatchesDriver(bus, identity)).map((bus) => String(bus.id)));
-
-      const enrollmentPaths = [
-        getSomap()?.P ? getSomap().P(`years/${y}/transportEnrollments`) : `years/${y}/transportEnrollments`,
-        `schools/${schoolId}/years/${y}/transportEnrollments`,
-        ...(socrates ? ['transport_enrollments'] : []),
-      ].filter(Boolean);
-      const assignmentPaths = [
-        getSomap()?.P ? getSomap().P(`years/${y}/transportAssignments`) : `years/${y}/transportAssignments`,
-        `schools/${schoolId}/years/${y}/transportAssignments`,
-        ...(socrates ? [`transportAssignments/${y}`] : []),
-      ].filter(Boolean);
-      const registryPaths = [
-        getSomap()?.P ? getSomap().P(`years/${y}/transportRegistry`) : `years/${y}/transportRegistry`,
-        `schools/${schoolId}/years/${y}/transportRegistry`,
-        ...(socrates ? [`transportRegistry/${y}`] : []),
-      ].filter(Boolean);
-
-      const [enrollmentsRaw, assignmentsRaw, registryRaw] = await Promise.all([
-        readFirstExisting(enrollmentPaths),
-        readFirstExisting(assignmentPaths),
-        readFirstExisting(registryPaths),
-      ]);
-      const allEnrollments = {};
-      Object.entries(enrollmentsRaw || {}).forEach(([studentId, value]) => { if (value) allEnrollments[studentId] = { ...(value || {}), studentId }; });
-      Object.entries(registryRaw || {}).forEach(([studentId, value]) => {
-        if (value?.using === true && !allEnrollments[studentId]) allEnrollments[studentId] = { ...(value || {}), studentId, amStop: value.routeId || '', pmStop: value.stopName || '' };
-      });
-      Object.entries(assignmentsRaw || {}).forEach(([studentId, value]) => {
-        if (!value) return;
-        if (value.status && value.status !== 'Using') {
-          delete allEnrollments[studentId];
-          return;
-        }
-        const existing = allEnrollments[studentId] || {};
-        const mv = value.morningVehicle || existing.morningVehicle || {};
-        const ev = value.eveningVehicle || existing.eveningVehicle || {};
-        allEnrollments[studentId] = {
-          ...existing,
-          ...value,
-          studentId,
-          amStop: value.morningRouteId || value.amStop || existing.amStop || '',
-          pmStop: value.eveningRouteId || value.pmStop || existing.pmStop || '',
-          morningVehicleId: mv.vehicleId || mv.id || existing.morningVehicleId || null,
-          eveningVehicleId: ev.vehicleId || ev.id || existing.eveningVehicleId || null,
-        };
-      });
-
-      const studentPaths = [
-        getSomap()?.P ? getSomap().P(`years/${y}/students`) : `years/${y}/students`,
-        getSomap()?.P ? getSomap().P('students') : 'students',
-        `schools/${schoolId}/years/${y}/students`,
-        `schools/${schoolId}/students`,
-        ...(socrates ? [`years/${y}/students`, 'students'] : []),
-      ].filter(Boolean);
-      let studentsRaw = {};
-      for (const path of studentPaths) {
-        const chunk = await readFirstExisting([path]);
-        studentsRaw = { ...studentsRaw, ...(chunk || {}) };
-        if (Object.keys(studentsRaw).length) break;
-      }
-
-      const resolveBusForEnrollment = (enrollment) => {
-        const ids = [
-          enrollment.vehicleId,
-          enrollment.busId,
-          enrollment.assignedVehicleId,
-          enrollment.morningVehicleId,
-          enrollment.eveningVehicleId,
-          enrollment.morningVehicle?.vehicleId,
-          enrollment.morningVehicle?.id,
-          enrollment.eveningVehicle?.vehicleId,
-          enrollment.eveningVehicle?.id,
-        ].map((value) => String(value || '').trim()).filter(Boolean);
-        const direct = ids.find((id) => driverBusIds.has(id));
-        if (direct) return direct;
-        const am = normalizeRoute(enrollment.amStop || enrollment.pickupStop || enrollment.morningStop || '');
-        const pm = normalizeRoute(enrollment.pmStop || enrollment.dropoffStop || enrollment.eveningStop || '');
-        const routeBus = busByRoute[am] || busByRoute[pm] || null;
-        return routeBus ? String(routeBus.id) : '';
-      };
-
-      const rows = Object.entries(allEnrollments || {}).filter(([, enrollment]) => {
-        if (transportRecordMatchesDriver(enrollment, identity)) return true;
-        const busId = resolveBusForEnrollment(enrollment);
-        return busId && driverBusIds.has(busId);
-      }).map(([studentId, enrollment]) => {
-        const student = studentsRaw[studentId] || {};
-        const fullName = String(
-          student.fullName ||
-          enrollment.fullName ||
-          enrollment.studentName ||
-          [student.firstName, student.middleName, student.lastName].filter(Boolean).join(' ') ||
-          student.admissionNumber ||
-          enrollment.admissionNumber ||
-          studentId
-        ).replace(/\s+/g, ' ').trim();
-        return {
-          studentId,
-          admissionNumber: student.admissionNumber || student.admissionNo || enrollment.admissionNumber || enrollment.admissionNo || enrollment.studentAdm || studentId,
-          fullName,
-          classLevel: student.classLevel || student.className || enrollment.classLevel || enrollment.className || enrollment.class || '-',
-          parentContact: student.primaryParentContact || student.parentPhone || student.guardianPhone || enrollment.parentContact || enrollment.parentPhone || '-',
-          enrollment,
-        };
-      }).sort((a, b) => String(a.fullName || '').localeCompare(String(b.fullName || '')));
-      return rows;
-    }
-
-    async function loadDriverTransportPayments(year, row) {
-      const ids = Array.from(new Set([row.studentId, row.admissionNumber].map((value) => String(value || '').trim()).filter(Boolean)));
-      for (const id of ids) {
-        const paymentPaths = [
-          getSomap()?.P ? getSomap().P(`years/${year}/transportLedgers/${id}/payments`) : `years/${year}/transportLedgers/${id}/payments`,
-          `transportLedgers/${year}/${id}/payments`,
-          getSomap()?.P ? getSomap().P(`years/${year}/transport_payments/${id}`) : `years/${year}/transport_payments/${id}`,
-          `transport_payments/${id}`,
-        ].filter(Boolean);
-        const raw = await readFirstExisting(paymentPaths);
-        const list = Array.isArray(raw) ? raw : Object.values(raw || {});
-        if (list.length) return list.filter((payment) => Number(payment?.year || year) === Number(year) || payment?.year === undefined);
-      }
-      return [];
-    }
-
-    async function calculateDriverTransportDebt(year, row, multipliers) {
-      if (!window.TransportPricing?.buildLedger) return { debt: 0, unpaidMonthsDisplay: 'None', currentMonthExpected: 0, paid: 0 };
-      const monthNames = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-      const enrollment = row.enrollment || {};
-      const payments = (await loadDriverTransportPayments(year, row)).filter((payment) =>
-        payment.approved === true || payment.approved === 'true' || payment.approvedAt || payment.status === 'approved'
-      );
-      const amStop = enrollment.amStop || enrollment.pickupStop || enrollment.morningStop || '';
-      const pmStop = enrollment.pmStop || enrollment.dropoffStop || enrollment.eveningStop || '';
-      const baseMonthlyFee = Number(enrollment.baseMonthlyFee || enrollment.monthlyFee || enrollment.transportFee || 0) || 0;
-      const ledger = await window.TransportPricing.buildLedger({
-        year: Number(year),
-        baseMonthlyFee,
-        amStop,
-        pmStop,
-        startDate: transportResolveStartDate(enrollment, year),
-        endDate: transportResolveEndDate(enrollment),
-        payments,
-        multipliers,
-      });
-      const now = new Date();
-      const currentYear = now.getFullYear();
-      const currentMonth = now.getMonth() + 1;
-      const lastDueMonth = now.getDate() >= 3 ? currentMonth : Math.max(0, currentMonth - 1);
-      const dueRows = (ledger.months || []).filter((monthRow) => {
-        if (Number(year) < currentYear) return true;
-        if (Number(year) > currentYear) return false;
-        return Number(monthRow.month) <= lastDueMonth;
-      });
-      const due = dueRows.reduce((sum, monthRow) => sum + Number(monthRow.due || 0), 0);
-      const paid = Math.min(due, dueRows.reduce((sum, monthRow) => sum + Number(monthRow.paid || 0), 0));
-      const unpaid = dueRows
-        .filter((monthRow) => Number(monthRow.due || 0) > 0 && Number(monthRow.balance || 0) > 0)
-        .map((monthRow) => `${monthNames[monthRow.month].slice(0, 3)}=${Number(monthRow.balance || 0).toLocaleString('en-US')}`);
-      const currentMonthExpected = Number((ledger.months || []).find((monthRow) => Number(monthRow.month) === currentMonth)?.due || 0);
-      return {
-        debt: Math.max(0, Math.round(due - paid)),
-        paid: Math.round(paid),
-        currentMonthExpected: Math.round(currentMonthExpected),
-        unpaidMonthsDisplay: unpaid.join(', ') || 'None',
-      };
-    }
-
+    // Transport debt comes from TransportDebtEngine, the same calculation as
+    // transportpayments.html ("Transport Debt (TO DATE)"), so the driver list
+    // always shows the exact debt finance sees.
     async function prepareDriverDebtDownload(year) {
-      if (!isDriverAttendanceRole() || !window.html2pdf || !window.SomapFinance) return null;
-      if (typeof window.SomapFinance._clearFinanceCaches === 'function') {
+      if (!isDriverAttendanceRole()) return null;
+      if (!window.TransportDebtEngine || !window.TransportPricing) {
+        throw new Error('Transport debt tools did not load. Refresh the page and try again.');
+      }
+      if (typeof window.SomapFinance?._clearFinanceCaches === 'function') {
         window.SomapFinance._clearFinanceCaches();
       }
-      const [assignedRows, financeEntries] = await Promise.all([
-        loadDriverTransportData(year),
-        window.SomapFinance.getYearFinanceEntries(year).catch(() => ({})),
+      const schoolId = state.schoolId || getSomap()?.getSchool?.()?.id || '';
+      const [financeEntries, engine] = await Promise.all([
+        window.SomapFinance?.getYearFinanceEntries
+          ? window.SomapFinance.getYearFinanceEntries(year).catch(() => ({}))
+          : Promise.resolve({}),
+        window.TransportDebtEngine.load({ db, schoolId, year }),
       ]);
       const financeById = new Map();
       Object.entries(financeEntries || {}).forEach(([studentId, entry]) => {
@@ -2023,7 +1767,6 @@
         const finance = entry?.finance || {};
         const row = {
           schoolDebt: Math.max(0, Number(finance.periodDebtValue || 0) || 0),
-          schoolBalance: Math.max(0, Number(finance.balance ?? entry?.outstanding ?? 0) || 0),
           debtTill: String(finance.periodDebtLabel || '-').trim() || '-',
         };
         [studentId, student.admissionNumber, student.admissionNo].forEach((key) => {
@@ -2031,69 +1774,44 @@
           if (normalized) financeById.set(normalized, row);
         });
       });
-      const multipliers = window.TransportPricing?.loadYearMultipliers
-        ? await window.TransportPricing.loadYearMultipliers(Number(year)).catch(() => null)
-        : null;
-      const rows = await Promise.all(assignedRows.map(async (row) => {
-        const finance = financeById.get(String(row.studentId)) || financeById.get(String(row.admissionNumber)) || {};
-        const transport = await calculateDriverTransportDebt(year, row, multipliers);
+      // Riders = the pupils transportpayments.html shows under this driver (AM or PM), including
+      // ones who stopped transport but still owe; pupils it does not list at all are left out.
+      const rows = (await Promise.all(engine.idsForDriver(driverIdentityValues()).map(async (studentId) => {
+        const status = await engine.statusFor(studentId);
+        if (!status || !status.listed) return null;
+        const finance = financeById.get(String(studentId)) || financeById.get(String(status.admissionNumber)) || {};
         return {
-          ...row,
+          studentId,
+          admissionNumber: status.admissionNumber,
+          fullName: status.fullName || status.admissionNumber,
+          classLevel: status.className || '-',
+          parentContact: status.parentContact || '-',
+          stopped: status.transportStatus === 'Stopped',
           schoolDebt: Math.max(0, Number(finance.schoolDebt || 0)),
-          schoolBalance: Math.max(0, Number(finance.schoolBalance || 0)),
           schoolDebtTill: finance.debtTill || '-',
-          transportDebt: Math.max(0, Number(transport.debt || 0)),
-          transportPaid: Math.max(0, Number(transport.paid || 0)),
-          currentMonthTransportFee: Math.max(0, Number(transport.currentMonthExpected || 0)),
-          unpaidMonthsDisplay: transport.unpaidMonthsDisplay || 'None',
+          transportDebt: Math.max(0, Number(status?.debt || 0)),
+          transportPaid: Math.max(0, Number(status?.totalPaid || 0)),
+          unpaidMonthsDisplay: status?.unpaidMonthsDisplay || 'None',
         };
-      }));
-      const blockedRows = rows
-        .filter((row) => Number(row.schoolDebt || 0) > 0 || Number(row.transportDebt || 0) > 0)
-        .sort((a, b) => (Number(b.schoolDebt || 0) + Number(b.transportDebt || 0)) - (Number(a.schoolDebt || 0) + Number(a.transportDebt || 0)));
+      }))).filter(Boolean);
+      // A pupil who stopped transport only matters to the driver while transport is still owed.
+      const debtors = rows
+        .filter((row) => row.transportDebt > 0 || (!row.stopped && row.schoolDebt > 0))
+        .sort((a, b) => (b.transportDebt - a.transportDebt) || (b.schoolDebt - a.schoolDebt) || String(a.fullName).localeCompare(String(b.fullName)));
       const generatedAt = new Date().toLocaleString('en-GB', {
-        timeZone: 'Africa/Nairobi',
-        weekday: 'short',
-        year: 'numeric',
-        month: 'short',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
+        timeZone: 'Africa/Nairobi', weekday: 'short', year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit',
       });
       return {
         year,
         generatedAt,
+        schoolName: state.schoolName || getSomap()?.getSchool?.()?.name || 'School',
         driverName: getWorkerName(),
-        assignedCount: assignedRows.length,
-        debtors: blockedRows,
+        assignedCount: rows.filter((row) => !row.stopped).length,
+        debtors,
+        totalTransportDebt: debtors.reduce((sum, row) => sum + row.transportDebt, 0),
+        totalSchoolDebt: debtors.reduce((sum, row) => sum + row.schoolDebt, 0),
         filename: `driver_no_pickup_debt_list_${year}_${state.todayKey}_${state.workerId || 'driver'}.pdf`,
       };
-    }
-
-    function driverDebtPdfStyles() {
-      return `
-        <style>
-          * { box-sizing: border-box; }
-          body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #102033; background: #ffffff; }
-          .dd-page { padding: 10mm; }
-          .dd-header { display: flex; align-items: center; gap: 12px; border-bottom: 3px solid #991b1b; padding-bottom: 10px; }
-          .dd-logo { width: 60px; height: 60px; object-fit: contain; }
-          .dd-title { margin: 0; font-size: 22px; color: #111827; }
-          .dd-subtitle { margin: 3px 0 0; color: #475569; font-size: 12px; }
-          .dd-alert { margin: 12px 0; padding: 10px 12px; border-left: 6px solid #dc2626; background: #fef2f2; color: #7f1d1d; font-weight: 800; }
-          .dd-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
-          .dd-card { border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px; background: #f8fafc; }
-          .dd-card span { display: block; color: #64748b; font-size: 9px; text-transform: uppercase; font-weight: 700; }
-          .dd-card strong { display: block; margin-top: 3px; color: #0f172a; font-size: 14px; }
-          table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-          th { background: #7f1d1d; color: #ffffff; text-align: left; font-size: 9px; padding: 7px 5px; }
-          td { border-bottom: 1px solid #dbe3ee; font-size: 9px; padding: 6px 5px; vertical-align: top; }
-          tr:nth-child(even) td { background: #f8fafc; }
-          .dd-money { color: #b91c1c; font-weight: 800; white-space: nowrap; }
-          .dd-ok { color: #047857; font-weight: 800; }
-          .dd-footer { margin-top: 12px; color: #64748b; font-size: 9px; display: flex; justify-content: space-between; border-top: 1px solid #cbd5e1; padding-top: 7px; }
-        </style>
-      `;
     }
 
     function getSomapLogoSrc() {
@@ -2102,70 +1820,6 @@
       } catch (_) {
         return '../images/somap-logo.png';
       }
-    }
-
-    function buildDriverDebtPdfHtml(data) {
-      const logoSrc = getSomapLogoSrc();
-      const money = (value) => `TZS ${Number(value || 0).toLocaleString('en-US')}`;
-      const totalSchoolDebt = data.debtors.reduce((sum, row) => sum + Number(row.schoolDebt || 0), 0);
-      const totalTransportDebt = data.debtors.reduce((sum, row) => sum + Number(row.transportDebt || 0), 0);
-      const rowsHtml = data.debtors.length
-        ? data.debtors.map((row, index) => `
-          <tr>
-            <td>${index + 1}</td>
-            <td>${escapeHtml(row.admissionNumber || row.studentId)}</td>
-            <td><strong>${escapeHtml(row.fullName)}</strong><br>${escapeHtml(row.parentContact || '-')}</td>
-            <td>${escapeHtml(row.classLevel || '-')}</td>
-            <td class="dd-money">${money(row.schoolDebt)}</td>
-            <td>${escapeHtml(row.schoolDebtTill || '-')}</td>
-            <td class="dd-money">${money(row.transportDebt)}</td>
-            <td>${escapeHtml(row.unpaidMonthsDisplay || 'None')}</td>
-            <td class="dd-money">${money(Number(row.schoolDebt || 0) + Number(row.transportDebt || 0))}</td>
-            <td>USIMCHUKUE / DO NOT PICK</td>
-          </tr>
-        `).join('')
-        : '<tr><td colspan="10" class="dd-ok" style="text-align:center;padding:18px;">No assigned transport child has current school-fee or transport debt.</td></tr>';
-      return `
-        ${driverDebtPdfStyles()}
-        <main class="dd-page">
-          <header class="dd-header">
-            <img class="dd-logo" src="${escapeHtml(logoSrc)}" alt="SoMAp logo">
-            <div>
-              <h1 class="dd-title">SoMAp Driver No-Pickup Debt List</h1>
-              <p class="dd-subtitle">${escapeHtml(state.schoolName || 'Socrates School')} | Academic Year ${escapeHtml(data.year)} | Generated ${escapeHtml(data.generatedAt)}</p>
-              <p class="dd-subtitle">Driver: ${escapeHtml(data.driverName || getWorkerName())}</p>
-            </div>
-          </header>
-          <div class="dd-alert">Students listed here use transport under this driver and must not be picked up until finance clears them. A student appears if either current school-fee debt or transport debt to date is above zero.</div>
-          <section class="dd-cards">
-            <div class="dd-card"><span>Assigned Riders</span><strong>${data.assignedCount}</strong></div>
-            <div class="dd-card"><span>No-Pickup Students</span><strong>${data.debtors.length}</strong></div>
-            <div class="dd-card"><span>School Fee Debt</span><strong>${money(totalSchoolDebt)}</strong></div>
-            <div class="dd-card"><span>Transport Debt</span><strong>${money(totalTransportDebt)}</strong></div>
-          </section>
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Admission</th>
-                <th>Student / Parent</th>
-                <th>Class</th>
-                <th>School Debt</th>
-                <th>School Debt Till</th>
-                <th>Transport Debt</th>
-                <th>Unpaid Transport Months</th>
-                <th>Total Debt</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>${rowsHtml}</tbody>
-          </table>
-          <footer class="dd-footer">
-            <span>SoMAp Workers Attendance driver gate</span>
-            <span>${escapeHtml(state.today || '')}</span>
-          </footer>
-        </main>
-      `;
     }
 
     function loadImageAsDataUrl(src) {
@@ -2178,8 +1832,7 @@
             const canvas = document.createElement('canvas');
             canvas.width = img.naturalWidth || img.width || 1;
             canvas.height = img.naturalHeight || img.height || 1;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0);
+            canvas.getContext('2d').drawImage(img, 0, 0);
             resolve(canvas.toDataURL('image/png'));
           } catch (error) {
             console.warn('Logo conversion skipped for PDF', error);
@@ -2191,222 +1844,198 @@
       });
     }
 
-    async function downloadDriverDebtPdf(data, fallbackSourceEl) {
-      const JsPdfCtor = window.jspdf?.jsPDF || window.jsPDF;
-      if (!JsPdfCtor) {
-        await window.html2pdf().set({
-          margin: 5,
-          filename: data.filename,
-          image: { type: 'jpeg', quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
-          jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' }
-        }).from(fallbackSourceEl).save();
-        return;
-      }
+    const driverDebtMoney = (value) => `TZS ${Math.round(Number(value || 0)).toLocaleString('en-US')}`;
 
+    async function downloadDriverDebtPdf(data) {
+      const JsPdfCtor = window.jspdf?.jsPDF || window.jsPDF;
+      if (!JsPdfCtor) throw new Error('PDF library not loaded');
       const doc = new JsPdfCtor({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      if (typeof doc.autoTable !== 'function') throw new Error('PDF table library not loaded');
       const pageW = doc.internal.pageSize.getWidth();
       const pageH = doc.internal.pageSize.getHeight();
-      const margin = 7;
-      const money = (value) => `TZS ${Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
-      const totalSchoolDebt = data.debtors.reduce((sum, row) => sum + Number(row.schoolDebt || 0), 0);
-      const totalTransportDebt = data.debtors.reduce((sum, row) => sum + Number(row.transportDebt || 0), 0);
+      const M = 10;
       const logoData = await loadImageAsDataUrl(getSomapLogoSrc());
-      const columns = [
-        { label: '#', x: margin, w: 7 },
-        { label: 'Admission', x: 15, w: 33 },
-        { label: 'Student / Parent', x: 49, w: 47 },
-        { label: 'Class', x: 97, w: 23 },
-        { label: 'School Debt', x: 121, w: 23 },
-        { label: 'Debt Till', x: 145, w: 20 },
-        { label: 'Transport Debt', x: 166, w: 25 },
-        { label: 'Unpaid Transport Months', x: 192, w: 47 },
-        { label: 'Total Debt', x: 240, w: 24 },
-        { label: 'Action', x: 265, w: 25 },
+      const RED = [153, 27, 27];
+      const INK = [15, 23, 42];
+      const MUTED = [100, 116, 139];
+
+      // Header
+      doc.setFillColor(...RED);
+      doc.rect(0, 0, pageW, 26, 'F');
+      if (logoData) {
+        doc.setFillColor(255, 255, 255);
+        doc.roundedRect(M, 4, 18, 18, 2, 2, 'F');
+        try { doc.addImage(logoData, 'PNG', M + 1.5, 5.5, 15, 15); } catch (_) {}
+      }
+      const textX = M + (logoData ? 23 : 0);
+      doc.setTextColor(255, 255, 255);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(17);
+      doc.text('Driver No-Pickup Debt List', textX, 12);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.5);
+      doc.text(`${data.schoolName} | Academic Year ${data.year}`, textX, 18);
+      doc.text(`Driver: ${data.driverName || '-'}   |   Generated: ${data.generatedAt}`, textX, 22.5);
+
+      // Summary cards
+      let y = 32;
+      const cards = [
+        ['Riders using transport', String(data.assignedCount)],
+        ['Do not pick up', String(data.debtors.length)],
+        ['Transport debt (to date)', driverDebtMoney(data.totalTransportDebt)],
+        ['School fee debt', driverDebtMoney(data.totalSchoolDebt)],
       ];
-      let y = margin;
-      let page = 1;
-
-      function drawHeader() {
-        y = margin;
-        if (logoData) {
-          try { doc.addImage(logoData, 'PNG', margin, y, 14, 14); } catch (_) {}
-        }
-        doc.setTextColor(17, 24, 39);
+      const gap = 4;
+      const cardW = (pageW - M * 2 - gap * (cards.length - 1)) / cards.length;
+      cards.forEach(([label, value], idx) => {
+        const x = M + idx * (cardW + gap);
+        doc.setDrawColor(226, 232, 240);
+        doc.setFillColor(idx === 1 ? 254 : 248, idx === 1 ? 242 : 250, idx === 1 ? 242 : 252);
+        doc.roundedRect(x, y, cardW, 15, 2, 2, 'FD');
+        doc.setTextColor(...MUTED);
         doc.setFont('helvetica', 'bold');
-        doc.setFontSize(15);
-        doc.text('SoMAp Driver No-Pickup Debt List', margin + 18, y + 5.5);
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(8.8);
-        doc.setTextColor(71, 85, 105);
-        doc.text(`${state.schoolName || 'Socrates School'} | Academic Year ${data.year} | Generated ${data.generatedAt}`, margin + 18, y + 10);
-        doc.text(`Driver: ${data.driverName || getWorkerName()}`, margin + 18, y + 14.2);
-        y += 18;
+        doc.setFontSize(7.5);
+        doc.text(label.toUpperCase(), x + 3.5, y + 5.5);
+        doc.setTextColor(...(idx >= 1 ? RED : INK));
+        doc.setFontSize(13);
+        doc.text(value, x + 3.5, y + 12);
+      });
+      y += 20;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(127, 29, 29);
+      doc.text(doc.splitTextToSize('Do not pick up the children below until finance clears them. Transport debt is exactly as shown on Transport Payments (debt to date: each month is due by the 3rd). School fee debt is the Finance "Debt till" amount.', pageW - M * 2), M, y);
+      y += 7;
 
-        doc.setDrawColor(153, 27, 27);
-        doc.setLineWidth(0.7);
-        doc.line(margin, y, pageW - margin, y);
-        y += 3;
-
-        doc.setFillColor(254, 242, 242);
-        doc.rect(margin, y, pageW - (margin * 2), 10, 'F');
-        doc.setTextColor(127, 29, 29);
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(7.8);
-        const alertLines = doc.splitTextToSize('Students listed here use transport under this driver and must not be picked up until finance clears them. A student appears if either current school-fee debt or transport debt to date is above zero.', pageW - (margin * 2) - 4);
-        doc.text(alertLines.slice(0, 2), margin + 2, y + 4);
-        y += 12;
-
-        const cardW = 47;
-        const cardGap = 3;
-        const cards = [
-          ['Assigned Riders', data.assignedCount],
-          ['No-Pickup Students', data.debtors.length],
-          ['School Fee Debt', money(totalSchoolDebt)],
-          ['Transport Debt', money(totalTransportDebt)],
-        ];
-        cards.forEach((card, idx) => {
-          const x = margin + idx * (cardW + cardGap);
-          doc.setDrawColor(203, 213, 225);
-          doc.setFillColor(248, 250, 252);
-          doc.roundedRect(x, y, cardW, 11, 1.2, 1.2, 'FD');
-          doc.setTextColor(100, 116, 139);
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(6.2);
-          doc.text(String(card[0]).toUpperCase(), x + 2.5, y + 4);
-          doc.setTextColor(17, 24, 39);
-          doc.setFontSize(8.8);
-          doc.text(String(card[1]), x + 2.5, y + 8.5);
-        });
-        y += 14;
-        drawTableHeader();
-      }
-
-      function drawTableHeader() {
-        doc.setFillColor(127, 29, 29);
-        doc.rect(margin, y, pageW - (margin * 2), 8, 'F');
-        doc.setTextColor(255, 255, 255);
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(6.4);
-        columns.forEach((col) => doc.text(col.label, col.x + 0.8, y + 5, { maxWidth: col.w - 1 }));
-        y += 9;
-      }
-
-      function drawFooter() {
-        doc.setDrawColor(203, 213, 225);
-        doc.line(margin, pageH - 8, pageW - margin, pageH - 8);
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(6);
-        doc.setTextColor(100, 116, 139);
-        doc.text('SoMAp Workers Attendance driver gate', margin, pageH - 4);
-        doc.text(`${state.today || ''} | Page ${page}`, pageW - margin - 34, pageH - 4);
-      }
-
-      drawHeader();
-      if (!data.debtors.length) {
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(10);
-        doc.setTextColor(4, 120, 87);
-        doc.text('No assigned transport child has current school-fee or transport debt.', margin, y + 8);
-      } else {
-        data.debtors.forEach((row, index) => {
-          const cells = [
-            String(index + 1),
-            String(row.admissionNumber || row.studentId || ''),
-            `${row.fullName || ''}\n${row.parentContact || '-'}`,
-            String(row.classLevel || '-'),
-            money(row.schoolDebt),
-            String(row.schoolDebtTill || '-'),
-            money(row.transportDebt),
-            String(row.unpaidMonthsDisplay || 'None'),
-            money(Number(row.schoolDebt || 0) + Number(row.transportDebt || 0)),
-            'USIMCHUKUE',
-          ];
-          const wrapped = cells.map((cell, idx) => {
-            if (idx === 9) return [String(cell)];
-            return doc.splitTextToSize(String(cell), columns[idx].w - 1.4);
-          });
-          const rowH = Math.max(8, ...wrapped.map((lines) => (Array.isArray(lines) ? lines.length : 1) * 3.4 + 1.8));
-          if (y + rowH > pageH - 11) {
-            drawFooter();
-            doc.addPage();
-            page += 1;
-            drawHeader();
-          }
-          if (index % 2 === 1) {
-            doc.setFillColor(248, 250, 252);
-            doc.rect(margin, y - 1, pageW - (margin * 2), rowH, 'F');
-          }
+      const body = data.debtors.map((row, index) => [
+        String(index + 1),
+        `${row.fullName || '-'}\n${row.admissionNumber || row.studentId || ''}${row.stopped ? ' (stopped transport)' : ''}`,
+        String(row.classLevel || '-'),
+        String(row.parentContact || '-'),
+        row.transportDebt > 0 ? driverDebtMoney(row.transportDebt) : '-',
+        row.transportDebt > 0 ? String(row.unpaidMonthsDisplay || '-').replace(/, /g, '\n') : '-',
+        row.schoolDebt > 0 ? `${driverDebtMoney(row.schoolDebt)}${row.schoolDebtTill && row.schoolDebtTill !== '-' ? `\ntill ${row.schoolDebtTill}` : ''}` : '-',
+        'USIMCHUKUE\nDO NOT PICK',
+      ]);
+      doc.autoTable({
+        startY: y,
+        margin: { left: M, right: M, top: 14, bottom: 14 },
+        head: [['#', 'Student / Admission', 'Class', 'Parent Phone', 'Transport Debt (to date)', 'Unpaid Transport Months', 'School Fee Debt', 'Action']],
+        body: body.length ? body : [[{ content: 'No child on your vehicle has transport or school-fee debt today.', colSpan: 8, styles: { halign: 'center', textColor: [4, 120, 87], fontStyle: 'bold' } }]],
+        theme: 'grid',
+        styles: { font: 'helvetica', fontSize: 9, cellPadding: 2.2, textColor: INK, lineColor: [226, 232, 240], lineWidth: 0.2, valign: 'middle' },
+        headStyles: { fillColor: RED, textColor: 255, fontStyle: 'bold', fontSize: 8.5 },
+        alternateRowStyles: { fillColor: [248, 250, 252] },
+        columnStyles: {
+          0: { cellWidth: 9, halign: 'center' },
+          1: { cellWidth: 62, fontStyle: 'bold' },
+          2: { cellWidth: 24 },
+          3: { cellWidth: 30 },
+          4: { cellWidth: 34, halign: 'right', textColor: RED, fontStyle: 'bold' },
+          5: { cellWidth: 46, fontSize: 8 },
+          6: { cellWidth: 34, halign: 'right' },
+          7: { halign: 'center', textColor: [127, 29, 29], fontStyle: 'bold', fontSize: 8 },
+        },
+        didDrawPage: () => {
           doc.setFont('helvetica', 'normal');
-          doc.setFontSize(7.1);
-          doc.setTextColor(15, 23, 42);
-          wrapped.forEach((lines, idx) => {
-            if ([4, 6, 8].includes(idx)) {
-              doc.setTextColor(185, 28, 28);
-              doc.setFont('helvetica', 'bold');
-            } else if (idx === 9) {
-              doc.setTextColor(127, 29, 29);
-              doc.setFont('helvetica', 'bold');
-            }
-            doc.text(lines, columns[idx].x + 0.8, y + 4);
-            doc.setTextColor(15, 23, 42);
-            doc.setFont('helvetica', 'normal');
-          });
-          doc.setDrawColor(219, 227, 238);
-          doc.line(margin, y + rowH - 1, pageW - margin, y + rowH - 1);
-          y += rowH;
-        });
-      }
-      drawFooter();
+          doc.setFontSize(7.5);
+          doc.setTextColor(...MUTED);
+          doc.text(`SoMAp driver check-in | ${data.driverName || ''} | ${data.year}`, M, pageH - 6);
+          doc.text(`Page ${doc.internal.getNumberOfPages()}`, pageW - M, pageH - 6, { align: 'right' });
+        },
+      });
       doc.save(data.filename);
     }
 
-    function showDriverDebtDownloadGate(data) {
-      if (!data) return Promise.resolve({ downloaded: true });
+    function showDriverDebtDownloadGate(year) {
       return new Promise((resolve) => {
-        const totalSchoolDebt = data.debtors.reduce((sum, row) => sum + Number(row.schoolDebt || 0), 0);
-        const totalTransportDebt = data.debtors.reduce((sum, row) => sum + Number(row.transportDebt || 0), 0);
         const overlay = document.createElement('div');
         overlay.className = 'mini-modal-overlay';
-        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(69,10,10,.95);z-index:13200;display:grid;place-items:center;padding:14px;overflow:auto;';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.88);z-index:13200;display:grid;place-items:center;padding:12px;overflow:auto;';
         overlay.innerHTML = `
-          <section class="mini-modal-card" role="dialog" aria-modal="true" style="width:min(1220px,100%);max-height:94vh;overflow:auto;background:#fff7ed;color:#111827;border:3px solid #991b1b;border-radius:18px;padding:14px;box-shadow:0 30px 90px rgba(0,0,0,.55);">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
-              <div style="display:flex;gap:12px;align-items:center;">
-                <img src="${escapeHtml(getSomapLogoSrc())}" alt="SoMAp logo" style="width:58px;height:58px;object-fit:contain;border-radius:14px;background:#fff;border:1px solid #fed7aa;padding:6px;">
-                <div>
-                  <div style="display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;background:#dc2626;color:#fff;font-weight:900;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;">Driver no-pickup list required</div>
-                  <h2 style="margin:8px 0 2px;color:#7f1d1d;font-size:1.25rem;">Download transport debt list before check-in</h2>
-                  <p style="margin:0;color:#7c2d12;font-weight:700;">Assigned riders: ${data.assignedCount} | No-pickup students: ${data.debtors.length} | School debt: TZS ${totalSchoolDebt.toLocaleString('en-US')} | Transport debt: TZS ${totalTransportDebt.toLocaleString('en-US')}</p>
-                </div>
-              </div>
-              <button type="button" class="workers-btn" data-action="download-driver-debts" style="background:linear-gradient(135deg,#dc2626,#f97316);color:#fff;box-shadow:0 12px 28px rgba(220,38,38,.35);">Download PDF & Continue Check-In</button>
-            </div>
-            <div style="background:#fff;border:1px solid #fed7aa;border-radius:10px;overflow:auto;">
-              <div class="driver-debt-pdf-source" style="width:1120px;max-width:none;background:#fff;">
-                ${buildDriverDebtPdfHtml(data)}
-              </div>
-            </div>
+          <section role="dialog" aria-modal="true" style="width:min(720px,100%);max-height:94vh;overflow:auto;background:#fff;color:#0f172a;border-radius:18px;box-shadow:0 30px 90px rgba(0,0,0,.5);">
+            <header style="background:#991b1b;color:#fff;padding:16px 18px;border-radius:18px 18px 0 0;">
+              <div style="font-size:.72rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;opacity:.85;">Driver check-in</div>
+              <h2 style="margin:4px 0 0;font-size:1.2rem;">Download the no-pickup debt list</h2>
+            </header>
+            <div data-role="body" style="padding:16px 18px;display:grid;gap:12px;"></div>
+            <footer style="padding:0 18px 18px;display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;">
+              <button type="button" class="workers-btn" data-action="cancel" style="background:#e2e8f0;color:#0f172a;">Ghairi</button>
+              <button type="button" class="workers-btn" data-action="primary" disabled style="background:linear-gradient(135deg,#dc2626,#f97316);color:#fff;">Inapakia...</button>
+            </footer>
           </section>
         `;
         document.body.appendChild(overlay);
-        const button = overlay.querySelector('[data-action="download-driver-debts"]');
-        const sourceEl = overlay.querySelector('.driver-debt-pdf-source');
-        button?.addEventListener('click', async () => {
-          const initialText = button.textContent;
-          button.disabled = true;
-          button.textContent = 'Preparing PDF...';
+        const bodyEl = overlay.querySelector('[data-role="body"]');
+        const primary = overlay.querySelector('[data-action="primary"]');
+        let data = null;
+        let mode = 'loading';
+        const card = (label, value, tone) => `<div style="border:1px solid #e2e8f0;border-radius:12px;padding:10px;background:${tone === 'bad' ? '#fef2f2' : '#f8fafc'};"><div style="font-size:.68rem;font-weight:800;color:#64748b;text-transform:uppercase;">${escapeHtml(label)}</div><div style="font-size:1.05rem;font-weight:900;color:${tone === 'bad' ? '#b91c1c' : '#0f172a'};margin-top:2px;">${escapeHtml(value)}</div></div>`;
+        const renderLoading = () => {
+          mode = 'loading';
+          primary.disabled = true;
+          primary.textContent = 'Inapakia...';
+          bodyEl.innerHTML = '<p style="margin:0;color:#475569;">Inapakia madeni halisi ya transport (kama Transport Payments) kwa watoto wa gari lako...</p>';
+        };
+        const renderError = (error) => {
+          mode = 'retry';
+          primary.disabled = false;
+          primary.textContent = 'Jaribu tena';
+          bodyEl.innerHTML = `<p style="margin:0;color:#b91c1c;font-weight:700;">Imeshindikana kupakia madeni.</p><p style="margin:0;color:#475569;">${escapeHtml(error?.message || 'Network error')}. Hakikisha una mtandao kisha bonyeza "Jaribu tena".</p>`;
+        };
+        const renderReady = () => {
+          mode = 'download';
+          primary.disabled = false;
+          primary.textContent = 'Download PDF & Continue Check-In';
+          const list = data.debtors.slice(0, 40).map((row) => `
+            <li style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid #f1f5f9;">
+              <span><strong>${escapeHtml(row.fullName)}</strong><br><span style="font-size:.78rem;color:#64748b;">${escapeHtml(row.classLevel || '-')} · ${escapeHtml(row.parentContact || '-')}${row.stopped ? ' · amesimama usafiri' : ''}</span>${row.transportDebt > 0 ? `<br><span style="font-size:.74rem;color:#7f1d1d;">${escapeHtml(row.unpaidMonthsDisplay)}</span>` : ''}</span>
+              <span style="text-align:right;white-space:nowrap;">${row.transportDebt > 0 ? `<strong style="color:#b91c1c;">${escapeHtml(driverDebtMoney(row.transportDebt))}</strong><br><span style="font-size:.7rem;color:#64748b;">transport</span>` : ''}${row.schoolDebt > 0 ? `<br><span style="font-size:.78rem;color:#9a3412;">${escapeHtml(driverDebtMoney(row.schoolDebt))} ada</span>` : ''}</span>
+            </li>`).join('');
+          bodyEl.innerHTML = `
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;">
+              ${card('Riders', String(data.assignedCount))}
+              ${card('Usimchukue', String(data.debtors.length), 'bad')}
+              ${card('Transport debt', driverDebtMoney(data.totalTransportDebt), 'bad')}
+              ${card('School fee debt', driverDebtMoney(data.totalSchoolDebt))}
+            </div>
+            ${data.debtors.length
+              ? `<ul style="list-style:none;margin:0;padding:0;">${list}</ul>${data.debtors.length > 40 ? `<p style="margin:0;color:#64748b;font-size:.8rem;">+${data.debtors.length - 40} more in the PDF.</p>` : ''}`
+              : '<p style="margin:0;color:#047857;font-weight:800;">Hakuna mtoto wa gari lako mwenye deni leo.</p>'}
+          `;
+        };
+        const loadData = async () => {
+          renderLoading();
           try {
-            await downloadDriverDebtPdf(data, sourceEl);
+            data = await prepareDriverDebtDownload(year);
+            if (!data) { overlay.remove(); resolve({ downloaded: true }); return; }
+            renderReady();
+          } catch (error) {
+            console.warn('Driver debt list failed', error);
+            renderError(error);
+          }
+        };
+        overlay.querySelector('[data-action="cancel"]').addEventListener('click', () => {
+          overlay.remove();
+          resolve({ downloaded: false });
+        });
+        primary.addEventListener('click', async () => {
+          if (mode === 'retry') { loadData(); return; }
+          if (mode !== 'download') return;
+          primary.disabled = true;
+          primary.textContent = 'Inaandaa PDF...';
+          try {
+            await downloadDriverDebtPdf(data);
             overlay.remove();
-            resolve({ downloaded: true, debtorCount: data.debtors.length, assignedCount: data.assignedCount });
+            resolve({ downloaded: true, debtorCount: data.debtors.length, assignedCount: data.assignedCount, filename: data.filename });
           } catch (error) {
             console.warn('Driver debt PDF download failed', error);
             toast('PDF haijapakuliwa. Bonyeza tena Download PDF & Continue Check-In.', 'error', 6500);
-            button.disabled = false;
-            button.textContent = initialText;
+            primary.disabled = false;
+            primary.textContent = 'Download PDF & Continue Check-In';
           }
         });
+        loadData();
       });
     }
 
@@ -4801,10 +4430,8 @@
           };
 
           if (isDriverAttendanceRole()) {
-            if (btn) { btn.disabled = true; btn.textContent = 'Inaandaa orodha ya madeni ya transport...'; }
-            const driverDebtData = await prepareDriverDebtDownload(systemYear);
             if (btn) { btn.disabled = false; btn.textContent = initialText || 'Check-In Sasa'; }
-            const driverDebtDecision = await showDriverDebtDownloadGate(driverDebtData);
+            const driverDebtDecision = await showDriverDebtDownloadGate(systemYear);
             if (!driverDebtDecision?.downloaded) {
               toast('Check-in imeghairiwa; driver lazima apakue PDF ya watoto wa transport wenye madeni kwanza.', 'warning', 6500);
               return;
@@ -4813,7 +4440,7 @@
               downloadedAt: Date.now(),
               debtorCount: Number(driverDebtDecision.debtorCount || 0),
               assignedCount: Number(driverDebtDecision.assignedCount || 0),
-              filename: driverDebtData?.filename || '',
+              filename: driverDebtDecision.filename || '',
             };
             if (btn) { btn.disabled = true; btn.textContent = 'Inahifadhi...'; }
           }

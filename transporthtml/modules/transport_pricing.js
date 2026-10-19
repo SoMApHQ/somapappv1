@@ -27,6 +27,10 @@
   function maybePrefixPath(path){
     const clean = String(path || '').replace(/^\/+/, '');
     if (window.SOMAP && typeof window.SOMAP.P === 'function') return window.SOMAP.P(clean);
+    // Without the SOMAP context (e.g. driver hub opened by link) only Socrates owns the root paths;
+    // any other school must read its own scoped data, never Socrates' root catalog.
+    const sid = currentSchoolId();
+    if (sid && sid !== 'socrates-school') return `schools/${sid}/${clean}`;
     return clean;
   }
 
