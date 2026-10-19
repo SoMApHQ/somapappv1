@@ -73,6 +73,11 @@ function calculateTotalFee(reportingDate) {
   return Math.round(total);
 }
 
+// Socrates Class 7 pupils join Preform One without paying (see prefone_socrates_join.js)
+function isSocratesJoined(student) {
+  return Boolean(student && (student.feeCategory === 'SOCRATES' || student.source === 'socrates-class7'));
+}
+
 // Auto ADM No
 function generateAdmNo() { return 'PF1-' + Date.now(); }
 

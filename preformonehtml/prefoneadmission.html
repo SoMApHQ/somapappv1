@@ -16,6 +16,7 @@
   
   <!-- Shared Preform One Logic -->
   <script src="prefonecommon.js"></script>
+  <script src="prefone_socrates_join.js"></script>
   
   <style>
     body {
@@ -653,7 +654,9 @@
           }
         }
         
-        const totalFee = calculateTotalFee(reportingDate);
+        // Socrates Class 7 pupils who joined automatically never get a Preform One fee
+        const socratesJoined = isEditing && isSocratesJoined(studentsCache[editingAdm] || editingStudentSnapshot);
+        const totalFee = socratesJoined ? 0 : calculateTotalFee(reportingDate);
         const admNo = editingAdm || generateAdmNo();
         const registrationDate = new Date().toISOString().split('T')[0];
         
@@ -711,7 +714,7 @@
             <div class="text-left">
               <p><strong>Student:</strong> ${firstName} ${lastName}</p>
               <p><strong>ADM No:</strong> ${admNo}</p>
-              <p><strong>Total Fee:</strong> ${formatTSh(totalFee)} (from ${reportingDate})</p>
+              <p><strong>Total Fee:</strong> ${socratesJoined ? 'SOCRATES (no Preform One fee)' : `${formatTSh(totalFee)} (from ${reportingDate})`}</p>
               <p><strong>Parent:</strong> ${parentName} (${parentContact})</p>
               <p><strong>Former School:</strong> ${formerSchool}</p>
             </div>
@@ -779,13 +782,14 @@
           const balanceClass = balance > 0 ? 'text-red-300' : 'text-green-300';
           const fullName = `${s?.firstName || ''} ${s?.lastName || ''}`.trim();
           const reportingDate = s?.reportingDate ? new Date(s.reportingDate).toLocaleDateString('en-GB') : 'N/A';
+          const socrates = isSocratesJoined(s);
 
           return `<tr class="hover:bg-white/5 transition">
             <td class="p-3">${fullName}</td>
             <td class="p-3">${adm}</td>
             <td class="p-3">${reportingDate}</td>
-            <td class="p-3">${formatTSh(s?.totalFee)}</td>
-            <td class="p-3 ${balanceClass}">${formatTSh(balance)}</td>
+            <td class="p-3">${socrates ? 'SOCRATES' : formatTSh(s?.totalFee)}</td>
+            <td class="p-3 ${balanceClass}">${socrates ? 'SOCRATES' : formatTSh(balance)}</td>
             <td class="p-3">
               <button class="bg-yellow-500 text-white px-3 py-1 rounded mr-2 text-sm shadow-sm hover:bg-yellow-600" onclick="editStudent('${adm}')"><i class="fas fa-edit mr-1"></i>Edit</button>
               <button class="bg-red-500 text-white px-3 py-1 rounded text-sm shadow-sm hover:bg-red-600" onclick="deleteStudent('${adm}')"><i class="fas fa-trash mr-1"></i>Delete</button>
@@ -852,7 +856,9 @@
         confirmButtonText: 'Yes, Delete'
       }).then((result) => {
         if (result.isConfirmed) {
-          db.ref(`/schools/Socrates School Preform one/${currentYear}/students/${adm}`).remove().then(() => {
+          // A deleted auto-joined Socrates pupil must not be re-added by the next sync
+          Promise.resolve(window.PrefoneSocratesJoin?.rememberExclusion(db, currentYear, studentsCache[adm]))
+            .then(() => db.ref(`/schools/Socrates School Preform one/${currentYear}/students/${adm}`).remove()).then(() => {
             delete studentsCache[adm];
             if (editingAdm === adm) {
               cancelEdit();
@@ -867,8 +873,10 @@
       });
     }
     
-    // Initial load: Search students
-    searchStudents({ force: true });
+    // Initial load: add Socrates Class 7 pupils (from 10 Sep), then search students
+    Promise.resolve(window.PrefoneSocratesJoin?.syncSocratesClass7(db, currentYear))
+      .catch(() => {})
+      .finally(() => searchStudents({ force: true }));
   </script>
 </body>
 </html>
