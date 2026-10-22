@@ -57,13 +57,20 @@ test('reparse versions preserve prior results and do not add a statement',async(
   assert.equal(saved.categoryTotals['Transport / Usafiri'],326000);
   assert.ok(Object.keys(record.categoryTotals).every(k=>!/[.#$\[\]/]/.test(k)),'categoryTotals keys written to Firebase must not contain RTDB-forbidden characters (./ #$[])');
 });
-test('PDF uses readable font sizes, complete cards, repeated headings and page footers',async()=>{
-  const tables=[];let pages=1,footerCount=0;
-  class Doc {constructor(){this.internal={pageSize:{getWidth:()=>595,getHeight:()=>842}};this.lastAutoTable={finalY:100};}setFillColor(){}rect(){}setTextColor(){}setFontSize(){}text(text){if(String(text).includes('Confidential'))footerCount++;}addPage(){pages++;}autoTable(options){tables.push(options);this.lastAutoTable.finalY=100;}getNumberOfPages(){return pages;}setPage(){}}
+test('PDF: compact summary, complete full register, repeated headings and page footers',async()=>{
+  let tables=[],pages=1,footerCount=0;
+  class Doc {constructor(){this.internal={pageSize:{getWidth:()=>595,getHeight:()=>842},getCurrentPageInfo:()=>({pageNumber:pages})};this.lastAutoTable={finalY:100};}
+    setFillColor(){}setDrawColor(){}rect(){}roundedRect(){}line(){}setTextColor(){}setFontSize(){}setFont(){}addImage(){}splitTextToSize(t){return [String(t)];}
+    text(text){if(String(text).includes('Confidential'))footerCount++;}addPage(){pages++;}autoTable(options){tables.push(options);this.lastAutoTable.finalY=100;}getNumberOfPages(){return pages;}setPage(){}}
   global.jspdf={jsPDF:Doc};global.fetch=async()=>({ok:false});
   vm.runInThisContext(fs.readFileSync('Tojs/bank-audit/bank_audit_pdf.js','utf8'));
   await SomapBankAuditPdf.createDocument(audit);
-  assert.ok(tables.every(t=>t.styles.fontSize>=9&&t.headStyles.fontSize>=9&&t.showHead==='everyPage'));
-  for(const t of audit.transactions)assert.ok(tables.some(table=>JSON.stringify(table.body).includes(t.bankReference)));
+  assert.ok(tables.length<=8,'summary is a handful of overview tables, not one block per transaction');
+  assert.ok(tables.every(t=>t.styles.fontSize>=7&&t.headStyles.fontSize>=7&&t.showHead==='everyPage'));
+  assert.equal(footerCount,pages);
+  tables=[];pages=1;footerCount=0;
+  await SomapBankAuditPdf.createDocument(audit,{report:'all',detail:'full'});
+  for(const t of audit.transactions)assert.ok(tables.some(table=>JSON.stringify(table.body).includes(t.moneyIn?t.moneyIn.toLocaleString('en-US',{minimumFractionDigits:2}):t.moneyOut.toLocaleString('en-US',{minimumFractionDigits:2}))));
+  assert.equal(tables.at(-1).body.length,audit.transactions.length);
   assert.equal(footerCount,pages);await assert.rejects(()=>SomapBankAuditPdf.createDocument({validation:{valid:false}}));
 });

@@ -54,3 +54,21 @@ test('new purpose suggestions, then Yes / Merge / No decisions reclassify',()=>{
   assert.equal(C.category('Cash',config),'Unknown income');
   assert.equal(C.category('Pre Form One',{...config,categories:{}}),'Unknown income','deleted category falls back');
 });
+test('clear new names are offered as new types; only misspellings are offered as merges',()=>{
+  for(const [label,target] of [['Gradu','Graduation'],['Usafr','Transport / Usafiri'],['Remed','Remedial'],['Pre form one',''],['School fees',''],['Kuweka',''],['Tution',''],['Books','']])
+    assert.equal(C.nearPurpose(label),target,label);
+  assert.ok(audit.purposeSuggestions.every(s=>!s.mergeInto));
+  const rows=[{...audit.income[0],id:'x1',category:'Unknown income',writtenPurpose:'Gradu',moneyIn:10000}];
+  assert.equal(E.purposeSuggestions(rows,{})[0].mergeInto,'Graduation','a single misspelling is still offered');
+  assert.equal(E.purposeSuggestions([{...rows[0],writtenPurpose:'Books'}],{}).length,0,'one clear new label waits for the threshold');
+  assert.equal(E.purposeSuggestions([{...rows[0],writtenPurpose:'Books'}],{minCount:1}).length,1);
+});
+test('withdrawal recipients, stated reasons and wallet fees',()=>{
+  const by=n=>audit.withdrawalEvents.filter(w=>w.recipient===n);
+  assert.deepEqual(by('FRENKY JANES ODIRA').map(w=>[w.amountWithdrawn,w.charges,w.recipientAccount]),[[78000,2500,'0697694552']]);
+  const rehema=by('REHEMA MLEKWA');assert.equal(rehema.length,2);
+  assert.deepEqual(rehema.map(w=>[w.amountWithdrawn,w.charges]),[[42000,590],[63000,2500]]);
+  assert.equal(rehema[0].rawLines[0].statedReason,'Transport');
+  assert.equal(by('MUSSA')[0].rawLines[0].statedReason,'Loan');
+  assert.equal(audit.totals.withdrawalEventCount,33);
+});

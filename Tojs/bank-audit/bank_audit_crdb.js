@@ -43,12 +43,17 @@
     const cls = name.match(/\b(?:std|standard|class)\s*(\d+)/i);
     name = name.replace(/\b(?:std|standard|class)\s*\d+/i, '').trim();
     const purpose = (payment?.[3] || '').replace(/\s*N\/A\s*$/i, '').trim();
-    const recipient = text.match(/\bTO\s+(?:MPESA|AIRTEL|TIGOPESA|HALOPESA)\s+(\d+)\s+(.+?)(?=\s+AB\d|$)/i);
+    const wallet = '(?:MPESA|AIRTEL\\s*MONEY|AIRTEL|TIGO\\s*PESA|HALOPESA|HALOTEL)';
+    const recipient = text.match(new RegExp(`\\bTO\\s+${wallet}\\s+(\\d+)\\s+(.+?)(?=\\s+AB\\d|$)`, 'i'));
+    // Bank transfers end "… TO <PAYEE IN CAPITALS><Typed reason>", e.g. "TO REHEMA MLEKWA Transport",
+    // "TO MUSSALoan". CRDB prints names in capitals; the reason the operator typed is mixed case.
+    const transfer = !recipient && !payment ? text.match(/\bTO\s+([A-Z][A-Z .'&-]*?)\s*([A-Z][a-z][A-Za-z0-9 ,.'/-]*)?\s*$/) : null;
     return { rawNarration: raw, description: text, bankReference: (text.match(/REF\s*:\s*([a-z0-9]+)/i) || [])[1] || '',
       paymentReference: payment?.[1] || '', detectedStudentName: name.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()),
       extractedClass: cls ? `Standard ${cls[1]}` : '', writtenPurpose: purpose,
-      sender: (text.match(/\bFROM\s+(.+?)\s+TO\b/i) || [])[1] || '', recipient: recipient?.[2] || '', recipientAccount: recipient?.[1] || '',
-      transactionType: (text.match(/REF\s*:\s*\w+\s+(IB\s+FT\s+TO\s+(?:MPESA|AIRTEL|TIGOPESA|HALOPESA)|.*?)(?=\s+FROM|\s+\d{7,}|$)/i) || [])[1] || '' };
+      sender: (text.match(/\bFROM\s+(.+?)\s+TO\b/i) || [])[1] || '', recipient: recipient?.[2] || transfer?.[1]?.trim() || '', recipientAccount: recipient?.[1] || '',
+      statedReason: transfer?.[2]?.trim() || '',
+      transactionType: (text.match(new RegExp(`REF\\s*:\\s*\\w+\\s+(IB\\s+FT\\s+TO\\s+${wallet}|.*?)(?=\\s+FROM|\\s+\\d{7,}|$)`, 'i')) || [])[1] || '' };
   }
 ﻿  function normalizeLines(text) {
     const result = [];
@@ -238,19 +243,40 @@
   function purposeNames(config) {
     return [...BUILTIN_NAMES, ...Object.values(config?.categories || {}).map(c => c?.name).filter(Boolean)];
   }
-  function category(purpose, config) {
-    const p = String(purpose || '').toLowerCase().replace(/\s+/g, ' ').trim();
-    for (const [name, pattern] of BUILTIN_PURPOSES) if (pattern.test(p)) return name;
-    const key = purposeKey(p);
-    if (!key) return 'Unknown income';
-    const names = purposeNames(config);
-    const candidates = [];
+  // [labelKey, categoryName] pairs every income label is compared against.
+  function purposeCandidates(config) {
+    const names = purposeNames(config), candidates = [];
     BUILTIN_PURPOSES.forEach(([name, , aliases]) => aliases.forEach(alias => candidates.push([alias, name])));
     names.forEach(name => candidates.push([purposeKey(name), name]));
     Object.entries(config?.aliases || {}).forEach(([alias, value]) => {
       const name = typeof value === 'string' ? value : value?.category;
       if (names.includes(name)) candidates.push([alias, name]);
     });
+    return candidates;
+  }
+  // A label too far from any payment type to be matched automatically, but which still looks
+  // like a slip of the pen for one ("Gradu" -> Graduation, "Usafr" -> Transport / Usafiri).
+  // Clear, different names ("Pre form one") return '' and are offered as new types instead.
+  function nearPurpose(label, config) {
+    const key = purposeKey(label);
+    if (key.length < 4) return '';
+    let best = null;
+    purposeCandidates(config).forEach(([alias, name]) => {
+      if (!alias || alias.length < 4) return;
+      const d = editDistance(key, alias);
+      const truncated = alias.startsWith(key) || key.startsWith(alias);
+      if (!truncated && (d > 2 || d > fuzzyLimit(key, alias) + 1)) return;
+      const score = truncated ? 0 : d;
+      if (!best || score < best.score) best = { score, name };
+    });
+    return best ? best.name : '';
+  }
+  function category(purpose, config) {
+    const p = String(purpose || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    for (const [name, pattern] of BUILTIN_PURPOSES) if (pattern.test(p)) return name;
+    const key = purposeKey(p);
+    if (!key) return 'Unknown income';
+    const candidates = purposeCandidates(config);
     let best = null;
     candidates.forEach(([alias, name]) => {
       if (!alias || !similarPurpose(key, alias)) return;
@@ -275,5 +301,5 @@
     return { valid: !errors.length, errors };
   }
   global.SomapCrdb = { VERSION, amount, date, header, narration, parsePages, logicalPage, extractPage, parseExtractedPages, category, validate, round,
-    BUILTIN_PURPOSE_NAMES: BUILTIN_NAMES, purposeKey, purposeNames, similarPurpose };
+    BUILTIN_PURPOSE_NAMES: BUILTIN_NAMES, purposeKey, purposeNames, similarPurpose, nearPurpose };
 })(window);

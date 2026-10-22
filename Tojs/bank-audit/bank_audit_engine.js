@@ -214,9 +214,12 @@
     });
   }
 
-  // Unknown-income purpose labels used by at least `minCount` payments, grouped by
-  // normalised spelling, excluding labels the school already rejected.
-  function purposeSuggestions(transactions, config, minCount) {
+  // Unknown-income purpose labels, grouped by normalised spelling, excluding labels the school
+  // already rejected. A label that looks like a misspelling of an existing type is offered as a
+  // merge into that type (even once); any other label becomes a "new payment type" card once
+  // at least `config.minCount` payments (default 2) use it.
+  function purposeSuggestions(transactions, config) {
+    const minCount = Math.max(1, Number(config?.minCount) || 2);
     const C = global.SomapCrdb, rejected = config?.rejectedLabels || {}, groups = [];
     (transactions || []).forEach(t => {
       if (!(t.moneyIn > 0) || t.category !== "Unknown income" || t.reversalOf) return;
@@ -233,9 +236,12 @@
       g.transactionIds.push(t.id);
     });
     return groups
-      .filter(g => g.count >= (minCount || 2))
-      .map(g => ({ ...g, key: g.keys[0], label: Object.entries(g.labels).sort((a, b) => b[1] - a[1])[0][0], variants: Object.keys(g.labels) }))
-      .sort((a, b) => b.count - a.count || b.total - a.total);
+      .map(g => {
+        const label = Object.entries(g.labels).sort((a, b) => b[1] - a[1])[0][0];
+        return { ...g, key: g.keys[0], label, variants: Object.keys(g.labels), mergeInto: C.nearPurpose(label, config) };
+      })
+      .filter(g => g.mergeInto || g.count >= minCount)
+      .sort((a, b) => Number(!!b.mergeInto) - Number(!!a.mergeInto) || b.count - a.count || b.total - a.total);
   }
 
   function categoryTotalsOf(transactions) {
@@ -316,11 +322,15 @@
       g.reviewFlags = [...new Set([...g.reviewFlags, ...t.reviewFlags])];
     });
     return [...groups.values()].map(g => {
-      // CRDB mobile transfers group principal, fee and tax under one reference.
-      const mobileTriplet = g.rawLines.length === 3 && /TO (MPESA|AIRTEL|TIGOPESA|HALOPESA)/i.test(g.description);
-      g.amountWithdrawn = mobileTriplet ? Math.max(...g.rawLines.map(t => t.moneyOut)) : g.totalImpact;
+      // CRDB posts principal, fee and tax under one reference (mobile wallets and TIPS transfers alike).
+      const largest = Math.max(...g.rawLines.map(t => t.moneyOut));
+      const mobileTriplet = g.rawLines.length === 3 && /TO (MPESA|AIRTEL|TIGO|HALOPESA|HALOTEL)/i.test(g.description);
+      const chargeTriplet = mobileTriplet || (g.rawLines.length === 3 && g.rawLines.filter(t => t.moneyOut < largest * 0.1).length === 2);
+      g.amountWithdrawn = chargeTriplet ? largest : g.totalImpact;
       g.charges = global.SomapCrdb.round(g.totalImpact - g.amountWithdrawn);
-      g.principalBasis = mobileTriplet ? 'CRDB mobile transfer: largest debit principal; remaining lines charges' : 'Unseparated debit; verify against supporting evidence';
+      g.principalBasis = mobileTriplet ? 'CRDB mobile transfer: largest debit principal; remaining lines charges'
+        : chargeTriplet ? 'CRDB transfer: largest debit principal; two small lines under the same reference are fee and tax'
+        : 'Unseparated debit; verify against supporting evidence';
       g.reviewFlags.push('Purpose not stated in bank narration. Supporting documentation required for company records.');
       if (reversedRefs.has(g.bankReference)) g.reviewFlags.push('Bank returned this transfer: credit(s) with the same reference appear in this statement.');
       return g;

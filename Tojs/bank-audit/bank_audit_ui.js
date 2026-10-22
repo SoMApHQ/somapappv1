@@ -199,6 +199,7 @@
     try {
       state.purposeConfig = await global.SomapBankAuditStorage.updatePurposeConfig(patch);
       if (state.activeAudit) renderAudit(state.activeAudit);
+      else renderCustomMetrics(null);
       renderPurposeSettings();
       if (message) setStatus(message, "ok");
     } catch (error) {
@@ -229,19 +230,29 @@
       `"${s.label}" stays in Unknown income and will not be suggested again. Restore it in Settings if needed.`);
   }
 
+  // Two kinds of card: a clear new name ("Pre form one") is offered as its own payment type
+  // (Yes / No); a slip of the pen ("Gradu", "Usafr") is offered as a merge into the one existing
+  // type it resembles. Clear names are never offered as merges.
   function renderPurposeSuggestions(audit) {
     const el = $("purposeSuggestions");
     if (!el) return;
     const list = state.readOnly ? [] : (audit?.purposeSuggestions || []);
-    const options = purposeCategoryNames().map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
-    el.innerHTML = list.map((s, i) => `<div class="purpose-card" data-suggestion="${i}">
-      <h3>New payment type found: "${esc(s.label)}"</h3>
-      <p>${s.count} payments, ${money(s.total)}, from: ${esc(s.names.join(", ") || "names not stated")}${s.variants.length > 1 ? `<br>Spellings seen: ${esc(s.variants.join(", "))}` : ""}</p>
+    const who = (s) => `${s.count} payment${s.count === 1 ? "" : "s"}, ${money(s.total)}, from: ${esc(s.names.join(", ") || "names not stated")}${s.variants.length > 1 ? `<br>Spellings seen: ${esc(s.variants.join(", "))}` : ""}`;
+    el.innerHTML = list.map((s, i) => s.mergeInto ? `<div class="purpose-card merge" data-suggestion="${i}">
+      <h3>"${esc(s.label)}" looks like a misspelling of ${esc(s.mergeInto)}</h3>
+      <p>${who(s)}</p>
       <div class="actions">
-        <strong>Add as a payment type?</strong>
-        <button type="button" data-purpose-yes>Yes</button>
-        <select data-purpose-target aria-label="Merge into existing payment type"><option value="">Merge into…</option>${options}</select>
-        <button type="button" class="ghost" data-purpose-merge>Merge</button>
+        <strong>Count these as ${esc(s.mergeInto)}?</strong>
+        <button type="button" data-purpose-merge>Yes, it is ${esc(s.mergeInto)}</button>
+        <button type="button" class="ghost" data-purpose-yes>No, it is a new payment type</button>
+        <button type="button" class="danger" data-purpose-no>Leave as unknown</button>
+      </div>
+    </div>` : `<div class="purpose-card" data-suggestion="${i}">
+      <h3>New payment type found: "${esc(s.label)}"</h3>
+      <p>${who(s)}</p>
+      <div class="actions">
+        <strong>Add "${esc(titleCase(s.label))}" as a payment type, like Transport or Graduation?</strong>
+        <button type="button" data-purpose-yes>Yes, add it</button>
         <button type="button" class="danger" data-purpose-no>No</button>
       </div>
     </div>`).join("");
@@ -249,12 +260,59 @@
       const s = list[Number(card.dataset.suggestion)];
       card.querySelector("[data-purpose-yes]").addEventListener("click", () => acceptPurpose(s));
       card.querySelector("[data-purpose-no]").addEventListener("click", () => rejectPurpose(s));
-      card.querySelector("[data-purpose-merge]").addEventListener("click", () => {
-        const target = card.querySelector("[data-purpose-target]").value;
-        if (!target) return toast("Choose the payment type to merge into.", "error");
-        mergePurpose(s, target);
-      });
+      card.querySelector("[data-purpose-merge]")?.addEventListener("click", () => mergePurpose(s, s.mergeInto));
     });
+  }
+
+  // Dashboard tile per approved payment type, plus a tile to add one before any statement uses it.
+  function renderCustomMetrics(audit) {
+    const el = $("customMetrics");
+    if (!el) return;
+    const builtin = global.SomapCrdb.BUILTIN_PURPOSE_NAMES;
+    const names = purposeCategoryNames().filter((n) => !builtin.includes(n));
+    const income = (audit?.transactions || []).filter((t) => t.moneyIn > 0);
+    el.innerHTML = names.map((name) => {
+      const rows = income.filter((t) => t.category === name);
+      return `<button type="button" class="metric metric-link" data-metric-category="${esc(name)}"><span>${esc(name)} collected:</span><strong>${money(rows.reduce((n, t) => n + t.moneyIn, 0))}</strong><small>${rows.length} payment${rows.length === 1 ? "" : "s"}</small></button>`;
+    }).join("") + (state.readOnly ? "" : `<button type="button" class="metric metric-add" id="addPurposeMetric"><span>New payment type</span><strong>+ Add</strong><small>e.g. Books, Uniform</small></button>`);
+    el.querySelectorAll("[data-metric-category]").forEach((btn) => btn.addEventListener("click", () => {
+      document.querySelector('[data-tab="summary"]')?.click();
+      state.activeCategory = btn.dataset.metricCategory;
+      renderCategoryTotals(state.activeAudit);
+      $("categoryDetail")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }));
+    $("addPurposeMetric")?.addEventListener("click", addPurposeManually);
+  }
+
+  async function addPurposeManually() {
+    let name = "", spellings = "";
+    if (global.Swal) {
+      const r = await Swal.fire({
+        title: "Add a payment type",
+        html: '<p style="font-size:.9rem;color:#475569">Use this when parents start paying something new into the bank (for example Books or Uniform). Future statements will count payments with this name automatically.</p>'
+          + '<input id="newPurposeName" class="swal2-input" placeholder="Name, e.g. Books">'
+          + '<input id="newPurposeSpellings" class="swal2-input" placeholder="Other spellings, comma separated (optional)">',
+        showCancelButton: true, confirmButtonText: "Add",
+        preConfirm: () => {
+          const n = document.getElementById("newPurposeName").value;
+          if (!n.trim()) { Swal.showValidationMessage("Enter a name."); return false; }
+          return { n, s: document.getElementById("newPurposeSpellings").value };
+        }
+      });
+      if (!r.isConfirmed) return;
+      name = r.value.n; spellings = r.value.s;
+    } else {
+      name = global.prompt("Name of the new payment type (e.g. Books)") || "";
+    }
+    name = String(name).replace(/\s+/g, " ").trim().slice(0, 60);
+    if (!name) return;
+    if (RESERVED_PURPOSES.includes(name.toLowerCase())) return toast(`"${name}" is a system category. Choose another name.`, "error");
+    if (purposeCategoryNames().some((n) => n.toLowerCase() === name.toLowerCase())) return toast(`"${name}" already exists.`, "error");
+    const keys = [name, ...String(spellings).split(",")].map((l) => [global.SomapCrdb.purposeKey(l), l.trim()]).filter(([k]) => k);
+    const id = global.SomapBankAuditStorage.newPurposeCategoryId();
+    const patch = { [`categories/${id}`]: { name, createdAt: Date.now(), createdBy: state.user?.email || "" } };
+    keys.forEach(([k, label]) => { Object.assign(patch, aliasPatch([k], name, label)); patch[`rejectedLabels/${k}`] = null; });
+    await savePurposeDecision(patch, `"${name}" added. It now has its own dashboard card.`);
   }
 
   function renderPurposeSettings() {
@@ -280,9 +338,23 @@
     </div>`);
     const rejected = Object.entries(cfg.rejectedLabels || {}).map(([key, r]) =>
       `<span class="alias-chip">${esc(r?.label || key)}${state.readOnly ? "" : `<button type="button" title="Suggest this label again" data-rejected-restore="${esc(key)}">↺</button>`}</span>`).join("");
-    el.innerHTML = [...builtin, ...customHtml].join("")
+    const minCount = Math.max(1, Number(cfg.minCount) || 2);
+    const controls = state.readOnly ? "" : `<div class="purpose-type"><div class="actions">
+        <label for="purposeMinCount">Suggest a new payment type when at least</label>
+        <input id="purposeMinCount" type="number" min="1" max="50" value="${minCount}" style="width:70px">
+        <span>payments use the same name.</span>
+        <button type="button" class="ghost" id="savePurposeMinCount">Save</button>
+        <button type="button" id="addPurposeSettings">+ Add payment type</button>
+      </div></div>`;
+    el.innerHTML = controls + [...builtin, ...customHtml].join("")
       + `<div class="purpose-type"><h3>Not payment types (kept in Unknown income)</h3><div>${rejected || '<span class="text-slate-500 text-sm">None.</span>'}</div></div>`;
 
+    $("addPurposeSettings")?.addEventListener("click", addPurposeManually);
+    $("savePurposeMinCount")?.addEventListener("click", () => {
+      const n = Math.round(Number($("purposeMinCount").value));
+      if (!(n >= 1 && n <= 50)) return toast("Enter a number from 1 to 50.", "error");
+      savePurposeDecision({ minCount: n }, `New payment types will be suggested once ${n} payment(s) use the same name.`);
+    });
     el.querySelectorAll("[data-alias-remove]").forEach((btn) => btn.addEventListener("click", () =>
       savePurposeDecision({ [`aliases/${btn.dataset.aliasRemove}`]: null }, "Spelling removed.")));
     el.querySelectorAll("[data-rejected-restore]").forEach((btn) => btn.addEventListener("click", () =>
@@ -325,7 +397,11 @@
     el.innerHTML = `
       <div class="cd-head">
         <h3>${esc(category)} — ${rows.length} payment${rows.length === 1 ? "" : "s"}, ${money(total)}</h3>
-        <button type="button" class="secondary" id="downloadCategoryBtn">Download this list</button>
+        <div class="report-buttons">
+          <button type="button" class="ghost" id="categoryPdfShort">Summary PDF</button>
+          <button type="button" class="ghost" id="categoryPdfFull">Full PDF (everyone who paid)</button>
+          <button type="button" class="secondary" id="downloadCategoryBtn">Excel list</button>
+        </div>
       </div>
       <div class="table-wrap"><table><thead><tr>
         <th>Date</th><th>Name</th><th>AB reference</th><th>Bank reference</th><th>Sender</th><th>Amount</th><th>Narration</th>
@@ -341,6 +417,8 @@
     `;
     labelCells();
     $("downloadCategoryBtn")?.addEventListener("click", () => downloadCategoryList(audit, category, rows));
+    $("categoryPdfShort")?.addEventListener("click", () => downloadSectionPdf({ report: "category", category, detail: "short" }));
+    $("categoryPdfFull")?.addEventListener("click", () => downloadSectionPdf({ report: "category", category, detail: "full" }));
   }
 
   function downloadCategoryList(audit, category, rows) {
@@ -373,6 +451,7 @@
     if (audit) { global.SomapBankAuditEngine.applyPurposes(audit, state.purposeConfig); attachMatches(audit); }
     renderSummary(audit);
     renderPurposeSuggestions(audit);
+    renderCustomMetrics(audit);
     renderCategoryTotals(audit);
     renderFindings(audit);
     const txns = audit?.transactions || [];
@@ -437,6 +516,19 @@
   async function openAudit(id) {
     const audit = await global.SomapBankAuditStorage.getAudit(id, year());
     if (audit) { state.activeCategory = null; renderAudit(audit); }
+  }
+
+  // Section reports (Income, Withdrawals, a category, Review items, All transactions) for the open audit.
+  async function downloadSectionPdf(opts) {
+    const audit = state.activeAudit;
+    if (!audit?.validation?.valid) return toast("Open or parse a validated statement first.", "error");
+    try {
+      global.SomapBankAuditEngine.applyPurposes(audit, state.purposeConfig);
+      await global.SomapBankAuditPdf.download(audit, opts);
+    } catch (error) {
+      console.error(error);
+      toast(error.message || "Could not create the PDF.", "error");
+    }
   }
 
   async function downloadAuditPdf(id) {
@@ -785,6 +877,7 @@
     try { state.purposeConfig = await global.SomapBankAuditStorage.getPurposeConfig(); }
     catch (error) { setStatus('Saved payment types could not be loaded; only built-in purposes apply. ' + (error.message || error), 'warn'); }
     renderPurposeSettings();
+    renderCustomMetrics(null);
     await loadAudits();
   }
 
@@ -794,6 +887,8 @@
     $("parseBtn")?.addEventListener("click", parseUpload);
     $("saveAuditBtn")?.addEventListener("click", saveParsedAudit);
     $("downloadPdfBtn")?.addEventListener("click", () => downloadAuditPdf());
+    document.querySelectorAll("[data-report]").forEach((btn) => btn.addEventListener("click", () =>
+      downloadSectionPdf({ report: btn.dataset.report, detail: btn.dataset.detail || "short" })));
     $("saveSettingsBtn")?.addEventListener("click", saveSettings);
     $("studentSearch")?.addEventListener("input", renderStudentTrace);
   }
