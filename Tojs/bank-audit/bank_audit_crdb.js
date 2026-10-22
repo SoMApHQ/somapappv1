@@ -1,6 +1,6 @@
 (function (global) {
   'use strict';
-  const VERSION = 'crdb-block-v3';
+  const VERSION = 'crdb-block-v4';
   const round = n => Math.round(n * 100) / 100;
   const dateToken = /^\d{2}[./]\d{2}[./]\d{4}$/;
   const timeToken = /^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/;
@@ -37,7 +37,8 @@
     const raw = lines.join('\n');
     // Preserve line breaks in the evidence; repair only known split words in the display.
     const text = lines.join(' ').replace(/Deposi\s+ts/gi, 'Deposits').replace(/Shedr\s+ack/gi, 'Shedrack').replace(/Scho\s+olbus/gi, 'Schoolbus').replace(/([a-z])([A-Z])/g, '$1 $2');
-    const payment = text.match(/\b(AB\d+)\s*:\s*([^:]*)(?::\s*(.*))?/i);
+    // CRDB sometimes prints "SOCRATESAB179…:" with no space, so AB cannot rely on a word boundary.
+    const payment = text.match(/(?:\b|(?<=[A-Z]))(AB\d{6,})\s*:\s*([^:]*)(?::\s*(.*))?/i);
     let name = (payment?.[2] || '').trim();
     const cls = name.match(/\b(?:std|standard|class)\s*(\d+)/i);
     name = name.replace(/\b(?:std|standard|class)\s*\d+/i, '').trim();
@@ -62,47 +63,65 @@
     });
     return result;
   }
+  const isRef = s => /^REF\s*:/i.test(s || '');
+  const isAmountLine = s => String(s).split(/\s+/).every(t => Number.isFinite(amount(t, true)));
+  // Narration text: anything that is not a date, time or accounting-amount line.
+  const isNarration = s => !!s && !dateToken.test(s) && !timeToken.test(s) && !isAmountLine(s);
+  // REF rows may use either date style; non-REF rows must use the dotted CRDB row date, which
+  // keeps the slash-dated "generated at" header stamp from looking like a row.
+  const isPostingAnchor = (lines, i) => dateToken.test(lines[i]) && timeToken.test(lines[i+1] || '') &&
+    (isRef(lines[i+2]) || /^\d{2}\.\d{2}\.\d{4}$/.test(lines[i]) && isNarration(lines[i+2]));
   function parsePages(pages) {
     const text = pages.map(p => typeof p === 'string' ? p : p.text).join('\n');
     const lines = normalizeLines(text), rows = [], rejected = [], visitedRefs = new Set();
+    // Rows are anchored on posting date + time + narration. Most CRDB rows start with REF:,
+    // but bank charges (e.g. "Debit Arrangement Tax", "Charge - Capitalise Maintenance Fee") carry none.
     const counts = {
-      postingDateCandidates: lines.filter((s,i) => dateToken.test(s) && timeToken.test(lines[i+1] || '') && /^REF\s*:/i.test(lines[i+2] || '')).length,
-      postingTimeCandidates: lines.filter((s,i) => timeToken.test(s) && /^REF\s*:/i.test(lines[i+1] || '')).length,
-      refBlocks: lines.filter(s => /^REF\s*:/i.test(s)).length,
-      accountingRows: 0, validTransactions: 0, rejectedBlocks: 0
+      postingDateCandidates: lines.filter((s,i) => isPostingAnchor(lines,i)).length,
+      postingTimeCandidates: lines.filter((s,i) => i > 0 && isPostingAnchor(lines,i-1)).length,
+      refBlocks: lines.filter(isRef).length,
+      accountingRows: 0, validTransactions: 0, rejectedBlocks: 0,
+      nonRefRows: 0, nonRefDebitTotal: 0, nonRefCreditTotal: 0, zeroValueRows: 0
     };
     function reject(start, refLine, reason, stop) {
       rejected.push({ line: start + 1, refLine: refLine + 1, reason, lines: lines.slice(start, Math.min(stop + 1, start + 30)) });
     }
     for (let i=0; i<lines.length; i++) {
-      if (!dateToken.test(lines[i]) || !timeToken.test(lines[i+1] || '') || !/^REF\s*:/i.test(lines[i+2] || '')) continue;
-      const start=i, posting=lines[i], postingTime=lines[i+1], refLine=i+2;
-      visitedRefs.add(refLine);
+      if (!isPostingAnchor(lines,i)) continue;
+      const start=i, posting=lines[i], postingTime=lines[i+1], refLine=i+2, hasRef=isRef(lines[refLine]);
+      // An incomplete REF block is a rejection. An incomplete non-REF candidate (e.g. the
+      // "generated at" stamp) is simply not a transaction; missed real charges still fail the header totals.
+      const fail = (reason, stop) => { if (hasRef) reject(start,refLine,reason,stop); };
+      if (hasRef) visitedRefs.add(refLine);
       let cursor=refLine+1;
-      while (cursor<lines.length && !dateToken.test(lines[cursor]) && !/^REF\s*:/i.test(lines[cursor])) cursor++;
+      while (cursor<lines.length && !dateToken.test(lines[cursor]) && !isRef(lines[cursor])) cursor++;
       const details=lines.slice(refLine,cursor), valueDate=lines[cursor], valueTime=lines[cursor+1];
-      if (!date(posting)) { reject(start,refLine,'Invalid posting date',cursor); continue; }
-      if (!date(valueDate) || !timeToken.test(valueTime || '') || /^REF\s*:/i.test(lines[cursor+2] || '')) {
-        reject(start,refLine,'Value date/time and accounting section not found before next transaction',cursor+2); continue;
+      if (!date(posting)) { fail('Invalid posting date',cursor); continue; }
+      if (!date(valueDate) || !timeToken.test(valueTime || '') || isRef(lines[cursor+2])) {
+        fail('Value date/time and accounting section not found before next transaction',cursor+2); continue;
       }
       cursor+=2;
       const tokens=[];
       while(cursor<lines.length && tokens.length<3) {
-        if (dateToken.test(lines[cursor]) || timeToken.test(lines[cursor]) || /^REF\s*:/i.test(lines[cursor])) break;
+        if (dateToken.test(lines[cursor]) || timeToken.test(lines[cursor]) || isRef(lines[cursor])) break;
         const next=lines[cursor].split(/\s+/);
         if(next.some(t => !Number.isFinite(amount(t,true)))) break;
         tokens.push(...next); cursor++;
       }
       const values=tokens.map(t=>amount(t,true));
-      if (tokens.length!==3) { reject(start,refLine,`Accounting section must contain exactly three amounts; found ${tokens.length}`,cursor); continue; }
-      counts.accountingRows++;
-      if (values[0]<0 || values[1]<0 || (values[0]>0)===(values[1]>0)) { reject(start,refLine,'Debit and credit must be non-negative, with exactly one positive side',cursor); continue; }
+      if (tokens.length!==3) { fail(`Accounting section must contain exactly three amounts; found ${tokens.length}`,cursor); continue; }
+      if (values[0]<0 || values[1]<0 || (values[0]>0 && values[1]>0)) { fail('Debit and credit must be non-negative, with at most one positive side',cursor); continue; }
       const detail=narration(details);
-      if (!detail.bankReference) { reject(start,refLine,'Bank reference missing',cursor); continue; }
-      rows.push({...detail,date:posting,postingTime,valueDate,valueTime,moneyOut:values[0],moneyIn:values[1],balance:values[2],sourceType:'pdf',sourceRow:rows.length+1,sourceLine:start+1,accountingColumnsExplicit:true});
+      if (hasRef && !detail.bankReference) { fail('Bank reference missing',cursor); continue; }
+      counts.accountingRows++;
+      // Zero-value rows are kept as evidence; analysis excludes them from totals and grouping.
+      const zeroValue = !values[0] && !values[1];
+      if (zeroValue) counts.zeroValueRows++;
+      if (!hasRef) { counts.nonRefRows++; counts.nonRefDebitTotal=round(counts.nonRefDebitTotal+values[0]); counts.nonRefCreditTotal=round(counts.nonRefCreditTotal+values[1]); }
+      rows.push({...detail,date:posting,postingTime,valueDate,valueTime,moneyOut:values[0],moneyIn:values[1],balance:values[2],sourceType:'pdf',sourceRow:rows.length+1,sourceLine:start+1,accountingColumnsExplicit:true,nonRef:!hasRef,zeroValue});
       i=cursor-1;
     }
-    lines.forEach((line,index) => { if (/^REF\s*:/i.test(line) && !visitedRefs.has(index)) reject(Math.max(0,index-2),index,'REF block has no valid preceding posting date/time',index+3); });
+    lines.forEach((line,index) => { if (isRef(line) && !visitedRefs.has(index)) reject(Math.max(0,index-2),index,'REF block has no valid preceding posting date/time',index+3); });
     counts.validTransactions=rows.length; counts.rejectedBlocks=rejected.length;
     const statement=header(text);
     const meta={parserVersion:VERSION,statement,diagnostics:rejected.map(r=>`Line ${r.line}: ${r.reason}`),rejectedBlocks:rejected,counts,rawRows:rows.length,pageCount:pages.length};
@@ -148,14 +167,26 @@
     let logicalLines=[];
     if(columns) {
       const body=visual.filter(l=>!heading || l.y>heading.y);
-      const refs=body.filter(l=>l.items.some(i=>/^REF\s*:/i.test(i.str)));
+      const column=item=>{const n=columns.findIndex(x=>item.x<x);return n<0?5:n;};
       logicalLines=(heading ? visual.filter(l=>l.y<=heading.y) : []).map(l=>l.text);
-      refs.forEach((ref,index)=>{
-        const next=refs[index+1]?.y ?? Infinity;
+      // A row starts at its REF line, or at a second posting date inside the current row:
+      // CRDB bank-charge rows have no REF and their posting date sits above the narration.
+      const blocks=[];let current=null;
+      body.forEach(line=>{
+        const ref=line.items.some(i=>/^REF\s*:/i.test(i.str));
+        const posting=line.items.some(i=>column(i)===0 && dateToken.test(i.str.trim()));
+        const adoptsRef=ref && current && !current.ref && !current.detail;
+        if(ref && !adoptsRef || posting && (!current || current.posting)) blocks.push(current={lines:[],ref:false,posting:false,detail:false});
+        if(!current) return;
+        current.lines.push(line);
+        current.ref=current.ref || ref; current.posting=current.posting || posting;
+        current.detail=current.detail || line.items.some(i=>column(i)===1);
+      });
+      blocks.forEach(block=>{
         const cols=Array.from({length:6},()=>[]);
-        body.filter(l=>l.y>=ref.y && l.y<next).forEach(line=>{
+        block.lines.forEach(line=>{
           const parts=Array.from({length:6},()=>[]);
-          line.items.forEach(item=>{const n=columns.findIndex(x=>item.x<x);parts[n<0?5:n].push(item);});
+          line.items.forEach(item=>parts[column(item)].push(item));
           parts.forEach((items,n)=>{if(items.length)cols[n].push(n===1?joinItems(items):items.map(i=>i.str).join('').trim());});
         });
         logicalLines.push(...cols.flat());
@@ -182,19 +213,58 @@
     return chosen.result;
   }
 
-  function category(purpose) {
-    const p = purpose.toLowerCase();
-    if (/\b(usafiri?|usafii|transport|school\s*bus)\b/.test(p)) return 'Transport / Usafiri';
-    if (/\b(remedial|remidial|remidio|rimidio|rimedio|remijio|remigial)\b/.test(p)) return 'Remedial';
-    if (/\b(graduation|graduat\w*|mahafali)\b/.test(p)) return 'Graduation';
-    return 'Unknown income';
+  // Built-in income purposes. School-defined purposes come from `config`:
+  // { categories: {id: {name}}, aliases: {labelKey: {category, label}}, rejectedLabels: {labelKey: {label}} }.
+  const BUILTIN_PURPOSES = [
+    ['Transport / Usafiri', /\b(usafiri?|usafii|transport|school\s*bus)\b/, ['usafiri', 'transport', 'schoolbus']],
+    ['Remedial', /\b(remedial|remidial|remidio|rimidio|rimedio|remijio|remigial)\b/, ['remedial']],
+    ['Graduation', /\b(graduation|graduat\w*|mahafali)\b/, ['graduation', 'mahafali']]
+  ];
+  const BUILTIN_NAMES = BUILTIN_PURPOSES.map(p => p[0]);
+  // RTDB-safe comparison key: "Pre form one", "PreForm One" and "pre-form one" all become "preformone".
+  function purposeKey(label) { return String(label || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
+  function editDistance(a, b) {
+    let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+      const row = [i];
+      for (let j = 1; j <= b.length; j++) row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = row;
+    }
+    return prev[b.length];
+  }
+  // Short labels need exact matches: "dep"/"dp" or "fee"/"fees" must not drift into other purposes.
+  function fuzzyLimit(a, b) { const n = Math.min(a.length, b.length); return n >= 6 ? 2 : n >= 4 ? 1 : 0; }
+  function similarPurpose(a, b) { return a === b || editDistance(a, b) <= fuzzyLimit(a, b); }
+  function purposeNames(config) {
+    return [...BUILTIN_NAMES, ...Object.values(config?.categories || {}).map(c => c?.name).filter(Boolean)];
+  }
+  function category(purpose, config) {
+    const p = String(purpose || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    for (const [name, pattern] of BUILTIN_PURPOSES) if (pattern.test(p)) return name;
+    const key = purposeKey(p);
+    if (!key) return 'Unknown income';
+    const names = purposeNames(config);
+    const candidates = [];
+    BUILTIN_PURPOSES.forEach(([name, , aliases]) => aliases.forEach(alias => candidates.push([alias, name])));
+    names.forEach(name => candidates.push([purposeKey(name), name]));
+    Object.entries(config?.aliases || {}).forEach(([alias, value]) => {
+      const name = typeof value === 'string' ? value : value?.category;
+      if (names.includes(name)) candidates.push([alias, name]);
+    });
+    let best = null;
+    candidates.forEach(([alias, name]) => {
+      if (!alias || !similarPurpose(key, alias)) return;
+      const d = editDistance(key, alias);
+      if (!best || d < best.d) best = { d, name };
+    });
+    return best ? best.name : 'Unknown income';
   }
   function validate(rows, meta) {
     const errors = [...(meta?.diagnostics || [])];
     if (!rows.length) errors.push('No valid transactions found.');
-    rows.forEach((r,i) => { if (!date(r.date) || !Number.isFinite(r.moneyIn) || !Number.isFinite(r.moneyOut) || r.moneyIn < 0 || r.moneyOut < 0 || (r.moneyIn > 0) === (r.moneyOut > 0)) errors.push(`Invalid financial row ${i + 1}.`); });
+    rows.forEach((r,i) => { if (!date(r.date) || !Number.isFinite(r.moneyIn) || !Number.isFinite(r.moneyOut) || r.moneyIn < 0 || r.moneyOut < 0 || (r.moneyIn > 0 && r.moneyOut > 0) || (!r.zeroValue && !r.moneyIn && !r.moneyOut)) errors.push(`Invalid financial row ${i + 1}.`); });
     if (meta?.parserVersion === VERSION) rows.forEach((r,i) => {
-      if (!timeToken.test(r.postingTime || '') || !date(r.valueDate) || !timeToken.test(r.valueTime || '') || !r.bankReference || !Number.isFinite(r.balance) || !r.accountingColumnsExplicit) errors.push(`Incomplete CRDB accounting block ${i + 1}.`);
+      if (!timeToken.test(r.postingTime || '') || !date(r.valueDate) || !timeToken.test(r.valueTime || '') || (!r.bankReference && !r.nonRef) || !Number.isFinite(r.balance) || !r.accountingColumnsExplicit) errors.push(`Incomplete CRDB accounting block ${i + 1}.`);
     });
     const s = meta?.statement;
     if (s) [['totalCredits','moneyIn'], ['totalDebits','moneyOut']].forEach(([key,side]) => {
@@ -204,5 +274,6 @@
     });
     return { valid: !errors.length, errors };
   }
-  global.SomapCrdb = { VERSION, amount, date, header, narration, parsePages, logicalPage, extractPage, parseExtractedPages, category, validate, round };
+  global.SomapCrdb = { VERSION, amount, date, header, narration, parsePages, logicalPage, extractPage, parseExtractedPages, category, validate, round,
+    BUILTIN_PURPOSE_NAMES: BUILTIN_NAMES, purposeKey, purposeNames, similarPurpose };
 })(window);

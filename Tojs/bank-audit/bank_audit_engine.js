@@ -132,7 +132,19 @@
     return ["Unclassified transaction", 0.2];
   }
 
-  function normalizeTransaction(row, index, settings) {
+  // CRDB posts its own fees and taxes as rows without a REF (e.g. "Debit Arrangement Tax",
+  // "Charge - Capitalise Maintenance Fee"); they are bank charges, not transfer charges.
+  const BANK_CHARGE_ROW = /\b(tax|charges?|fees?|levy|excise|vat|commission)\b/i;
+  const INTERNAL_FLAG = "Possible owner / internal movement - confirm source before treating as school income";
+  const LOAN_FLAG = "Narration mentions a loan - possible owner / internal movement; supporting documentation required";
+  const REVERSAL_FLAG = "Reversal of an outgoing transfer with the same bank reference - confirm with the bank";
+
+  function incomeCategory(row, config) {
+    const category = global.SomapCrdb.category(row.writtenPurpose ?? row.description ?? "", config);
+    return [category, category === "Unknown income" ? 0.35 : 0.9];
+  }
+
+  function normalizeTransaction(row, index, settings, purposeConfig) {
     const dateObj = parseDate(row.date || row.transactionDate || row.postingDate);
     const valueDateObj = parseDate(row.valueDate);
     const moneyIn = Math.max(0, parseMoney(row.moneyIn ?? row.credit ?? row.deposit));
@@ -141,11 +153,15 @@
     const reference = cleanText(row.bankReference || row.reference || row.ref || row.transactionId || row.chequeNo);
     const balance = parseMoney(row.balance);
     const chargeAmount = Math.max(0, parseMoney(row.chargeAmount || row.charges));
-    const [category, confidence] = moneyIn > 0 ? [global.SomapCrdb.category(row.writtenPurpose ?? desc), global.SomapCrdb.category(row.writtenPurpose ?? desc) === "Unknown income" ? 0.35 : 0.9] : categoryFor({ description: desc, reference, moneyIn, moneyOut }, settings);
+    const bankChargeRow = row.nonRef === true && moneyOut > 0 && BANK_CHARGE_ROW.test(desc);
+    const [category, confidence] = moneyIn > 0 ? incomeCategory({ writtenPurpose: row.writtenPurpose, description: desc }, purposeConfig)
+      : bankChargeRow ? ["Bank charge", 0.95]
+      : categoryFor({ description: desc, reference, moneyIn, moneyOut }, settings);
     const flags = [];
     if (!dateObj) flags.push("Date requires review");
     if (!desc) flags.push("Narration missing");
-    if (moneyOut > 0) flags.push("Purpose not stated in bank narration. Supporting documentation required for company records.");
+    if (moneyOut > 0 && !bankChargeRow) flags.push("Purpose not stated in bank narration. Supporting documentation required for company records.");
+    if (moneyOut > 0 && /loan\b|mkopo/i.test(desc)) flags.push(LOAN_FLAG);
     if (confidence < 0.5) flags.push("Purpose unclear");
     if (moneyOut >= settings.largeWithdrawalThreshold) flags.push("Large withdrawal - supporting evidence recommended");
     const dow = dayOfWeek(dateObj);
@@ -173,9 +189,80 @@
       detectedPurpose: category,
       category,
       confidence,
+      bankChargeRow,
       reviewFlags: flags,
       notes: []
     };
+  }
+
+  // A credit carrying the same bank reference as a debit in this statement is the bank
+  // returning that transfer (e.g. a failed M-Pesa payout), not new income.
+  // A credit without an AB payment reference that arrives through the account's own
+  // banking channels (SIMAPP / IB), or from someone this statement pays out to, is flagged
+  // as a possible owner / internal movement. It is never auto-classified.
+  function markReversals(transactions) {
+    const debitRefs = new Set(transactions.filter(t => t.moneyOut > 0 && t.bankReference).map(t => t.bankReference));
+    const recipients = new Set(transactions.filter(t => t.moneyOut > 0 && t.recipient).map(t => normalizeSearch(t.recipient)));
+    transactions.forEach(t => {
+      if (t.moneyIn > 0 && !t.paymentReference && (/^(SIMAPP|IB)\b/i.test(t.transactionType || "") || (t.sender && recipients.has(normalizeSearch(t.sender))))) t.reviewFlags.push(INTERNAL_FLAG);
+      if (!(t.moneyIn > 0) || !t.bankReference || !debitRefs.has(t.bankReference)) return;
+      t.reversalOf = t.bankReference;
+      t.category = t.detectedPurpose = "Transfer reversal";
+      t.confidence = 0.9;
+      t.reviewFlags = t.reviewFlags.filter(f => f !== INTERNAL_FLAG && f !== "Purpose unclear");
+      t.reviewFlags.push(REVERSAL_FLAG);
+    });
+  }
+
+  // Unknown-income purpose labels used by at least `minCount` payments, grouped by
+  // normalised spelling, excluding labels the school already rejected.
+  function purposeSuggestions(transactions, config, minCount) {
+    const C = global.SomapCrdb, rejected = config?.rejectedLabels || {}, groups = [];
+    (transactions || []).forEach(t => {
+      if (!(t.moneyIn > 0) || t.category !== "Unknown income" || t.reversalOf) return;
+      const label = cleanText(t.writtenPurpose), key = C.purposeKey(label);
+      if (!key || rejected[key]) return;
+      let g = groups.find(g => g.keys.some(k => C.similarPurpose(k, key)));
+      if (!g) groups.push(g = { keys: [], labels: {}, count: 0, total: 0, names: [], transactionIds: [] });
+      if (!g.keys.includes(key)) g.keys.push(key);
+      g.labels[label] = (g.labels[label] || 0) + 1;
+      g.count += 1;
+      g.total = C.round(g.total + t.moneyIn);
+      const name = t.detectedStudentName || t.sender;
+      if (name && !g.names.includes(name)) g.names.push(name);
+      g.transactionIds.push(t.id);
+    });
+    return groups
+      .filter(g => g.count >= (minCount || 2))
+      .map(g => ({ ...g, key: g.keys[0], label: Object.entries(g.labels).sort((a, b) => b[1] - a[1])[0][0], variants: Object.keys(g.labels) }))
+      .sort((a, b) => b.count - a.count || b.total - a.total);
+  }
+
+  function categoryTotalsOf(transactions) {
+    const totals = {};
+    transactions.forEach(t => { totals[t.category] = global.SomapCrdb.round((totals[t.category] || 0) + (t.moneyIn || t.moneyOut || 0)); });
+    return totals;
+  }
+
+  // Re-apply the school's current purpose decisions to an analysed or saved audit.
+  // Only bank-written income purposes change; amounts, references and debits are untouched.
+  function applyPurposes(audit, config) {
+    if (!audit?.transactions) return audit;
+    audit.transactions.forEach(t => {
+      if (!(t.moneyIn > 0) || t.reversalOf) return;
+      const [category, confidence] = incomeCategory(t, config);
+      if (category === t.category) return;
+      t.category = t.detectedPurpose = category;
+      t.confidence = confidence;
+      t.reviewFlags = (t.reviewFlags || []).filter(f => f !== "Purpose unclear");
+      if (confidence < 0.5) t.reviewFlags.push("Purpose unclear");
+    });
+    audit.categoryTotals = categoryTotalsOf(audit.transactions);
+    audit.income = audit.transactions.filter(t => t.moneyIn > 0);
+    audit.reviewItems = audit.transactions.filter(t => (t.reviewFlags || []).length);
+    if (audit.totals) audit.totals.reviewItems = audit.reviewItems.length;
+    audit.purposeSuggestions = purposeSuggestions(audit.transactions, config);
+    return audit;
   }
 
   function isIncomingCategory(category) {
@@ -219,7 +306,8 @@
 
   function groupWithdrawalEvents(transactions) {
     const groups = new Map();
-    transactions.filter(t => t.moneyOut > 0).forEach(t => {
+    const reversedRefs = new Set(transactions.filter(t => t.reversalOf).map(t => t.reversalOf));
+    transactions.filter(t => t.moneyOut > 0 && !t.bankChargeRow).forEach(t => {
       const key = t.bankReference && t.postingTime && t.recipient ? [t.bankReference,t.date,t.postingTime,t.recipient,t.recipientAccount].join('|') : t.id;
       if (!groups.has(key)) groups.set(key, { ...t, id: 'wd_' + (groups.size + 1), transactions: [], rawLines: [], reviewFlags: [], amountWithdrawn: 0, charges: 0, totalImpact: 0,
         businessPurpose: 'Not stated in bank narration', evidence: 'Required', reviewer: '', reviewStatus: 'Pending documentation' });
@@ -234,6 +322,7 @@
       g.charges = global.SomapCrdb.round(g.totalImpact - g.amountWithdrawn);
       g.principalBasis = mobileTriplet ? 'CRDB mobile transfer: largest debit principal; remaining lines charges' : 'Unseparated debit; verify against supporting evidence';
       g.reviewFlags.push('Purpose not stated in bank narration. Supporting documentation required for company records.');
+      if (reversedRefs.has(g.bankReference)) g.reviewFlags.push('Bank returned this transfer: credit(s) with the same reference appear in this statement.');
       return g;
     });
   }
@@ -283,6 +372,35 @@
     }
   }
 
+  // CRDB sometimes posts near-simultaneous rows in a different order than it prints them
+  // (e.g. a 16:22 debit applied before a 16:21 credit). Replay the printed balances, letting
+  // a row within the next few same-day rows be applied first when that exactly explains the
+  // printed balance. Anything still unexplained is a genuine discontinuity.
+  const REORDER_WINDOW = 8;
+  function checkRunningBalance(transactions) {
+    const round = global.SomapCrdb.round, discontinuities = [], reordered = [];
+    const pending = transactions.slice(1);
+    let balance = transactions[0]?.balance;
+    const fits = t => Math.abs(round(balance + t.moneyIn - t.moneyOut) - t.balance) <= 0.02;
+    while (pending.length) {
+      const head = pending[0];
+      let pick = fits(head) ? 0 : -1;
+      for (let i = 1; pick < 0 && i < Math.min(pending.length, REORDER_WINDOW); i += 1) {
+        if (pending[i].date === head.date && fits(pending[i])) pick = i;
+      }
+      if (pick < 0) {
+        const expected = round(balance + head.moneyIn - head.moneyOut);
+        discontinuities.push({ transactionId: head.id, date: head.date, expected, displayed: head.balance, difference: round(head.balance - expected) });
+        pick = 0;
+      } else if (pick > 0) {
+        reordered.push({ transactionId: pending[pick].id, date: pending[pick].date, postingTime: pending[pick].postingTime, before: head.id });
+      }
+      balance = pending[pick].balance;
+      pending.splice(pick, 1);
+    }
+    return { discontinuities, reordered };
+  }
+
   function buildFindings(transactions, totals) {
     const findings = [];
     if (totals.totalDeposits || totals.totalWithdrawals) {
@@ -298,24 +416,25 @@
 
   function analyze(rawRows, options) {
     const settings = mergeSettings(options?.settings);
+    const purposeConfig = options?.purposeConfig || {};
+    // Zero-value rows stay in the raw rows as evidence but are excluded here from totals and grouping.
     const transactions = (rawRows || [])
-      .map((row, index) => normalizeTransaction(row, index, settings))
+      .map((row, index) => normalizeTransaction(row, index, settings, purposeConfig))
       .filter((t) => t.date && (t.moneyIn > 0) !== (t.moneyOut > 0));
     // Printed debit/credit columns are authoritative; balance gaps never change direction.
+    markReversals(transactions);
     detectDuplicates(transactions);
-    const { totals, categoryTotals } = summarize(transactions);
+    const { totals } = summarize(transactions);
+    const categoryTotals = categoryTotalsOf(transactions);
     const withdrawalEvents = groupWithdrawalEvents(transactions);
     const validation = global.SomapCrdb.validate(rawRows || [], options?.meta);
     const statement = options?.meta?.statement || {};
-    const discontinuities = [];
-    transactions.forEach((t,i) => {
-      if (!i) return;
-      const expected = global.SomapCrdb.round(transactions[i-1].balance + t.moneyIn - t.moneyOut);
-      const difference = global.SomapCrdb.round(t.balance - expected);
-      if (Math.abs(difference) > 0.02) discontinuities.push({ transactionId: t.id, date: t.date, expected, displayed: t.balance, difference });
-    });
+    const { discontinuities, reordered } = checkRunningBalance(transactions);
     totals.totalCharges = global.SomapCrdb.round(withdrawalEvents.reduce((n,g) => n + g.charges,0));
     totals.totalPrincipal = global.SomapCrdb.round(withdrawalEvents.reduce((n,g) => n + g.amountWithdrawn,0));
+    const bankCharges = transactions.filter(t => t.bankChargeRow);
+    totals.bankCharges = global.SomapCrdb.round(bankCharges.reduce((n,t) => n + t.moneyOut,0));
+    totals.bankChargeCount = bankCharges.length;
     totals.withdrawalEventCount = withdrawalEvents.length;
     totals.groupedEventCount = totals.creditsCount + withdrawalEvents.length;
     Object.keys(totals).forEach(k => { if (typeof totals[k] === 'number') totals[k] = global.SomapCrdb.round(totals[k]); });
@@ -324,7 +443,7 @@
     const expenses = transactions.filter((t) => t.moneyOut > 0);
     return {
       parserVersion: options?.meta?.parserVersion || global.SomapCrdb.VERSION,
-      validation, statement, discontinuities,
+      validation, statement, discontinuities, postingOrderNotes: reordered,
       generatedAt: Date.now(),
       settings,
       totals,
@@ -334,7 +453,11 @@
       reviewItems,
       income,
       expenses,
-      findings: [...buildFindings(transactions, totals), ...discontinuities.map(d => `Running-balance discontinuity on ${d.date}: expected ${formatTsh(d.expected)}, printed ${formatTsh(d.displayed)}, difference ${formatTsh(d.difference)}.`)]
+      purposeSuggestions: purposeSuggestions(transactions, purposeConfig),
+      findings: [...buildFindings(transactions, totals),
+        ...(bankCharges.length ? [`${bankCharges.length} bank charge row(s) without a bank reference: ${formatTsh(totals.bankCharges)} (${bankCharges.map(t => t.description).join('; ')}).`] : []),
+        ...(reordered.length ? [`${reordered.length} row(s) on ${[...new Set(reordered.map(r => r.date))].join(', ')} were posted by the bank in a different order than printed; the printed balances reconcile.`] : []),
+        ...discontinuities.map(d => `Running-balance discontinuity on ${d.date}: expected ${formatTsh(d.expected)}, printed ${formatTsh(d.displayed)}, difference ${formatTsh(d.difference)}.`)]
     };
   }
 
@@ -345,6 +468,8 @@
     parseDate,
     formatTsh,
     analyze,
+    applyPurposes,
+    purposeSuggestions,
     longDate
   };
 })(window);

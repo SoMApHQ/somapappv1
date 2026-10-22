@@ -105,7 +105,7 @@
       const moneyIn = money(cells[4]);
       const balance = money(cells[5]);
       if (!posting.date) { rejected.push({ line: i + 1, reason: "Invalid or missing posting date" }); continue; }
-      if ((moneyIn > 0) === (moneyOut > 0)) { rejected.push({ line: i + 1, reason: "Debit and credit must contain exactly one positive value" }); continue; }
+      if (moneyIn < 0 || moneyOut < 0 || (moneyIn > 0 && moneyOut > 0)) { rejected.push({ line: i + 1, reason: "Debit and credit must be non-negative, with at most one positive value" }); continue; }
       // Reuse the same narration parser as the PDF path: bank reference, AB payment
       // reference, sender/recipient, class and written purpose all come from one regex set.
       const detail = global.SomapCrdb.narration([detailsText]);
@@ -120,7 +120,10 @@
         balance,
         sourceType: sourceType || "xls",
         sourceRow: out.length + 1,
-        sourceLine: i + 1
+        sourceLine: i + 1,
+        // Bank charge rows have no REF; zero-value rows are kept as evidence only.
+        nonRef: !detail.bankReference,
+        zeroValue: !moneyIn && !moneyOut
       });
     }
     const counts = { rawRows: rows.length - headerIndex - 1, validTransactions: out.length, rejectedBlocks: rejected.length };

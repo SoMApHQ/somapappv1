@@ -273,6 +273,27 @@
     await db().ref(path(`years/${y || year()}/bankAuditSettings`)).update(settings || {});
   }
 
+  // Payment-purpose decisions belong to the school, not a year, so every future statement
+  // classifies with them: {categories, aliases, rejectedLabels} (see SomapCrdb.category).
+  function purposeConfigPath() {
+    return path("bankAudit/purposeConfig");
+  }
+
+  async function getPurposeConfig() {
+    const snap = await db().ref(purposeConfigPath()).once("value");
+    return snap.val() || {};
+  }
+
+  // patch: multi-path update relative to purposeConfig, e.g. {"aliases/preformone": {...}}; null deletes.
+  async function updatePurposeConfig(patch) {
+    await db().ref(purposeConfigPath()).update(patch || {});
+    return getPurposeConfig();
+  }
+
+  function newPurposeCategoryId() {
+    return db().ref(purposeConfigPath() + "/categories").push().key;
+  }
+
   async function listAudits(y) {
     const snap = await db().ref(auditPath(y)).once("value");
     const val = snap.val() || {};
@@ -370,6 +391,9 @@
     path,
     getSettings,
     saveSettings,
+    getPurposeConfig,
+    updatePurposeConfig,
+    newPurposeCategoryId,
     listAudits,
     getAudit,
     saveAudit,

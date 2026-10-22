@@ -63,6 +63,8 @@
     cards('Transport collection register',income.filter(t=>t.category==='Transport / Usafiri'));
     cards('Remedial collection register',income.filter(t=>t.category==='Remedial'));
     cards('Graduation collection register',income.filter(t=>t.category==='Graduation'));
+    // School-approved payment types (and bank reversals) each get their own register.
+    [...new Set(income.map(t=>t.category))].filter(c=>!['Transport / Usafiri','Remedial','Graduation','Unknown income'].includes(c)).forEach(c=>cards(`${c} register`,income.filter(t=>t.category===c)));
     cards('Named payments with unclear purpose',income.filter(t=>t.detectedStudentName&&t.category==='Unknown income'));
     cards('Known purpose without child name',income.filter(t=>!t.detectedStudentName&&t.category!=='Unknown income'));
     cards('Neither name nor purpose',income.filter(t=>!t.detectedStudentName&&t.category==='Unknown income'));

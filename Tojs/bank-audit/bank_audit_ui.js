@@ -12,7 +12,8 @@
     students: [],
     diagnostics: null,
     parsedFile: null,
-    activeCategory: null
+    activeCategory: null,
+    purposeConfig: {}
   };
 
   const $ = (id) => document.getElementById(id);
@@ -91,6 +92,7 @@
     setText('sumBook', audit?.statement?.bookBalance == null ? 'Not reported' : money(audit.statement.bookBalance));
     setText('sumUnallocated', money(audit?.categoryTotals?.['Unknown income']));
     setText('sumCharges', money(t.totalCharges));
+    setText('sumBankCharges', money(t.bankCharges || 0));
     setText('sumRaw', String(t.transactionCount || 0));
     setText('sumEvents', String(t.groupedEventCount || 0));
     setText('sumWithdrawalEvents', String(t.withdrawalEventCount || 0));
@@ -159,6 +161,154 @@
     renderCategoryDetail(audit);
   }
 
+  // ---- Payment-purpose decisions (per school, see SomapBankAuditStorage.getPurposeConfig) ----
+  const RESERVED_PURPOSES = ["unknown income", "transfer reversal", "transfer in", "transfer out", "bank charge", "unknown expense", "unclassified transaction"];
+
+  function purposeCategoryNames() {
+    return global.SomapCrdb.purposeNames(state.purposeConfig);
+  }
+
+  function purposeAliases() {
+    return Object.entries(state.purposeConfig?.aliases || {}).map(([key, v]) => ({
+      key, category: typeof v === "string" ? v : v?.category, label: (v && typeof v === "object" && v.label) || key
+    }));
+  }
+
+  function aliasPatch(keys, category, label) {
+    const stamp = { updatedAt: Date.now(), updatedBy: state.user?.email || "" };
+    return Object.fromEntries(keys.map((k) => [`aliases/${k}`, { category, label, ...stamp }]));
+  }
+
+  function titleCase(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  async function askPurposeName(title, value) {
+    let name = global.Swal
+      ? (await Swal.fire({ title, input: "text", inputValue: value, showCancelButton: true, confirmButtonText: "Save",
+          inputValidator: (v) => !String(v || "").trim() && "Enter a name." })).value
+      : global.prompt(title, value);
+    name = String(name || "").replace(/\s+/g, " ").trim().slice(0, 60);
+    if (!name) return "";
+    if (RESERVED_PURPOSES.includes(name.toLowerCase())) { toast(`"${name}" is a system category. Choose another name.`, "error"); return ""; }
+    return name;
+  }
+
+  async function savePurposeDecision(patch, message) {
+    if (state.readOnly) return;
+    try {
+      state.purposeConfig = await global.SomapBankAuditStorage.updatePurposeConfig(patch);
+      if (state.activeAudit) renderAudit(state.activeAudit);
+      renderPurposeSettings();
+      if (message) setStatus(message, "ok");
+    } catch (error) {
+      console.error(error);
+      toast(`Could not save payment type: ${error.message || error}`, "error");
+    }
+  }
+
+  async function acceptPurpose(s) {
+    const name = await askPurposeName(`Add "${s.label}" as a payment type`, titleCase(s.label));
+    if (!name) return;
+    const existing = purposeCategoryNames().find((n) => n.toLowerCase() === name.toLowerCase());
+    if (existing) return mergePurpose(s, existing);
+    const id = global.SomapBankAuditStorage.newPurposeCategoryId();
+    await savePurposeDecision({
+      [`categories/${id}`]: { name, createdAt: Date.now(), createdBy: state.user?.email || "" },
+      ...aliasPatch(s.keys, name, s.label)
+    }, `"${name}" added as a payment type. ${s.count} payment(s) moved out of Unknown income.`);
+  }
+
+  function mergePurpose(s, target) {
+    return savePurposeDecision(aliasPatch(s.keys, target, s.label), `"${s.label}" will now be counted as ${target}.`);
+  }
+
+  function rejectPurpose(s) {
+    const stamp = { label: s.label, rejectedAt: Date.now(), rejectedBy: state.user?.email || "" };
+    return savePurposeDecision(Object.fromEntries(s.keys.map((k) => [`rejectedLabels/${k}`, stamp])),
+      `"${s.label}" stays in Unknown income and will not be suggested again. Restore it in Settings if needed.`);
+  }
+
+  function renderPurposeSuggestions(audit) {
+    const el = $("purposeSuggestions");
+    if (!el) return;
+    const list = state.readOnly ? [] : (audit?.purposeSuggestions || []);
+    const options = purposeCategoryNames().map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+    el.innerHTML = list.map((s, i) => `<div class="purpose-card" data-suggestion="${i}">
+      <h3>New payment type found: "${esc(s.label)}"</h3>
+      <p>${s.count} payments, ${money(s.total)}, from: ${esc(s.names.join(", ") || "names not stated")}${s.variants.length > 1 ? `<br>Spellings seen: ${esc(s.variants.join(", "))}` : ""}</p>
+      <div class="actions">
+        <strong>Add as a payment type?</strong>
+        <button type="button" data-purpose-yes>Yes</button>
+        <select data-purpose-target aria-label="Merge into existing payment type"><option value="">Merge into…</option>${options}</select>
+        <button type="button" class="ghost" data-purpose-merge>Merge</button>
+        <button type="button" class="danger" data-purpose-no>No</button>
+      </div>
+    </div>`).join("");
+    el.querySelectorAll("[data-suggestion]").forEach((card) => {
+      const s = list[Number(card.dataset.suggestion)];
+      card.querySelector("[data-purpose-yes]").addEventListener("click", () => acceptPurpose(s));
+      card.querySelector("[data-purpose-no]").addEventListener("click", () => rejectPurpose(s));
+      card.querySelector("[data-purpose-merge]").addEventListener("click", () => {
+        const target = card.querySelector("[data-purpose-target]").value;
+        if (!target) return toast("Choose the payment type to merge into.", "error");
+        mergePurpose(s, target);
+      });
+    });
+  }
+
+  function renderPurposeSettings() {
+    const el = $("purposeSettings");
+    if (!el) return;
+    const cfg = state.purposeConfig || {};
+    const aliases = purposeAliases();
+    const names = purposeCategoryNames();
+    const custom = Object.entries(cfg.categories || {}).filter(([, c]) => c?.name);
+    const chips = (name) => aliases.filter((a) => a.category === name).map((a) =>
+      `<span class="alias-chip">${esc(a.label)}${state.readOnly ? "" : `<button type="button" title="Remove this spelling" data-alias-remove="${esc(a.key)}">×</button>`}</span>`).join("")
+      || '<span class="text-slate-500 text-sm">No extra spellings yet.</span>';
+    const builtin = global.SomapCrdb.BUILTIN_PURPOSE_NAMES.map((name) =>
+      `<div class="purpose-type"><h3>${esc(name)} <small class="text-slate-500">(built-in)</small></h3><div>${chips(name)}</div></div>`);
+    const customHtml = custom.map(([id, c]) => `<div class="purpose-type" data-category-id="${esc(id)}">
+      <h3>${esc(c.name)}</h3><div>${chips(c.name)}</div>
+      ${state.readOnly ? "" : `<div class="actions">
+        <button type="button" class="ghost" data-category-rename>Rename</button>
+        <select data-category-target aria-label="Merge into"><option value="">Merge into…</option>${names.filter((n) => n !== c.name).map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select>
+        <button type="button" class="ghost" data-category-merge>Merge</button>
+        <button type="button" class="danger" data-category-delete>Delete</button>
+      </div>`}
+    </div>`);
+    const rejected = Object.entries(cfg.rejectedLabels || {}).map(([key, r]) =>
+      `<span class="alias-chip">${esc(r?.label || key)}${state.readOnly ? "" : `<button type="button" title="Suggest this label again" data-rejected-restore="${esc(key)}">↺</button>`}</span>`).join("");
+    el.innerHTML = [...builtin, ...customHtml].join("")
+      + `<div class="purpose-type"><h3>Not payment types (kept in Unknown income)</h3><div>${rejected || '<span class="text-slate-500 text-sm">None.</span>'}</div></div>`;
+
+    el.querySelectorAll("[data-alias-remove]").forEach((btn) => btn.addEventListener("click", () =>
+      savePurposeDecision({ [`aliases/${btn.dataset.aliasRemove}`]: null }, "Spelling removed.")));
+    el.querySelectorAll("[data-rejected-restore]").forEach((btn) => btn.addEventListener("click", () =>
+      savePurposeDecision({ [`rejectedLabels/${btn.dataset.rejectedRestore}`]: null }, "Label will be suggested again on the next statement that uses it.")));
+    el.querySelectorAll("[data-category-id]").forEach((card) => {
+      const id = card.dataset.categoryId, old = cfg.categories[id].name;
+      const moveAliases = (target) => Object.fromEntries(aliases.filter((a) => a.category === old)
+        .map((a) => [`aliases/${a.key}`, target ? { category: target, label: a.label, updatedAt: Date.now(), updatedBy: state.user?.email || "" } : null]));
+      card.querySelector("[data-category-rename]")?.addEventListener("click", async () => {
+        const name = await askPurposeName(`Rename "${old}"`, old);
+        if (!name || name === old) return;
+        if (names.some((n) => n.toLowerCase() === name.toLowerCase())) return toast(`"${name}" already exists. Use Merge instead.`, "error");
+        savePurposeDecision({ [`categories/${id}/name`]: name, ...moveAliases(name) }, `Renamed "${old}" to "${name}".`);
+      });
+      card.querySelector("[data-category-merge]")?.addEventListener("click", () => {
+        const target = card.querySelector("[data-category-target]").value;
+        if (!target) return toast("Choose the payment type to merge into.", "error");
+        savePurposeDecision({ [`categories/${id}`]: null, ...moveAliases(target) }, `"${old}" merged into ${target}.`);
+      });
+      card.querySelector("[data-category-delete]")?.addEventListener("click", () => {
+        if (!global.confirm(`Delete payment type "${old}"? Its payments return to Unknown income and its labels will be suggested again.`)) return;
+        savePurposeDecision({ [`categories/${id}`]: null, ...moveAliases(null) }, `"${old}" deleted.`);
+      });
+    });
+  }
+
   function toggleCategoryDetail(category) {
     state.activeCategory = state.activeCategory === category ? null : category;
     renderCategoryTotals(state.activeAudit);
@@ -220,8 +370,9 @@
     $("parseFailure")?.setAttribute("hidden", "");
     if ($("downloadPdfBtn")) $("downloadPdfBtn").disabled = !audit?.validation?.valid;
     state.activeAudit = audit;
-    if (audit) attachMatches(audit);
+    if (audit) { global.SomapBankAuditEngine.applyPurposes(audit, state.purposeConfig); attachMatches(audit); }
     renderSummary(audit);
+    renderPurposeSuggestions(audit);
     renderCategoryTotals(audit);
     renderFindings(audit);
     const txns = audit?.transactions || [];
@@ -291,6 +442,7 @@
   async function downloadAuditPdf(id) {
     const audit = id ? await global.SomapBankAuditStorage.getAudit(id, year()) : state.activeAudit;
     if (!audit) return toast("Open or save an audit first.", "error");
+    global.SomapBankAuditEngine.applyPurposes(audit, state.purposeConfig);
     await global.SomapBankAuditPdf.download(audit);
     if (audit.id && !audit.reportFile?.downloadUrl && !state.readOnly) {
       try {
@@ -374,7 +526,7 @@
     else setStatus("Parsing statement. Please wait...", "warn");
     try {
       const parsed = await global.SomapBankAuditParser.parseFile(file);
-      const analysis = global.SomapBankAuditEngine.analyze(parsed.rows, { settings: formSettings(), meta: parsed.meta });
+      const analysis = global.SomapBankAuditEngine.analyze(parsed.rows, { settings: formSettings(), meta: parsed.meta, purposeConfig: state.purposeConfig });
       state.diagnostics = {fileName:file.name,parserVersion:global.SomapCrdb.VERSION,meta:parsed.meta,validation:analysis.validation,extractedText:parsed.extractedText,extraction:parsed.extraction};
       if (!analysis.validation.valid) { showParseFailure(analysis.validation.errors, parsed); return; }
       const inferredPeriod = inferPeriod(analysis.transactions);
@@ -445,6 +597,7 @@
       'Accounting rows found: ' + (counts.accountingRows || 0),
       'Valid transactions created: ' + rows.length,
       'Rejected blocks: ' + (counts.rejectedBlocks || 0),
+      'Non-REF rows found: ' + (counts.nonRefRows || 0) + ' (bank charges ' + money(counts.nonRefDebitTotal || 0) + ')',
       ...errors
     ];
     setText('parserDiagnosticText',lines.join('\n'));
@@ -523,7 +676,7 @@
     const result=await Swal.fire({title:'Match or split payment',width:800,html:
       '<p>'+esc(t.detectedStudentName)+' | '+esc(t.paymentReference)+' | '+money(t.moneyIn)+'</p><p>One row per child, month and category. Allocations must total the bank credit.</p><div id="allocationRows"></div><button type="button" id="addAllocation">Add split</button>',
       showCancelButton:true,confirmButtonText:'Save allocation',didOpen:()=>{
-        const add=()=>{const row=document.createElement('div');row.className='allocation-row';row.innerHTML='<select data-child>'+choices+'</select><input data-month type="month" value="'+t.date.slice(0,7)+'"><select data-category><option>Transport / Usafiri</option><option>Remedial</option><option>Graduation</option><option>Unknown income</option></select><input data-amount type="number" min="0.01" step="0.01" placeholder="Amount"><button type="button">Remove</button>';row.querySelector('button').onclick=()=>row.remove();$('allocationRows').appendChild(row);return row;};
+        const add=()=>{const row=document.createElement('div');row.className='allocation-row';row.innerHTML='<select data-child>'+choices+'</select><input data-month type="month" value="'+t.date.slice(0,7)+'"><select data-category>'+[...purposeCategoryNames(),'Unknown income'].map(n=>'<option>'+esc(n)+'</option>').join('')+'</select><input data-amount type="number" min="0.01" step="0.01" placeholder="Amount"><button type="button">Remove</button>';row.querySelector('button').onclick=()=>row.remove();$('allocationRows').appendChild(row);return row;};
         const row=add();row.querySelector('[data-amount]').value=t.moneyIn;row.querySelector('[data-category]').value=t.category;
         if(t.matchSuggestions?.length===1)row.querySelector('[data-child]').value=t.matchSuggestions[0].id;
         $('addAllocation').onclick=add;
@@ -572,7 +725,7 @@
       if (previous.parserMeta?.sourceHash && previous.parserMeta.sourceHash !== parsed.meta.sourceHash) throw new Error('Selected file differs from the original statement.');
       const inferred = inferPeriod(parsed.rows.map(r => ({date:global.SomapBankAuditEngine.parseDate(r.date)?.toLocaleDateString('sv-SE')})));
       if (!previous.parserMeta?.sourceHash && ((previous.statementPeriodFrom && previous.statementPeriodFrom !== inferred.from) || (previous.statementPeriodTo && previous.statementPeriodTo !== inferred.to))) throw new Error('Selected statement period differs from this saved audit.');
-      const analysis = global.SomapBankAuditEngine.analyze(parsed.rows, {settings:formSettings(),meta:parsed.meta});
+      const analysis = global.SomapBankAuditEngine.analyze(parsed.rows, {settings:formSettings(),meta:parsed.meta,purposeConfig:state.purposeConfig});
       if (!analysis.validation.valid) throw new Error('Parsing failed validation. ' + analysis.validation.errors.join(' '));
       let statementFile = previous.statementFile;
       if (!statementFile?.driveFileId) {
@@ -629,6 +782,9 @@
     await initYearSelect();
     state.settings = await global.SomapBankAuditStorage.getSettings(year());
     fillSettings();
+    try { state.purposeConfig = await global.SomapBankAuditStorage.getPurposeConfig(); }
+    catch (error) { setStatus('Saved payment types could not be loaded; only built-in purposes apply. ' + (error.message || error), 'warn'); }
+    renderPurposeSettings();
     await loadAudits();
   }
 
