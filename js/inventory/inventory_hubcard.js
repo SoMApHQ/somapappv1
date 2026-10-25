@@ -100,17 +100,19 @@
     const feed = [];
     Object.entries(day).forEach(([wid, r]) => {
       if (!r || !['submitted', 'approved'].includes(r.status)) return;
-      (r.problems || []).filter((p) => ['damaged', 'lost', 'notOk'].includes(p.kind)).forEach((p) => feed.push(Object.assign({ workerId: wid, workerName: r.workerName, area: r.area, status: r.status }, p)));
+      (r.problems || []).filter((p) => ['damaged', 'lost', 'notOk'].includes(p.kind) && p.isNew !== false).forEach((p) => feed.push(Object.assign({ workerId: wid, workerName: r.workerName, area: r.area, status: r.status }, p)));
     });
     const seenMap = seen || {};
+    const totalLi = (it) => `<div class="inv-li"><div class="inv-li__head"><div class="inv-li__title">${esc(INV.totalsPhrase(it))}</div>
+        <span class="inv-tag inv-tag--${it.pending ? 'warn' : 'good'}">${it.pending ? `${it.confirmed} imethibitishwa · ${it.pending} inasubiri` : 'Imethibitishwa · Confirmed'}</span></div>
+        ${it.damaged || it.lost ? `<div class="inv-li__meta">vibovu ${it.damaged} · vimepotea ${it.lost}</div>` : ''}</div>`;
     const render = () => card(el, `<div style="${wrapStyle}"><div class="inv-card" style="margin:0">
       <details ${feed.length ? 'open' : ''}><summary style="cursor:pointer;list-style:none"><div class="inv-li__head"><div><h3>🛡️ Ulinzi wa mali ya shule · School-wide watch</h3>
         <p class="inv-card__sub" style="margin:0">Kulingana na ripoti za wafanyakazi wote · From every worker's reports. Mwalimu Mkuu ndiye anayethibitisha.</p></div>
         ${feed.length ? `<span class="inv-badge">${feed.length}</span>` : pill(true, 'Hakuna tatizo jipya leo')}</div></summary>
       <div class="inv-cat">Jumla ya mali · Totals</div>
-      <div class="inv-list">${highlights.length ? highlights.map((it) => `<div class="inv-li"><div class="inv-li__head"><div class="inv-li__title">${esc(INV.totalsPhrase(it))}</div>
-        <span class="inv-tag inv-tag--${it.pending ? 'warn' : 'good'}">${it.pending ? `${it.confirmed} imethibitishwa · ${it.pending} inasubiri` : 'Imethibitishwa · Confirmed'}</span></div>
-        ${it.damaged || it.lost ? `<div class="inv-li__meta">vibovu ${it.damaged} · vimepotea ${it.lost}</div>` : ''}</div>`).join('') : '<p class="inv-empty">Bado hakuna ripoti · No reports yet.</p>'}</div>
+      ${highlights.length ? `<div class="inv-list">${highlights.slice(0, 6).map(totalLi).join('')}</div>
+        ${highlights.length > 6 ? `<details style="margin-top:6px"><summary class="inv-small" style="cursor:pointer">Zaidi · More (${highlights.length - 6})</summary><div class="inv-list" style="margin-top:6px">${highlights.slice(6).map(totalLi).join('')}</div></details>` : ''}` : '<p class="inv-empty">Bado hakuna ripoti · No reports yet.</p>'}
       <div class="inv-cat">Vilivyoharibika / kupotea leo · Damaged or lost today</div>
       <div class="inv-list">${feed.length ? feed.map((p) => {
         const key = INV.util.keySafe(`${p.workerId}_${p.itemId}`);
