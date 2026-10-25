@@ -66,11 +66,13 @@
     if (!(ctx.isHeadteacher || ctx.isAdmin)) { el.hidden = true; return; }
     const ymd = todayYMD();
     const n = await headteacherNumbers(ctx, ymd);
-    if (ctx.workerId && !INV.isEnabledFor(n.settings, ctx.workerId) && !ctx.isAdmin) { el.hidden = true; return; }
     const reports = INV.URLS.reports;
+    // Management always sees the entry point, even before any pilot worker is chosen.
+    const notStarted = !n.settings.configured ? `<div class="inv-banner inv-banner--warn"><span class="inv-banner__icon">🧪</span><div class="inv-banner__body"><strong>Hesabu ya Mali bado haijawashwa · Not switched on yet</strong>Admin achague wafanyakazi kwenye Mipangilio · Admin chooses the workers in Settings.</div></div>` : '';
     card(el, `<div class="inv-card" style="margin:0">
       <div class="inv-li__head"><div><h3>🏫 Ukaguzi wa Mali · Inventory Approvals & Reports</h3><p class="inv-card__sub" style="margin:0">Leo · Today — ${esc(INV.util.fmtDaySw(ymd))}</p></div>
         ${n.queue.pendingCount ? `<span class="inv-badge">${n.queue.pendingCount}</span>` : pill(true, 'Zote zimepitiwa · All reviewed')}</div>
+      ${notStarted}
       <div class="inv-stats">
         ${statBox(`Zinasubiri idhini · Pending (safi ${n.queue.clean.length})`, n.queue.pendingCount, n.queue.pendingCount ? 'warn' : 'good', 'approvals')}
         ${statBox('Vibovu leo · Damaged today', n.damaged, n.damaged ? 'bad' : '', 'overview')}
@@ -136,7 +138,17 @@
   async function mountDigest(el, ctx) {
     if (!ctx.isAdmin) { el.hidden = true; return; }
     const settings = await INV.loadSettings(ctx, ctx.year);
-    if (settings.directorDailyDigest === false || !settings.configured) { el.hidden = true; return; }
+    if (!settings.configured) {
+      // Not switched on yet: show the way in instead of hiding the module.
+      card(el, `<div class="inv-card" style="margin:12px 0">
+        <div class="inv-li__head"><div><h3>🧾 Hesabu ya Mali · Inventory</h3><p class="inv-card__sub" style="margin:0">Bado haijawashwa. Fungua Mipangilio, chagua wafanyakazi wa majaribio, kisha Hifadhi · Not switched on yet: open Settings, choose the pilot workers and save.</p></div></div>
+        <div class="inv-inline" style="margin-top:10px"><a class="inv-btn inv-btn--primary" href="${esc(INV.URLS.reports)}?tab=settings">⚙️ Washa · Set up</a><a class="inv-btn" href="${esc(INV.URLS.reports)}?tab=overview">📊 Fungua · Open</a></div></div>`);
+      return;
+    }
+    if (settings.directorDailyDigest === false) {
+      card(el, `<div class="inv-card" style="margin:12px 0"><div class="inv-li__head"><h3>🧾 Hesabu ya Mali · Inventory</h3><a class="inv-btn inv-btn--primary" href="${esc(INV.URLS.reports)}">Fungua · Open</a></div></div>`);
+      return;
+    }
     const ymd = todayYMD();
     const n = await headteacherNumbers(ctx, ymd);
     const month = ymd.slice(0, 7);

@@ -230,8 +230,10 @@
     if (!user) return { isAdmin: false };
     const [admin, profile] = await Promise.all([val(db().ref(`admins/${user.uid}`)), val(db().ref(`users/${user.uid}`))]);
     const role = normRole(profile?.role || profile?.userType || '');
+    // dashboard.html marks its signed-in administrators/directors with localStorage role "admin".
+    const storedRole = normRole(storageGet('role') || '');
     return {
-      isAdmin: admin === true || ADMIN_ROLES.some((r) => role.includes(r)),
+      isAdmin: admin === true || ADMIN_ROLES.some((r) => role.includes(r)) || ADMIN_ROLES.includes(storedRole),
       uid: user.uid,
       name: user.displayName || user.email || 'Director',
     };
