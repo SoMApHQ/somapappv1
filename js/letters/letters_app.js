@@ -70,14 +70,31 @@
     const params = new URLSearchParams(global.location.search);
     if (params.get('new')) openPicker(); else render();
   }
-  // Use the school profile logo until a letterhead logo is uploaded.
+  // Until a letterhead logo is uploaded, use the school profile logo, else the SoMAp logo.
+  const SOMAP_LOGO = 'images/somap-logo.png';
   async function logoFallback() {
-    const head = S.settings.letterheads.school;
-    if (head.logo) return;
+    let profileLogo = '';
     try {
       const snap = await global.firebase.database().ref(`schools/${S.ctx.schoolId}/profile/logoUrl`).once('value');
-      if (snap.val()) head.logo = snap.val();
+      profileLogo = snap.val() || '';
     } catch (_) { /* no profile logo */ }
+    Object.values(S.settings.letterheads).forEach((h) => {
+      if (h.kind !== 'image' && !h.logo) { h.logo = profileLogo || SOMAP_LOGO; h.logoIsDefault = true; }
+    });
+  }
+  // What a letterhead still needs before letters look finished.
+  function headGaps(h) {
+    if (!h) return ['letterhead'];
+    if (h.kind === 'image') return h.image ? [] : ['header image'];
+    return [['name', 'name'], ['address', 'address'], ['phones', 'phone'], ['email', 'email']].filter(([k]) => !String(h[k] || '').trim()).map(([, l]) => l)
+      .concat(h.logoIsDefault ? ['own logo (SoMAp logo in use)'] : []);
+  }
+  function readinessHtml() {
+    const heads = S.ctx.isDirector ? ['school', 'company'] : ['school'];
+    const gaps = heads.map((id) => [id, headGaps(S.settings.letterheads[id])]).filter(([, g]) => g.length);
+    if (!gaps.length) return '';
+    const list = gaps.map(([id, g]) => `<strong>${id === 'company' ? 'Company' : 'School'} letterhead</strong> needs: ${esc(g.join(', '))}`).join('<br>');
+    return `<div class="lt-banner"><span>🏷</span><div>${S.ctx.isDirector ? '<strong>Letterhead readiness.</strong> ' : '<strong>The director has not finished the letterhead yet</strong> — letters use the school name and the SoMAp logo until then.<br>'}${list}</div>${S.ctx.isDirector ? '<button class="lt-btn lt-btn--sm lt-btn--primary" data-act="settings">Set up</button>' : ''}</div>`;
   }
   function emptyScreen(icon, title, text, actions) {
     return `<div class="lt-empty-screen"><div class="lt-empty-screen__icon">${icon}</div><h1>${esc(title)}</h1><p>${esc(text)}</p><div class="lt-inline">${actions || ''}</div></div>`;
@@ -151,7 +168,7 @@
         <div class="lt-inline"><button class="lt-btn lt-btn--primary lt-btn--lg" data-act="new">＋ Write a letter</button>
         <button class="lt-btn lt-btn--lg" data-act="new-minutes">🗂 Write minutes</button></div>
       </section>
-      ${S.ctx.isDirector && !S.settings.configured ? `<div class="lt-banner"><span>🏷</span><div><strong>First, set up your letterheads.</strong> Add the school and company names, registration, address, phones and logo once — every letter then carries them.</div><button class="lt-btn lt-btn--sm lt-btn--primary" data-act="settings">Set up</button></div>` : ''}
+      ${readinessHtml()}
       <section class="lt-stats">
         <button class="lt-stat lt-stat--hero ${!f.status && !f.type ? 'lt-stat--on' : ''}" data-act="filter-clear"><span class="lt-stat__value">${st.total}</span><span class="lt-stat__label">Letters in ${esc(S.year)}</span></button>
         <button class="lt-stat lt-stat--muted ${f.status === 'draft' ? 'lt-stat--on' : ''}" data-act="filter-status" data-status="draft"><span class="lt-stat__value">${st.drafts}</span><span class="lt-stat__label">Drafts</span></button>
@@ -705,7 +722,7 @@
           <div class="lt-row2">${inp('phones', 'Phones', '+255 …')}${inp('email', 'Email', 'info@…')}</div>
           <div class="lt-row2">${inp('website', 'Website', 'somapv2i.com')}${inp('motto', 'Motto', '')}</div>
           <div class="lt-row2"><label class="lt-field"><span>Accent colour</span><input class="lt-input lt-input--color" type="color" data-h="color" value="${esc(h.color || '#0f3d6e')}" ${ro ? 'disabled' : ''}></label>
-          <label class="lt-field"><span>Logo (PNG with transparent background is best)</span><input type="file" accept="image/*" data-upload="head-logo" ${ro ? 'disabled' : ''}></label></div>`}
+          <label class="lt-field"><span>${h.logoIsDefault ? 'Logo — SoMAp logo in use; upload yours to replace it' : 'Logo (PNG with transparent background is best)'}</span><input type="file" accept="image/*" data-upload="head-logo" ${ro ? 'disabled' : ''}></label></div>`}
           ${inp('footer', 'Footer line (optional)', 'Bank: … · TIN: …')}
           ${ro ? '' : `<div class="lt-inline"><button class="lt-btn lt-btn--primary" data-act="save-head">Save letterhead</button>${['school', 'company'].includes(h.id) ? '' : '<button class="lt-btn lt-btn--ghost lt-danger" data-act="del-head">Delete</button>'}</div>`}
         </div>
@@ -729,7 +746,9 @@
     sc.style.transform = `scale(${scale})`; pv.style.height = `${Math.min(page.offsetHeight, 520) * scale + 12}px`;
   }
   async function saveHead() {
-    const h = S.headDraft;
+    const h = clone(S.headDraft);
+    if (h.logoIsDefault) h.logo = ''; // the fallback logo is applied at load time, never stored
+    delete h.logoIsDefault;
     await guard(async () => {
       await LT.saveLetterhead(S.ctx, h);
       if (!S.settings.configured) await LT.saveSettings(S.ctx, { configuredAt: Date.now() });
@@ -975,7 +994,7 @@
     if (!up || !el.files || !el.files[0]) return;
     const file = el.files[0];
     if (up === 'signature') { const url = await guard(() => processImage(file, { maxW: 900, maxH: 320, removeWhite: true })); if (url) saveSignature(url); return; }
-    if (up === 'head-logo') { const url = await guard(() => processImage(file, { maxW: 360, maxH: 360 })); if (url) { S.headDraft.logo = url; headPreview(); toast('Logo ready — press Save letterhead', 'info'); } return; }
+    if (up === 'head-logo') { const url = await guard(() => processImage(file, { maxW: 360, maxH: 360 })); if (url) { S.headDraft.logo = url; delete S.headDraft.logoIsDefault; headPreview(); toast('Logo ready — press Save letterhead', 'info'); } return; }
     if (up === 'head-image') { const url = await guard(() => processImage(file, { maxW: 1800, maxH: 500, jpeg: !/png/i.test(file.type) })); if (url) { S.headDraft.image = url; headPreview(); toast('Header ready — press Save letterhead', 'info'); } }
   }
 

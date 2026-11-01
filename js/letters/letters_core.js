@@ -323,7 +323,7 @@
     await db().ref().update(updates);
     return row;
   }
-  function firstLine(text) { return String(text || '').split(/\n/).map((s) => s.trim()).filter(Boolean).slice(0, 2).join(', '); }
+  function firstLine(text) { return String(text || '').split(/\n/).map((s) => s.trim().replace(/[,.]+$/, '')).filter(Boolean).slice(0, 2).join(', '); }
 
   async function openBody(ctx, id) {
     const box = await val(lref(ctx, `bodies/${id}`));
