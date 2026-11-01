@@ -111,5 +111,59 @@
 
   function label(t, lang) { return t ? (lang === 'sw' ? (t.sw || t.en) : (t.en || t.name)) : ''; }
 
-  global.SomapLettersT = { GROUPS, TYPES, L, MONTHS_EN, MONTHS_SW, FONTS, SPACINGS, SIZES, DEFAULT_FORMAT, STATUSES, formatDate, closingFor, blankMinutes, label };
+  // Sentences the studio can offer to add when a letter is thin (used when the Claude service is
+  // not available; Claude writes letter-specific suggestions instead). `at`: start | end.
+  const S_ = (at, en, sw, why) => ({ at, en, sw, why });
+  const SUGGEST = {
+    _generic: [
+      S_('start', 'I hope this letter finds you well.', 'Natumaini barua hii inakukuta ukiwa mzima wa afya.', 'A courteous opening'),
+      S_('end', 'Thank you for your time and consideration.', 'Asante kwa muda wako na kwa kulizingatia jambo hili.', 'A polite close'),
+      S_('end', 'Please do not hesitate to contact us should you need any further information.', 'Tafadhali usisite kuwasiliana nasi iwapo utahitaji maelezo zaidi.', 'Invites a reply'),
+    ],
+    director_apology: [
+      S_('start', 'I hope this letter finds you well.', 'Natumaini barua hii inakukuta ukiwa mzima wa afya.', 'A warm opening'),
+      S_('end', 'I take full responsibility for this, and I truly value your work and the patience you have shown during this period.', 'Ninabeba jukumu kamili kwa hili, na ninathamini sana kazi yako pamoja na uvumilivu uliouonyesha katika kipindi hiki.', 'Takes responsibility and shows appreciation'),
+      S_('end', 'I am committed to making sure that this does not happen again.', 'Ninaahidi kuhakikisha kwamba hali hii haijirudii tena.', 'A commitment for the future'),
+      S_('end', 'Should you wish to discuss this further, please feel free to contact me at any time.', 'Iwapo ungependa kulijadili jambo hili zaidi, tafadhali usisite kuwasiliana nami wakati wowote.', 'Keeps the door open'),
+      S_('end', 'Thank you for your understanding and continued support.', 'Asante kwa uelewa wako na ushirikiano wako endelevu.', 'A gracious close'),
+    ],
+    loan_request: [
+      S_('start', 'We are writing to formally apply for a loan facility from your esteemed institution.', 'Tunaandika kuomba rasmi mkopo kutoka katika taasisi yenu tukufu.', 'States the purpose up front'),
+      S_('end', 'The loan will be repaid from the school\'s fee collections, which have been stable and growing.', 'Mkopo huu utarejeshwa kupitia makusanyo ya ada za shule, ambayo yamekuwa imara na yanaongezeka.', 'Shows repayment capacity — keep only if true'),
+      S_('end', 'We have attached the supporting documents for your review and are ready to provide any further information you may require.', 'Tumeambatisha nyaraka za kuunga mkono ombi hili, na tuko tayari kutoa taarifa nyingine yoyote mtakayohitaji.', 'Points to the enclosures'),
+      S_('end', 'We look forward to your favourable consideration.', 'Tunatarajia kupata majibu mazuri kutoka kwenu.', 'A confident close'),
+    ],
+    warning: [
+      S_('end', 'You are hereby warned that any repetition of this conduct will lead to further disciplinary action in accordance with the school\'s regulations.', 'Unaonywa kwamba kurudia kosa hili kutasababisha hatua zaidi za kinidhamu kwa mujibu wa kanuni za shule.', 'States the consequence'),
+      S_('end', 'Please sign the copy of this letter to acknowledge receipt.', 'Tafadhali saini nakala ya barua hii kuthibitisha kuipokea.', 'Records receipt'),
+    ],
+    summons: [
+      S_('end', 'You are welcome to be accompanied by a colleague of your choice.', 'Unaruhusiwa kuambatana na mfanyakazi mwenzako utakayemchagua.', 'Fair process'),
+      S_('end', 'Failure to attend without a reasonable explanation may lead to the matter being decided in your absence.', 'Kutohudhuria bila sababu ya msingi kunaweza kusababisha suala hili kuamuliwa bila uwepo wako.', 'States the consequence'),
+    ],
+    show_cause: [
+      S_('end', 'Your written explanation should reach the Head Teacher\'s office within three (3) working days from the date of this letter.', 'Maelezo yako ya maandishi yafike ofisi ya Mwalimu Mkuu ndani ya siku tatu (3) za kazi tangu tarehe ya barua hii.', 'Sets a deadline — adjust the days'),
+    ],
+    course: [
+      S_('end', 'Upon your return, you will be expected to share what you have learnt with your colleagues.', 'Utakaporudi, unatarajiwa kuwashirikisha wenzako yale uliyojifunza.', 'Sets an expectation'),
+      S_('end', 'We wish you a fruitful training.', 'Tunakutakia mafunzo mema yenye mafanikio.', 'An encouraging close'),
+    ],
+    commendation: [
+      S_('end', 'Your dedication sets a good example for your colleagues and for our pupils.', 'Kujituma kwako ni mfano mzuri kwa wenzako na kwa wanafunzi wetu.', 'Adds warmth'),
+      S_('end', 'Keep up the good work.', 'Endelea na kazi nzuri.', 'An encouraging close'),
+    ],
+    parent_notice: [
+      S_('end', 'We appreciate your continued cooperation and support.', 'Tunashukuru kwa ushirikiano na msaada wenu endelevu.', 'Thanks parents'),
+      S_('end', 'For any enquiries, please contact the school office.', 'Kwa maswali yoyote, tafadhali wasiliana na ofisi ya shule.', 'Where to ask'),
+    ],
+    fee_reminder: [
+      S_('end', 'If you have already made the payment, kindly ignore this reminder and accept our thanks.', 'Kama tayari umeshalipa, tafadhali puuza ukumbusho huu na upokee shukrani zetu.', 'Polite for those who have paid'),
+      S_('end', 'For any enquiries, please contact the school office.', 'Kwa maswali yoyote, tafadhali wasiliana na ofisi ya shule.', 'Where to ask'),
+    ],
+  };
+  SUGGEST.parent_invite = SUGGEST.parent_notice;
+  SUGGEST.circular = SUGGEST.parent_notice;
+  SUGGEST.bank_letter = SUGGEST._generic;
+
+  global.SomapLettersT = { GROUPS, TYPES, L, MONTHS_EN, MONTHS_SW, FONTS, SPACINGS, SIZES, DEFAULT_FORMAT, STATUSES, SUGGEST, formatDate, closingFor, blankMinutes, label };
 })(window);

@@ -521,33 +521,65 @@
     // Full names plus their distinctive first word ("Socrates"), never generic words like "school".
     return [h.school?.name, h.company?.name, S.settings.companyName, S.ctx.schoolName].filter(Boolean).flatMap((n) => [n, n.split(/\s+/)[0]].filter((w) => w.length > 3));
   }
+  // Free public services see the letter text; protected letters ask first (once per session).
+  function externalOk(doc, services) {
+    if (!(doc.scope === 'company' || doc.confidential) || S.externalConsent) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      S.consentResolve = resolve;
+      modal(`<div class="lt-lock"><div class="lt-lock__icon">🌐</div><h2>Send this confidential letter to a free online service?</h2>
+        <p>The Claude assistant is not deployed yet, so this step uses ${esc(services)}. The letter text leaves SoMAp for a moment and those services may keep it. Names and amounts in it would be included.</p></div>
+        <div class="lt-modal__actions"><button class="lt-btn lt-btn--ghost" data-act="consent-no">No, keep it private</button><button class="lt-btn lt-btn--primary" data-act="consent-yes">Yes, for this session</button></div>`);
+    });
+  }
+  function finishConsent(ok) { const r = S.consentResolve; S.consentResolve = null; if (ok) S.externalConsent = true; closeModal(); if (r) r(ok); }
+  // Claude returns letter-specific suggestions; normalise them to the shape of the built-in ones.
+  function claudeAdditions(res) {
+    return (res.suggestedAdditions || []).filter((a) => a && a.text).map((a) => ({ text: a.text, reason: a.reason || '', at: a.afterParagraph < 0 ? 'start' : a.afterParagraph >= (res.paragraphs || []).length - 1 ? 'end' : Number(a.afterParagraph) }));
+  }
   async function aiPolish() {
     const d = S.cur.doc;
     if (!String(d.body || '').trim() && !d.subject) { toast('Write something first', 'error'); return; }
     const btn = $('[data-act="ai-polish"]'); busy(btn, 'Polishing…');
-    let res; let offline = false;
-    try { res = await AI.run(S.settings, 'polish', d, typeById(d.typeId)); } catch (err) {
-      if (['NO_SERVICE', 'UNREACHABLE', 'HTTP_404', 'AI_KEY', 'AI_DOWN'].includes(err.code)) { res = AI.tidy(d, namesForTidy()); offline = true; } else { busy(btn); toast(friendly(err), 'error'); return; }
+    let res; let kind = 'polish';
+    try {
+      res = await AI.run(S.settings, 'polish', d, typeById(d.typeId));
+      res.additions = claudeAdditions(res);
+    } catch (err) {
+      if (!AI.isServiceDown(err)) { busy(btn); toast(friendly(err), 'error'); return; }
+      busy(btn);
+      const ok = await externalOk(d, d.lang === 'sw' ? 'Google Translate' : 'LanguageTool (spelling and grammar) and Google Translate');
+      busy(btn, 'Checking spelling…');
+      if (ok) {
+        try { res = await AI.freePolish(d, namesForTidy(), d.typeId); kind = 'polish-free'; } catch (_) { res = null; }
+      }
+      if (!res) { res = AI.tidy(d, namesForTidy()); res.additions = AI.suggestAdditions(d, d.typeId, String(res.body || '').split(/\n\s*\n/)); kind = 'polish-offline'; }
     }
     busy(btn);
-    const after = { subject: res.subject || d.subject, salutation: res.salutation || d.salutation, body: Array.isArray(res.paragraphs) ? res.paragraphs.join('\n\n') : res.body, closing: res.closing || d.closing, lang: d.lang };
-    reviewModal('✨ Polished', d, after, res, offline ? 'polish-offline' : 'polish');
+    const paragraphs = Array.isArray(res.paragraphs) ? res.paragraphs : String(res.body || '').split(/\n\s*\n/).filter(Boolean);
+    reviewModal('✨ Polished', d, { subject: res.subject || d.subject, salutation: res.salutation || d.salutation, paragraphs, closing: res.closing || d.closing, lang: d.lang }, res, kind);
   }
   async function aiTranslate() {
     const d = S.cur.doc;
     const target = d.lang === 'sw' ? 'en' : 'sw';
+    const title = target === 'sw' ? '🌍 Kiswahili' : '🌍 English';
     const btn = $('[data-act="ai-translate"]'); busy(btn, 'Translating…');
+    let res;
     try {
-      const res = await AI.run(S.settings, 'translate', d, typeById(d.typeId), { targetLang: target });
-      busy(btn);
-      reviewModal(target === 'sw' ? '🌍 Kiswahili' : '🌍 English', d, { subject: res.subject, salutation: res.salutation, body: (res.paragraphs || []).join('\n\n'), closing: res.closing, lang: target }, res, 'translate');
+      res = await AI.run(S.settings, 'translate', d, typeById(d.typeId), { targetLang: target });
     } catch (err) {
+      if (!AI.isServiceDown(err)) { busy(btn); toast(friendly(err), 'error'); return; }
       busy(btn);
-      if (['NO_SERVICE', 'UNREACHABLE', 'HTTP_404', 'AI_KEY', 'AI_DOWN'].includes(err.code)) {
-        modal(`<h2>Translation needs the AI service</h2><p>The writing assistant is not reachable yet (${esc(err.message)}). Until it is deployed, I can switch the date, salutation, closing and labels to ${target === 'sw' ? 'Kiswahili' : 'English'} — you translate the paragraphs yourself.</p>
+      if (!(await externalOk(d, 'Google Translate'))) return;
+      busy(btn, 'Translating…');
+      try { res = await AI.freeTranslate(d, target, namesForTidy()); } catch (e2) {
+        busy(btn);
+        modal(`<h2>The translator could not be reached</h2><p>Neither the Claude assistant nor the free translators answered (${esc(e2.message || 'no connection')}). Check the internet connection and try again, or switch only the date, salutation, closing and labels to ${target === 'sw' ? 'Kiswahili' : 'English'} now.</p>
           <div class="lt-modal__actions"><button class="lt-btn lt-btn--ghost" data-act="modal-close">Cancel</button><button class="lt-btn lt-btn--primary" data-act="labels-only" data-v="${target}">Switch labels only</button></div>`);
-      } else toast(friendly(err), 'error');
+        return;
+      }
     }
+    busy(btn);
+    reviewModal(title, d, { subject: res.subject, salutation: res.salutation, paragraphs: res.paragraphs || [], closing: res.closing, lang: target }, Object.assign(res, { additions: [] }), 'translate');
   }
   async function aiSubject() {
     const d = S.cur.doc;
@@ -596,18 +628,48 @@
     const miss = (res.missingDetails || []).filter(Boolean);
     return `${miss.length ? `<div class="lt-missing"><strong>Missing details — add them so the letter is complete:</strong><ul>${miss.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></div>` : ''}${res.notes ? `<p class="lt-note">${esc(res.notes)}</p>` : ''}`;
   }
+  // Paragraphs with the ticked additions put in place: "start" ones open the first paragraph,
+  // "end" ones form a closing paragraph, numbered ones follow that paragraph.
+  function withAdditions(paragraphs, additions, on) {
+    const ps = paragraphs.slice();
+    additions.map((a, i) => ({ a, i })).filter((x) => on[x.i] && typeof x.a.at === 'number').sort((x, y) => y.a.at - x.a.at)
+      .forEach((x) => ps.splice(Math.min(x.a.at + 1, ps.length), 0, x.a.text));
+    const starts = additions.filter((a, i) => on[i] && a.at === 'start').map((a) => a.text);
+    const ends = additions.filter((a, i) => on[i] && a.at === 'end').map((a) => a.text);
+    if (starts.length) ps[0] = `${starts.join(' ')}${ps[0] ? ` ${ps[0]}` : ''}`;
+    if (ends.length) ps.push(ends.join(' '));
+    return ps;
+  }
+  const ENGINE_CHIP = { 'polish-offline': '<span class="lt-chip lt-chip--warn">basic tidy — no internet service reached</span>', 'polish-free': '<span class="lt-chip lt-chip--info">free spelling & grammar check</span>' };
   function reviewModal(title, before, after, res, kind) {
-    S.pendingAI = { after, kind };
-    const col = (h, x) => `<div class="lt-review__col"><h4>${h}</h4>${x.subject ? `<p class="lt-review__subj">${esc(x.subject)}</p>` : ''}<p><em>${esc(x.salutation || '')}</em></p>${String(x.body || '').split(/\n\s*\n/).map((p) => `<p>${esc(p)}</p>`).join('')}<p><em>${esc(x.closing || '')}</em></p></div>`;
-    modal(`<h2>${title}${kind === 'polish-offline' ? ' <span class="lt-chip lt-chip--warn">offline tidy</span>' : ''}</h2>${missingHtml(res)}
-      <div class="lt-review">${col('Before', before)}${col('After', after)}</div>
+    const additions = res.additions || [];
+    S.pendingAI = { after, kind, additions, on: additions.map(() => true) };
+    const fixes = (res.fixes || []).filter(Boolean);
+    const advice = (res.advice || []).filter(Boolean);
+    modal(`<h2>${title} ${ENGINE_CHIP[kind] || (res.engine === 'free' ? '<span class="lt-chip lt-chip--info">free translator</span>' : '<span class="lt-chip lt-chip--good">Claude</span>')}</h2>${missingHtml(res)}
+      ${fixes.length ? `<details class="lt-fixes" open><summary><strong>${fixes.length} correction${fixes.length > 1 ? 's' : ''} made</strong></summary><ul>${fixes.slice(0, 40).map((f) => `<li>${esc(f)}</li>`).join('')}</ul></details>` : ''}
+      ${advice.length ? `<details class="lt-fixes"><summary>${advice.length} style tip${advice.length > 1 ? 's' : ''} (not applied)</summary><ul>${advice.map((f) => `<li>${esc(f)}</li>`).join('')}</ul></details>` : ''}
+      ${additions.length ? `<div class="lt-adds"><strong>Suggested additions</strong> <span class="lt-muted">— untick anything you do not want; the “After” text updates.</span>${additions.map((a, i) => `<label class="lt-add"><input type="checkbox" data-add="${i}" checked><span><span class="lt-add__text">${esc(a.text)}</span>${a.reason ? `<span class="lt-muted"> · ${esc(a.reason)}</span>` : ''}</span></label>`).join('')}</div>` : ''}
+      <div class="lt-review">${reviewCol('Before', Object.assign({}, before, { paragraphs: String(before.body || '').split(/\n\s*\n/) }))}<div id="ltAfterCol">${reviewCol('After', Object.assign({}, after, { paragraphs: withAdditions(after.paragraphs, additions, S.pendingAI.on) }), additions)}</div></div>
       <div class="lt-modal__actions"><button class="lt-btn lt-btn--ghost" data-act="ai-reject">Reject</button><span class="lt-spacer"></span><button class="lt-btn" data-act="ai-accept" data-keep="1">Accept and keep editing</button><button class="lt-btn lt-btn--primary" data-act="ai-accept">Accept</button></div>`, { wide: true });
+  }
+  function reviewCol(h, x, additions) {
+    const added = new Set((additions || []).map((a) => a.text));
+    const para = (p) => { let html = esc(p); added.forEach((t) => { if (p.includes(t)) html = html.replace(esc(t), `<mark class="lt-added">${esc(t)}</mark>`); }); return `<p>${html}</p>`; };
+    return `<div class="lt-review__col"><h4>${h}</h4>${x.subject ? `<p class="lt-review__subj">${esc(x.subject)}</p>` : ''}<p><em>${esc(x.salutation || '')}</em></p>${(x.paragraphs || []).filter(Boolean).map(para).join('')}<p><em>${esc(x.closing || '')}</em></p></div>`;
+  }
+  function toggleAddition(i, on) {
+    const p = S.pendingAI; if (!p) return;
+    p.on[i] = on;
+    const col = document.getElementById('ltAfterCol');
+    if (col) col.innerHTML = reviewCol('After', Object.assign({}, p.after, { paragraphs: withAdditions(p.after.paragraphs, p.additions, p.on) }), p.additions);
   }
   function acceptAI(keep) {
     const p = S.pendingAI; if (!p) return;
     const d = S.cur.doc;
     S.cur.versions = LT.pushVersion(S.cur.versions, d, p.kind === 'translate' ? 'before-translation' : 'before-polish', S.ctx);
-    Object.assign(d, { subject: String(p.after.subject || '').replace(/^\s*(re|yah)\s*[:.-]\s*/i, '').toUpperCase(), salutation: p.after.salutation, body: p.after.body, closing: p.after.closing, lang: p.after.lang || d.lang });
+    const body = withAdditions(p.after.paragraphs || [], p.additions || [], p.on || []).filter(Boolean).join('\n\n');
+    Object.assign(d, { subject: String(p.after.subject || '').replace(/^\s*(re|yah)\s*[:.-]\s*/i, '').toUpperCase(), salutation: p.after.salutation, body, closing: p.after.closing, lang: p.after.lang || d.lang });
     S.pendingAI = null; closeModal(); markDirty();
     if (!keep && global.innerWidth < 900) S.mobileTab = 'preview';
     renderEditor(); toast('Applied — your previous text is kept in Versions', 'good');
@@ -891,11 +953,11 @@
   // ---------- events ----------
   async function onClick(e) {
     const el = e.target.closest('[data-act]');
-    if (!el) { const m = e.target.classList?.contains('lt-modal') ? e.target : null; if (m) { closeModal(); finishUnlock(false); } return; }
+    if (!el) { const m = e.target.classList?.contains('lt-modal') ? e.target : null; if (m) { if (S.consentResolve) finishConsent(false); else { closeModal(); finishUnlock(false); } } return; }
     const act = el.dataset.act;
     if (el.closest('.lt-more__menu')) el.closest('details')?.removeAttribute('open');
     switch (act) {
-      case 'modal-close': closeModal(); finishUnlock(false); break;
+      case 'modal-close': if (S.consentResolve) { finishConsent(false); break; } closeModal(); finishUnlock(false); break;
       case 'home': if (S.cur) await flushSave(); S.cur = null; S.view = 'home'; await refreshList(); break;
       case 'new': openPicker(); break;
       case 'new-minutes': openPicker('minutes'); break;
@@ -937,6 +999,8 @@
       case 'accept-minutes': acceptMinutes(); break;
       case 'ai-accept': acceptAI(!!el.dataset.keep); break;
       case 'ai-reject': S.pendingAI = null; closeModal(); break;
+      case 'consent-yes': finishConsent(true); break;
+      case 'consent-no': finishConsent(false); break;
       case 'use-subject': S.cur.versions = LT.pushVersion(S.cur.versions, S.cur.doc, 'before-subject', S.ctx); S.cur.doc.subject = String(el.dataset.v).toUpperCase(); closeModal(); markDirty(); renderEditor(); break;
       case 'labels-only': { const d = S.cur.doc; const v = el.dataset.v; d.lang = v; d.salutation = T.L[v].dearSir; d.closing = T.closingFor(d.salutation, v); closeModal(); markDirty(); renderEditor(); break; }
       case 'sign': signNow(); break;
@@ -989,6 +1053,7 @@
   async function onChange(e) {
     const el = e.target;
     if (el.dataset.filter && el.tagName === 'SELECT') { S.filter[el.dataset.filter] = el.value; renderHome(); return; }
+    if (el.dataset.add !== undefined) { toggleAddition(Number(el.dataset.add), el.checked); return; }
     if (el.dataset.f && el.tagName === 'SELECT' && S.cur) return; // handled by input
     const up = el.dataset.upload;
     if (!up || !el.files || !el.files[0]) return;

@@ -101,13 +101,25 @@ async function rateLimit(path, max, windowMs) {
 const LETTER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['subject', 'salutation', 'paragraphs', 'closing', 'missingDetails', 'notes'],
+  required: ['subject', 'salutation', 'paragraphs', 'closing', 'missingDetails', 'fixes', 'suggestedAdditions', 'notes'],
   properties: {
     subject: { type: 'string', description: 'Subject line without the "RE:" / "YAH:" prefix, in UPPERCASE.' },
     salutation: { type: 'string' },
     paragraphs: { type: 'array', items: { type: 'string' } },
     closing: { type: 'string' },
     missingDetails: { type: 'array', items: { type: 'string' } },
+    fixes: { type: 'array', items: { type: 'string' }, description: 'Each spelling/grammar correction as "wrong → right".' },
+    suggestedAdditions: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['afterParagraph', 'text', 'reason'],
+        properties: {
+          afterParagraph: { type: 'integer', description: '-1 = opening of the letter, n = after paragraphs[n].' },
+          text: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+    },
     notes: { type: 'string' },
   },
 };
@@ -152,14 +164,18 @@ function buildPrompt(action, body) {
   if (action === 'polish') {
     return {
       schema: LETTER_SCHEMA,
-      system: `${HOUSE_RULES}\n\nTask: polish the letter. Write the whole result in ${langName(target)}, even if parts were typed in the other language.`,
+      system: `${HOUSE_RULES}\n\nTask: polish the letter. Write the whole result in ${langName(target)}, even if parts were typed in the other language.
+- Correct every spelling mistake and typo (for example "teh" → "the", "appology" → "apology", "ihave" → "I have"), every grammar error and every run-on sentence. List each correction in fixes as "wrong → right".
+- Improve the wording so it reads like a well-written formal letter: smooth transitions, varied sentences, the right register. Keep the author's meaning, voice and every fact.
+- If the letter is short or leaves out parts a reader would expect for this type (for an apology: acknowledging the impact, taking responsibility, a commitment, thanks), propose up to 5 extra sentences in suggestedAdditions, written in the output language, each with afterParagraph (-1 for the opening) and a short reason in English. Suggestions must not invent facts, figures, dates or promises the author did not make; phrase commitments generally. Do NOT put suggested sentences inside paragraphs — the author chooses which to keep.
+- For Kiswahili, write correct standard Kiswahili (sanifu) with proper noun-class agreement and formal letter conventions.`,
       user: `Letter type: ${l.typeName || 'Letter'}\nTone: ${l.tone || 'Formal and courteous.'}\nScope: ${l.scope === 'company' ? 'company letter' : 'school letter'}\n\n<letter>\n${letterJson}\n</letter>`,
     };
   }
   if (action === 'translate') {
     return {
       schema: LETTER_SCHEMA,
-      system: `${HOUSE_RULES}\n\nTask: translate the whole letter (subject, salutation, body and closing) into ${langName(target)}. Keep names and figures exactly. Use the conventional formal salutation and closing of that language (Kiswahili closings such as "Wako mwaminifu,"). Keep the paragraph structure.`,
+      system: `${HOUSE_RULES}\n\nTask: translate the whole letter (subject, salutation, body and closing) into ${langName(target)}. Keep names and figures exactly. Use the conventional formal salutation and closing of that language (Kiswahili closings such as "Wako mwaminifu,"). Keep the paragraph structure. Fix any spelling mistakes in the source while translating. Leave suggestedAdditions empty.`,
       user: `Letter type: ${l.typeName || 'Letter'}\n\n<letter>\n${letterJson}\n</letter>`,
     };
   }
