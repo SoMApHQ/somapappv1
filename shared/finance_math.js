@@ -367,7 +367,66 @@
     return normalized;
   }
 
+  // Year-end fee rule (2026+): the fee per year is the source of truth, not the plan rows.
+  // 1) If the plan/override rows add up to less than the fee (e.g. "Monthly 40k" on an
+  //    890,000 fee), the unscheduled remainder becomes a "Year balance" row due 10 Oct.
+  // 2) Once 10 Oct has passed, every row scheduled after it is due too, so any remaining
+  //    year balance becomes overdue debt for every plan (monthly, instalments, custom).
+  // Approved deadline extensions still apply on top of this via the normal extension flow.
+  const YEAR_END_FEE_RULE_FROM_YEAR = 2026;
+  function applyYearEndFeeRule(schedule, student, year, nowTs){
+    const items = Array.isArray(schedule?.items) ? schedule.items : null;
+    const y = Number(year);
+    if (!items || !student || student.isGraduated) return schedule;
+    if (!Number.isFinite(y) || y < YEAR_END_FEE_RULE_FROM_YEAR) return schedule;
+    const now = Number.isFinite(Number(nowTs)) ? Number(nowTs) : Date.now();
+    const dueFromTS = new Date(y, 9, 1, 0, 0, 0, 0).getTime();
+    const dueTS = new Date(y, 9, 10, 23, 59, 59, 999).getTime();
+    const fee = Math.max(0, Math.round(Number(student.feePerYear) || 0));
+    const scheduled = items.reduce((sum, it) => sum + Math.max(0, Math.round(Number(it?.amount) || 0)), 0);
+    const shortfall = fee - scheduled;
+    // Ignore per-row rounding remainders (e.g. 890,000 / 6); only real gaps become a row.
+    if (shortfall > 100) {
+      const row = {
+        key: 'yearEndBalance',
+        label: 'Year balance (fee per year) - due 10 Oct',
+        fromTS: dueFromTS,
+        toTS: dueTS,
+        amount: shortfall,
+        carryComponent: 0,
+        paidAllocated: 0,
+        status: 'Pending',
+        yearEndRule: true
+      };
+      const insertAt = items.findIndex((it) => Number(it?.toTS || 0) > dueTS);
+      if (insertAt >= 0) items.splice(insertAt, 0, row); else items.push(row);
+    }
+    if (now > dueTS) {
+      items.forEach((it) => {
+        if (!it || !(Number(it.toTS || 0) > dueTS)) return;
+        it.originalFromTS = it.fromTS;
+        it.originalToTS = it.toTS;
+        it.fromTS = Math.min(Number(it.fromTS || dueFromTS), dueFromTS);
+        it.toTS = dueTS;
+        it.yearEndRule = true;
+        if (!/due 10 Oct/.test(String(it.label || ''))) it.label = `${it.label || 'Item'} (year end - due 10 Oct)`;
+      });
+    }
+    let lastDueIndex = -1;
+    let expectedToDate = 0;
+    items.forEach((it, idx) => {
+      if (Number(it.toTS || 0) < now) { lastDueIndex = idx; expectedToDate += Math.max(0, Number(it.amount || 0)); }
+    });
+    schedule.periodLabelNow = lastDueIndex >= 0 ? items[lastDueIndex].label : '-';
+    schedule.expectedToDate = expectedToDate;
+    return schedule;
+  }
+
   function buildSchedule(student, targetYear){
+    return applyYearEndFeeRule(buildScheduleCore(student, targetYear), student, todayYMD(targetYear).y);
+  }
+
+  function buildScheduleCore(student, targetYear){
     if (!student || student.isGraduated) {
       return { items: [], periodLabelNow: '-', expectedToDate: 0 };
     }
@@ -1567,6 +1626,8 @@ function buildFinanceStudents(
   }
 
   global.SomapFinanceComplianceMath = { buildFinanceStudentsForCompliance: buildFinanceStudents, computeStudentFinancials };
+  // Shared by pages that keep their own schedule builders (finance, payment, workers attendance).
+  global.SomapYearEndFeeRule = applyYearEndFeeRule;
   // Finance already owns its roster/loading flow. Loading the pure adapter must not
   // activate optional shared-roster fallbacks on that page.
   if (global.document?.currentScript?.hasAttribute('data-compliance-only')) return;
@@ -1584,6 +1645,7 @@ function buildFinanceStudents(
     getYearFinanceEntries,
     getBalanceForYearAdmission,
     computeStudentFinancials,
+    applyYearEndFeeRule,
     _clearFinanceCaches: clearCaches
   };
 
