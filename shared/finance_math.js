@@ -1264,6 +1264,10 @@ function buildFinanceStudents(
           y
         );
         dataset.students = decorateStudentsWithDeadlineExtensions(built || {}, deadlineExtensionsSnap.val() || {});
+        // Raw builder inputs, kept so read-only audits can rebuild the roster with what-if inputs.
+        dataset.mergedOverrides = mergedOverrides;
+        dataset.mergedPlans = mergedPlans;
+        dataset.approvalsByStudent = approvalsByStudent;
         return dataset;
       })();
       datasetCache[cacheKey].catch(() => { delete datasetCache[cacheKey]; });
@@ -1643,6 +1647,7 @@ function buildFinanceStudents(
     getYearStudents,
     getFinanceRoster,
     getYearFinanceEntries,
+    getYearDataset: ensureYearDataset,
     getBalanceForYearAdmission,
     computeStudentFinancials,
     applyYearEndFeeRule,

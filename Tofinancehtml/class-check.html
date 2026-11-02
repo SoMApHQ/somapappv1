@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Class Check Report</title>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
+  <script src="../somapappv1multischool/js/context.js"></script>
+  <script src="../firebase.js"></script>
+  <script src="../js/finance_dedupe.js"></script>
+  <script src="../shared/finance_math.js"></script>
+  <style>
+    :root {
+      --bg: #f6f7fb; --panel: #ffffff; --ink: #0f172a; --muted: #64748b; --line: #e2e8f0;
+      --accent: #4f46e5; --bad: #b91c1c; --bad-bg: #fef2f2; --warn: #92400e; --warn-bg: #fffbeb; --ok: #166534;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #0b1120; --panel: #111827; --ink: #e5e7eb; --muted: #94a3b8; --line: #1f2937;
+        --accent: #818cf8; --bad: #fca5a5; --bad-bg: #2a1215; --warn: #fcd34d; --warn-bg: #2a2110; --ok: #86efac;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+    main { max-width: 1400px; margin: 0 auto; padding: 20px 16px 48px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 16px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; }
+    .rule { font-size: 13px; color: var(--muted); }
+    .rule b { color: var(--ink); }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    select, input, button { font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+    button { cursor: pointer; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+    .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+    .stat .n { font-size: 22px; font-weight: 700; }
+    .stat .l { color: var(--muted); font-size: 12px; }
+    .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+    table { border-collapse: collapse; width: 100%; min-width: 1200px; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; white-space: nowrap; }
+    th { font-size: 12px; color: var(--muted); position: sticky; top: 0; background: var(--panel); }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tr.changed td.newcls { color: var(--bad); font-weight: 700; }
+    .tag { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; margin: 1px 2px 1px 0; background: var(--warn-bg); color: var(--warn); }
+    .tag.bad { background: var(--bad-bg); color: var(--bad); }
+    .arrow { color: var(--muted); }
+    .delta-up { color: var(--bad); font-weight: 600; }
+    .delta-down { color: var(--ok); font-weight: 600; }
+    #status { color: var(--muted); }
+    .muted { color: var(--muted); }
+    h2 { font-size: 16px; margin: 22px 0 8px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Class Check Report</h1>
+  <p class="sub">Read-only. Nothing on this page writes to the database. School: <b id="schoolName">-</b></p>
+
+  <div class="panel rule">
+    <b>Rule being checked:</b> a child is in the class they were registered in for the calendar year of registration,
+    and moves up one class every 1 January. The year is taken from the <b>real registration date</b>
+    (date of registration, creation stamp or the AUTO-number), never from a typed year field.
+    A class saved for the year (enrollment / class transfer) still wins.
+    "Finance now" is exactly what finance.html, class attendance and workers attendance show today.
+  </div>
+
+  <div class="panel controls">
+    <label>Year <select id="year"></select></label>
+    <button class="primary" id="run">Run check</button>
+    <label><input type="checkbox" id="onlyChanged" checked /> Only children whose class changes or needs review</label>
+    <input id="search" placeholder="Search name / admission no." />
+    <button id="csv" disabled>Download CSV</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <h2>Children</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Admission No</th><th>Name</th><th>Registered on</th><th>Typed year</th>
+          <th>Registered class (classLevel / className)</th><th>Academic shows</th><th>Finance now</th><th>Correct class</th>
+          <th>Fee now → new</th><th>Paid</th><th>Balance now → new</th><th>Debt now → new</th><th>Notes</th>
+        </tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="13" class="muted">Choose a year and press "Run check".</td></tr></tbody>
+    </table>
+  </div>
+
+  <h2>Hidden from finance completely</h2>
+  <p class="sub">Children registered on or before this year whose typed year field is in the future, so finance leaves them out of the list altogether.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Admission No</th><th>Name</th><th>Registered on</th><th>Typed year</th><th>Registered class</th><th>Correct class</th></tr></thead>
+      <tbody id="hidden"><tr><td colspan="6" class="muted">-</td></tr></tbody>
+    </table>
+  </div>
+</main>
+<script>
+(function () {
+  'use strict';
+  const CLASS_ORDER = ['Baby Class','Middle Class','Pre Unit Class','Class 1','Class 2','Class 3','Class 4','Class 5','Class 6','Class 7'];
+  const SOMAP_DEFAULT_YEAR = 2025;
+  const $ = (id) => document.getElementById(id);
+  const fmt = (n) => (Number(n) || 0).toLocaleString('en-US');
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  let lastRows = [];
+  let lastHidden = [];
+
+  const school = window.SOMAP?.getSchool?.();
+  $('schoolName').textContent = school ? (school.name || school.id) : 'none selected';
+  const nowYear = new Date().getFullYear();
+  for (let y = nowYear + 1; y >= 2025; y--) {
+    const opt = document.createElement('option');
+    opt.value = String(y); opt.textContent = String(y);
+    if (y === nowYear) opt.selected = true;
+    $('year').appendChild(opt);
+  }
+
+  function canonClass(name) {
+    const s = String(name || '').trim();
+    if (!s) return '';
+    const low = s.toLowerCase();
+    if (low === 'graduated') return 'GRADUATED';
+    if (low.includes('baby')) return 'Baby Class';
+    if (low.includes('middle') || low.includes('pre-primary') || low.includes('pre primary')) return 'Middle Class';
+    if (low.includes('pre') || low.includes('nursery') || low.includes('unit')) return 'Pre Unit Class';
+    const m = low.match(/class\s*(\d+)/) || low.match(/\b(\d+)\b/);
+    if (m) return `Class ${parseInt(m[1], 10)}`;
+    return s;
+  }
+  function shiftClass(base, delta) {
+    const c = canonClass(base);
+    const i = CLASS_ORDER.indexOf(c);
+    if (i < 0) return c || 'Unknown';
+    const j = i + Number(delta || 0);
+    if (j < 0) return 'PRE-ADMISSION';
+    if (j >= CLASS_ORDER.length) return 'GRADUATED';
+    return CLASS_ORDER[j];
+  }
+  const sameClass = (a, b) => canonClass(a).toLowerCase() === canonClass(b).toLowerCase();
+
+  // Real registration date: manual date of registration wins, otherwise the earliest
+  // creation / approval stamp including the AUTO-<ms> admission number (same as class attendance).
+  function realRegistration(s, admissionNo) {
+    const manual = String(s.dateOfRegistration || s.dateRegistered || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(manual)) {
+      return { ts: new Date(manual + 'T12:00:00').getTime(), source: 'date of registration' };
+    }
+    const toMs = (v) => {
+      if (v === null || v === undefined || v === '') return null;
+      if (typeof v === 'object' && typeof v.seconds === 'number') return v.seconds * 1000;
+      const text = String(v).trim();
+      const n = /^\d{10,13}$/.test(text) ? Number(text) : Date.parse(text);
+      if (!Number.isFinite(n)) return null;
+      return n < 1e12 && n > 1e9 ? n * 1000 : n;
+    };
+    const joining = s.joiningFormPayment || {};
+    const auto = /^AUTO-(\d{13})$/i.exec(String(admissionNo || s.admissionNumber || '').trim());
+    const candidates = [
+      ['registeredAt', s.registeredAt], ['createdAt', s.createdAt], ['timestamp', s.timestamp],
+      ['regTimestamp', s.regTimestamp], ['joining form paid', joining.paidAt], ['joining form approved', joining.approvedAt],
+      ['admission number', auto ? auto[1] : null],
+    ].map(([source, v]) => ({ source, ts: toMs(v) }))
+      .filter((c) => Number.isFinite(c.ts) && c.ts > 946684800000 && c.ts <= Date.now() + 86400000)
+      .sort((a, b) => a.ts - b.ts);
+    return candidates[0] || null;
+  }
+  function typedYear(s) {
+    const v = Number(s.academicYear || s.admissionYear || s.admYear || s.year);
+    return Number.isFinite(v) && v > 1900 ? v : null;
+  }
+  function lookup(map, id, adm) {
+    if (!map) return {};
+    if (map[id]) return map[id];
+    if (adm && map[adm]) return map[adm];
+    return Object.values(map).find((e) => e && (e.admissionNumber === adm || e.admissionNo === adm)) || {};
+  }
+  const enrollClass = (e) => (e && typeof e === 'object') ? (e.className || e.classLevel || e.class || e.grade || '') : '';
+  const isRemoved = (s) => {
+    const status = String(s?.status || '').trim().toLowerCase();
+    return s?.deleted === true || s?.isDeleted === true || s?.archived === true || s?.isArchived === true ||
+      s?.removed === true || s?.isRemoved === true || s?.active === false ||
+      ['deleted', 'archived', 'removed', 'shifted', 'graduated'].includes(status);
+  };
+
+  // academic.html's rule, copied so the report can show what the scoresheet shows.
+  function academicClass(s, id, adm, anchorEnroll, yearEnroll, year) {
+    const yearClass = enrollClass(yearEnroll);
+    if (yearClass) return canonClass(yearClass);
+    const lastTransfer = s.lastClassTransfer || s.meta?.lastClassTransfer;
+    const transferYear = lastTransfer?.effectiveDate ? new Date(String(lastTransfer.effectiveDate) + 'T12:00:00').getFullYear() : null;
+    if (lastTransfer?.toClass && Number(transferYear) === Number(year)) return canonClass(lastTransfer.toClass);
+    const anchorClass = enrollClass(anchorEnroll);
+    const studentClass = s.className || s.classLevel || s.class || s.grade || s.gradeLevel || 'Unknown';
+    const baseClass = anchorClass || studentClass;
+    const sources = [s.createdTs, s.admissionTs, s.createdAt, s.admissionDate, s.admissionYear, s.admYear];
+    let admYear = null;
+    for (const v of sources) {
+      if (v == null) continue;
+      const y = typeof v === 'number' ? new Date(v).getFullYear() : (/^\d{4}$/.test(String(v).trim()) ? Number(v) : null);
+      if (Number.isFinite(y)) { admYear = y; break; }
+    }
+    const hasAnchor = anchorEnroll && Object.keys(anchorEnroll).length > 0;
+    const shouldShift = hasAnchor || (Number.isFinite(admYear) && admYear <= SOMAP_DEFAULT_YEAR);
+    return shouldShift ? shiftClass(baseClass, Number(year) - SOMAP_DEFAULT_YEAR) : canonClass(baseClass);
+  }
+
+  async function run() {
+    const year = Number($('year').value);
+    $('run').disabled = true; $('csv').disabled = true;
+    $('status').textContent = 'Loading finance data…';
+    try {
+      if (!window.SOMAP?.getSchoolId?.()) throw new Error('No school selected. Open the school first, then this page.');
+      const api = window.SomapFinance;
+      if (!api?.getYearDataset) throw new Error('Finance module not loaded.');
+      api._clearFinanceCaches?.();
+      const ds = await api.getYearDataset(year);
+      const current = ds.students || {};
+      const base = ds.baseStudents || {};
+
+      const proposals = {};
+      const info = {};
+      Object.entries(current).forEach(([id, rec]) => {
+        const s = base[id] || rec || {};
+        const adm = String(s.admissionNumber || s.admissionNo || rec.admissionNumber || id).trim();
+        const yearEnroll = lookup(ds.yearEnrollments, id, adm);
+        const anchorEnroll = lookup(ds.anchorEnrollments, id, adm);
+        const reg = realRegistration(s, adm);
+        const regYear = reg ? new Date(reg.ts).getFullYear() : null;
+        const typed = typedYear(s);
+        const lvl = s.classLevel || s.class || '';
+        const named = s.className || '';
+        const registeredClass = canonClass(lvl || named || enrollClass(anchorEnroll));
+        const financeNow = rec.classLevel || '';
+        const notes = [];
+        let correct;
+        if (enrollClass(yearEnroll)) {
+          correct = canonClass(enrollClass(yearEnroll));
+          notes.push({ t: 'class saved for ' + year });
+        } else if (!Number.isFinite(regYear)) {
+          correct = financeNow;
+          notes.push({ t: 'no registration date - left as is', bad: true });
+        } else if (regYear > year) {
+          correct = 'NOT YET REGISTERED';
+          notes.push({ t: 'registered after ' + year, bad: true });
+        } else {
+          correct = shiftClass(registeredClass, year - regYear);
+        }
+        if (typed && regYear && typed !== regYear) notes.push({ t: `typed year ${typed} ≠ registered ${regYear}`, bad: true });
+        if (lvl && named && !sameClass(lvl, named)) notes.push({ t: `classLevel "${lvl}" ≠ className "${named}"`, bad: true });
+        if (!enrollClass(yearEnroll) && enrollClass(anchorEnroll) && regYear && regYear <= SOMAP_DEFAULT_YEAR) {
+          const viaAnchor = shiftClass(enrollClass(anchorEnroll), year - SOMAP_DEFAULT_YEAR);
+          if (!sameClass(viaAnchor, correct)) notes.push({ t: `${SOMAP_DEFAULT_YEAR} enrollment gives ${viaAnchor}`, bad: true });
+        }
+        const academic = academicClass(s, id, adm, anchorEnroll, yearEnroll, year);
+        const changes = correct !== 'NOT YET REGISTERED' && !sameClass(correct, financeNow);
+        if (changes && !enrollClass(yearEnroll)) proposals[id] = correct;
+        info[id] = { adm, reg, regYear, typed, lvl, named, academic, financeNow, correct, notes, changes };
+      });
+
+      $('status').textContent = 'Recalculating fees under the correct class…';
+      const whatIfEnroll = { ...(ds.yearEnrollments || {}) };
+      Object.entries(proposals).forEach(([id, cls]) => { whatIfEnroll[id] = { className: cls, classLevel: cls }; });
+      const rebuilt = api.buildFinanceStudentsForCompliance(
+        ds.baseStudents, ds.anchorEnrollments, whatIfEnroll, ds.classFees, ds.mergedOverrides || ds.overrides,
+        ds.mergedPlans || ds.plans, ds.ledgers, ds.carryForward, ds.studentFees, ds.approvalsByStudent || {}, year
+      );
+
+      lastRows = Object.entries(info).map(([id, row]) => {
+        const rec = current[id];
+        const finNow = api.computeStudentFinancials(rec, year);
+        let finNew = finNow;
+        if (proposals[id] && rebuilt[id]) {
+          rebuilt[id]._deadlineExtensions = rec._deadlineExtensions || [];
+          finNew = api.computeStudentFinancials(rebuilt[id], year);
+        }
+        const name = [rec.firstName, rec.middleName, rec.lastName].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+        return {
+          id, ...row, name,
+          feeNow: finNow.feePerYear, feeNew: finNew.feePerYear, paid: finNow.paidAmount,
+          balNow: finNow.balance, balNew: finNew.balance,
+          debtNow: finNow.periodDebtValue, debtNew: finNew.periodDebtValue,
+          review: row.notes.some((n) => n.bad),
+        };
+      }).sort((a, b) => Number(b.changes) - Number(a.changes) || Number(b.review) - Number(a.review) || a.name.localeCompare(b.name));
+
+      // Children finance leaves out because a typed year is later than their real registration.
+      lastHidden = Object.entries(base).filter(([id, s]) => {
+        if (current[id] || !s || typeof s !== 'object' || isRemoved(s)) return false;
+        if (!String(s.admissionNumber || '').trim() || !String(s.firstName || '').trim() || !String(s.lastName || '').trim()) return false;
+        const reg = realRegistration(s, s.admissionNumber);
+        const typed = typedYear(s);
+        return reg && new Date(reg.ts).getFullYear() <= year && typed && typed > year;
+      }).map(([id, s]) => {
+        const reg = realRegistration(s, s.admissionNumber);
+        const regYear = new Date(reg.ts).getFullYear();
+        const registeredClass = canonClass(s.classLevel || s.class || s.className || '');
+        return {
+          id, adm: s.admissionNumber, name: [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' '),
+          reg, typed: typedYear(s), registeredClass, correct: shiftClass(registeredClass, year - regYear),
+        };
+      });
+
+      render();
+      $('csv').disabled = false;
+      $('status').textContent = `Done: ${lastRows.length} children checked for ${year}.`;
+    } catch (err) {
+      console.error(err);
+      $('status').textContent = 'Error: ' + (err?.message || err);
+    } finally {
+      $('run').disabled = false;
+    }
+  }
+
+  const regLabel = (reg) => reg ? `${new Date(reg.ts).toLocaleDateString()} <span class="muted">(${esc(reg.source)})</span>` : '<span class="tag bad">unknown</span>';
+  function pair(a, b) {
+    if (Number(a) === Number(b)) return fmt(a);
+    const cls = Number(b) > Number(a) ? 'delta-up' : 'delta-down';
+    return `${fmt(a)} <span class="arrow">→</span> <span class="${cls}">${fmt(b)}</span>`;
+  }
+
+  function render() {
+    const only = $('onlyChanged').checked;
+    const q = $('search').value.trim().toLowerCase();
+    const visible = lastRows.filter((r) => (!only || r.changes || r.review) &&
+      (!q || r.name.toLowerCase().includes(q) || String(r.adm).toLowerCase().includes(q)));
+    const changed = lastRows.filter((r) => r.changes);
+    const feeDiff = changed.reduce((s, r) => s + (Number(r.feeNew) - Number(r.feeNow)), 0);
+    const debtDiff = changed.reduce((s, r) => s + (Number(r.debtNew) - Number(r.debtNow)), 0);
+    $('stats').innerHTML = [
+      ['Children checked', lastRows.length],
+      ['Class would change', changed.length],
+      ['Need human review', lastRows.filter((r) => r.review).length],
+      ['Academic ≠ finance today', lastRows.filter((r) => !sameClass(r.academic, r.financeNow)).length],
+      ['Hidden from finance', lastHidden.length],
+      ['Total fee change', (feeDiff >= 0 ? '+' : '') + fmt(feeDiff)],
+      ['Debt-now change', (debtDiff >= 0 ? '+' : '') + fmt(debtDiff)],
+    ].map(([l, n]) => `<div class="stat"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join('');
+
+    $('rows').innerHTML = visible.length ? visible.map((r) => `
+      <tr class="${r.changes ? 'changed' : ''}">
+        <td>${esc(r.adm)}</td>
+        <td>${esc(r.name)}</td>
+        <td>${regLabel(r.reg)}</td>
+        <td>${r.typed ?? '<span class="muted">-</span>'}</td>
+        <td>${esc(r.lvl || '-')} / ${esc(r.named || '-')}</td>
+        <td>${esc(r.academic)}</td>
+        <td>${esc(r.financeNow)}</td>
+        <td class="newcls">${esc(r.correct)}</td>
+        <td class="num">${pair(r.feeNow, r.feeNew)}</td>
+        <td class="num">${fmt(r.paid)}</td>
+        <td class="num">${pair(r.balNow, r.balNew)}</td>
+        <td class="num">${pair(r.debtNow, r.debtNew)}</td>
+        <td>${r.notes.map((n) => `<span class="tag ${n.bad ? 'bad' : ''}">${esc(n.t)}</span>`).join('')}</td>
+      </tr>`).join('') : '<tr><td colspan="13" class="muted">No children match.</td></tr>';
+
+    $('hidden').innerHTML = lastHidden.length ? lastHidden.map((r) => `
+      <tr><td>${esc(r.adm)}</td><td>${esc(r.name)}</td><td>${regLabel(r.reg)}</td><td>${esc(r.typed)}</td>
+      <td>${esc(r.registeredClass)}</td><td>${esc(r.correct)}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="muted">None.</td></tr>';
+  }
+
+  function downloadCsv() {
+    const head = ['Admission No','Name','Registered on','Registration source','Typed year','classLevel','className','Academic shows','Finance now','Correct class','Class changes','Fee now','Fee new','Paid','Balance now','Balance new','Debt now','Debt new','Notes'];
+    const lines = [head].concat(lastRows.map((r) => [
+      r.adm, r.name, r.reg ? new Date(r.reg.ts).toISOString().slice(0, 10) : '', r.reg?.source || '', r.typed ?? '',
+      r.lvl, r.named, r.academic, r.financeNow, r.correct, r.changes ? 'YES' : '', r.feeNow, r.feeNew, r.paid,
+      r.balNow, r.balNew, r.debtNow, r.debtNew, r.notes.map((n) => n.t).join('; '),
+    ]));
+    lastHidden.forEach((r) => lines.push([r.adm, r.name, new Date(r.reg.ts).toISOString().slice(0, 10), r.reg.source, r.typed, r.registeredClass, '', '', 'HIDDEN FROM FINANCE', r.correct, 'YES', '', '', '', '', '', '', '', 'typed year in the future']));
+    const csv = lines.map((row) => row.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `class-check-${window.SOMAP?.getSchoolId?.() || 'school'}-${$('year').value}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  $('run').addEventListener('click', run);
+  $('onlyChanged').addEventListener('change', render);
+  $('search').addEventListener('input', render);
+  $('csv').addEventListener('click', downloadCsv);
+})();
+</script>
+</body>
+</html>
