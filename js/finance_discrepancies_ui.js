@@ -227,50 +227,172 @@
     const { jsPDF } = global.jspdf || {};
     if (!jsPDF) return alert('PDF library not loaded.');
     const year = hooks.getYear();
-    const list = filtered();
-    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    // A4 portrait, readable sizes, compact rows: name bold with admission no / plan in grey
+    // under it; short issue labels with a coloured dot; long meanings printed once as a legend.
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
     const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
     const margin = 12;
+    const contentW = pageW - margin * 2;
+    const INK = [15, 23, 42], MUTED = [100, 116, 139], FAINT = [148, 163, 184], INDIGO = [67, 56, 202];
+    const RULE_COLOR = {
+      PAID_OVER_FEE: [220, 38, 38], FEE_BELOW_CLASS: [234, 88, 12], PLAN_TOTAL_MISMATCH: [190, 24, 93],
+      FEE_ZERO: [71, 85, 105], FEE_ABOVE_CLASS: [202, 138, 4],
+    };
+    const tint = (rgb) => rgb.map((c) => Math.round(c + (255 - c) * 0.9));
+    const kept = view.tab === 'kept';
+    const issuesOf = (r) => (kept ? r.kept : r.open);
+    const classRank = (c) => { const i = ['Baby Class', 'Middle Class', 'Pre Unit Class', 'Class 1', 'Class 2', 'Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7'].indexOf(c); return i < 0 ? 99 : i; };
+    const list = filtered().slice().sort((a, b) => classRank(a.student.classLevel) - classRank(b.student.classLevel) || nameOf(a.student).localeCompare(nameOf(b.student)));
+
+    // Header
     const logo = await logoDataUrl();
-    if (logo) { try { doc.addImage(logo, 'PNG', margin, 8, 18, 18); } catch (_) {} }
-    const textX = logo ? margin + 22 : margin;
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.setTextColor(30, 27, 75);
-    doc.text('SoMAp Finance — Discrepancies Report', textX, 15);
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(71, 85, 105);
-    doc.text(`${hooks.schoolName()} · Academic year ${year} · ${view.tab === 'open' ? 'To review' : 'Kept as is'}${view.rule ? ` · ${D().RULES[view.rule].title}` : ''}`, textX, 21);
-    doc.text(`Generated ${new Date().toLocaleString()} by ${hooks.userEmail()} · ${list.length} student(s)`, textX, 26);
-    doc.setDrawColor(79, 70, 229); doc.setLineWidth(0.6); doc.line(margin, 30, pageW - margin, 30);
+    if (logo) { try { doc.addImage(logo, 'PNG', margin, 10, 17, 17); } catch (_) {} }
+    const textX = logo ? margin + 21 : margin;
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...INK);
+    doc.text('Finance Discrepancies', textX, 16.5);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...MUTED);
+    doc.text(`${hooks.schoolName()}  ·  Academic year ${year}  ·  ${kept ? 'Kept as is' : 'To review'}${view.rule ? `  ·  ${D().RULES[view.rule].title}` : ''}`, textX, 22);
+    doc.setFontSize(8); doc.setTextColor(...FAINT);
+    doc.text(`Generated ${new Date().toLocaleString()} by ${hooks.userEmail()}`, textX, 26.5);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(22); doc.setTextColor(...INDIGO);
+    doc.text(String(list.length), pageW - margin, 18, { align: 'right' });
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text('students listed', pageW - margin, 23, { align: 'right' });
+    doc.setDrawColor(...INDIGO); doc.setLineWidth(0.5); doc.line(margin, 31, pageW - margin, 31);
 
-    const counts = {};
-    list.forEach((r) => (view.tab === 'open' ? r.open : r.kept).forEach((i) => { counts[i.title] = (counts[i.title] || 0) + 1; }));
-    doc.setFontSize(9); doc.setTextColor(51, 65, 85);
-    doc.text(Object.entries(counts).map(([t, n]) => `${t}: ${n}`).join('   ·   ') || 'No discrepancies.', margin, 36);
-
-    const body = list.map((r, idx) => {
-      const issues = view.tab === 'open' ? r.open : r.kept;
-      const text = issues.map((i) => {
-        const rv = reviews?.[r.id]?.[i.code];
-        return `• ${i.title}: ${i.detail}${view.tab === 'kept' && rv ? `\n   Kept by ${rv.by} (${new Date(rv.at).toLocaleDateString()}): ${rv.reason}` : ''}`;
-      }).join('\n');
-      return [idx + 1, r.student.admissionNumber || r.id, nameOf(r.student), r.student.classLevel || '', money(r.fin.feePerYear),
-        money(r.student._classDefaults?.feePerYear), r.student.paymentPlan || '', money(r.fin.paidAmount), text];
+    // Count tiles, one per rule
+    const codes = Object.keys(D().RULES);
+    const counts = Object.fromEntries(codes.map((c) => [c, 0]));
+    list.forEach((r) => issuesOf(r).forEach((i) => { counts[i.code] += 1; }));
+    const gap = 3, tileW = (contentW - gap * (codes.length - 1)) / codes.length, tileH = 17, tileY = 35;
+    codes.forEach((code, i) => {
+      const x = margin + i * (tileW + gap);
+      const color = RULE_COLOR[code];
+      doc.setFillColor(...tint(color)); doc.setDrawColor(...color); doc.setLineWidth(0.3);
+      doc.roundedRect(x, tileY, tileW, tileH, 2, 2, 'FD');
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.setTextColor(...color);
+      doc.text(String(counts[code]), x + 3, tileY + 7);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(...INK);
+      doc.text(doc.splitTextToSize(D().RULES[code].title, tileW - 6), x + 3, tileY + 11.2);
     });
+
+    // Legend: what each flag means (printed once, so table rows stay short)
+    let y = tileY + tileH + 6;
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...INK);
+    doc.text('What each flag means', margin, y);
+    y += 4.5;
+    codes.forEach((code) => {
+      const color = RULE_COLOR[code];
+      doc.setFillColor(...color); doc.circle(margin + 1.2, y - 1, 1.1, 'F');
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...INK);
+      const title = `${D().RULES[code].title}: `;
+      doc.text(title, margin + 4, y);
+      const titleW = doc.getTextWidth(title);
+      doc.setFont('helvetica', 'normal'); doc.setTextColor(...MUTED);
+      const lines = doc.splitTextToSize(D().LEGEND[code] || '', contentW - 4 - titleW);
+      doc.text(lines, margin + 4 + titleW, y);
+      y += 4 * lines.length + 0.6;
+    });
+    doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text('Fix each one in Finance > Per-Student Override; every change there goes to Approvals before it takes effect.', margin, y + 1.5);
+    y += 6;
+
+    // Table
+    const W = { idx: 7, student: 58, cls: 18, fee: 19, clsFee: 19, paid: 19 };
+    W.issues = contentW - (W.idx + W.student + W.cls + W.fee + W.clsFee + W.paid);
+    const PAD = 1.6;
+    const nameFont = 8.5, subFont = 7, issueFont = 7.8;
+    const body = list.map((r, idx) => {
+      const s = r.student;
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(nameFont);
+      const nameLines = doc.splitTextToSize(nameOf(s), W.student - PAD * 2);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(subFont);
+      const subLines = doc.splitTextToSize(`${s.admissionNumber || r.id}  ·  ${s.paymentPlan || '-'}`, W.student - PAD * 2);
+      doc.setFontSize(issueFont);
+      const issueItems = issuesOf(r).map((i) => {
+        const rv = reviews?.[r.id]?.[i.code];
+        return {
+          color: RULE_COLOR[i.code] || MUTED,
+          lines: doc.splitTextToSize(i.short || i.title, W.issues - PAD * 2 - 3),
+          note: kept && rv ? doc.splitTextToSize(`Kept: ${rv.reason} (${rv.by}, ${new Date(rv.at).toLocaleDateString()})`, W.issues - PAD * 2 - 3) : [],
+        };
+      });
+      const studentLineCount = nameLines.length + subLines.length * 0.85;
+      const issueLineCount = issueItems.reduce((n, it) => n + it.lines.length + it.note.length * 0.9, 0);
+      const lineH = 3.5;
+      const minH = Math.max(studentLineCount, issueLineCount, 1) * lineH + PAD * 2;
+      return [
+        { content: String(idx + 1), styles: { minCellHeight: minH } },
+        { content: '', _draw: { nameLines, subLines } },
+        String(s.classLevel || '').replace(/^(Baby|Middle|Pre Unit) Class$/, '$1'),
+        money(r.fin.feePerYear),
+        money(s._classDefaults?.feePerYear),
+        money(r.fin.paidAmount),
+        { content: '', _issues: issueItems },
+      ];
+    });
+
     doc.autoTable({
-      startY: 40,
-      head: [['#', 'Admission No', 'Name', 'Class', 'Fee/yr', 'Class fee', 'Plan', 'Paid', 'What is illogical']],
+      startY: y,
+      head: [['#', 'Student', 'Class', 'Fee / year', 'Class fee', 'Paid', 'What is illogical']],
       body,
-      margin: { left: margin, right: margin },
-      styles: { fontSize: 7.5, cellPadding: 1.8, valign: 'top', overflow: 'linebreak' },
-      headStyles: { fillColor: [79, 70, 229], textColor: 255 },
+      theme: 'plain',
+      margin: { left: margin, right: margin, top: 18, bottom: 14 },
+      styles: { font: 'helvetica', fontSize: 8, cellPadding: PAD, valign: 'top', textColor: INK, lineColor: [226, 232, 240], lineWidth: { bottom: 0.2 } },
+      headStyles: { fillColor: INDIGO, textColor: 255, fontStyle: 'bold', fontSize: 8, valign: 'middle', lineWidth: 0 },
       alternateRowStyles: { fillColor: [248, 250, 252] },
-      columnStyles: { 0: { cellWidth: 7 }, 1: { cellWidth: 36 }, 2: { cellWidth: 36 }, 3: { cellWidth: 20 }, 4: { cellWidth: 18, halign: 'right' }, 5: { cellWidth: 18, halign: 'right' }, 6: { cellWidth: 28 }, 7: { cellWidth: 18, halign: 'right' }, 8: { cellWidth: 'auto' } },
-      didDrawPage: () => {
-        const h = doc.internal.pageSize.getHeight();
-        doc.setFontSize(8); doc.setTextColor(148, 163, 184);
-        doc.text('Fix in Per-Student Override (paymentedits.html); every change goes to Approvals before it takes effect.', margin, h - 6);
-        doc.text(`Page ${doc.internal.getNumberOfPages()}`, pageW - margin, h - 6, { align: 'right' });
+      columnStyles: {
+        0: { cellWidth: W.idx, textColor: FAINT },
+        1: { cellWidth: W.student },
+        2: { cellWidth: W.cls },
+        3: { cellWidth: W.fee, halign: 'right' },
+        4: { cellWidth: W.clsFee, halign: 'right', textColor: MUTED },
+        5: { cellWidth: W.paid, halign: 'right', fontStyle: 'bold' },
+        6: { cellWidth: W.issues },
+      },
+      didDrawCell: (data) => {
+        if (data.section !== 'body') return;
+        const raw = data.cell.raw || {};
+        const x = data.cell.x + PAD;
+        let ty = data.cell.y + PAD + 2.6;
+        if (raw._draw) {
+          doc.setFont('helvetica', 'bold'); doc.setFontSize(nameFont); doc.setTextColor(...INK);
+          raw._draw.nameLines.forEach((line) => { doc.text(line, x, ty); ty += 3.5; });
+          doc.setFont('helvetica', 'normal'); doc.setFontSize(subFont); doc.setTextColor(...MUTED);
+          raw._draw.subLines.forEach((line) => { doc.text(line, x, ty - 0.3); ty += 3; });
+        }
+        if (raw._issues) {
+          doc.setFont('helvetica', 'normal'); doc.setFontSize(issueFont);
+          raw._issues.forEach((it) => {
+            doc.setFillColor(...it.color); doc.circle(x + 0.9, ty - 1, 0.9, 'F');
+            doc.setTextColor(...INK);
+            it.lines.forEach((line) => { doc.text(line, x + 3, ty); ty += 3.5; });
+            if (it.note.length) {
+              doc.setFontSize(7); doc.setTextColor(...MUTED);
+              it.note.forEach((line) => { doc.text(line, x + 3, ty - 0.3); ty += 3.1; });
+              doc.setFontSize(issueFont);
+            }
+          });
+        }
+      },
+      didDrawPage: (data) => {
+        if (data.pageNumber > 1) {
+          doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...INK);
+          doc.text('Finance Discrepancies', margin, 11);
+          doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...MUTED);
+          doc.text(`${hooks.schoolName()}  ·  ${year}  ·  ${kept ? 'Kept as is' : 'To review'}`, pageW - margin, 11, { align: 'right' });
+          doc.setDrawColor(226, 232, 240); doc.setLineWidth(0.3); doc.line(margin, 13, pageW - margin, 13);
+        }
       },
     });
+    const totalPages = doc.internal.getNumberOfPages();
+    for (let p = 1; p <= totalPages; p++) {
+      doc.setPage(p);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...FAINT);
+      doc.text('SoMAp  ·  School Management Platform', margin, pageH - 7);
+      doc.text(`Page ${p} of ${totalPages}`, pageW - margin, pageH - 7, { align: 'right' });
+    }
     doc.save(`finance-discrepancies-${year}-${view.tab}.pdf`);
   }
 
