@@ -32,9 +32,48 @@
     return !n || ADMIN_FALLBACK.test(n);
   }
 
+  // Workers (drivers included) sign in through the Workers Hub, which keeps its own session
+  // (localStorage workerId / workerRole) instead of Firebase Auth; the driver hub stores
+  // somap_driver_uid. Such a session is accepted as the page user, ALWAYS in approval mode.
+  function workerSession() {
+    try {
+      const ls = window.localStorage;
+      const uid = ls.getItem('workerId') || ls.getItem('somap_driver_uid') || '';
+      if (!uid) return null;
+      const name = ls.getItem('somap_driver_name') || ls.getItem('fullNameUpper') || ls.getItem('somap_workerName') || 'Worker';
+      const role = ls.getItem('workerRole') || (ls.getItem('somap_driver_uid') ? 'driver' : '') || 'worker';
+      return { uid, email: '', displayName: name, role, isWorkerSession: true, getIdToken: () => Promise.resolve('') };
+    } catch (_) {
+      return null;
+    }
+  }
+
   try {
-    fb.auth().onAuthStateChanged(async (user) => {
-      if (!user) { guarded = true; resolveReady(); return; }
+    const authInst = fb.auth();
+    const origOnAuth = authInst.onAuthStateChanged.bind(authInst);
+    let currentUserDesc = null;
+    for (let o = authInst; o && !currentUserDesc; o = Object.getPrototypeOf(o)) {
+      currentUserDesc = Object.getOwnPropertyDescriptor(o, 'currentUser');
+    }
+    const realCurrentUser = () => (currentUserDesc?.get ? currentUserDesc.get.call(authInst) : currentUserDesc?.value) || null;
+    // Pages see the worker session as a signed-in user when Firebase Auth has none.
+    authInst.onAuthStateChanged = (next, ...rest) => {
+      const wrap = (user) => (typeof next === 'function' ? next(user || workerSession()) : next?.next?.(user || workerSession()));
+      return origOnAuth(wrap, ...rest);
+    };
+    try {
+      Object.defineProperty(authInst, 'currentUser', { configurable: true, get: () => realCurrentUser() || workerSession() });
+    } catch (_) { /* keep the real getter */ }
+
+    origOnAuth(async (user) => {
+      if (!user) {
+        const w = workerSession();
+        if (w) actor = { uid: w.uid, email: '', name: w.displayName, role: w.role };
+        guarded = true;
+        resolveReady();
+        if (w) showBanner();
+        return;
+      }
       actor = { uid: user.uid, email: user.email || '', name: user.displayName || '', role: '' };
       try {
         const snap = await fb.database().ref(`users/${user.uid}`).once('value');
