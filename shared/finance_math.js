@@ -95,6 +95,86 @@
   };
   const shiftClassFn = typeof global.shiftClass === 'function' ? global.shiftClass : shiftClassFallback;
 
+  // Class for a year, decided exactly like academic.html / scoresheet (the trusted source):
+  // enrollment saved for the year → class transfer effective that year → otherwise the
+  // registered class (2025 enrollment, else className/classLevel) moved up one class per
+  // 1 January. Registrations up to 2025 count from 2025 (academic baseline); later
+  // registrations count from their own registration year. Typed academicYear/year fields
+  // are never used, because they are what put children in the wrong class in finance.
+  const CLASS_RULE_FROM_YEAR = 2026;
+  function canonYearClass(name) {
+    const s = String(name || '').trim();
+    if (!s) return '';
+    const low = s.toLowerCase();
+    if (low === 'graduated') return 'GRADUATED';
+    if (low.includes('baby')) return 'Baby Class';
+    if (low.includes('middle')) return 'Middle Class';
+    if (low.includes('pre') || low.includes('nursery') || low.includes('unit')) return 'Pre Unit Class';
+    const m = low.match(/class\s*(\d+)/) || low.match(/\b(\d+)\b/);
+    if (m) return `Class ${parseInt(m[1], 10)}`;
+    return s;
+  }
+  function makeEnrollmentLookup(raw) {
+    const byId = {};
+    const byAdmission = {};
+    const add = (id, entry) => {
+      if (id && entry && typeof entry === 'object') byId[id] = Object.assign(byId[id] || {}, entry);
+    };
+    Object.entries(raw || {}).forEach(([key, value]) => {
+      if (!value || typeof value !== 'object') return;
+      if (value.studentId || value.id || value.className || value.classLevel || value.class || value.grade) {
+        add(value.id || value.studentId || key, value);
+        return;
+      }
+      // Enrollments grouped by class: enrollments/{year}/{Class}/{studentId}
+      Object.entries(value).forEach(([stuId, stuVal]) => {
+        const entry = (stuVal && typeof stuVal === 'object') ? { ...stuVal } : {};
+        if (!entry.className && !entry.classLevel && !entry.class && !entry.grade) entry.className = key;
+        add(entry.id || entry.studentId || stuId, entry);
+      });
+    });
+    Object.values(byId).forEach((entry) => {
+      const adm = entry.admissionNumber || entry.admissionNo || entry.admNo || '';
+      if (adm && !byAdmission[adm]) byAdmission[adm] = entry;
+    });
+    return (studentId, admissionNo) => {
+      if (studentId && byId[studentId]) return byId[studentId];
+      if (admissionNo && byId[admissionNo]) return byId[admissionNo];
+      if (admissionNo && byAdmission[admissionNo]) return byAdmission[admissionNo];
+      return {};
+    };
+  }
+  function resolveYearClass(student, anchorEnroll, yearEnroll, year) {
+    const y = Number(year);
+    if (!student || !Number.isFinite(y)) return '';
+    const fromEntry = (e) => (e && typeof e === 'object') ? (e.className || e.classLevel || e.class || e.grade || '') : '';
+    const yearClass = fromEntry(yearEnroll);
+    if (yearClass) return canonYearClass(yearClass);
+    const transfer = student.lastClassTransfer || student.meta?.lastClassTransfer;
+    const transferYear = transfer?.effectiveDate ? new Date(String(transfer.effectiveDate) + 'T12:00:00').getFullYear() : null;
+    if (transfer?.toClass && Number(transferYear) === y) return canonYearClass(transfer.toClass);
+    const anchorClass = fromEntry(anchorEnroll);
+    const studentClass = student.className || student.classLevel || student.class || student.grade || student.gradeLevel || '';
+    const baseClass = canonYearClass(anchorClass || studentClass);
+    if (!baseClass) return '';
+    let admissionYear = null;
+    for (const v of [student.createdTs, student.admissionTs, student.createdAt, student.admissionDate, student.admissionYear, student.admYear]) {
+      if (v == null) continue;
+      const parsed = typeof v === 'number' ? new Date(v).getFullYear() : (/^\d{4}$/.test(String(v).trim()) ? Number(v) : null);
+      if (Number.isFinite(parsed)) { admissionYear = parsed; break; }
+    }
+    const hasAnchor = anchorEnroll && typeof anchorEnroll === 'object' && Object.keys(anchorEnroll).length > 0;
+    let delta = 0;
+    if (hasAnchor || (Number.isFinite(admissionYear) && admissionYear <= SOMAP_DEFAULT_YEAR)) delta = y - SOMAP_DEFAULT_YEAR;
+    else if (Number.isFinite(admissionYear) && admissionYear < y) delta = y - admissionYear;
+    const idx = CLASS_ORDER.findIndex((c) => L(c) === L(baseClass));
+    if (idx < 0) return baseClass;
+    const next = idx + delta;
+    if (next < 0) return 'PRE-ADMISSION';
+    if (next >= CLASS_ORDER.length) return 'GRADUATED';
+    return CLASS_ORDER[next];
+  }
+
   const datasetCache = {};
   const summaryCache = {};
   const expensesCache = {};
@@ -906,6 +986,8 @@ function buildFinanceStudents(
       ...Object.keys(baseStudents || {}),
     ]);
 
+    const anchorLookup = makeEnrollmentLookup(anchorEnrollments);
+    const yearLookup = makeEnrollmentLookup(enrollments);
     const map = {};
     ids.forEach((id) => {
       const base = baseStudents[id] || {};
@@ -945,7 +1027,12 @@ function buildFinanceStudents(
       if (!hasTargetEnroll && Number.isFinite(registrationYear) && Number.isFinite(targetYearNum)) {
         delta = targetYearNum - registrationYear;
       }
-      const classLevel = shiftClassFn(baseClass, delta);
+      let classLevel = shiftClassFn(baseClass, delta);
+      if (targetYearNum >= CLASS_RULE_FROM_YEAR) {
+        const admKey = String(base.admissionNumber || base.admissionNo || '').trim();
+        const resolved = resolveYearClass(base, anchorLookup(id, admKey), yearLookup(id, admKey), targetYearNum);
+        if (resolved) classLevel = normalizeClassLabel(resolved);
+      }
       const classDefaults = classFees[classLevel] || classFees[baseClass] || {};
       const resolvedPlanId = override.planId || classDefaults.defaultPlanId || null;
       const resolvedPlan = resolvedPlanId ? plans[resolvedPlanId] : null;
@@ -1581,17 +1668,24 @@ function buildFinanceStudents(
       const regYear = studentYear(student);
       return !Number.isFinite(targetYearNum) || !regYear || regYear <= targetYearNum;
     };
+    const rosterAnchorLookup = makeEnrollmentLookup(dataset.anchorEnrollments);
+    const rosterYearLookup = makeEnrollmentLookup(dataset.yearEnrollments);
     Object.entries(dataset.baseStudents || {}).forEach(([id, student]) => {
       if (rowMap.has(id) || !isActiveDirectStudent(student)) return;
       const enrollment = dataset.yearEnrollments?.[id] || {};
       const anchor = dataset.anchorEnrollments?.[id] || {};
       const regYear = studentYear(student);
       const baseClass = enrollment.className || enrollment.classLevel || student.classLevel || student.className || anchor.className || anchor.classLevel || '';
-      const classLevel = enrollment.className || enrollment.classLevel || (
+      let classLevel = enrollment.className || enrollment.classLevel || (
         Number.isFinite(regYear) && Number.isFinite(targetYearNum)
           ? shiftClassFn(normalizeClassLabel(baseClass), targetYearNum - regYear)
           : normalizeClassLabel(baseClass || 'N/A')
       );
+      if (targetYearNum >= CLASS_RULE_FROM_YEAR) {
+        const admKey = String(student.admissionNumber || student.admissionNo || '').trim();
+        const resolved = resolveYearClass(student, rosterAnchorLookup(id, admKey), rosterYearLookup(id, admKey), targetYearNum);
+        if (resolved) classLevel = normalizeClassLabel(resolved);
+      }
       pushRow(id, {
         ...student,
         classLevel,
@@ -1632,6 +1726,7 @@ function buildFinanceStudents(
   global.SomapFinanceComplianceMath = { buildFinanceStudentsForCompliance: buildFinanceStudents, computeStudentFinancials };
   // Shared by pages that keep their own schedule builders (finance, payment, workers attendance).
   global.SomapYearEndFeeRule = applyYearEndFeeRule;
+  global.SomapYearClass = { resolveYearClass, makeEnrollmentLookup, fromYear: CLASS_RULE_FROM_YEAR };
   // Finance already owns its roster/loading flow. Loading the pure adapter must not
   // activate optional shared-roster fallbacks on that page.
   if (global.document?.currentScript?.hasAttribute('data-compliance-only')) return;
