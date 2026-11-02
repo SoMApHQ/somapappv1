@@ -699,24 +699,29 @@
       const month=new Date().getMonth()+1;
       set("mgMultLbl",`${MONTH_SHORT[month]} · malipo ×`);
       const db=firebase.database();
-      const pendingNode=p=>db.ref(p).limitToLast(300).get().then(s=>Object.values(s.val()||{})).catch(()=>[]);
-      const [assign,stops,mult,buses,pendScoped,pendRoot]=await Promise.all([
-        readVal(`schools/${sk}/years/${year}/transportAssignments`),
-        window.TransportPricing?.loadStopsForYear?.(Number(year)).catch(()=>[])||[],
+      // once() rather than get(): get() can resolve empty while the hub is starting many reads.
+      const pendingNode=p=>db.ref(p).limitToLast(300).once("value").then(s=>Object.values(s.val()||{}));
+      const [stops,mult,pend]=await Promise.all([
+        window.TransportPricing?.loadStopsForYear?.(Number(year)).catch(()=>null)||null,
         window.TransportPricing?.loadYearMultipliers?.(Number(year)).catch(()=>null)||null,
-        readVal(`schools/${sk}/years/${year}/transport/buses`),
-        pendingNode(`schools/${sk}/approvalsPending`),
-        isSoc()?pendingNode("approvalsPending"):Promise.resolve([])
+        Promise.all([pendingNode(`schools/${sk}/approvalsPending`),isSoc()?pendingNode("approvalsPending"):Promise.resolve([])])
+          .then(([a,b])=>{const seen=new Set();return [...a,...b].filter(r=>r&&r.sourceModule==="transportpricing"&&r.status==="pending"&&!seen.has(r.approvalId)&&seen.add(r.approvalId)).length;})
+          .catch(()=>null)
       ]);
-      set("mgRiders",String(Object.values(assign||{}).filter(a=>a&&String(a.status||"").toLowerCase()!=="stopped").length));
       // The catalog holds repeated records per stop name; count distinct stops like Routes & Stops does.
-      set("mgStops",String(new Set((stops||[]).filter(s=>s&&s.active!==false).map(s=>String(s.name||"").toLowerCase().trim()).filter(Boolean)).size));
+      set("mgStops",stops?String(new Set(stops.filter(s=>s&&s.active!==false).map(s=>String(s.name||"").toLowerCase().trim()).filter(Boolean)).size):"—");
       const m=mult&&mult[month]!=null?Number(mult[month]):null;
       set("mgMult",m==null?"—":m===0?"Hakuna":`×${m}`);
-      set("mgVehicles",String(buses?Object.keys(buses).length:(state.buses||[]).length));
-      const seen=new Set();
-      const pend=[...pendScoped,...pendRoot].filter(r=>r&&r.sourceModule==="transportpricing"&&r.status==="pending"&&!seen.has(r.approvalId)&&seen.add(r.approvalId)).length;
-      set("mgPending",String(pend));
+      set("mgPending",pend==null?"—":String(pend));
+    }
+
+    // Riders and vehicles reuse what the hub itself loads (state.allEnrollments = school-wide
+    // riders still "Using", state.buses = the whole fleet), after those loads have finished.
+    async function updateMgmtCounts(){
+      const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
+      try{if(!Object.keys(state.allEnrollments||{}).length)await loadAllEnrollments();}catch(err){console.warn("Management riders failed",err);set("mgRiders","—");return set("mgVehicles",String((state.buses||[]).length));}
+      set("mgRiders",String(Object.keys(state.allEnrollments||{}).length));
+      set("mgVehicles",String((state.buses||[]).length));
     }
 
     async function initializeDashboard(){
@@ -738,6 +743,7 @@
         refs.finalizeBtn.disabled=true;
         updateAttendanceLink();
         loadFeeData();
+        updateMgmtCounts();
         return;
       }
       localStorage.setItem("somap_vehicleId",state.vehicleId);
@@ -749,6 +755,7 @@
       }finally{
         // Whatever happens above, the debt panel must never stay on "Inapakia madeni..."
         loadFeeData();
+        updateMgmtCounts();
       }
       await loadAttendance().catch(err=>{console.warn("Attendance load failed",err);state.attendanceMap={};});
       updateAttendanceLink();
