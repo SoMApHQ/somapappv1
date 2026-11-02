@@ -1212,7 +1212,7 @@
       finance: 'Verify the student ledger in finance.html before approving.',
       financeconfig: 'Review the requested finance configuration change carefully. Approval will update fee structures, plans, or student overrides.',
       transport: 'Check transport payments module to confirm the month and amount.',
-      transportpricing: 'Review the requested transport pricing change carefully. Approval will update stop prices, monthly multipliers, or a student override immediately.',
+      transportpricing: 'Review the requested transport change carefully. Approval will immediately update stop prices, monthly multipliers, student overrides, or — for requests made from the Transport Hub by drivers/staff — student registrations, vehicles and transport settings exactly as shown.',
       prefonefinance: 'Cross-check Preform One finance records before approval.',
       graduation: 'Check graduation dashboard to ensure totals align.',
       fridaymoney: 'Confirm Friday register entries match payments.',
@@ -1424,6 +1424,14 @@
       }
       if (action.startsWith('override:') || category === 'overrides') {
         return buildOverrideDiffRows(entry);
+      }
+      if (action.startsWith('manage:') || category === 'manage') {
+        return [{
+          action: entry.action || 'manage',
+          detail: entry.label || entry.path || 'Transport change',
+          before: summarizeConfigValue(entry.before),
+          after: summarizeConfigValue(entry.after),
+        }];
       }
       return [{
         action: entry.action || 'change',
@@ -2212,9 +2220,43 @@
       /^transportOverrides\/20\d{2}(\/|$)/.test(path)
     );
 
+    // Management-mode requests (transporthtml/modules/transport_approval_guard.js) carry the
+    // exact absolute DB paths the driver/staff page tried to write. They are replayed as-is,
+    // but only inside this school and only on transport data.
+    const lockedSchoolId = resolveSchoolId();
+    const socrates = isSocratesSchool();
+    const sameSchool = (id) => id === lockedSchoolId || (socrates && ['socrates-school', 'socrates', 'default'].includes(id));
+    const isAllowedTransportManagePath = (absPath) => {
+      if (absPath.split('/').some((seg) => !seg || seg === '.' || seg === '..')) return false;
+      let rel = absPath;
+      const scoped = absPath.match(/^schools\/([^/]+)\/(.+)$/);
+      if (scoped) {
+        if (!sameSchool(scoped[1])) return false;
+        rel = scoped[2];
+      } else if (!socrates && !/^(transport\/[^/]+\/|fuel_requests\/|fuel_ledger\/|maintenance_requests\/|maintenance_ledger\/|maintenance_invoices\/)/.test(rel)) {
+        return false; // root data belongs to Socrates
+      }
+      const legacyTransport = rel.match(/^transport\/([^/]+)\/20\d{2}\/(buses|attendance[A-Za-z_]*)(\/|$)/);
+      if (legacyTransport) return sameSchool(legacyTransport[1]);
+      return (
+        /^years\/20\d{2}\/(transportAssignments|transportEnrollments|transportPeriods|transportRegistry|transport|transportLedgers|transportPayments|transport_payments|transport_expenses)(\/|$)/.test(rel) ||
+        /^(transportCatalog|transportSettings|transportOverrides|transportRoutes|transportAssignments|transportEnrollments|transportRegistry|transportPeriods|transport_payments)\/20\d{2}(\/|$)/.test(rel) ||
+        /^(transportAssignments|transportRegistry|transportPeriods|transport_payments|transportOverrides)\/[^/]+(\/|$)/.test(rel) ||
+        /^(fuel_requests|fuel_ledger|maintenance_requests|maintenance_ledger|maintenance_invoices)\/[^/]+(\/|$)/.test(rel) ||
+        /^settings\/transport(\/|$)/.test(rel)
+      );
+    };
+
     operations.forEach((operation) => {
       const path = normalizePath(operation?.path || '');
       if (!path) return;
+      if (operation.abs === true) {
+        if (!isAllowedTransportManagePath(path)) {
+          throw new Error(`Blocked transport change outside this school's transport data: ${path}`);
+        }
+        updates[path] = operation.value === undefined ? null : operation.value;
+        return;
+      }
       if (!isAllowedTransportPricingPath(path)) {
         throw new Error(`Blocked unsafe transport pricing path: ${path}`);
       }

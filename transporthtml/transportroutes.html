@@ -53,6 +53,8 @@
   </script>
 
   <!-- Year constants + Global Year Context (unchanged from your intent) -->
+  <script src="./modules/transport_roles.js"></script>
+  <script src="./modules/transport_approval_guard.js?v=20261102"></script>
   <script src="../Todashboardhtml/yearContext.js"></script>
   <script>
     // Year selector constants
@@ -509,7 +511,10 @@
       const operations = Array.isArray(change.operations) ? change.operations.filter((op) => op && op.path) : [];
       if (!operations.length) throw new Error('No transport pricing changes to queue.');
       const year = String(change.year || window.somapYearContext?.getSelectedYear?.() || SOMAP_DEFAULT_YEAR);
-      const approvalRef = db.ref('approvalsPending').push();
+      // Every school's Approvals page listens on schools/{id}/approvalsPending (Socrates via its
+      // scoped shadow); the bare root queue is only visible to Socrates.
+      const sid = selectedSchoolId();
+      const approvalRef = db.ref(sid ? `schools/${sid}/approvalsPending` : 'approvalsPending').push();
       const approvalId = approvalRef.key;
       const target = change.target || 'Transport Pricing';
       const summary = change.summary || change.action || 'Transport pricing change';
@@ -547,6 +552,15 @@
       });
       showToast('Submitted for approval — takes effect once an admin approves it.', 'ok');
       return approvalId;
+    }
+
+    async function findStopForApproval(id, year) {
+      const stops = (window.TransportPricing && typeof window.TransportPricing.loadStopsForYear === 'function')
+        ? (await window.TransportPricing.loadStopsForYear(year)) || []
+        : [];
+      const found = stops.find(s => s && s.id === id) || {};
+      const { priceHistory, ...rest } = found;
+      return rest;
     }
 
     function clearTransportPricingCache(year) {
@@ -1046,16 +1060,20 @@
         if (!db) {
           showToast('DB unavailable', 'bad'); return;
         }
-        await db.ref(transportDataPath(`transportCatalog/${year}/stops/${id}`)).update({
-          active,
-          updatedAt: Date.now()
+        // Deactivating a stop hides it from fee assignment, so it is approval-gated like price edits.
+        const prev = await findStopForApproval(id, year);
+        const after = { ...prev, active, updatedAt: Date.now() };
+        await queueTransportPricingChange({
+          year,
+          action: 'stop:update',
+          target: prev.name || id,
+          summary: `${prev.name || id}: ${active ? 'activate' : 'deactivate'} stop`,
+          operations: [{ op: 'update', path: `transportCatalog/${year}/stops/${id}`, value: { active, updatedAt: Date.now() } }],
+          historyEntries: [{ year, category: 'stops', id, action: 'stop:update', before: prev, after }]
         });
-        showToast(`Stop ${active ? 'activated' : 'deactivated'} successfully!`);
-        clearTransportPricingCache(year);
-        render();
       } catch (error) {
         console.error('Error toggling stop:', error);
-        showToast('Failed to update stop', 'bad');
+        showToast('Failed to submit stop change', 'bad');
       }
     }
 
@@ -1131,13 +1149,18 @@
         if (!db) {
           showToast('DB unavailable', 'bad'); return;
         }
-        await db.ref(transportDataPath(`transportCatalog/${year}/stops/${id}`)).remove();
-        showToast('Stop deleted successfully!');
-        clearTransportPricingCache(year);
-        render();
+        const prev = await findStopForApproval(id, year);
+        await queueTransportPricingChange({
+          year,
+          action: 'stop:delete',
+          target: prev.name || id,
+          summary: `${prev.name || id}: delete stop`,
+          operations: [{ op: 'set', path: `transportCatalog/${year}/stops/${id}`, value: null }],
+          historyEntries: [{ year, category: 'stops', id, action: 'stop:delete', before: prev, after: null }]
+        });
       } catch (error) {
         console.error('Error deleting stop:', error);
-        showToast('Failed to delete stop', 'bad');
+        showToast('Failed to submit stop deletion', 'bad');
       }
     }
 
@@ -1180,158 +1203,89 @@
     }
 
     // ===== Imports =====
+    // Imports go through approvals like every other stop change. Existing stops are read
+    // through TransportPricing (root + scoped, merged) so Socrates root stops are not re-imported.
+    async function buildLegacyImportOps(year, note, extra) {
+      const existing = (window.TransportPricing && typeof window.TransportPricing.loadStopsForYear === "function")
+        ? (await window.TransportPricing.loadStopsForYear(year)) || []
+        : Object.values((await db.ref(transportDataPath(`transportCatalog/${year}/stops`)).once("value")).val() || {});
+      const names = new Set(existing.map(s => String(s?.name || "").toLowerCase().trim()).filter(Boolean));
+      const operations = [];
+      const historyEntries = [];
+      let skipped = 0;
+      for (const group of LEGACY_ROUTES) {
+        for (const stopName of group.names) {
+          const key = String(stopName).toLowerCase().trim();
+          if (names.has(key)) { skipped++; continue; }
+          names.add(key);
+          const formattedName = String(stopName)
+            .split(" ")
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(" ");
+          const newId = db.ref(`transportCatalog/${year}/stops`).push().key;
+          const histKey = db.ref(`transportCatalog/${year}/stops/${newId}/priceHistory`).push().key;
+          const stopData = { name: formattedName, baseFee: group.price, active: true, createdAt: Date.now(), updatedAt: Date.now(), imported: true, ...extra };
+          operations.push({ op: "set", path: `transportCatalog/${year}/stops/${newId}`, value: stopData });
+          operations.push({
+            op: "set",
+            path: `transportCatalog/${year}/stops/${newId}/priceHistory/${histKey}`,
+            value: { amount: Number(group.price), effectiveFrom: `${year}-01-01`, changedAt: Date.now(), changedBy: (auth?.currentUser?.email || auth?.currentUser?.uid || "unknown"), note }
+          });
+          historyEntries.push({ year, category: "stops", id: newId, action: "stop:create", before: null, after: stopData });
+        }
+      }
+      return { operations, historyEntries, skipped, imported: historyEntries.length, existingCount: existing.length };
+    }
+
     async function bulkImportAllYears() {
-      console.log('🚀 bulkImportAllYears function called');
       try {
         const yearsToImport = [2024, 2025, 2026, 2027, 2028, 2029];
         const totalRoutes = LEGACY_ROUTES.reduce((sum, group) => sum + group.names.length, 0);
+        if (!confirm(`🚀 This will request import of ${totalRoutes} routes for ${yearsToImport.length} years (${yearsToImport.join(", ")}).
 
-        if (!confirm(`🚀 This will import ${totalRoutes} routes for ${yearsToImport.length} years (${yearsToImport.join(', ')}).\n\nContinue?`)) {
-          console.log('❌ User cancelled bulk import');
-          return;
-        }
-
-        if (!db) {
-          showToast('DB unavailable', 'bad'); return;
-        }
-
-        showToast('🔄 Bulk importing for all years... Please wait', 'ok');
+Nothing is added until an admin approves it in Approvals. Continue?`)) return;
+        if (!db) { showToast("DB unavailable", "bad"); return; }
+        showToast("🔄 Preparing import request... Please wait", "ok");
         let totalImported = 0;
         let totalSkipped = 0;
-
         for (const year of yearsToImport) {
-          // Check existing routes
-          const existingSnap = await db.ref(transportDataPath(`transportCatalog/${year}/stops`)).once('value');
-          const existing = existingSnap.val() || {};
-
-          for (const group of LEGACY_ROUTES) {
-            for (const stopName of group.names) {
-              // Check if exists
-              const existingStop = Object.values(existing).find(s =>
-                s.name && String(s.name).toLowerCase().trim() === String(stopName).toLowerCase().trim()
-              );
-
-              if (existingStop) {
-                totalSkipped++;
-                continue;
-              }
-
-              // Format name
-              const formattedName = String(stopName)
-                .split(' ')
-                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-                .join(' ');
-
-              // Save to database
-              const newRef = db.ref(transportDataPath(`transportCatalog/${year}/stops`)).push();
-              await newRef.set({
-                name: formattedName,
-                baseFee: group.price,
-                active: true,
-                createdAt: Date.now(),
-                updatedAt: Date.now(),
-                imported: true,
-                bulkImported: true
-              });
-              
-              // Seed initial priceHistory
-              await newRef.child('priceHistory').push({
-                amount: Number(group.price),
-                effectiveFrom: `${year}-01-01`,
-                changedAt: Date.now(),
-                changedBy: 'system',
-                note: 'Bulk imported'
-              });
-
-              totalImported++;
-            }
-          }
-          console.log(`✅ Year ${year} import complete`);
+          const plan = await buildLegacyImportOps(year, "Bulk imported", { bulkImported: true });
+          totalSkipped += plan.skipped;
+          if (!plan.imported) continue;
+          totalImported += plan.imported;
+          await queueTransportPricingChange({
+            year, action: "stop:import", target: `Import ${year}`,
+            summary: `Import ${plan.imported} legacy stops for ${year}`,
+            operations: plan.operations, historyEntries: plan.historyEntries
+          });
         }
-
-        console.log(`✨ Bulk import complete! Imported ${totalImported}, skipped ${totalSkipped}`);
-        showToast(`✅ Bulk import complete! Imported ${totalImported} routes across ${yearsToImport.length} years!`);
-
-        yearsToImport.forEach(clearTransportPricingCache);
-        setTimeout(() => render(), 500);
+        if (!totalImported) showToast(`Nothing to import — all routes already exist (${totalSkipped} skipped).`);
       } catch (error) {
-        console.error('❌ Error in bulk import:', error);
-        showToast('❌ Bulk import failed: ' + (error?.message || error), 'bad');
+        console.error("❌ Error in bulk import:", error);
+        showToast("❌ Bulk import failed: " + (error?.message || error), "bad");
       }
     }
 
     async function migrateLegacyRoutes() {
-      console.log('📦 migrateLegacyRoutes function called');
       try {
         const year = Number(window.somapYearContext.getSelectedYear() || SOMAP_DEFAULT_YEAR);
-        const totalRoutes = LEGACY_ROUTES.reduce((sum, group) => sum + group.names.length, 0);
+        if (!db) { showToast("DB unavailable", "bad"); return; }
+        const plan = await buildLegacyImportOps(year, "Legacy import", {});
+        if (!plan.imported) { showToast(`Nothing to import — all routes already exist for ${year}.`); return; }
+        if (plan.existingCount > 0 && !confirm(`Year ${year} already has ${plan.existingCount} routes.
 
-        if (!db) {
-          showToast('DB unavailable', 'bad'); return;
+Request ${plan.imported} more? (Duplicates are skipped; nothing is added until approved)`)) {
+          showToast("Import cancelled", "bad");
+          return;
         }
-
-        showToast(`🔄 Importing ${totalRoutes} routes for ${year}...`, 'ok');
-
-        const existingSnap = await db.ref(transportDataPath(`transportCatalog/${year}/stops`)).once('value');
-        const existing = existingSnap.val() || {};
-        const existingCount = Object.keys(existing).length;
-
-        if (existingCount > 0) {
-          if (!confirm(`Year ${year} already has ${existingCount} routes.\n\nAdd more? (Duplicates will be skipped)`)) {
-            console.log('❌ User cancelled import');
-            showToast('Import cancelled', 'bad');
-            return;
-          }
-        }
-
-        let imported = 0;
-        let skipped = 0;
-
-        for (const group of LEGACY_ROUTES) {
-          for (const stopName of group.names) {
-            const existingStop = Object.values(existing).find(s =>
-              s.name && String(s.name).toLowerCase().trim() === String(stopName).toLowerCase().trim()
-            );
-
-            if (existingStop) {
-              skipped++;
-              continue;
-            }
-
-            const formattedName = String(stopName)
-              .split(' ')
-              .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-              .join(' ');
-
-            const newRef = db.ref(transportDataPath(`transportCatalog/${year}/stops`)).push();
-            await newRef.set({
-              name: formattedName,
-              baseFee: group.price,
-              active: true,
-              createdAt: Date.now(),
-              updatedAt: Date.now(),
-              imported: true
-            });
-            
-            // Seed initial priceHistory
-            await newRef.child('priceHistory').push({
-              amount: Number(group.price),
-              effectiveFrom: `${year}-01-01`,
-              changedAt: Date.now(),
-              changedBy: 'system',
-              note: 'Legacy import'
-            });
-
-            imported++;
-          }
-        }
-
-        showToast(`✅ Imported ${imported} routes for ${year}${skipped > 0 ? ` (${skipped} duplicates skipped)` : ''}!`);
-        clearTransportPricingCache(year);
-        setTimeout(() => render(), 500);
+        await queueTransportPricingChange({
+          year, action: "stop:import", target: `Import ${year}`,
+          summary: `Import ${plan.imported} legacy stops for ${year}${plan.skipped ? ` (${plan.skipped} duplicates skipped)` : ""}`,
+          operations: plan.operations, historyEntries: plan.historyEntries
+        });
       } catch (error) {
-        console.error('❌ Error migrating routes:', error);
-        showToast('❌ Failed to import: ' + (error?.message || error), 'bad');
+        console.error("❌ Error migrating routes:", error);
+        showToast("❌ Failed to import: " + (error?.message || error), "bad");
       }
     }
 

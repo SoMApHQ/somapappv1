@@ -34,6 +34,21 @@
       ((h.fromWorkerId === ctx.workerId && !h.fromConfirmedAt) || (h.toWorkerId === ctx.workerId && !h.toConfirmedAt))).length;
     const area = docket?.area || ctx.profile?.docketArea || T.DEFAULT_AREAS[ctx.roleKey] || '';
     const statusText = st.status === 'approved' ? `Imeidhinishwa · ${fmtTime(st.report?.approvedAt)}` : st.done ? `Imewasilishwa · ${fmtTime(st.submittedAt)}` : st.status === 'returned' ? 'Imerudishwa · Returned' : 'Bado · Not yet';
+    // data-compact="1": slim tile for hubs that sit it beside other cards (driver hub).
+    if (el.dataset.compact === '1') {
+      const notes = [
+        st.status === 'returned' ? `<span class="inv-tag inv-tag--bad">↩️ Imerudishwa</span>` : '',
+        incoming ? `<span class="inv-tag inv-tag--warn">📦 ${incoming} incoming</span>` : '',
+        handovers ? `<span class="inv-tag inv-tag--warn">🤝 Handover</span>` : '',
+      ].filter(Boolean).join(' ');
+      card(el, `<div class="inv-card" style="margin:0;height:100%;box-sizing:border-box;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
+        <div class="inv-li__head"><h3 style="margin:0;font-size:15px">🧾 Hesabu ya Mali</h3>${pill(st.done, statusText)}</div>
+        <p class="inv-card__sub" style="margin:0;font-size:12px">${area ? `📍 ${esc(area)} · ` : ''}Jaza kila siku kabla ya kuondoka</p>
+        ${notes ? `<div>${notes}</div>` : ''}
+        <div style="margin-top:auto"><a class="inv-btn inv-btn--sm ${st.done ? '' : 'inv-btn--primary'}" href="${esc(INV.URLS.inventory)}">${st.done ? 'Fungua · Open' : 'Jaza sasa · Fill now'}</a></div>
+      </div>`);
+      return;
+    }
     card(el, `<div style="${wrapStyle}"><div class="inv-card" style="margin:0">
       <div class="inv-li__head"><div><h3>🧾 Hesabu ya Mali · Inventory</h3><p class="inv-card__sub" style="margin:0">${area ? `📍 ${esc(area)} · ` : ''}Jaza kila siku kabla ya kuondoka · Fill daily before check-out</p></div>${pill(st.done, statusText)}</div>
       ${st.status === 'returned' ? `<div class="inv-banner inv-banner--bad"><span class="inv-banner__icon">↩️</span><div class="inv-banner__body"><strong>Ripoti imerudishwa · Report returned</strong>"${esc(st.returnComment)}"</div></div>` : ''}

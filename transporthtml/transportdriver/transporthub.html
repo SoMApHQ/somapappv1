@@ -96,6 +96,21 @@
     .pmActions .btn.save:hover{background:#166534}
     #toast{z-index:1200}
     @media (max-width:600px){.pmForm{grid-template-columns:1fr}#payModal{padding:.5rem;align-items:flex-end}.pmCard{max-height:96vh;max-height:96dvh}.pmActions .btn{flex:1}}
+    /* Top row: compact inventory tile + Management (Transport Hub) card */
+    .topCards{display:grid;gap:.8rem;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin-bottom:1rem;align-items:stretch}
+    .topCards>[data-somap-inventory-card]{min-width:0}
+    .mgmtCard{display:flex;flex-direction:column;gap:.7rem;padding:.9rem 1rem;border-radius:16px;text-decoration:none;color:#eef2ff;background:linear-gradient(135deg,#1e3a8a 0%,#4338ca 55%,#6d28d9 100%);box-shadow:0 10px 24px rgba(67,56,202,.25);transition:transform .15s,box-shadow .15s}
+    .mgmtCard:hover{transform:translateY(-2px);box-shadow:0 14px 30px rgba(67,56,202,.32)}
+    .mgmtHead{display:flex;justify-content:space-between;align-items:flex-start;gap:.6rem}
+    .mgmtKicker{font-size:.72rem;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#c7d2fe}
+    .mgmtHead h3{margin:.15rem 0 0;font-size:1.15rem}
+    .mgmtGo{font-size:.82rem;font-weight:800;background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.4);border-radius:999px;padding:.3rem .75rem;white-space:nowrap}
+    .mgmtStats{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:.45rem}
+    .mgmtStats>div{background:rgba(255,255,255,.12);border-radius:10px;padding:.45rem .55rem;display:grid;gap:.1rem}
+    .mgmtStats b{font-size:1.15rem;font-weight:900}
+    .mgmtStats span{font-size:.68rem;color:#c7d2fe;font-weight:700}
+    .mgmtStats .pend b{color:#fde68a}
+    .mgmtNote{margin:0;font-size:.74rem;color:#e0e7ff;line-height:1.35}
     @media (min-width:860px){.hero{grid-template-columns:1.2fr auto;align-items:center}}
     @media (max-width:900px){
       .rHead{display:none}
@@ -108,14 +123,33 @@
   </style>
 </head>
 <body>
-  <!-- SOMAP-INVENTORY: start -->
-  <div data-somap-inventory-card="hub" hidden></div>
-  <script src="../../js/inventory/inventory_templates.js?v=20261025"></script>
-  <script src="../../js/inventory/inventory_core.js?v=20261025"></script>
-  <script src="../../js/inventory/inventory_ui.js?v=20261025"></script>
-  <script src="../../js/inventory/inventory_hubcard.js?v=20261025"></script>
-  <!-- SOMAP-INVENTORY: end -->
   <main class="wrap">
+    <section class="topCards">
+      <!-- SOMAP-INVENTORY: start -->
+      <div data-somap-inventory-card="hub" data-compact="1" hidden></div>
+      <script src="../../js/inventory/inventory_templates.js?v=20261025"></script>
+      <script src="../../js/inventory/inventory_core.js?v=20261025"></script>
+      <script src="../../js/inventory/inventory_ui.js?v=20261025"></script>
+      <script src="../../js/inventory/inventory_hubcard.js?v=20261102"></script>
+      <!-- SOMAP-INVENTORY: end -->
+      <a class="mgmtCard" id="mgmtCard" href="../transport.html">
+        <div class="mgmtHead">
+          <div>
+            <div class="mgmtKicker">🧭 Usimamizi · Management</div>
+            <h3>Transport Hub</h3>
+          </div>
+          <span class="mgmtGo">Fungua →</span>
+        </div>
+        <div class="mgmtStats">
+          <div><b id="mgRiders">—</b><span>Wanafunzi · Riders</span></div>
+          <div><b id="mgStops">—</b><span>Vituo · Stops</span></div>
+          <div><b id="mgMult">—</b><span id="mgMultLbl">Mwezi huu · This month</span></div>
+          <div><b id="mgVehicles">—</b><span>Magari · Vehicles</span></div>
+          <div class="pend"><b id="mgPending">—</b><span>Zinasubiri idhini · Pending</span></div>
+        </div>
+        <p class="mgmtNote">🔒 Usajili, vituo, malipo ya mwezi na magari — kila badiliko linaenda Approvals kwanza. Mahudhurio ni yako moja kwa moja.</p>
+      </a>
+    </section>
     <section class="hero">
       <div>
         <h1>Kituo cha Dereva</h1>
@@ -652,9 +686,41 @@
       return drivers[0];
     }
 
+    /* Management card: live summary of the Transport Hub. Opening it gives the full hub in
+       approval mode (modules/transport_approval_guard.js) — nothing the driver saves there
+       changes until it is approved in Approvals; attendance stays direct. */
+    async function loadMgmtCard(){
+      const sk=schoolKey(),year=String(state.context.year||new Date().getFullYear());
+      const card=document.getElementById("mgmtCard");
+      if(!card||!sk)return;
+      card.href=`../transport.html?${new URLSearchParams({school:sk,year}).toString()}`;
+      const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
+      const month=Number(state.context.month)||new Date().getMonth()+1;
+      set("mgMultLbl",`${MONTH_SHORT[month]} · malipo ×`);
+      const db=firebase.database();
+      const pendingNode=p=>db.ref(p).limitToLast(300).get().then(s=>Object.values(s.val()||{})).catch(()=>[]);
+      const [assign,stops,mult,buses,pendScoped,pendRoot]=await Promise.all([
+        readVal(`schools/${sk}/years/${year}/transportAssignments`),
+        window.TransportPricing?.loadStopsForYear?.(Number(year)).catch(()=>[])||[],
+        window.TransportPricing?.loadYearMultipliers?.(Number(year)).catch(()=>null)||null,
+        readVal(`schools/${sk}/years/${year}/transport/buses`),
+        pendingNode(`schools/${sk}/approvalsPending`),
+        isSoc()?pendingNode("approvalsPending"):Promise.resolve([])
+      ]);
+      set("mgRiders",String(Object.values(assign||{}).filter(a=>a&&String(a.status||"").toLowerCase()!=="stopped").length));
+      set("mgStops",String((stops||[]).filter(s=>s&&s.active!==false).length));
+      const m=mult&&mult[month]!=null?Number(mult[month]):null;
+      set("mgMult",m==null?"—":m===0?"0":`×${m}`);
+      set("mgVehicles",String(buses?Object.keys(buses).length:(state.buses||[]).length));
+      const seen=new Set();
+      const pend=[...pendScoped,...pendRoot].filter(r=>r&&r.sourceModule==="transportpricing"&&r.status==="pending"&&!seen.has(r.approvalId)&&seen.add(r.approvalId)).length;
+      set("mgPending",String(pend));
+    }
+
     async function initializeDashboard(){
       setDateFromContext();
       setYearSelectFromContext();
+      loadMgmtCard().catch(err=>console.warn("Management card failed",err));
       state.allEnrollments={};state.ledgerMap={};
       await loadBuses();
       state.vehicleId=pickVehicle();
