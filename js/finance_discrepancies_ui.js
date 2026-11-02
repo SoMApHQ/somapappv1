@@ -259,6 +259,10 @@
     doc.text(String(list.length), pageW - margin, 18, { align: 'right' });
     doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...MUTED);
     doc.text('students listed', pageW - margin, 23, { align: 'right' });
+    if (!kept) {
+      const keptCount = rows.filter((r) => !r.open.length && r.kept.length).length;
+      if (keptCount) doc.text(`+${keptCount} kept as is (see Kept tab)`, pageW - margin, 27, { align: 'right' });
+    }
     doc.setDrawColor(...INDIGO); doc.setLineWidth(0.5); doc.line(margin, 31, pageW - margin, 31);
 
     // Count tiles, one per rule
@@ -277,32 +281,16 @@
       doc.text(doc.splitTextToSize(D().RULES[code].title, tileW - 6), x + 3, tileY + 11.2);
     });
 
-    // Legend: what each flag means (printed once, so table rows stay short)
-    let y = tileY + tileH + 6;
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...INK);
-    doc.text('What each flag means', margin, y);
-    y += 4.5;
-    codes.forEach((code) => {
-      const color = RULE_COLOR[code];
-      doc.setFillColor(...color); doc.circle(margin + 1.2, y - 1, 1.1, 'F');
-      doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...INK);
-      const title = `${D().RULES[code].title}: `;
-      doc.text(title, margin + 4, y);
-      const titleW = doc.getTextWidth(title);
-      doc.setFont('helvetica', 'normal'); doc.setTextColor(...MUTED);
-      const lines = doc.splitTextToSize(D().LEGEND[code] || '', contentW - 4 - titleW);
-      doc.text(lines, margin + 4 + titleW, y);
-      y += 4 * lines.length + 0.6;
-    });
-    doc.setFontSize(8); doc.setTextColor(...MUTED);
-    doc.text('Fix each one in Finance > Per-Student Override; every change there goes to Approvals before it takes effect.', margin, y + 1.5);
-    y += 6;
+    let y = tileY + tileH + 5.5;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+    doc.text('Fix each one in Finance > Per-Student Override. Every change there goes to Approvals before it takes effect.', margin, y);
+    y += 4;
 
-    // Table
-    const W = { idx: 7, student: 58, cls: 18, fee: 19, clsFee: 19, paid: 19 };
-    W.issues = contentW - (W.idx + W.student + W.cls + W.fee + W.clsFee + W.paid);
+    // Table: the explanation column carries the real figures (fee, class fee, plan total).
+    const W = { idx: 7, student: 52, cls: 15, fee: 18, paid: 18 };
+    W.issues = contentW - (W.idx + W.student + W.cls + W.fee + W.paid);
     const PAD = 1.6;
-    const nameFont = 8.5, subFont = 7, issueFont = 7.8;
+    const nameFont = 8.5, subFont = 7, issueFont = 8;
     const body = list.map((r, idx) => {
       const s = r.student;
       doc.setFont('helvetica', 'bold'); doc.setFontSize(nameFont);
@@ -319,7 +307,7 @@
         };
       });
       const studentLineCount = nameLines.length + subLines.length * 0.85;
-      const issueLineCount = issueItems.reduce((n, it) => n + it.lines.length + it.note.length * 0.9, 0);
+      const issueLineCount = issueItems.reduce((n, it) => n + it.lines.length + it.note.length * 0.9 + 0.2, 0);
       const lineH = 3.5;
       const minH = Math.max(studentLineCount, issueLineCount, 1) * lineH + PAD * 2;
       return [
@@ -327,7 +315,6 @@
         { content: '', _draw: { nameLines, subLines } },
         String(s.classLevel || '').replace(/^(Baby|Middle|Pre Unit) Class$/, '$1'),
         money(r.fin.feePerYear),
-        money(s._classDefaults?.feePerYear),
         money(r.fin.paidAmount),
         { content: '', _issues: issueItems },
       ];
@@ -335,9 +322,10 @@
 
     doc.autoTable({
       startY: y,
-      head: [['#', 'Student', 'Class', 'Fee / year', 'Class fee', 'Paid', 'What is illogical']],
+      head: [['#', 'Student', 'Class', 'Fee / year', 'Paid', 'What is wrong']],
       body,
       theme: 'plain',
+      rowPageBreak: 'avoid',
       margin: { left: margin, right: margin, top: 18, bottom: 14 },
       styles: { font: 'helvetica', fontSize: 8, cellPadding: PAD, valign: 'top', textColor: INK, lineColor: [226, 232, 240], lineWidth: { bottom: 0.2 } },
       headStyles: { fillColor: INDIGO, textColor: 255, fontStyle: 'bold', fontSize: 8, valign: 'middle', lineWidth: 0 },
@@ -347,9 +335,8 @@
         1: { cellWidth: W.student },
         2: { cellWidth: W.cls },
         3: { cellWidth: W.fee, halign: 'right' },
-        4: { cellWidth: W.clsFee, halign: 'right', textColor: MUTED },
-        5: { cellWidth: W.paid, halign: 'right', fontStyle: 'bold' },
-        6: { cellWidth: W.issues },
+        4: { cellWidth: W.paid, halign: 'right', fontStyle: 'bold' },
+        5: { cellWidth: W.issues },
       },
       didDrawCell: (data) => {
         if (data.section !== 'body') return;
@@ -368,6 +355,7 @@
             doc.setFillColor(...it.color); doc.circle(x + 0.9, ty - 1, 0.9, 'F');
             doc.setTextColor(...INK);
             it.lines.forEach((line) => { doc.text(line, x + 3, ty); ty += 3.5; });
+            ty += 0.7;
             if (it.note.length) {
               doc.setFontSize(7); doc.setTextColor(...MUTED);
               it.note.forEach((line) => { doc.text(line, x + 3, ty - 0.3); ty += 3.1; });

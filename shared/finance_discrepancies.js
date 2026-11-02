@@ -44,8 +44,8 @@
   function detect(student, fin) {
     if (!student || !fin || student.isGraduated) return [];
     const issues = [];
-    // detail = full sentence for the screen; short = compact label for the printed report.
-    const add = (code, detail, short) => issues.push({ code, title: RULES[code].title, severity: RULES[code].severity, detail, short });
+    // Plain sentences with real figures (no percentages): shown on screen and printed in the PDF.
+    const add = (code, detail) => issues.push({ code, title: RULES[code].title, severity: RULES[code].severity, detail, short: detail });
     const fee = num(fin.feePerYear);
     const paid = num(fin.paidAmount);
     const carry = num(student.carryAmount);
@@ -55,28 +55,24 @@
     const source = FEE_SOURCE_LABEL[student._feeSource] || 'fee settings';
 
     if (fee === 0 && (classFee > 0 || paid > 0)) {
-      add('FEE_ZERO', `Fee per year is 0${classFee ? ` while the ${cls} fee is ${money(classFee)}` : ''}${paid ? `, yet ${money(paid)} has been paid` : ''}. Set by ${source}.`, 'Fee is 0');
+      add('FEE_ZERO', `Fee is 0${classFee ? `, but the ${cls} fee is ${money(classFee)}` : ''}${paid ? `. Already paid ${money(paid)}` : ''}. Typed in the ${source}.`);
     }
     if (fee > 0 && paid > fee + TOLERANCE) {
-      add('PAID_OVER_FEE', `Paid ${money(paid)} but the fee per year is only ${money(fee)} (over by ${money(paid - fee)}). Nobody pays more than they owe, so the fee is probably typed wrong (${source}).`,
-        `Overpaid by ${money(paid - fee)}`);
+      add('PAID_OVER_FEE', `Paid ${money(paid)} but the fee is only ${money(fee)}: ${money(paid - fee)} more than the fee. The fee was probably typed too low (${source}).`);
     }
     if (classFee > 0 && baseFee > 0 && baseFee < classFee * FEE_LOW_RATIO) {
-      add('FEE_BELOW_CLASS', `Fee ${money(baseFee)} is only ${Math.round((baseFee / classFee) * 100)}% of the ${cls} fee (${money(classFee)}). Set by ${source}.`,
-        `Fee only ${Math.round((baseFee / classFee) * 100)}% of class fee`);
+      add('FEE_BELOW_CLASS', `Fee is ${money(baseFee)} but the ${cls} fee is ${money(classFee)}: ${money(classFee - baseFee)} less. Typed in the ${source}.`);
     }
     if (classFee > 0 && baseFee > classFee * FEE_HIGH_RATIO) {
-      add('FEE_ABOVE_CLASS', `Fee ${money(baseFee)} is ${Math.round((baseFee / classFee) * 100)}% of the ${cls} fee (${money(classFee)}). Set by ${source}.`,
-        `Fee ${Math.round((baseFee / classFee) * 100)}% of class fee`);
+      add('FEE_ABOVE_CLASS', `Fee is ${money(baseFee)} but the ${cls} fee is ${money(classFee)}: ${money(baseFee - classFee)} more. Typed in the ${source}.`);
     }
     const hasOwnPlan = Boolean(student._hasPlanOverride) || (Array.isArray(student._customSchedule) && student._customSchedule.length > 0);
     const planTotal = hasOwnPlan ? planRowsTotal(student) : 0;
     if (planTotal > 0 && baseFee > 0 && Math.abs(planTotal - baseFee) > Math.max(TOLERANCE, baseFee * PLAN_GAP_RATIO)) {
-      const plan = student.paymentPlan || 'The plan';
+      const plan = student.paymentPlan || 'the plan';
       add('PLAN_TOTAL_MISMATCH', planTotal < baseFee
-        ? `${plan} adds up to ${money(planTotal)} a year but the fee is ${money(baseFee)}; ${money(baseFee - planTotal)} has no instalment of its own (it is due by 10 Oct).`
-        : `${plan} adds up to ${money(planTotal)} a year but the fee is only ${money(baseFee)}. Either the plan or the fee is wrong.`,
-        `Plan ${money(planTotal)} vs fee ${money(baseFee)}`);
+        ? `Plan "${plan}" adds up to ${money(planTotal)} but the fee is ${money(baseFee)}: ${money(baseFee - planTotal)} has no instalment (now due by 10 Oct).`
+        : `Plan "${plan}" adds up to ${money(planTotal)} but the fee is only ${money(baseFee)}. Either the plan or the fee is wrong.`);
     }
     return issues;
   }
@@ -90,8 +86,8 @@
   const LEGEND = {
     PAID_OVER_FEE: 'Paid is higher than the fee per year. Nobody pays more than they owe, so the fee was probably typed too low.',
     FEE_ZERO: 'An active student has no fee per year at all.',
-    FEE_BELOW_CLASS: `Fee per year is below ${Math.round(FEE_LOW_RATIO * 100)}% of the class fee. Check the per-student fee override.`,
-    FEE_ABOVE_CLASS: `Fee per year is above ${Math.round(FEE_HIGH_RATIO * 100)}% of the class fee. Check the per-student fee override.`,
+    FEE_BELOW_CLASS: 'Fee per year is much lower than the fee of the class. Check the per-student fee override.',
+    FEE_ABOVE_CLASS: 'Fee per year is much higher than the fee of the class. Check the per-student fee override.',
     PLAN_TOTAL_MISMATCH: "The student's own plan or custom schedule adds up to a different amount than the fee per year.",
   };
 
