@@ -617,7 +617,18 @@
       const list = isObj(raw) ? Object.values(raw).filter(isObj) : [];
       const periods = list.map((p) => normalizePeriod(p, enrollment)).filter((p) => p.startDate)
         .sort((a, b) => String(a.startDate).localeCompare(String(b.startDate)));
-      return periods.length ? periods : [normalizePeriod(enrollment, enrollment)];
+      return periods.length ? clipOverlapping(periods) : [normalizePeriod(enrollment, enrollment)];
+    }
+    // Port of transportpayments.html clipOverlappingPeriods(): an unclosed earlier period ends
+    // the day before the next one starts, so overlapping days are never billed twice.
+    function clipOverlapping(sorted) {
+      return sorted.map((period, idx) => {
+        const next = sorted[idx + 1];
+        if (!next || next.startDate <= period.startDate) return period;
+        const lastDay = previousDayIso(next.startDate);
+        if (period.endDate && period.endDate <= lastDay) return period;
+        return { ...period, endDate: lastDay, stopDate: lastDay, stoppedAtDate: lastDay, transportEndDate: lastDay, supersededByNext: true };
+      }).filter((period, idx, all) => !(all[idx + 1] && all[idx + 1].startDate === period.startDate));
     }
 
     // ---- calculateTransportStatus() ----
