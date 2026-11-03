@@ -46,6 +46,7 @@
     const account = `${audit.bankName || "CRDB"} ${acct ? "****" + acct.slice(-4) : ""}`.trim();
     const period = `${day(r.from)} to ${day(r.to)}`;
     const T = r.transport, S = r.subject;
+    const returnedTotal = S.returned.reduce((n, w) => n + (Number(w.amountWithdrawn) || 0), 0);
     let y = 0;
 
     const font = (size, style, color) => { doc.setFont("helvetica", style || "normal"); doc.setFontSize(size); doc.setTextColor(...(color || C.ink)); };
@@ -191,6 +192,16 @@
       font(7.5, "normal", C.slate); text(mix.map((m) => `${m[0]}: ${tsh(m[1])} (${pct(m[1], S.principal)})`).join("     "), M, y + 21); y += 32;
     }
 
+    // Money that came back to the account
+    if (S.paidBackTotal || returnedTotal) {
+      font(10, "bold", C.night); text("Money that came back to the account", M, y); y += 8;
+      cardRow([
+        { label: "Paid back into the account", value: tsh(S.paidBackTotal), color: C.emerald, note: `${S.paidBack.length} deposit(s) into the account` },
+        { label: "Returned by the bank", value: tsh(returnedTotal), color: C.sky, note: `${S.returned.length} failed transfer(s), already left out` },
+        { label: "Net still held", value: tsh(S.principal - S.paidBackTotal), color: C.rose, note: "Received minus paid back" }
+      ], 62);
+    }
+
     // Others the user added
     if (r.others.length) {
       font(10, "bold", C.night); text("Other recipients added to this trace", M, y); y += 6;
@@ -234,7 +245,10 @@
     if (S.weekend.length) facts.push(`${S.weekend.length} transfer(s) on a weekend, ${tsh(S.weekend.reduce((n, w) => n + w.amountWithdrawn, 0))}.`);
     if (S.afterHours.length) facts.push(`${S.afterHours.length} transfer(s) before 07:00 or after 19:00.`);
     if (S.returned.length) facts.push(`${S.returned.length} transfer(s) returned by the bank are excluded.`);
-    if (facts.length) { ensure(30); font(7.5, "normal", C.slate); doc.text(doc.splitTextToSize(ascii(facts.join("   ")), CW), M, y); }
+    // Footnote only if it fits on the cover; every fact in it is repeated in section 2.
+    font(7.5, "normal", C.slate);
+    const factLines = doc.splitTextToSize(ascii(facts.join("   ")), CW);
+    if (facts.length && y + factLines.length * 10 <= H - 48) doc.text(factLines, M, y);
 
     function callout(title, items, color, soft) {
       font(8.2, "normal", C.ink);
@@ -336,7 +350,9 @@
       table(["Date", "What", "Reference", "Amount (TSh)"], [
         ...S.paidBack.map((t) => [day(t.date), `Deposited by ${t.sender}`, t.bankReference || "", num(t.moneyIn)]),
         ...S.returned.map((w) => [day(w.date), "Transfer returned by the bank (excluded above)", w.bankReference || "", num(w.amountWithdrawn)])
-      ], { amountCols: [3], color: C.emerald, columnStyles: { 0: { cellWidth: 70 } } });
+      ], { amountCols: [3], color: C.emerald, columnStyles: { 0: { cellWidth: 70 } }, footColor: C.emeraldSoft,
+        foot: ["Total", `Paid back ${tsh(S.paidBackTotal)} + returned by the bank ${tsh(returnedTotal)}`, "", num(S.paidBackTotal + returnedTotal)] });
+      paragraph(`Received ${tsh(S.principal)} - paid back ${tsh(S.paidBackTotal)} = ${tsh(S.principal - S.paidBackTotal)} still held by ${r.label}. Bank returns are already left out of the amount received.`, 8.5, C.ink);
     }
 
     // ================= 3. EVERY TRANSFER =================
