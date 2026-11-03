@@ -290,8 +290,9 @@
       : `Expenses are written for the whole period, up to ${T.lastDate}.`;
     return `<div class="trace-figures">
         <div><span>Withdrawn${r.others.length ? " (incl. others)" : ""}</span><strong>${money(r.includedPrincipal)}</strong><small>${r.included.length} transfers</small></div>
-        <div class="good"><span>Transport expenses written</span><strong>${money(T.total)}</strong><small>${T.rows.length} entries</small></div>
-        <div class="${bad ? "bad" : "good"}"><span>${bad ? "Not explained" : "Fully explained"}</span><strong>${money(Math.abs(r.unexplained))}</strong><small>${bad ? "Withdrawn with no expense record" : "Expenses exceed withdrawals"}</small></div>
+        <div class="good"><span>- Transport expenses written</span><strong>${money(T.total)}</strong><small>${T.rows.length} entries</small></div>
+        <div class="good"><span>- Paid back to the bank</span><strong>${money(r.subject.paidBackTotal)}</strong><small>${r.subject.paidBack.length} deposit${r.subject.paidBack.length === 1 ? "" : "s"}</small></div>
+        <div class="${bad ? "bad" : "good"}"><span>${bad ? "= Unexplained" : "= Fully explained"}</span><strong>${money(Math.abs(r.unexplained))}</strong><small>${bad ? "Ask where this money is" : "Expenses + paid back exceed withdrawals"}</small></div>
         ${T.pendingTotal ? `<div><span>Awaiting approval</span><strong>${money(T.pendingTotal)}</strong><small>Not counted</small></div>` : ""}
       </div>
       <div class="trace-note">${esc(coverage)}${T.gaps.length ? ` ${T.gaps.length} stretch(es) of 3+ weekdays have no expense written.` : ""}${T.backdatedTotal ? ` ${esc(money(T.backdatedTotal))} entered for days before the period is left out.` : ""}</div>`;

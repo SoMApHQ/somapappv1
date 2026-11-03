@@ -1675,6 +1675,8 @@
           endDateIso,
           startDateDisplay: hasExplicitStart ? formatStartDateDisplay(startDateIso) : 'N/A',
           debtTillMonth: formatDebtTillMonth(endDateIso || `${year}-${String(Math.max(...unpaidMonthsWithAmounts.map(m => m.month), 1)).padStart(2, '0')}-01`),
+          // Per-month ledger for the PDF report (same figures the totals above are built from).
+          months: monthResults.map(m => ({ ...m, isDue: isMonthAlreadyDue(m.month) })),
         };
 
         // Cache the result
@@ -2791,145 +2793,323 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
         showToast('SMS debt Excel downloaded');
       }
 
+      // ---- Transport fees PDF: asks which children to include, then draws a portrait report:
+      // cover (cards + month chart + class table + top debtors), one card per child with a 12-month
+      // paid / partly paid / unpaid grid, then a compact register and sign-off. Figures come from
+      // calculateTransportStatus for EVERY child (not just the rows visible on screen), so totals
+      // match the KPI cards at the top of the page.
+      function askTransportPdfOptions() {
+        return new Promise((resolve) => {
+          const classes = Array.from(classFilter?.options || []).map(o => o.value).filter(Boolean);
+          const wrap = document.createElement('div');
+          wrap.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;';
+          const radio = (name, value, label, checked) => `<label style="display:flex;gap:8px;align-items:center;padding:8px 10px;border:1px solid #ddd6fe;border-radius:8px;background:#fff;cursor:pointer;font-size:.9rem"><input type="radio" name="${name}" value="${value}"${checked ? ' checked' : ''}> ${label}</label>`;
+          const group = (title, html) => `<div style="margin-top:12px"><div style="font-weight:800;color:#312e81;margin-bottom:6px">${title}</div><div style="display:grid;gap:6px">${html}</div></div>`;
+          wrap.innerHTML = `<div style="background:#faf5ff;border-radius:14px;max-width:460px;width:100%;max-height:90vh;overflow:auto;padding:18px;box-shadow:0 24px 60px rgba(0,0,0,.3);font-family:inherit;color:#0f172a">
+            <div style="font-size:1.15rem;font-weight:800;color:#1e1b4b">Transport fees PDF</div>
+            <div style="font-size:.85rem;color:#475569;margin-top:2px">Choose which children to include. Totals always use every month already due (by the 3rd).</div>
+            ${group('Which children?', radio('tpWho', 'debt', 'Only children with debt', true) + radio('tpWho', 'all', 'All children') + radio('tpWho', 'paid', 'Only fully paid children'))}
+            ${group('Transport use', radio('tpUse', 'all', 'Everyone (using and stopped)', true) + radio('tpUse', 'using', 'Only children using transport now') + radio('tpUse', 'stopped', 'Only children who stopped using transport'))}
+            ${group('Class', `<select id="tpClass" style="padding:9px;border:1px solid #c4b5fd;border-radius:8px;background:#fff"><option value="">All classes</option>${classes.map(c => `<option value="${c}">${c}</option>`).join('')}</select>`)}
+            <label style="display:flex;gap:8px;align-items:center;margin-top:12px;font-size:.9rem"><input type="checkbox" id="tpDetail" checked> Include a month-by-month card for every child</label>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+              <button type="button" class="btn secondary" data-tp="cancel">Cancel</button>
+              <button type="button" class="btn" data-tp="go" style="background:#4338ca;color:#fff">Download PDF</button>
+            </div></div>`;
+          document.body.appendChild(wrap);
+          const close = (value) => { wrap.remove(); resolve(value); };
+          wrap.querySelector('[data-tp="cancel"]').onclick = () => close(null);
+          wrap.addEventListener('click', (e) => { if (e.target === wrap) close(null); });
+          wrap.querySelector('[data-tp="go"]').onclick = () => close({
+            who: wrap.querySelector('input[name="tpWho"]:checked').value,
+            use: wrap.querySelector('input[name="tpUse"]:checked').value,
+            cls: wrap.querySelector('#tpClass').value,
+            detail: wrap.querySelector('#tpDetail').checked,
+          });
+        });
+      }
+
+      async function loadPdfImage(urls) {
+        for (const url of urls.filter(Boolean)) {
+          try {
+            const res = await fetch(url);
+            if (!res.ok) continue;
+            const blob = await res.blob();
+            if (!/^image\//.test(blob.type)) continue;
+            const data = await new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = bad; r.readAsDataURL(blob); });
+            return { data, type: /png/i.test(blob.type) ? 'PNG' : 'JPEG' };
+          } catch (_) { /* try next */ }
+        }
+        return null;
+      }
+
       async function exportToPDF() {
+        const opts = await askTransportPdfOptions();
+        if (!opts) return;
+        showToast('Preparing transport PDF...');
         const yearNum = Number(state.year);
         const multipliers = cachedMultipliers[yearNum] || (await TransportPricing.loadYearMultipliers(yearNum));
         if (!cachedMultipliers[yearNum]) cachedMultipliers[yearNum] = multipliers;
-        const visibleRows = await buildVisiblePaymentRows(multipliers, true);
-        const rows = visibleRows.map(({ studentId, enrollment, student, shiftedClass, fullName, transportStatus }) => {
-          const driverDisplay = getDriverDisplay(enrollment).replace('&mdash;', '');
-          const unpaidDisp = transportStatus.unpaidMonthsDisplay ?? transportStatus.unpaidMonths;
-          return [
-            student.admissionNumber || studentId,
-            fullName,
-            shiftedClass,
-            getTransportParentContact(student, enrollment),
-            transportStatus.startDateDisplay,
-            enrollment.amStop || '',
-            enrollment.pmStop || '',
-            driverDisplay,
-            String(transportStatus.currentMonthExpected),
-            String(transportStatus.totalPaid),
-            String(transportStatus.debt),
-            unpaidDisp,
-          ];
-        });
-        let totalExpected = 0, totalPaid = 0, totalDebt = 0, maxDebt = 0, maxDebtName = '', paidCount = 0;
-        rows.forEach((r) => {
-          const fee = Number(r[8]) || 0, paid = Number(r[9]) || 0, debt = Number(r[10]) || 0;
-          totalExpected += fee; totalPaid += paid; totalDebt += debt;
-          if (debt > maxDebt) { maxDebt = debt; maxDebtName = r[1]; }
-          if (debt === 0) paidCount++;
-        });
-        const unpaidCount = rows.length - paidCount;
-        const minDebtRow = rows.filter(r => (Number(r[10]) || 0) > 0).sort((a, b) => (Number(a[10]) || 0) - (Number(b[10]) || 0))[0];
-        const leastDebt = minDebtRow ? (Number(minDebtRow[10]) || 0) : 0;
-        const leastDebtName = minDebtRow ? minDebtRow[1] : '';
+        const everyone = await buildVisiblePaymentRows(multipliers, false);
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const isUsing = (r) => !r.transportStatus.endDateIso || r.transportStatus.endDateIso >= todayIso;
+        const rows = everyone.filter((r) => {
+          const debt = Number(r.transportStatus.debt) || 0;
+          if (opts.who === 'debt' && !(debt > 0)) return false;
+          if (opts.who === 'paid' && debt > 0) return false;
+          if (opts.use === 'using' && !isUsing(r)) return false;
+          if (opts.use === 'stopped' && isUsing(r)) return false;
+          if (opts.cls && r.shiftedClass !== opts.cls) return false;
+          return true;
+        }).sort((a, b) => (b.transportStatus.debt - a.transportStatus.debt) || a.fullName.localeCompare(b.fullName));
+        if (!rows.length) { showToast('No children match those choices', 'bad'); return; }
+
+        const C = { night: [30, 27, 75], indigo: [67, 56, 202], violet: [124, 58, 237], rose: [225, 29, 72], roseSoft: [255, 228, 230],
+          emerald: [5, 150, 105], emeraldSoft: [209, 250, 229], amber: [217, 119, 6], amberSoft: [254, 243, 199], sky: [2, 132, 199],
+          teal: [13, 148, 136], navy: [15, 23, 42], ink: [30, 41, 59], slate: [100, 116, 139], line: [226, 232, 240], soft: [248, 250, 252],
+          white: [255, 255, 255], indigoSoft: [238, 242, 255], grey: [241, 245, 249] };
+        const ascii = (v) => String(v ?? '').replace(/[–—]/g, '-').replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/&mdash;/g, '-').replace(/[^\x20-\x7e\n]/g, '');
+        const num = (v) => Math.round(Number(v) || 0).toLocaleString('en-US');
+        const tsh = (v) => `TSh ${num(v)}`;
+        const short = (v) => { const n = Math.round(Number(v) || 0); return n >= 1000 ? `${(n / 1000).toFixed(n % 1000 ? 1 : 0)}k` : String(n); };
+        const pct = (a, b) => `${b ? Math.round((a / b) * 100) : 0}%`;
+        const MON = MONTH_NAMES.map((m) => m.slice(0, 3));
+        const sum = (list, fn) => list.reduce((n, r) => n + (Number(fn(r)) || 0), 0);
+
+        const totals = {
+          expected: sum(rows, (r) => r.transportStatus.totalExpected), paid: sum(rows, (r) => r.transportStatus.totalPaid),
+          debt: sum(rows, (r) => r.transportStatus.debt), month: sum(rows, (r) => r.transportStatus.currentMonthExpected),
+          debtors: rows.filter((r) => r.transportStatus.debt > 0).length, using: rows.filter(isUsing).length,
+        };
+        const whole = { paid: sum(everyone, (r) => r.transportStatus.totalPaid), debt: sum(everyone, (r) => r.transportStatus.debt), count: everyone.length };
+        const byMonth = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, expected: 0, paid: 0, unpaid: 0, due: false }));
+        rows.forEach((r) => (r.transportStatus.months || []).forEach((m) => {
+          const b = byMonth[m.month - 1]; if (!b) return;
+          b.expected += Number(m.expected) || 0; b.paid += Number(m.paid) || 0; b.due = b.due || m.isDue;
+          if (m.isDue) b.unpaid += Math.max(0, (Number(m.expected) || 0) - (Number(m.paid) || 0));
+        }));
+        const byClass = {};
+        rows.forEach((r) => { const k = r.shiftedClass || 'Unknown'; const g = byClass[k] || (byClass[k] = { cls: k, count: 0, debtors: 0, paid: 0, debt: 0 });
+          g.count += 1; g.paid += r.transportStatus.totalPaid; g.debt += r.transportStatus.debt; if (r.transportStatus.debt > 0) g.debtors += 1; });
+        const filterLabel = [{ debt: 'Children with debt', all: 'All children', paid: 'Fully paid children' }[opts.who],
+          { all: 'using and stopped', using: 'using transport now', stopped: 'stopped using transport' }[opts.use], opts.cls ? `class ${opts.cls}` : 'all classes'].join(' | ');
 
         const { jsPDF } = window.jspdf;
-        const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
-        const pageW = doc.internal.pageSize.getWidth();
-        let y = 18;
-        try {
-          const sid = window.SOMAP?.getSchool?.()?.id || '';
-          let logoDataUrl = null;
-          if (sid) {
-            const logoSnap = await db.ref(`schools/${sid}/profile/logoUrl`).once('value');
-            const logoUrl = logoSnap.val();
-            if (logoUrl) {
-              const img = await fetch(logoUrl).then(r => r.blob());
-              const reader = new FileReader();
-              logoDataUrl = await new Promise((res, rej) => {
-                reader.onload = () => res(reader.result);
-                reader.onerror = rej;
-                reader.readAsDataURL(img);
-              });
+        const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
+        const W = 210, H = 297, M = 14, CW = W - 2 * M;
+        let y = 0;
+        const font = (size, style, color) => { doc.setFont('helvetica', style || 'normal'); doc.setFontSize(size); doc.setTextColor(...(color || C.ink)); };
+        const fill = (c) => doc.setFillColor(...c);
+        const text = (s, x, yy, o) => doc.text(ascii(s), x, yy, o);
+        const opacity = (o) => { try { doc.setGState(new doc.GState({ opacity: o })); } catch (_) { /* older jsPDF */ } };
+        function gradient(x, yy, w, h, a, b, steps) {
+          const n = steps || 48;
+          for (let i = 0; i < n; i += 1) { const t = i / (n - 1); doc.setFillColor(...a.map((v, j) => Math.round(v + (b[j] - v) * t))); doc.rect(x + (w * i) / n, yy, w / n + 0.3, h, 'F'); }
+        }
+        function pageHeader() {
+          gradient(0, 0, W, 10, C.night, C.violet, 24);
+          font(7.5, 'bold', C.white); text(`${schoolName || 'School'}  |  Transport Fees Report ${state.year}`, M, 6.6);
+          font(7, 'normal', [221, 214, 254]); text(filterLabel, W - M, 6.6, { align: 'right' });
+        }
+        function newPage() { doc.addPage('a4', 'portrait'); pageHeader(); y = 18; }
+        function ensure(h) { if (y + h > H - 16) newPage(); }
+        function section(title, color, note) {
+          ensure(16);
+          fill(color || C.indigo); doc.roundedRect(M, y - 3.6, 1.4, 5.2, 0.6, 0.6, 'F');
+          font(11, 'bold', C.navy); text(title, M + 4, y + 0.6);
+          if (note) { font(7, 'normal', C.slate); text(note, W - M, y + 0.6, { align: 'right' }); }
+          y += 5;
+        }
+        function card(x, yy, w, h, o) {
+          opacity(0.08); fill(C.navy); doc.roundedRect(x + 0.5, yy + 0.9, w, h, 2.8, 2.8, 'F'); opacity(1);
+          fill(o.bg || C.white); doc.setDrawColor(...C.line); doc.setLineWidth(0.2); doc.roundedRect(x, yy, w, h, 2.8, 2.8, 'FD');
+          fill(o.color); doc.roundedRect(x, yy, 1.8, h, 0.9, 0.9, 'F');
+          font(6.2, 'bold', C.slate); text(String(o.label).toUpperCase(), x + 4.5, yy + 5.5);
+          font(o.value.length > 14 ? 11 : 13, 'bold', o.color); text(o.value, x + 4.5, yy + 12.5);
+          if (o.note) { font(6.3, 'normal', C.slate); doc.text(doc.splitTextToSize(ascii(o.note), w - 7).slice(0, 2), x + 4.5, yy + 17); }
+        }
+        function cardRow(items, h) {
+          const gap = 3.5, w = (CW - gap * (items.length - 1)) / items.length;
+          ensure(h + 4); items.forEach((it, i) => card(M + i * (w + gap), y, w, h, it)); y += h + 4;
+        }
+        function table(head, body, o = {}) {
+          ensure(20);
+          const columnStyles = {};
+          (o.amountCols || []).forEach((i) => { columnStyles[i] = { halign: 'right', fontStyle: 'bold' }; });
+          Object.entries(o.columnStyles || {}).forEach(([i, s]) => { columnStyles[i] = { ...(columnStyles[i] || {}), ...s }; });
+          doc.autoTable({
+            startY: y, head: [head.map(ascii)], body: body.map((r) => r.map((c) => (c && typeof c === 'object' ? { ...c, content: ascii(c.content) } : ascii(c)))),
+            foot: o.foot ? [o.foot.map(ascii)] : undefined, showFoot: 'lastPage', showHead: 'everyPage', theme: 'grid',
+            margin: { left: M, right: M, top: 16, bottom: 16 },
+            styles: { font: 'helvetica', fontSize: o.fontSize || 8, cellPadding: 1.6, textColor: C.ink, lineColor: C.line, lineWidth: 0.15, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: o.color || C.night, textColor: 255, fontStyle: 'bold', fontSize: 7.5 },
+            footStyles: { fillColor: C.indigoSoft, textColor: C.night, fontStyle: 'bold' },
+            alternateRowStyles: { fillColor: C.soft }, columnStyles, rowPageBreak: 'avoid',
+            didParseCell: (d) => { if (d.section === 'foot' && (o.amountCols || []).includes(d.column.index)) d.cell.styles.halign = 'right'; },
+            didDrawCell: (d) => {
+              const share = d.section === 'body' ? d.row.raw?.[d.column.index]?.bar : undefined;
+              if (share == null) return;
+              const x = d.cell.x + 2, w = d.cell.width - 4, cy = d.cell.y + d.cell.height / 2 - 1;
+              fill(C.line); doc.roundedRect(x, cy, w, 2, 1, 1, 'F');
+              if (w * share > 0.3) { fill(o.color || C.indigo); doc.roundedRect(x, cy, w * share, 2, 1, 1, 'F'); }
+            },
+            didDrawPage: () => { if (doc.internal.getCurrentPageInfo().pageNumber > 1) pageHeader(); },
+          });
+          y = doc.lastAutoTable.finalY + 6;
+        }
+
+        // ================= COVER =================
+        const sid = window.SOMAP?.getSchool?.()?.id || '';
+        let schoolLogoUrl = '';
+        try { if (sid) schoolLogoUrl = (await db.ref(`schools/${sid}/profile/logoUrl`).once('value')).val() || ''; } catch (_) { /* optional */ }
+        const [schoolLogo, somapLogo] = await Promise.all([
+          loadPdfImage([schoolLogoUrl, ...(isSocratesSchool() ? ['../images/socrates_logo.png', '../images/socrates-school-logo.png', '../images/socrates-logo.png'] : [])]),
+          loadPdfImage(['../images/somap-logo.png', '../images/somap-logo.png.jpg']),
+        ]);
+        gradient(0, 0, W, 78, C.night, C.violet, 60);
+        opacity(0.1); fill(C.white); doc.circle(W - 12, 8, 42, 'F'); doc.circle(W - 52, 80, 26, 'F'); opacity(1);
+        const logo = schoolLogo || somapLogo;
+        if (logo) { fill(C.white); doc.roundedRect(M, 12, 26, 26, 4, 4, 'F'); try { doc.addImage(logo.data, logo.type, M + 2.5, 14.5, 21, 21); } catch (_) { /* optional */ } }
+        if (schoolLogo && somapLogo) { fill(C.white); doc.roundedRect(W - M - 16, 12, 16, 16, 3, 3, 'F'); try { doc.addImage(somapLogo.data, somapLogo.type, W - M - 14.5, 13.5, 13, 13); } catch (_) { /* optional */ } }
+        const tx = logo ? M + 32 : M;
+        font(8, 'bold', [196, 181, 253]); text('SoMAp  |  TRANSPORT', tx, 18);
+        font(22, 'bold', C.white); text('Transport Fees Report', tx, 28);
+        font(9.5, 'normal', [224, 231, 255]); text(`${schoolName || 'School'}  |  Year ${state.year}`, tx, 35);
+        font(8, 'normal', [224, 231, 255]);
+        text(`Showing: ${filterLabel}`, M, 50);
+        text(`As of ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })}  |  Each month is due by the 3rd; only months already due count as debt`, M, 56);
+        text(`Whole transport register: ${whole.count} children, collected ${tsh(whole.paid)}, debt ${tsh(whole.debt)}`, M, 62);
+        y = 70;
+        cardRow([
+          { label: 'Children in report', value: String(rows.length), color: C.indigo, note: `${totals.using} using now, ${rows.length - totals.using} stopped` },
+          { label: 'Expected to date', value: tsh(totals.expected), color: C.sky, note: 'All months already due' },
+          { label: 'Collected', value: tsh(totals.paid), color: C.emerald, note: `${pct(totals.paid, totals.expected)} of expected` },
+          { label: 'Debt', value: tsh(totals.debt), color: C.rose, bg: totals.debt ? [255, 241, 242] : C.white, note: `${totals.debtors} child(ren) owe` },
+        ], 22);
+        cardRow([
+          { label: 'Fully paid', value: String(rows.length - totals.debtors), color: C.emerald, note: 'No month unpaid' },
+          { label: 'This month expected', value: tsh(totals.month), color: C.violet, note: `${MONTH_NAMES[getFocusedMonth()] || ''} ${state.year}` },
+          { label: 'Average debt', value: tsh(totals.debtors ? totals.debt / totals.debtors : 0), color: C.amber, note: 'Per child who owes' },
+          { label: 'Largest debt', value: rows[0] && rows[0].transportStatus.debt > 0 ? tsh(rows[0].transportStatus.debt) : '-', color: C.rose, note: rows[0] && rows[0].transportStatus.debt > 0 ? rows[0].fullName : 'Nobody owes' },
+        ], 22);
+        // Collection bar
+        fill(C.line); doc.roundedRect(M, y, CW, 4, 2, 2, 'F');
+        if (totals.expected) { fill(C.emerald); doc.roundedRect(M, y, CW * Math.min(1, totals.paid / totals.expected), 4, 2, 2, 'F'); }
+        font(7, 'bold', C.emerald); text(`Collected ${pct(totals.paid, totals.expected)}`, M, y + 8.5);
+        font(7, 'bold', C.rose); text(`Unpaid ${pct(totals.debt, totals.expected)}`, W - M, y + 8.5, { align: 'right' });
+        y += 14;
+
+        // Month chart
+        const months = byMonth.filter((m) => m.expected > 0);
+        if (months.length) {
+          section('Month by month: expected vs paid', C.indigo, 'Red figure = still unpaid for that month');
+          const chartH = 32, gx = M + 11, max = Math.max(1, ...months.map((m) => m.expected)), slot = (W - M - gx) / months.length, bw = Math.min(6, slot / 3);
+          ensure(chartH + 14);
+          const base = y + chartH;
+          doc.setDrawColor(...C.line); doc.setLineWidth(0.15);
+          [0, 0.5, 1].forEach((f) => { const ly = base - chartH * f; doc.line(gx, ly, W - M, ly); font(5.5, 'normal', C.slate); text(short(max * f), gx - 1.5, ly + 1, { align: 'right' }); });
+          months.forEach((m, i) => {
+            const cx = gx + slot * i + slot / 2, h1 = (chartH * m.expected) / max, h2 = (chartH * m.paid) / max;
+            fill(m.due ? C.sky : C.line); doc.roundedRect(cx - bw - 0.4, base - h1, bw, h1, 0.6, 0.6, 'F');
+            fill(C.emerald); if (h2 > 0.2) doc.roundedRect(cx + 0.4, base - h2, bw, h2, 0.6, 0.6, 'F');
+            font(6.5, 'bold', C.ink); text(MON[m.month], cx, base + 4, { align: 'center' });
+            if (m.unpaid > 0) { font(5.6, 'bold', C.rose); text(short(m.unpaid), cx, base + 7.6, { align: 'center' }); }
+          });
+          y = base + 11;
+          fill(C.sky); doc.rect(M, y - 2.2, 3, 3, 'F'); font(6.8, 'normal', C.ink); text('Expected (due)', M + 4.5, y);
+          fill(C.line); doc.rect(M + 30, y - 2.2, 3, 3, 'F'); text('Expected (not yet due)', M + 34.5, y);
+          fill(C.emerald); doc.rect(M + 70, y - 2.2, 3, 3, 'F'); text('Paid', M + 74.5, y);
+          y += 6;
+        }
+
+        // By class + top debtors
+        const classRows = Object.values(byClass).sort((a, b) => b.debt - a.debt || a.cls.localeCompare(b.cls));
+        const maxClassDebt = Math.max(1, ...classRows.map((c) => c.debt));
+        section('By class', C.violet);
+        table(['Class', 'Children', 'Owing', 'Collected', 'Debt', 'Share of debt'],
+          classRows.map((c) => [c.cls, String(c.count), String(c.debtors), num(c.paid), num(c.debt), { content: '', bar: c.debt / maxClassDebt }]),
+          { amountCols: [1, 2, 3, 4], color: C.violet, columnStyles: { 0: { fontStyle: 'bold' }, 5: { cellWidth: 46 } },
+            foot: ['Total', String(rows.length), String(totals.debtors), num(totals.paid), num(totals.debt), ''] });
+        const top = rows.filter((r) => r.transportStatus.debt > 0).slice(0, 10);
+        newPage();
+        if (top.length) {
+          section('Largest debts', C.rose, top.length < totals.debtors ? `Top ${top.length} of ${totals.debtors}` : '');
+          table(['#', 'Child', 'Class', 'Parent contact', 'Unpaid months', 'Debt'],
+            top.map((r, i) => [String(i + 1), r.fullName, r.shiftedClass, getTransportParentContact(r.student, r.enrollment) || '-',
+              (r.transportStatus.unpaidMonthsWithAmounts || []).map((m) => m.name.slice(0, 3)).join(', '), num(r.transportStatus.debt)]),
+            { amountCols: [5], color: C.rose, fontSize: 7.6, columnStyles: { 0: { cellWidth: 7, halign: 'right' }, 1: { fontStyle: 'bold' }, 5: { cellWidth: 24 } } });
+        }
+
+        // ================= ONE CARD PER CHILD =================
+        if (opts.detail) {
+          ensure(60);
+          if (y > 20) y += 4;
+          font(15, 'bold', C.night); text('Every child, month by month', M, y + 2);
+          font(7.5, 'normal', C.slate); text(`${rows.length} children, largest debt first. Green = paid, amber = partly paid, red = unpaid, grey = not yet due, blank = not on transport.`, M, y + 8);
+          y += 14;
+          const cellW = CW / 12;
+          rows.forEach((r, idx) => {
+            const st = r.transportStatus, owes = st.debt > 0, override = String(st.overrideDisplay || '').replace(/<[^>]+>/g, '').trim(), h = override && override !== '-' ? 36 : 32;
+            ensure(h + 3);
+            const x0 = M, y0 = y;
+            fill(C.white); doc.setDrawColor(...C.line); doc.setLineWidth(0.2); doc.roundedRect(x0, y0, CW, h, 2.5, 2.5, 'FD');
+            fill(owes ? C.rose : C.emerald); doc.roundedRect(x0, y0, 1.8, h, 0.9, 0.9, 'F');
+            font(10, 'bold', C.navy); text(`${idx + 1}. ${r.fullName}`, x0 + 5, y0 + 6);
+            font(9.5, 'bold', owes ? C.rose : C.emerald); text(owes ? `Owes ${tsh(st.debt)}` : 'Fully paid', W - M - 3, y0 + 6, { align: 'right' });
+            const driver = getDriverDisplay(r.enrollment);
+            const info = [`Adm ${r.student.admissionNumber || r.studentId}`, r.shiftedClass || 'Class -', `Parent ${getTransportParentContact(r.student, r.enrollment) || '-'}`,
+              `AM ${r.enrollment.amStop || '-'} / PM ${r.enrollment.pmStop || '-'}`, driver && driver !== '&mdash;' ? `Driver ${driver}` : '',
+              `Started ${st.startDateDisplay}`, isUsing(r) ? 'Using transport' : `Stopped ${formatStartDateDisplay(st.endDateIso)}`].filter(Boolean).join('  |  ');
+            font(6.6, 'normal', C.slate); doc.text(doc.splitTextToSize(ascii(info), CW - 8)[0], x0 + 5, y0 + 10.5);
+            const byM = {}; (st.months || []).forEach((m) => { byM[m.month] = m; });
+            for (let mo = 1; mo <= 12; mo += 1) {
+              const m = byM[mo], cx = x0 + 3 + (mo - 1) * ((CW - 6) / 12), cw = (CW - 6) / 12 - 1, cy = y0 + 13.5;
+              const exp = Number(m?.expected) || 0, paid = Number(m?.paid) || 0;
+              let bg = C.soft, fg = C.slate, line1 = '-';
+              if (exp > 0 && paid + 0.01 >= exp) { bg = C.emeraldSoft; fg = C.emerald; line1 = short(paid); }
+              else if (exp > 0 && !m.isDue) { bg = C.grey; fg = C.slate; line1 = paid > 0 ? `${short(paid)}/${short(exp)}` : short(exp); }
+              else if (exp > 0 && paid > 0) { bg = C.amberSoft; fg = C.amber; line1 = `${short(paid)}/${short(exp)}`; }
+              else if (exp > 0) { bg = C.roseSoft; fg = C.rose; line1 = `-${short(exp)}`; }
+              else if (paid > 0) { bg = C.emeraldSoft; fg = C.emerald; line1 = short(paid); }
+              fill(bg); doc.roundedRect(cx, cy, cw, 11, 1.2, 1.2, 'F');
+              font(6.5, 'bold', fg); text(MON[mo], cx + cw / 2, cy + 4.2, { align: 'center' });
+              font(5.8, 'normal', fg); text(line1, cx + cw / 2, cy + 8.6, { align: 'center' });
             }
-          }
-          if (!logoDataUrl && isSocratesSchool()) {
-            const socratesPaths = ['../images/socrates_logo.png', '../images/socrates-school-logo.png', '../images/socrates-logo.png'];
-            for (const p of socratesPaths) {
-              try {
-                const img = await fetch(p).then(r => r.blob());
-                const reader = new FileReader();
-                logoDataUrl = await new Promise((res, rej) => {
-                  reader.onload = () => res(reader.result);
-                  reader.onerror = rej;
-                  reader.readAsDataURL(img);
-                });
-                if (logoDataUrl) break;
-              } catch (_) {}
-            }
-          }
-          if (logoDataUrl) {
-            doc.addImage(logoDataUrl, 'PNG', 14, y - 4, 24, 24);
-          }
-        } catch (_) {}
-        doc.setFontSize(10);
+            font(6.8, 'normal', C.ink);
+            const unpaid = (st.unpaidMonthsWithAmounts || []).map((m) => `${m.name.slice(0, 3)} ${num(m.balance)}`).join(', ');
+            text(`Expected to date ${tsh(st.totalExpected)}   |   Paid ${tsh(st.totalPaid)}   |   ${unpaid ? 'Unpaid: ' + unpaid : 'Nothing unpaid'}`, x0 + 5, y0 + 29);
+            if (h > 32) { font(6, 'normal', C.violet); text(override, x0 + 5, y0 + 33); }
+            y = y0 + h + 3;
+          });
+        }
+
+        // ================= REGISTER + SIGN-OFF =================
+        newPage();
+        section('Register', C.navy, `${rows.length} children`);
+        table(['#', 'Child', 'Class', 'Parent contact', 'Unpaid months', 'Expected', 'Paid', 'Debt'],
+          rows.map((r, i) => [String(i + 1), r.fullName, r.shiftedClass, getTransportParentContact(r.student, r.enrollment) || '-',
+            r.transportStatus.unpaidMonthsDisplay || 'None', num(r.transportStatus.totalExpected), num(r.transportStatus.totalPaid),
+            { content: num(r.transportStatus.debt), styles: { textColor: r.transportStatus.debt > 0 ? C.rose : C.emerald } }]),
+          { amountCols: [5, 6, 7], fontSize: 7, columnStyles: { 0: { cellWidth: 7, halign: 'right' }, 1: { fontStyle: 'bold', cellWidth: 38 }, 2: { cellWidth: 16 }, 3: { cellWidth: 24 }, 5: { cellWidth: 19 }, 6: { cellWidth: 19 }, 7: { cellWidth: 19 } },
+            foot: ['', 'Total', '', '', '', num(totals.expected), num(totals.paid), num(totals.debt)] });
+        ensure(30);
         y += 10;
-        doc.setFontSize(16);
-        doc.text(schoolName || 'School', 42, y);
-        y += 8;
-        doc.setFontSize(14);
-        doc.text('Transport Payments Report', 14, y);
-        y += 6;
-        doc.setFontSize(10);
-        doc.text('Generated: ' + new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }), 14, y);
-        y += 12;
-
-        doc.autoTable({
-          startY: y,
-          head: [['Metric', 'Value']],
-          body: [
-            ['Total Expected (current month)', formatCurrency(totalExpected)],
-            ['Total Collected', formatCurrency(totalPaid)],
-            ['Total Transport Debt', formatCurrency(totalDebt)],
-            ['Students fully paid', String(paidCount)],
-            ['Students with debt', String(unpaidCount)],
-            ['Highest debt', maxDebtName ? `${formatCurrency(maxDebt)} (${maxDebtName})` : formatCurrency(maxDebt)],
-            ['Lowest debt (among debtors)', leastDebtName ? `${formatCurrency(leastDebt)} (${leastDebtName})` : (leastDebt ? formatCurrency(leastDebt) : 'N/A')],
-          ],
-          theme: 'grid',
-          margin: { left: 14 },
+        const sw = (CW - 10) / 3;
+        ['Prepared by', 'Headteacher', 'Director'].forEach((label, i) => {
+          const x = M + i * (sw + 5);
+          doc.setDrawColor(...C.slate); doc.setLineWidth(0.2); doc.line(x, y + 8, x + sw, y + 8);
+          font(7.5, 'bold', C.slate); text(label, x, y + 12); font(6.5, 'normal', C.slate); text('Name, signature and date', x, y + 15.5);
         });
-        y = doc.lastAutoTable.finalY + 10;
 
-        doc.setFontSize(10);
-        const p1 = 'This report summarizes transport fee payments and outstanding debt for the selected academic year. Debt is calculated only for months whose payment due date (the 3rd of the same month) has already passed; future months are not included. Partial payments are reflected so that any shortfall between expected and paid amount for a due month counts as debt.';
-        const p2 = 'Payment deadline is the 3rd of each month for that same month. Payments made on or after the 3rd are considered late. The table below lists each student on transport with their routes, driver, current month fee, amount paid to date, transport debt to date, and unpaid months. Use this report for reconciliation and follow-up with parents.';
-        const lineH = 5;
-        const lines1 = doc.splitTextToSize(p1, pageW - 28);
-        doc.text(lines1, 14, y);
-        y += lines1.length * lineH + 6;
-        const lines2 = doc.splitTextToSize(p2, pageW - 28);
-        doc.text(lines2, 14, y);
-        y += lines2.length * lineH + 8;
-
-        const colHeaders = ['Admission No', 'Full Name', 'Class', 'Parent Contact', 'Transport Start', 'Route (AM)', 'Route (PM)', 'Driver', 'Curr. Month Fee', 'Transport Paid', 'Transport Debt', 'Unpaid Months'];
-        doc.addPage('a4', 'l');
-        const tablePageW = 297 - 28;
-        const colW = [18, 38, 16, 22, 18, 22, 22, 32, 18, 18, 18, 27];
-        const colStyles = {};
-        colW.forEach((w, i) => { colStyles[i] = { cellWidth: w, overflow: 'linebreak', minCellHeight: 6 }; });
-        doc.autoTable({
-          startY: 14,
-          head: [colHeaders],
-          body: rows,
-          theme: 'grid',
-          margin: { left: 14 },
-          styles: { fontSize: 8, cellPadding: 2 },
-          columnStyles: colStyles,
-          headStyles: { fontSize: 8, cellPadding: 2 },
-          tableWidth: tablePageW,
-          showHead: 'everyPage',
-        });
-        doc.addPage('a4', 'p');
-        doc.setFontSize(10);
-        doc.text('_________________________', 14, 36);
-        doc.text('Headteacher signature', 14, 42);
-        doc.text('Date: _________________________', 14, 48);
-
-        doc.save(`transport_payments_${state.year}.pdf`);
+        const pages = doc.getNumberOfPages();
+        for (let n = 1; n <= pages; n += 1) {
+          doc.setPage(n);
+          doc.setDrawColor(...C.line); doc.setLineWidth(0.15); doc.line(M, H - 11, W - M, H - 11);
+          font(7, 'normal', C.slate); text(`SoMAp Transport  |  ${schoolName || 'School'}  |  ${state.year}`, M, H - 6.5);
+          text(`Page ${n} of ${pages}`, W - M, H - 6.5, { align: 'right' });
+        }
+        const tag = { debt: 'debtors', all: 'all', paid: 'paid' }[opts.who] + (opts.use === 'all' ? '' : '_' + opts.use) + (opts.cls ? '_' + opts.cls : '');
+        doc.save(`transport_fees_${state.year}_${tag}.pdf`.replace(/[^\w.-]+/g, '_'));
         showToast('PDF downloaded!');
       }
 

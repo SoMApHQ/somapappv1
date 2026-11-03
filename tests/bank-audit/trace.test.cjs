@@ -64,13 +64,15 @@ test('trace build: totals, paid-back deposit, transport comparison, back-dated a
   assert.equal(r.subject.events.at(-1).running,1360000);
   assert.equal(r.includedPrincipal,1465000);
   assert.equal(r.transport.total,145000);assert.equal(r.transport.backdatedTotal,5000);assert.equal(r.transport.pendingTotal,20000);
-  assert.equal(r.unexplained,1320000);
+  // Unexplained = withdrawn - expenses - paid back; the bank-returned 29,000 is never in "withdrawn".
+  assert.equal(r.beforePaidBack,1320000);assert.equal(r.unexplained,1070000);
   assert.deepEqual(r.transport.tail,{from:'2026-10-08',to:'2026-10-21',days:14});
-  assert.equal(r.months.length,1);assert.equal(r.months[0].gap,1320000);
+  assert.equal(r.months.length,1);assert.equal(r.months[0].paidBack,250000);assert.equal(r.months[0].gap,1070000);
+  assert.equal(r.weeks.reduce((n,w)=>n+w.gap,0),1070000);
   assert.equal(r.weeks.reduce((n,w)=>n+w.withdrawn,0),1465000);
   assert.equal(r.weekdays.reduce((n,d)=>n+d.count,0),29);
 });
-test('no expenses written: whole period is the gap, everything unexplained',()=>{
+test('no expenses written: whole period is the gap, everything not paid back is unexplained',()=>{
   const r=T.build(audit,{subjectKeys:[MUSSA],transport:{expenses:[],pending:[]}});
-  assert.equal(r.unexplained,r.subject.principal);assert.deepEqual(r.transport.tail,{from:'2026-10-01',to:'2026-10-21',days:21});
+  assert.equal(r.unexplained,r.subject.principal-250000);assert.deepEqual(r.transport.tail,{from:'2026-10-01',to:'2026-10-21',days:21});
 });

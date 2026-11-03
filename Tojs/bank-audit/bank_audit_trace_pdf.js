@@ -193,10 +193,11 @@
     }
 
     // Money that came back to the account
-    if (S.paidBackTotal || returnedTotal) {
+    // (With a transport comparison, paid-back money appears in the formula row further down instead.)
+    if (!T && (S.paidBackTotal || returnedTotal)) {
       font(10, "bold", C.night); text("Money that came back to the account", M, y); y += 8;
       cardRow([
-        { label: "Paid back into the account", value: tsh(S.paidBackTotal), color: C.emerald, note: `${S.paidBack.length} deposit(s) into the account` },
+        { label: "Paid back into the account", value: tsh(S.paidBackTotal), color: C.teal, note: `${S.paidBack.length} deposit(s) into the account` },
         { label: "Returned by the bank", value: tsh(returnedTotal), color: C.sky, note: `${S.returned.length} failed transfer(s), already left out` },
         { label: "Net still held", value: tsh(S.principal - S.paidBackTotal), color: C.rose, note: "Received minus paid back" }
       ], 62);
@@ -216,16 +217,19 @@
     // The answer
     if (T) {
       ensure(150);
-      font(10, "bold", C.night); text("Compared with the transport expense book for the same period", M, y); y += 8;
+      font(10, "bold", C.night); text("Withdrawn - transport expenses - money paid back = unexplained", M, y); y += 8;
       cardRow([
-        { label: r.others.length ? "Withdrawn (incl. others)" : "Withdrawn", value: tsh(r.includedPrincipal), color: C.indigo, note: `${r.included.length} transfers, ${day(r.from, false)} - ${day(r.to, false)}` },
-        { label: "Transport expenses written", value: tsh(T.total), color: C.emerald, note: T.rows.length ? `${T.rows.length} entries, ${day(T.firstDate, false)} - ${day(T.lastDate, false)}` : "No expenses written for this period" },
+        { label: r.others.length ? "Withdrawn (incl. others)" : "Withdrawn", value: tsh(r.includedPrincipal), color: C.indigo, size: 12.5, note: `${r.included.length} transfers` },
+        { label: "- Transport expenses", value: tsh(T.total), color: C.emerald, size: 12.5, note: T.rows.length ? `${T.rows.length} entries, ${day(T.firstDate, false)} - ${day(T.lastDate, false)}` : "None written for this period" },
+        { label: "- Paid back to bank", value: tsh(S.paidBackTotal), color: C.teal, size: 12.5, note: `${S.paidBack.length} deposit(s) by ${r.label.split(" ")[0]}` },
         r.unexplained > 0
-          ? { label: "Not explained", value: tsh(r.unexplained), color: C.rose, bg: C.roseSoft, border: [254, 205, 211], note: `${pct(r.unexplained, r.includedPrincipal)} of the money has no expense record` }
-          : { label: "Fully explained", value: tsh(-r.unexplained), color: C.emerald, bg: C.emeraldSoft, note: "Expenses written exceed the withdrawals by this amount" }
-      ], 72);
-      bar(M, y, CW, 12, [{ value: Math.min(T.total, r.includedPrincipal), color: C.emerald }, { value: Math.max(0, r.unexplained), color: C.rose }]);
-      font(7.5, "bold", C.emerald); text(`Explained by expense records ${pct(Math.min(T.total, r.includedPrincipal), r.includedPrincipal)}`, M, y + 24);
+          ? { label: "= Unexplained", value: tsh(r.unexplained), color: C.rose, size: 12.5, bg: C.roseSoft, border: [254, 205, 211], note: `${pct(r.unexplained, r.includedPrincipal)} - ask where it is` }
+          : { label: "= Fully explained", value: tsh(-r.unexplained), color: C.emerald, size: 12.5, bg: C.emeraldSoft, note: "Expenses + paid back exceed withdrawals" }
+      ], 66);
+      const explained = Math.min(T.total, r.includedPrincipal), back = Math.min(S.paidBackTotal, Math.max(0, r.includedPrincipal - explained));
+      bar(M, y, CW, 12, [{ value: explained, color: C.emerald }, { value: back, color: C.teal }, { value: Math.max(0, r.unexplained), color: C.rose }]);
+      font(7.5, "bold", C.emerald); text(`Expenses ${pct(explained, r.includedPrincipal)}`, M, y + 24);
+      if (back) { font(7.5, "bold", C.teal); text(`Paid back ${pct(back, r.includedPrincipal)}`, M + CW / 2, y + 24, { align: "center" }); }
       font(7.5, "bold", C.rose); text(`Unexplained ${pct(Math.max(0, r.unexplained), r.includedPrincipal)}`, W - M, y + 24, { align: "right" });
       y += 36;
       const notes = [];
@@ -234,7 +238,7 @@
       else notes.push(`Expenses are written for the whole period, up to ${day(T.lastDate)}.`);
       if (T.gaps.length) notes.push(`${T.gaps.length} stretch(es) of 3+ weekdays inside the period have no expense written (section 1).`);
       if (T.pendingTotal) notes.push(`${tsh(T.pendingTotal)} of expenses are still awaiting approval and are NOT counted above.`);
-      if (S.paidBackTotal) notes.push(`${r.label} paid ${tsh(S.paidBackTotal)} back into the account in this period (${S.paidBack.length} deposit(s)). Net of that, ${tsh(Math.max(0, r.unexplained - S.paidBackTotal))} remains unexplained.`);
+      if (returnedTotal) notes.push(`${tsh(returnedTotal)} the bank returned (${S.returned.length} failed transfer(s)) was never counted as withdrawn, so it is not subtracted again.`);
       callout("What this means", notes, C.amber, C.amberSoft);
     } else {
       callout("Transport comparison", ["Not requested for this report. Re-run the trace and answer Yes to compare with the transport expense book."], C.slate, C.soft);
@@ -268,20 +272,22 @@
       chapter(chapterNo++, "Withdrawals against transport expenses",
         `Only expenses for days inside the statement period (${period}) are counted. The day used is the one the clerk wrote at the start of the description (e.g. "16/04-fuel"), otherwise the day it was entered. Entries made in this period for earlier days are left out so nothing is counted twice.`);
       cardRow([
-        { label: "Withdrawn", value: tsh(r.includedPrincipal), color: C.indigo },
-        { label: "Expenses written", value: tsh(T.total), color: C.emerald },
-        { label: r.unexplained > 0 ? "Unexplained" : "Over-explained", value: tsh(Math.abs(r.unexplained)), color: r.unexplained > 0 ? C.rose : C.emerald },
-        { label: "Days with expenses", value: String(T.daysWritten), color: C.sky, note: T.lastDate ? `Last written: ${day(T.lastDate)}` : "None written" }
+        { label: "Withdrawn", value: tsh(r.includedPrincipal), color: C.indigo, size: 12.5 },
+        { label: "- Expenses written", value: tsh(T.total), color: C.emerald, size: 12.5, note: T.lastDate ? `${T.daysWritten} day(s), last ${day(T.lastDate, false)}` : "None written" },
+        { label: "- Paid back to bank", value: tsh(S.paidBackTotal), color: C.teal, size: 12.5, note: `${S.paidBack.length} deposit(s)` },
+        { label: r.unexplained > 0 ? "= Unexplained" : "= Over-explained", value: tsh(Math.abs(r.unexplained)), color: r.unexplained > 0 ? C.rose : C.emerald, size: 12.5 }
       ], 62);
-      section("Month by month", C.indigo, "Positive difference = money with no expense record");
-      table(["Month", "Transfers", r.others.length ? `To ${r.label.split(" ")[0]}` : "Withdrawn", ...(r.others.length ? ["To others"] : []), "Expenses written", "Difference"],
-        r.months.map((m) => [monthName(m.key) + (m.from.slice(8) !== "01" || m.to !== lastDay(m.key) ? `\n${day(m.from, false)} - ${day(m.to, false)}` : ""), String(m.count), num(m.subject), ...(r.others.length ? [num(m.others)] : []), num(m.expenses), gapCell(m.gap)]),
-        { amountCols: r.others.length ? [1, 2, 3, 4, 5] : [1, 2, 3, 4], color: C.indigo, columnStyles: { 0: { fontStyle: "bold", cellWidth: 110 } },
-          foot: ["Whole period", String(r.included.length), num(S.principal), ...(r.others.length ? [num(r.includedPrincipal - S.principal)] : []), num(T.total), (r.unexplained > 0 ? "+" : "") + num(r.unexplained)] });
+      const sign = (v) => (v > 0 ? "+" : "") + num(v);
+      section("Month by month", C.indigo, "Unexplained = withdrawn - expenses - paid back");
+      table(["Month", "Transfers", r.others.length ? `To ${r.label.split(" ")[0]}` : "Withdrawn", ...(r.others.length ? ["To others"] : []), "Expenses", "Paid back", "Unexplained"],
+        r.months.map((m) => [monthName(m.key) + (m.from.slice(8) !== "01" || m.to !== lastDay(m.key) ? `\n${day(m.from, false)} - ${day(m.to, false)}` : ""), String(m.count), num(m.subject), ...(r.others.length ? [num(m.others)] : []), num(m.expenses), num(m.paidBack), gapCell(m.gap)]),
+        { amountCols: r.others.length ? [1, 2, 3, 4, 5, 6] : [1, 2, 3, 4, 5], color: C.indigo, columnStyles: { 0: { fontStyle: "bold", cellWidth: 100 } },
+          foot: ["Whole period", String(r.included.length), num(S.principal), ...(r.others.length ? [num(r.includedPrincipal - S.principal)] : []), num(T.total), num(S.paidBackTotal), sign(r.unexplained)] });
       section("Week by week", C.violet, "Weeks run Monday to Sunday");
-      table(["Week", "Transfers", "Withdrawn", "Expenses written", "Difference"],
-        r.weeks.map((w) => [`${day(w.from, false)} - ${day(w.to, false)}`, String(w.count), num(w.withdrawn), num(w.expenses), gapCell(w.gap)]),
-        { amountCols: [1, 2, 3, 4], color: C.violet, fontSize: 7.8, columnStyles: { 0: { fontStyle: "bold" } } });
+      table(["Week", "Transfers", "Withdrawn", "Expenses", "Paid back", "Unexplained"],
+        r.weeks.map((w) => [`${day(w.from, false)} - ${day(w.to, false)}`, String(w.count), num(w.withdrawn), num(w.expenses), num(w.paidBack), gapCell(w.gap)]),
+        { amountCols: [1, 2, 3, 4, 5], color: C.violet, fontSize: 7.8, columnStyles: { 0: { fontStyle: "bold" } },
+          foot: ["Whole period", String(r.included.length), num(r.includedPrincipal), num(T.total), num(S.paidBackTotal), sign(r.unexplained)] });
       const cats = Object.entries(T.byCategory).sort((a, b) => b[1] - a[1]);
       section("What the written expenses were for", C.emerald);
       table(["Category", "Amount (TSh)", "Share"], cats.map(([k, v]) => [k, num(v), pct(v, T.total)]), { amountCols: [1, 2], color: C.emerald, columnStyles: { 0: { fontStyle: "bold" } }, foot: ["Total", num(T.total), "100%"] });
@@ -298,6 +304,7 @@
         ], { amountCols: [1, 2], color: C.slate, columnStyles: { 0: { fontStyle: "bold", cellWidth: 120 } } });
       }
       callout("How to read this", [
+        `Unexplained = money withdrawn - transport expenses written - money ${r.label} deposited back. Transfers the bank returned are never counted as withdrawn, so they are not subtracted again.`,
         "The comparison assumes every transport expense written was paid from these withdrawals. If some were paid in cash or from another account, the unexplained amount is even larger.",
         "A withdrawal is explained only when an expense is written for it. Ask for receipts or written expenses covering each unexplained week.",
         ...(T.fromDescription ? [`${T.fromDescription} of ${T.rows.length} expenses were dated from the date written in their description.`] : [])
@@ -352,7 +359,9 @@
         ...S.returned.map((w) => [day(w.date), "Transfer returned by the bank (excluded above)", w.bankReference || "", num(w.amountWithdrawn)])
       ], { amountCols: [3], color: C.emerald, columnStyles: { 0: { cellWidth: 70 } }, footColor: C.emeraldSoft,
         foot: ["Total", `Paid back ${tsh(S.paidBackTotal)} + returned by the bank ${tsh(returnedTotal)}`, "", num(S.paidBackTotal + returnedTotal)] });
-      paragraph(`Received ${tsh(S.principal)} - paid back ${tsh(S.paidBackTotal)} = ${tsh(S.principal - S.paidBackTotal)} still held by ${r.label}. Bank returns are already left out of the amount received.`, 8.5, C.ink);
+      paragraph(T
+        ? `Withdrawn ${tsh(r.includedPrincipal)} - transport expenses ${tsh(T.total)} - paid back ${tsh(S.paidBackTotal)} = ${tsh(r.unexplained)} unexplained. Bank returns are already left out of the amount withdrawn.`
+        : `Received ${tsh(S.principal)} - paid back ${tsh(S.paidBackTotal)} = ${tsh(S.principal - S.paidBackTotal)} still held by ${r.label}. Bank returns are already left out of the amount received.`, 8.5, C.ink);
     }
 
     // ================= 3. EVERY TRANSFER =================

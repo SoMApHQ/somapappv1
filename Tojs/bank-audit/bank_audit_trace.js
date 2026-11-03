@@ -186,20 +186,23 @@
     const transport = o.transport ? transportBook(o.transport, from, to) : null;
     const includedPrincipal = sum(included, "amountWithdrawn");
     const expenseIn = (a, b) => transport ? round(transport.rows.filter((e) => e.date >= a && e.date <= b).reduce((n, e) => n + e.amount, 0)) : 0;
+    // Unexplained = withdrawn - expenses written - money the subject paid back. Bank-returned transfers
+    // are already out of "withdrawn", so they are not subtracted again.
+    const paidIn = (a, b) => round(paidBack.filter((t) => t.date >= a && t.date <= b).reduce((n, t) => n + t.moneyIn, 0));
 
     const months = [];
     for (let m = from.slice(0, 7); m && m <= to.slice(0, 7); m = nextMonth(m)) {
       const a = m + "-01" < from ? from : m + "-01", b = (nextMonth(m) + "-01") <= to ? addDays(nextMonth(m) + "-01", -1) : to;
       const rows = included.filter((w) => w.date >= a && w.date <= b), s = rows.filter((w) => w.who === "subject");
-      const withdrawn = sum(rows, "amountWithdrawn"), expenses = expenseIn(a, b);
+      const withdrawn = sum(rows, "amountWithdrawn"), expenses = expenseIn(a, b), paid = paidIn(a, b);
       months.push({ key: m, from: a, to: b, count: rows.length, subject: sum(s, "amountWithdrawn"), others: round(withdrawn - sum(s, "amountWithdrawn")),
-        withdrawn, charges: sum(rows, "charges"), expenses, gap: round(withdrawn - expenses) });
+        withdrawn, charges: sum(rows, "charges"), expenses, paidBack: paid, gap: round(withdrawn - expenses - paid) });
     }
     const weeks = [];
     if (from && to) for (let w = mondayOf(from); w <= to; w = addDays(w, 7)) {
       const a = w < from ? from : w, b = addDays(w, 6) > to ? to : addDays(w, 6);
-      const rows = included.filter((x) => x.date >= a && x.date <= b), withdrawn = sum(rows, "amountWithdrawn"), expenses = expenseIn(a, b);
-      if (rows.length || expenses) weeks.push({ from: a, to: b, count: rows.length, withdrawn, expenses, gap: round(withdrawn - expenses) });
+      const rows = included.filter((x) => x.date >= a && x.date <= b), withdrawn = sum(rows, "amountWithdrawn"), expenses = expenseIn(a, b), paid = paidIn(a, b);
+      if (rows.length || expenses || paid) weeks.push({ from: a, to: b, count: rows.length, withdrawn, expenses, paidBack: paid, gap: round(withdrawn - expenses - paid) });
     }
     const weekdays = WEEKDAYS.map((d) => { const rows = subjectEvents.filter((w) => w.weekday === d); return { day: d, count: rows.length, principal: sum(rows, "amountWithdrawn") }; });
     const hours = BANDS.map((band) => { const rows = subjectEvents.filter((w) => hourBand(w.time) === band); return { band, count: rows.length, principal: sum(rows, "amountWithdrawn") }; })
@@ -221,7 +224,8 @@
         activeDays: new Set(subjectEvents.map((w) => w.date)).size },
       others, included, includedPrincipal, includedCharges: sum(included, "charges"),
       allPrincipal: sum(live, "amountWithdrawn"), shareOfAll: sum(live, "amountWithdrawn") ? includedPrincipal / sum(live, "amountWithdrawn") : 0,
-      transport, unexplained: transport ? round(includedPrincipal - transport.total) : null,
+      transport, unexplained: transport ? round(includedPrincipal - transport.total - sum(paidBack, "moneyIn")) : null,
+      beforePaidBack: transport ? round(includedPrincipal - transport.total) : null,
       months, weeks, weekdays, hours
     };
   }
