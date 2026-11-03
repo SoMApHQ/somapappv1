@@ -13,7 +13,8 @@
     diagnostics: null,
     parsedFile: null,
     activeCategory: null,
-    purposeConfig: {}
+    purposeConfig: {},
+    trace: null
   };
 
   const $ = (id) => document.getElementById(id);
@@ -140,6 +141,171 @@
       <td>${esc(w.description || "")}<details><summary>View raw bank lines</summary>${(w.rawLines || []).map(t => `<p>${esc(t.postingTime)} | ${money(t.moneyOut)} | Balance ${money(t.balance)}<br>${esc(t.rawNarration)}</p>`).join("")}</details></td>
       <td>${esc(w.businessPurpose || "Purpose not stated in bank narration")}<br>Supporting evidence: ${esc(w.evidence || "Required")}<br>Reviewer: ${esc(w.reviewer || "Not assigned")}<br>${esc(w.reviewStatus || "Pending documentation")}<br>${esc((w.reviewFlags || []).join("; "))}</td>
     </tr>`).join("") : `<tr><td colspan="8" class="empty">No withdrawal events.</td></tr>`;
+  }
+
+  // ---- Withdrawal trace: pick a recipient, confirm linked names / numbers, optionally add other
+  // recipients, optionally compare with the transport expense book, then download the trace PDF.
+  // Read-only analysis: nothing here writes to the database.
+  function traceState(audit) {
+    if (!state.trace || state.trace.audit !== audit) {
+      state.trace = { audit, subject: "", linked: {}, addOthers: false, others: new Set(), filter: "", compare: false, transport: null, loading: false, error: "" };
+    }
+    return state.trace;
+  }
+
+  function traceSubjectKeys(tr) {
+    return tr.subject ? [tr.subject, ...Object.keys(tr.linked).filter((k) => tr.linked[k])] : [];
+  }
+
+  function traceResult(audit, tr) {
+    return global.SomapBankAuditTrace.build(audit, {
+      subjectKeys: traceSubjectKeys(tr), otherKeys: tr.addOthers ? [...tr.others] : [],
+      transport: tr.compare && tr.transport ? tr.transport : null
+    });
+  }
+
+  function chooseTraceSubject(key) {
+    const tr = state.trace;
+    if (!tr) return;
+    tr.subject = key; tr.linked = {}; tr.others.delete(key);
+    const list = global.SomapBankAuditTrace.recipients(tr.audit);
+    global.SomapBankAuditTrace.related(list, key).forEach((r) => { tr.linked[r.key] = r.strong; });
+    renderTrace(tr.audit);
+    $("tracePanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  async function loadTraceTransport(tr) {
+    const { from, to } = traceResult(tr.audit, tr);
+    tr.loading = true; tr.error = ""; renderTrace(tr.audit);
+    try {
+      tr.transport = await global.SomapBankAuditStorage.listTransportExpenses(from, to);
+      if (tr.transport.warnings.length) tr.error = `Some expense records could not be read: ${tr.transport.warnings.join("; ")}`;
+    } catch (error) {
+      console.error(error);
+      tr.error = `Transport expenses could not be loaded: ${error.message || error}`;
+      tr.compare = false;
+    } finally {
+      tr.loading = false;
+      if (state.trace === tr) renderTrace(tr.audit);
+    }
+  }
+
+  function renderTrace(audit) {
+    const statsEl = $("traceStats"), panel = $("tracePanel");
+    if (!statsEl || !panel || !global.SomapBankAuditTrace) return;
+    const T = global.SomapBankAuditTrace, list = T.recipients(audit).filter((r) => r.count);
+    if (!audit || !list.length) { statsEl.innerHTML = ""; panel.hidden = true; return; }
+    const tr = traceState(audit);
+    const allSent = list.reduce((n, r) => n + r.principal, 0);
+    const share = (v) => `${allSent ? ((v / allSent) * 100).toFixed(1) : "0.0"}%`;
+    statsEl.innerHTML = `<div class="metric hero"><span>Sent to people</span><strong>${money(allSent)}</strong><small>${list.reduce((n, r) => n + r.count, 0)} transfers to ${list.length} recipient${list.length === 1 ? "" : "s"}</small></div>`
+      + list.slice(0, 3).map((r, i) => `<button type="button" class="metric metric-link${tr.subject === r.key ? " active" : ""}" data-trace-pick="${esc(r.key)}">
+        <span>#${i + 1} received</span><strong>${esc(r.name)}</strong><small>${money(r.principal)} | ${share(r.principal)} | ${r.count} transfer${r.count === 1 ? "" : "s"}${r.phones.length ? " | " + esc(r.phones.join(", ")) : ""}</small><small>Click to trace</small></button>`).join("");
+    statsEl.querySelectorAll("[data-trace-pick]").forEach((b) => b.addEventListener("click", () => chooseTraceSubject(b.dataset.tracePick)));
+
+    panel.hidden = false;
+    const period = `${audit.statementPeriodFrom || "start"} to ${audit.statementPeriodTo || "end"}`;
+    let html = `<h3>Trace who received the money</h3>
+      <p>Choose a recipient to see everything sent to them, through every phone number and account, and compare it with the transport expense book for ${esc(period)}.</p>
+      <div class="trace-step"><strong>1. Whose withdrawals do you want to see?</strong>
+        <select id="traceSubject"><option value="">Choose a recipient...</option>${list.map((r) =>
+          `<option value="${esc(r.key)}"${r.key === tr.subject ? " selected" : ""}>${esc(r.name)} - ${esc(money(r.principal))} (${r.count} transfer${r.count === 1 ? "" : "s"})${r.phones.length ? " - " + esc(r.phones.join(", ")) : ""}</option>`).join("")}</select></div>`;
+    if (tr.subject) {
+      const related = T.related(T.recipients(audit), tr.subject);
+      const r = traceResult(audit, tr), S = r.subject;
+      html += `<div class="trace-step"><strong>2. Names and numbers counted as the same person</strong>
+        ${related.length ? `<p class="text-slate-500 text-sm" style="margin:0 0 6px">Ticked = SoMAp thinks it is the same person. Untick anyone who is not; tick dashed ones that are.</p>
+        <div class="trace-list">${related.map((x) => { const rec = list.find((l) => l.key === x.key) || T.recipients(audit).find((l) => l.key === x.key);
+          return `<label class="${x.strong ? "" : "weak"}"><input type="checkbox" data-trace-link="${esc(x.key)}"${tr.linked[x.key] ? " checked" : ""}><span>${esc(rec?.name || x.key)}<small>${esc(money(rec?.principal || 0))} | ${esc(x.reason)}</small></span></label>`; }).join("")}</div>`
+          : `<p class="text-slate-500 text-sm" style="margin:0">No other names or numbers look like this person.</p>`}
+        <div class="trace-figures">
+          <div class="bad"><span>Received in total</span><strong>${money(S.principal)}</strong><small>${S.count} transfers, plus ${money(S.charges)} charges</small></div>
+          ${S.channels.map((c) => `<div><span>${esc(c.label)}</span><strong>${money(c.principal)}</strong><small>${esc(c.account || "")} ${c.count} transfer${c.count === 1 ? "" : "s"}</small></div>`).join("")}
+          ${S.paidBackTotal ? `<div class="good"><span>Paid back into the account</span><strong>${money(S.paidBackTotal)}</strong><small>${S.paidBack.length} deposit${S.paidBack.length === 1 ? "" : "s"}</small></div>` : ""}
+          ${S.weekend.length ? `<div><span>Weekend transfers</span><strong>${S.weekend.length}</strong><small>${money(S.weekend.reduce((n, w) => n + w.amountWithdrawn, 0))}</small></div>` : ""}
+        </div>
+        ${S.viaNumber.length ? `<div class="trace-note">${S.viaNumber.length} transfer(s) went to this person's number under another name: ${esc([...new Set(S.viaNumber.map((w) => w.recipient))].join(", "))}. Tick that name above to include it.</div>` : ""}
+      </div>
+      <div class="trace-step"><strong>3. What about other withdrawals?</strong>
+        <div class="trace-choices"><button type="button" data-trace-others="no" class="${tr.addOthers ? "" : "on"}">Only this person</button><button type="button" data-trace-others="yes" class="${tr.addOthers ? "on" : ""}">Yes, add other recipients</button></div>
+        ${tr.addOthers ? `<p class="text-slate-500 text-sm" style="margin:8px 0 6px">Tick everyone to add (e.g. drivers paid from the same budget). Leave unticked anyone to omit, such as agreed payments.</p>
+          <input type="search" id="traceFilter" placeholder="Filter names or numbers" value="${esc(tr.filter)}">
+          <div class="trace-choices" style="margin-top:6px"><button type="button" id="traceAllShown">Tick all shown</button><button type="button" id="traceNone">Clear</button></div>
+          <div id="traceOthersList" class="trace-list"></div>` : ""}
+      </div>
+      <div class="trace-step"><strong>4. Compare with transport expenses for ${esc(period)}?</strong>
+        <div class="trace-choices"><button type="button" data-trace-compare="yes" class="${tr.compare ? "on" : ""}">Yes, compare</button><button type="button" data-trace-compare="no" class="${tr.compare ? "" : "on"}">No</button></div>
+        ${tr.loading ? `<p class="text-slate-500 text-sm" style="margin-top:8px">Loading transport expenses...</p>` : ""}
+        ${tr.error ? `<div class="trace-note">${esc(tr.error)}</div>` : ""}
+        ${tr.compare && r.transport ? traceComparisonHtml(r) : ""}
+      </div>
+      <div class="trace-step"><div class="trace-choices"><button type="button" id="traceDownload" class="on"${tr.loading ? " disabled" : ""}>Download trace report (PDF)</button></div></div>`;
+    }
+    panel.innerHTML = html;
+    $("traceSubject")?.addEventListener("change", (e) => {
+      if (e.target.value) chooseTraceSubject(e.target.value);
+      else { tr.subject = ""; tr.linked = {}; renderTrace(audit); }
+    });
+    panel.querySelectorAll("[data-trace-link]").forEach((cb) => cb.addEventListener("change", () => {
+      tr.linked[cb.dataset.traceLink] = cb.checked;
+      if (cb.checked) tr.others.delete(cb.dataset.traceLink);
+      renderTrace(audit);
+    }));
+    panel.querySelectorAll("[data-trace-others]").forEach((b) => b.addEventListener("click", () => { tr.addOthers = b.dataset.traceOthers === "yes"; renderTrace(audit); }));
+    panel.querySelectorAll("[data-trace-compare]").forEach((b) => b.addEventListener("click", () => {
+      tr.compare = b.dataset.traceCompare === "yes";
+      if (tr.compare && !tr.transport && !tr.loading) loadTraceTransport(tr);
+      else renderTrace(audit);
+    }));
+    $("traceDownload")?.addEventListener("click", () => downloadTracePdf(audit, tr));
+    if (tr.addOthers) renderTraceOthers(audit, tr, list);
+  }
+
+  // Only the list re-renders while typing in the filter, so the search box keeps focus.
+  function renderTraceOthers(audit, tr, list) {
+    const el = $("traceOthersList");
+    if (!el) return;
+    const taken = new Set(traceSubjectKeys(tr));
+    const q = tr.filter.toLowerCase().trim();
+    const shown = list.filter((r) => !taken.has(r.key) && (!q || `${r.name} ${r.phones.join(" ")}`.toLowerCase().includes(q)));
+    el.innerHTML = shown.length ? shown.map((r) => `<label><input type="checkbox" data-trace-other="${esc(r.key)}"${tr.others.has(r.key) ? " checked" : ""}><span>${esc(r.name)}<small>${esc(money(r.principal))} | ${r.count} transfer${r.count === 1 ? "" : "s"}${r.phones.length ? " | " + esc(r.phones.join(", ")) : ""} | ${esc(r.channels.join(", "))}</small></span></label>`).join("")
+      : `<p class="text-slate-500 text-sm">No other recipients${q ? " match" : ""}.</p>`;
+    el.querySelectorAll("[data-trace-other]").forEach((cb) => cb.addEventListener("change", () => {
+      if (cb.checked) tr.others.add(cb.dataset.traceOther); else tr.others.delete(cb.dataset.traceOther);
+      renderTrace(audit);
+    }));
+    const filter = $("traceFilter");
+    if (filter && !filter.dataset.bound) {
+      filter.dataset.bound = "1";
+      filter.addEventListener("input", () => { tr.filter = filter.value; renderTraceOthers(audit, tr, list); });
+    }
+    $("traceAllShown")?.addEventListener("click", () => { shown.forEach((r) => tr.others.add(r.key)); renderTrace(audit); }, { once: true });
+    $("traceNone")?.addEventListener("click", () => { tr.others.clear(); renderTrace(audit); }, { once: true });
+  }
+
+  function traceComparisonHtml(r) {
+    const T = r.transport, bad = r.unexplained > 0;
+    const coverage = !T.rows.length ? "No transport expenses are written for this period yet."
+      : T.tail ? `Expenses are written up to ${T.lastDate}. Nothing written from ${T.tail.from} to ${T.tail.to} (${T.tail.days} day${T.tail.days === 1 ? "" : "s"}).`
+      : `Expenses are written for the whole period, up to ${T.lastDate}.`;
+    return `<div class="trace-figures">
+        <div><span>Withdrawn${r.others.length ? " (incl. others)" : ""}</span><strong>${money(r.includedPrincipal)}</strong><small>${r.included.length} transfers</small></div>
+        <div class="good"><span>Transport expenses written</span><strong>${money(T.total)}</strong><small>${T.rows.length} entries</small></div>
+        <div class="${bad ? "bad" : "good"}"><span>${bad ? "Not explained" : "Fully explained"}</span><strong>${money(Math.abs(r.unexplained))}</strong><small>${bad ? "Withdrawn with no expense record" : "Expenses exceed withdrawals"}</small></div>
+        ${T.pendingTotal ? `<div><span>Awaiting approval</span><strong>${money(T.pendingTotal)}</strong><small>Not counted</small></div>` : ""}
+      </div>
+      <div class="trace-note">${esc(coverage)}${T.gaps.length ? ` ${T.gaps.length} stretch(es) of 3+ weekdays have no expense written.` : ""}${T.backdatedTotal ? ` ${esc(money(T.backdatedTotal))} entered for days before the period is left out.` : ""}</div>`;
+  }
+
+  async function downloadTracePdf(audit, tr) {
+    if (!tr.subject) return toast("Choose a recipient first.", "error");
+    if (!global.SomapBankAuditTracePdf) return toast("Trace report module not loaded. Refresh and try again.", "error");
+    try {
+      await global.SomapBankAuditTracePdf.download(audit, traceResult(audit, tr));
+    } catch (error) {
+      console.error(error);
+      toast(error.message || "Could not create the trace report.", "error");
+    }
   }
 
   function renderFindings(audit) {
@@ -457,6 +623,7 @@
     const txns = audit?.transactions || [];
     renderTable("incomeBody", txns.filter((t) => t.moneyIn > 0), "No income transactions.");
     renderWithdrawalEvents(audit);
+    renderTrace(audit);
     renderTable("reviewBody", audit?.reviewItems || [], "No review items.");
     renderTable("allTxnBody", txns, "No transaction register.");
     renderStudentTrace();

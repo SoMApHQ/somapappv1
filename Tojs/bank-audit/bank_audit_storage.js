@@ -39,36 +39,46 @@
     return String(value || "file").replace(/[^\w.-]+/g, "_").slice(0, 120);
   }
 
-  // Firebase RTDB keys can't contain '.', '#', '$', '/', '[' or ']'. Category names like
-  // "Transport / Usafiri" become categoryTotals keys, so they must be encoded before writing
-  // and decoded after reading, or the whole audit save silently fails after the Drive upload
-  // already succeeded (files land in Drive, but no record is ever created in RTDB).
+  // Firebase RTDB keys can't be empty or contain '.', '#', '$', '/', '[' or ']'. Any object in an
+  // audit may be keyed by bank text (categoryTotals by "Transport / Usafiri", purposeSuggestions[].labels
+  // by what a payer typed, e.g. "Tuition fee."), so EVERY key is encoded before writing and decoded after
+  // reading. Undefined and NaN/Infinity are scrubbed too: RTDB rejects the whole write for any of these,
+  // after the Drive upload already succeeded (files land in Drive, but no record is created in RTDB).
+  const EMPTY_KEY = "__empty__";
+
   function encodeCategoryKey(key) {
+    if (key === "") return EMPTY_KEY;
     return String(key).replace(/[.#$\[\]/]/g, (ch) => `__${ch.charCodeAt(0)}__`);
   }
 
   function decodeCategoryKey(key) {
+    if (key === EMPTY_KEY) return "";
     return String(key).replace(/__(\d+)__/g, (_, code) => String.fromCharCode(Number(code)));
   }
 
-  function encodeCategoryTotals(categoryTotals) {
-    if (!categoryTotals) return categoryTotals;
+  function encodeForDb(value) {
+    if (value === undefined || typeof value === "function") return undefined;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    if (!value || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map((v) => { const e = encodeForDb(v); return e === undefined ? null : e; });
     const out = {};
-    for (const [k, v] of Object.entries(categoryTotals)) out[encodeCategoryKey(k)] = v;
+    for (const [k, v] of Object.entries(value)) {
+      const e = encodeForDb(v);
+      if (e !== undefined) out[encodeCategoryKey(k)] = e;
+    }
     return out;
   }
 
-  function decodeCategoryTotals(categoryTotals) {
-    if (!categoryTotals) return categoryTotals;
+  function decodeFromDb(value) {
+    if (!value || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map(decodeFromDb);
     const out = {};
-    for (const [k, v] of Object.entries(categoryTotals)) out[decodeCategoryKey(k)] = v;
+    for (const [k, v] of Object.entries(value)) out[decodeCategoryKey(k)] = decodeFromDb(v);
     return out;
   }
 
   function decodeAuditRecord(record) {
-    if (!record) return record;
-    if (!record.categoryTotals) return record;
-    return { ...record, categoryTotals: decodeCategoryTotals(record.categoryTotals) };
+    return record ? decodeFromDb(record) : record;
   }
 
   function safeDriveName(value) {
@@ -313,9 +323,8 @@
     const ref = audit.id ? db().ref(`${auditPath(y)}/${audit.id}`) : db().ref(auditPath(y)).push();
     const user = authUser();
     const now = Date.now();
-    const payload = {
+    const payload = encodeForDb({
       ...audit,
-      categoryTotals: encodeCategoryTotals(audit.categoryTotals),
       id: ref.key,
       auditId: ref.key,
       schoolId: schoolId(),
@@ -327,7 +336,7 @@
         uid: user?.uid || "",
         email: user?.email || ""
       }
-    };
+    });
     const result = await ref.transaction(existing => {
       if (existing) return existing;
       return payload;
@@ -341,7 +350,7 @@
     const ref = db().ref(auditPath(y) + '/' + id);
     const versionId = db().ref().push().key;
     const user = authUser();
-    const encodedAnalysis = { ...analysis, categoryTotals: encodeCategoryTotals(analysis.categoryTotals) };
+    const encodedAnalysis = encodeForDb(analysis);
     const result = await ref.transaction(previous => {
       if (!previous) return;
       const { history, ...snapshot } = previous;
@@ -358,8 +367,9 @@
   }
 
   async function updateAudit(id, patch, y) {
-    const safePatch = { ...(patch || {}) };
-    if (safePatch.categoryTotals) safePatch.categoryTotals = encodeCategoryTotals(safePatch.categoryTotals);
+    // Patch keys are child paths ("allocations/<id>"), so only the values are encoded.
+    const safePatch = {};
+    for (const [k, v] of Object.entries(patch || {})) safePatch[k] = v === undefined ? null : encodeForDb(v);
     await db().ref(`${auditPath(y)}/${id}`).update({
       ...safePatch,
       updatedAt: Date.now()
@@ -384,7 +394,35 @@
     await db().ref(`${auditPath(y)}/${id}`).remove();
   }
 
+  // Read-only: approved transport expenses (and pending ones awaiting approval) for every year the
+  // statement period touches. Same paths as transporthtml/transportpayments.html: Socrates keeps them
+  // under schools/socrates-school/... with the root `transport_expenses` as legacy fallback; every other
+  // school under its own scope.
+  async function listTransportExpenses(fromIso, toIso) {
+    const sid = schoolId();
+    const socrates = sid === "socrates-school" || sid === "default";
+    const y0 = Number(String(fromIso || "").slice(0, 4)) || Number(year());
+    const y1 = Math.max(y0, Number(String(toIso || "").slice(0, 4)) || y0);
+    const expenses = {}, pending = {}, warnings = [];
+    const read = async (p) => {
+      try { return (await db().ref(p).once("value")).val() || {}; }
+      catch (error) { warnings.push(`${p}: ${error.message || error}`); return {}; }
+    };
+    for (let y = y0; y <= y1; y += 1) {
+      let val = await read(path(socrates ? `schools/${sid}/years/${y}/transport_expenses` : `years/${y}/transport_expenses`));
+      if (socrates && !Object.keys(val).length) val = await read("transport_expenses");
+      Object.entries(val).forEach(([id, e]) => { if (e && (e.year == y || !e.year)) expenses[id] = { id, ...e }; });
+      Object.entries(await read(path(`years/${y}/expenseApprovals`))).forEach(([id, r]) => {
+        if (r?.module === "transport" && String(r.status || "").toLowerCase() === "pending") pending[id] = { id, ...(r.targetPayload || {}), ...r };
+      });
+    }
+    return { expenses: Object.values(expenses), pending: Object.values(pending), warnings };
+  }
+
   global.SomapBankAuditStorage = {
+    encodeForDb,
+    decodeFromDb,
+    listTransportExpenses,
     year,
     school,
     schoolId,
