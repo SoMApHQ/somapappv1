@@ -42,3 +42,11 @@ test('unreadable paths become warnings, not failures',async()=>{
   const book=await B.collect({db,year:2026,ledger});
   assert.equal(book.counts.transport,2);assert.equal(book.warnings.length,2);
 });
+test('future typed date: day/month swap is corrected for display, typed date kept',()=>{
+  const at=(y,m,d)=>new Date(y,m-1,d).getTime();
+  const r=B.fixFutureDate({timestamp:at(2026,12,10),createdAt:at(2026,10,28)+3600000});
+  assert.equal(r.timestamp,at(2026,10,12));assert.equal(r.typedTimestamp,at(2026,12,10));assert.equal(r.dateIssue,'day and month swapped');
+  const late=B.fixFutureDate({timestamp:at(2026,12,25),createdAt:at(2026,10,28)});
+  assert.equal(late.timestamp,at(2026,10,28));assert.match(late.dateIssue,/entry day/);
+  const ok={timestamp:at(2026,10,20),createdAt:at(2026,10,28)};assert.equal(B.fixFutureDate(ok),ok);
+});

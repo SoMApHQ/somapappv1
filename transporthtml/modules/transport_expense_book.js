@@ -12,6 +12,20 @@
 
   const TRANSPORT_CATEGORY = /\b(transport|usafiri|school\s*bus|schoolbus)\b/i;
 
+  // A typed expense date later than the moment the entry was made is a typing slip, usually day and
+  // month swapped in a month/day date box ("12/10/2026" meant 12 Oct, saved as 10 Dec). The swapped
+  // date is used when it is valid and not after the entry; otherwise the entry day. Display only:
+  // the stored record is never changed, and the typed date is kept in `typedTimestamp`.
+  const DAY = 86400000;
+  function fixFutureDate(row) {
+    const ts = Number(row.timestamp), entered = Number(row.createdAt);
+    if (!ts || !entered || ts <= entered + DAY) return row;
+    const d = new Date(ts), swapped = new Date(d.getFullYear(), d.getDate() - 1, d.getMonth() + 1);
+    const swapOk = d.getDate() <= 12 && swapped.getDate() === d.getMonth() + 1 && swapped.getTime() <= entered + DAY;
+    const fixed = swapOk ? swapped.getTime() : new Date(new Date(entered).toDateString()).getTime();
+    return { ...row, typedTimestamp: ts, timestamp: fixed, dateIssue: swapOk ? "day and month swapped" : "date after entry; entry day used" };
+  }
+
   async function readVal(db, path, warnings) {
     try { return (await db.ref(path).once("value")).val() || {}; }
     catch (error) { warnings.push(`${path}: ${error.message || error}`); return {}; }
@@ -57,8 +71,8 @@
     Object.entries(finance).forEach(([id, e]) => {
       if (!e || typeof e !== "object" || !TRANSPORT_CATEGORY.test(`${e.category || ""}`)) return;
       const when = Number(e.timestamp) || Number(e.createdAt) || (e.date ? new Date(`${e.date}T00:00:00`).getTime() : 0);
-      rows.push({ ...e, amount: Number(e.amount) || 0, timestamp: when, addedBy: e.addedBy || e.createdBy || e.approvedBy || "",
-        year, id: `finance_${id}`, source: "finance" });
+      rows.push(fixFutureDate({ ...e, amount: Number(e.amount) || 0, timestamp: when, addedBy: e.addedBy || e.createdBy || e.approvedBy || "",
+        year, id: `finance_${id}`, source: "finance" }));
     });
 
     const counts = { transport: 0, approval: 0, finance: 0 }, totals = { transport: 0, approval: 0, finance: 0 };
@@ -66,5 +80,5 @@
     return { rows, counts, totals, warnings };
   }
 
-  global.SomapTransportExpenseBook = { collect, TRANSPORT_CATEGORY };
+  global.SomapTransportExpenseBook = { collect, fixFutureDate, TRANSPORT_CATEGORY };
 })(window);
