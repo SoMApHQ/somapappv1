@@ -401,7 +401,7 @@
     if (T) {
       chapter(chapterNo++, "Transport expenses counted", `Every approved transport expense dated inside ${period}, from the transport payments expense book.`);
       table(["Spent on", "Entered", "Category", "Description", "Entered by", "Amount"],
-        T.rows.map((e) => [day(e.date), e.recordedDate ? day(e.recordedDate, false) : "-", e.category || "OTHER", e.description || "", e.addedBy || "-", num(e.amount)]),
+        T.rows.map((e) => [day(e.date), e.recordedDate ? day(e.recordedDate, false) : "-", e.category || "OTHER", e.description || "", `${e.addedBy || "-"}${e.source === "finance" ? "\n(Finance book)" : e.source === "approval" ? "\n(from approvals)" : ""}`, num(e.amount)]),
         { amountCols: [5], color: C.emerald, fontSize: 7.3, empty: "No transport expenses are written for this period.",
           columnStyles: { 0: { cellWidth: 56 }, 1: { cellWidth: 40 }, 2: { cellWidth: 66 }, 4: { cellWidth: 92, fontSize: 6.5 }, 5: { cellWidth: 60 } },
           foot: ["Total", "", "", `${T.rows.length} entries`, "", num(T.total)], footColor: C.emeraldSoft });

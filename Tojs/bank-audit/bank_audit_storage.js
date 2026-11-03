@@ -411,7 +411,16 @@
     for (let y = y0; y <= y1; y += 1) {
       let val = await read(path(socrates ? `schools/${sid}/years/${y}/transport_expenses` : `years/${y}/transport_expenses`));
       if (socrates && !Object.keys(val).length) val = await read("transport_expenses");
-      Object.entries(val).forEach(([id, e]) => { if (e && (e.year == y || !e.year)) expenses[id] = { id, ...e }; });
+      const ledger = {};
+      Object.entries(val).forEach(([id, e]) => { if (e && (e.year == y || !e.year)) ledger[id] = e; });
+      // Same book transportpayments.html shows: + approved requests missing from the ledger + Finance transport expenses.
+      let book = null;
+      if (global.SomapTransportExpenseBook) {
+        try { book = await global.SomapTransportExpenseBook.collect({ db: db(), P: path, year: y, ledger }); warnings.push(...book.warnings); }
+        catch (error) { warnings.push(`Expense book: ${error.message || error}`); }
+      }
+      if (book) book.rows.forEach((e) => { expenses[`${y}_${e.id}`] = e; });
+      else Object.entries(ledger).forEach(([id, e]) => { expenses[id] = { id, ...e, source: "transport" }; });
       Object.entries(await read(path(`years/${y}/expenseApprovals`))).forEach(([id, r]) => {
         if (r?.module === "transport" && String(r.status || "").toLowerCase() === "pending") pending[id] = { id, ...(r.targetPayload || {}), ...r };
       });

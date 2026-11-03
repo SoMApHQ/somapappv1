@@ -587,6 +587,7 @@
 
     <script src="./modules/transport_roles.js"></script>
     <script src="./modules/transport_approval_guard.js?v=20261102b"></script>
+    <script src="./modules/transport_expense_book.js?v=20261103a"></script>
     <script src="./modules/transport_context.js"></script>
     <script src="./modules/transport_helpers.js"></script>
     <script src="./modules/transport_pricing.js"></script>
@@ -2689,9 +2690,16 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
             <td><span class="chip ${exp.category === 'FUEL' ? 'warn' : exp.category === 'MAINTENANCE' ? 'info' : 'ok'}">${exp.category}</span></td>
             <td>${exp.description}</td>
             <td>${formatCurrency(exp.amount)}</td>
-            <td>${exp.addedBy || '-'}</td>
+            <td>${exp.addedBy || '-'}${exp.source === 'approval' ? '<br><span class="chip info" title="Approved in Expense Approvals; recovered from the approvals queue">from approvals</span>' : exp.source === 'finance' ? '<br><span class="chip warn" title="Recorded in the Finance expense book with a transport category">from Finance</span>' : ''}</td>
           </tr>
         `).join('');
+        const src = state.expenseSources;
+        if (src && (src.counts.approval || src.counts.finance)) {
+          expensesBody.insertAdjacentHTML('afterbegin', `<tr><td colspan="5" style="background:#eef2ff;color:#312e81;font-size:.85rem;padding:.6rem">
+            Transport book: ${src.counts.transport} entries ${formatCurrency(src.totals.transport)}
+            ${src.counts.approval ? ` + ${src.counts.approval} approved in Expense Approvals but missing from the book ${formatCurrency(src.totals.approval)}` : ''}
+            ${src.counts.finance ? ` + ${src.counts.finance} transport expenses from the Finance book ${formatCurrency(src.totals.finance)}` : ''}</td></tr>`);
+        }
       }
 
       // Export to Excel - same columns as UI, summary rows at top, column widths and numeric formatting
@@ -3958,6 +3966,19 @@ Kumbuka, ada ya usafiri tunalipa kwa mwaka ambapo tumeigawanya kwa mikupuo kumi.
               state.expenses[key] = exp;
             }
           });
+          // Add approved transport requests missing from the ledger and Finance-book transport
+          // expenses (see modules/transport_expense_book.js). Read-only.
+          if (window.SomapTransportExpenseBook) {
+            try {
+              const book = await window.SomapTransportExpenseBook.collect({ db, P: (p) => window.SOMAP.P(p), year, ledger: state.expenses });
+              state.expenses = {};
+              book.rows.forEach((row) => { state.expenses[row.id] = { ...row, year: row.year || year }; });
+              state.expenseSources = book;
+              if (book.warnings.length) console.warn('Transport expense book:', book.warnings);
+            } catch (err) {
+              console.warn('Transport expense book merge failed; showing ledger only:', err);
+            }
+          }
 
           // STEP 5: Pre-load multipliers
           if (!cachedMultipliers[yearNum]) {
