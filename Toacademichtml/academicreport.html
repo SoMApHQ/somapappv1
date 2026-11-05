@@ -24,6 +24,7 @@
   <script type="module">
     import { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass, setCustomSubjectsMap } from '../js/modules/subjects.js';
     window.SomapSubjects = { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass, setCustomSubjectsMap };
+    window.dispatchEvent(new Event('somap-subjects-ready'));
   </script>
 
   <style>
@@ -408,6 +409,49 @@
   </main>
 
   <script>
+    // Firebase .get() rejects with "Client is offline" while the connection is still opening or
+    // briefly drops under load; this page swallowed that as "no data" (missing exams, enrollments,
+    // teachers at random). Fall back to once('value'), which waits for the connection.
+    // This page only reads, and several parts (roster, finance engine, finance roster) read the
+    // same big nodes such as students/ (1.6 MB). Whole-node reads are shared for 2 minutes.
+    (function makeGetWaitForConnection() {
+      const db = window.firebase && window.firebase.database;
+      const Reference = db && db.Reference;
+      const memo = new Map();
+      const TTL_MS = 120000;
+      const shared = (ref, load) => {
+        if (!Reference || !(ref instanceof Reference)) return load();
+        const key = ref.toString();
+        const hit = memo.get(key);
+        if (hit && Date.now() - hit.at < TTL_MS) return hit.promise;
+        const promise = load();
+        memo.set(key, { at: Date.now(), promise });
+        promise.catch(() => memo.delete(key));
+        return promise;
+      };
+      [db && db.Query, db && db.Reference].forEach((Ctor) => {
+        if (!Ctor || !Ctor.prototype || Object.prototype.hasOwnProperty.call(Ctor.prototype, '__somapOfflineSafe') || typeof Ctor.prototype.get !== 'function') return;
+        const originalGet = Ctor.prototype.get;
+        const originalOnce = Ctor.prototype.once;
+        Ctor.prototype.get = function () {
+          const query = this;
+          const args = arguments;
+          return shared(query, () => originalGet.apply(query, args).catch((err) => {
+            if (/offline/i.test(String(err && err.message || err))) return originalOnce.call(query, 'value');
+            throw err;
+          }));
+        };
+        Ctor.prototype.once = function (eventType) {
+          // Only plain once('value') promise reads are shared; callback forms behave as before.
+          if (eventType === 'value' && arguments.length === 1) {
+            const query = this;
+            return shared(query, () => originalOnce.call(query, 'value'));
+          }
+          return originalOnce.apply(this, arguments);
+        };
+        Ctor.prototype.__somapOfflineSafe = true;
+      });
+    })();
     const SOMAP_DEFAULT_YEAR = 2025;
     const SCHOOL_WIDE_VALUE = '__whole_school__';
     const CLASS_ORDER = ['Baby Class', 'Middle Class', 'Pre Unit Class', 'Class 1', 'Class 2', 'Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7'];
@@ -681,6 +725,37 @@
       if (value >= 0.45) return positiveMeaning;
       if (value >= 0.2) return 'There is a moderate positive link inside this window.';
       return 'The pattern is visible but not strong enough to call decisive.';
+    }
+
+    // lessonPlans/{year} holds every class (about 18 MB); read only this class's keys
+    // (with stream spellings such as "1B" / "2 B") and only the dates inside the window.
+    async function readLessonPlansForClass(year, className, fromDate, toDate) {
+      const db = getDB();
+      const empty = { exists: () => false, val: () => null };
+      if (!db) return empty;
+      const base = normalizeClassNameForEnrollment(className);
+      const keys = new Set([String(className || '').trim(), base].filter(Boolean));
+      const digits = (String(base).match(/\d+/) || [''])[0];
+      if (digits) {
+        ['', 'A', 'B', 'C', ' A', ' B', ' C'].forEach((suffix) => {
+          keys.add(digits + suffix);
+          keys.add('Class ' + digits + suffix);
+          keys.add('Class' + digits + suffix);
+        });
+      }
+      const out = {};
+      await Promise.all(Array.from(keys).filter((key) => classMatches(className, key) && !/[.#$[\]/]/.test(key)).map(async (key) => {
+        for (const path of buildCandidateDbPaths('lessonPlans/' + year + '/' + key)) {
+          try {
+            let query = db.ref(path).orderByKey();
+            if (fromDate) query = query.startAt(fromDate);
+            if (toDate) query = query.endAt(toDate + '');
+            const snap = await query.get();
+            if (snap && snap.exists && snap.exists()) { out[key] = snap.val() || {}; return; }
+          } catch (_) {}
+        }
+      }));
+      return Object.keys(out).length ? { exists: () => true, val: () => out } : empty;
     }
 
     function classMatches(target, actual) {
@@ -1266,7 +1341,8 @@
     async function fetchAttendanceRange(year, className, fromDate, toDate) {
       const merged = {};
       const frames = monthsBetween(fromDate, toDate).filter((frame) => String(frame.year) === String(year));
-      for (const frame of frames) {
+      // Months are independent: load them together instead of one after another.
+      const monthMaps = await Promise.all(frames.map(async (frame) => {
         let monthMap = {};
         const classFirst = await scopedOrSocratesLegacy('attendance/' + className + '/' + frame.yearMonth, 'attendance/' + className + '/' + frame.yearMonth);
         if (classFirst && classFirst.exists && classFirst.exists()) {
@@ -1284,13 +1360,16 @@
             }
           }
         }
+        return monthMap;
+      }));
+      monthMaps.forEach((monthMap) => {
         Object.entries(monthMap || {}).forEach(([adm, row]) => {
           merged[adm] = merged[adm] || { present: 0, absent: 0, days: 0 };
           merged[adm].present += Number(row.present || 0);
           merged[adm].absent += Number(row.absent || 0);
           merged[adm].days += Number(row.days || 0);
         });
-      }
+      });
       return merged;
     }
 
@@ -1377,9 +1456,20 @@
       };
     }
 
-    async function fetchFees(year, className, students) {
+    async function fetchFees(year, className, students, mode = 'auto') {
       const out = {};
-      try {
+      // Finance engine first (same figures as finance.html). The page's own fee reads are only
+      // a fallback for learners the engine does not know, so their downloads are skipped normally.
+      if (mode === 'auto' && window.SomapFinance && typeof window.SomapFinance.getFinanceRoster === 'function') {
+        try {
+          const fromEngine = await fetchFees(year, className, students, 'engine');
+          const missing = (students || []).filter((s) => { const a = normalizeAdm(s && s.adm); return a && !fromEngine[a]; });
+          if (!missing.length) return fromEngine;
+          const legacy = await fetchFees(year, className, missing, 'legacy');
+          return { ...legacy, ...fromEngine };
+        } catch (_) {}
+      }
+      if (mode !== 'engine') try {
         const [financeSnap, annualSnap, classFeesSnap, studentFeesSnap, ledgersSnap, carrySnap, studentPlansSnap, plansSnap] = await Promise.all([
           scopedOrSocratesLegacy('finance/' + year + '/students', 'finance/' + year + '/students'),
           scopedOrSocratesLegacy('financials/' + year + '/students', 'financials/' + year + '/students'),
@@ -1440,7 +1530,7 @@
       // Same figures as finance.html and the teacher check-in: the shared finance engine
       // (class fee / special plan / student override, all approved payments, year rules).
       // The typed feePerYear on the student record is NOT the fee and must not be trusted.
-      try {
+      if (mode !== 'legacy') try {
         if (window.SomapFinance && typeof window.SomapFinance.getFinanceRoster === 'function') {
           const roster = await window.SomapFinance.getFinanceRoster(year, { includeGraduated: true });
           const byId = {};
@@ -1799,7 +1889,7 @@
 
         // Load lesson plans — stored as lessonPlans/{year}/{className}/{date}/{planId}
         try {
-          const plansSnap = await scopedOrSocratesLegacy('lessonPlans/' + year, 'lessonPlans/' + year);
+          const plansSnap = await readLessonPlansForClass(year, className, fromDate, toDate);
           if (plansSnap && plansSnap.exists && plansSnap.exists()) {
             const allPlansData = plansSnap.val() || {};
             // Nested: { planClassName: { date: { planId: plan } } }
@@ -1979,7 +2069,7 @@
         }
 
         try {
-          const plansSnap = await scopedOrSocratesLegacy('lessonPlans/' + year, 'lessonPlans/' + year);
+          const plansSnap = await readLessonPlansForClass(year, className, fromDate, toDate);
           if (plansSnap && plansSnap.exists && plansSnap.exists()) {
             const allPlansData = plansSnap.val() || {};
             Object.entries(allPlansData).forEach(([planClass, dateMap]) => {
@@ -2512,12 +2602,13 @@
     async function buildClassReportAnalysis(filters, className) {
       const classFilters = { ...filters, className: normalizeDisplayClass(className), stream: filters.stream || '' };
       const students = await fetchStudents(classFilters.className, classFilters.stream, classFilters.year);
-      const [attendanceRaw, examRecords, shiftReports] = await Promise.all([
+      // Everything independent loads in parallel; fees (finance engine) is the slowest part.
+      const [attendanceRaw, examRecords, shiftReports, feesRaw] = await Promise.all([
         fetchAttendanceRange(classFilters.year, classFilters.className, classFilters.fromDate, classFilters.toDate),
         collectScoreRecordsInDateRange(classFilters.year, classFilters.className, classFilters.fromDate, classFilters.toDate),
-        fetchShiftReports(classFilters.year, classFilters.className, classFilters.fromDate, classFilters.toDate)
+        fetchShiftReports(classFilters.year, classFilters.className, classFilters.fromDate, classFilters.toDate),
+        fetchFees(classFilters.year, classFilters.className, students)
       ]);
-      const feesRaw = await fetchFees(classFilters.year, classFilters.className, students);
       const merged = mergeExamRecords(examRecords);
       let subjectList = getSubjectList(classFilters.className, classFilters.year);
       if (!subjectList.length) subjectList = inferSubjectsFromMerged(merged.mergedScores);
@@ -2540,7 +2631,16 @@
       return { ...analyzeClass(classFilters, studentAnalytics, timeline, subjectStats, teacherInsights, movement, shiftReports, examRecords, teacherEffort), className: classFilters.className };
     }
 
+    // Start the finance download (approvalsHistory is several MB) while the page is still setting up.
+    try {
+      const warmYear = new URLSearchParams(location.search).get('year') || (window.somapYearContext && window.somapYearContext.getSelectedYear && window.somapYearContext.getSelectedYear()) || new Date().getFullYear();
+      if (window.SomapFinance && window.SomapFinance.getFinanceRoster) window.SomapFinance.getFinanceRoster(String(warmYear)).catch(() => {});
+    } catch (_) {}
+    let reportRunSeq = 0;
     async function runReport() {
+      // Only the latest run may render: an older, slower run must never overwrite a newer one.
+      const runId = ++reportRunSeq;
+      const isStale = () => runId !== reportRunSeq;
       try {
         const filters = currentFilters();
         validateFilters(filters);
@@ -2554,16 +2654,21 @@
         setStatus(schoolWide ? 'Loading whole-school academic evidence across all classes...' : 'Loading class roster, exams, teachers, attendance, finance, and movement data...', false);
         await Promise.all([loadCustomSubjectsForYear(filters.year), loadClassTeacherAssignmentsForYear(filters.year), loadTeachers(filters.year)]);
         if (schoolWide) {
-          state.analysis = await buildSchoolReportAnalysis(filters);
+          const schoolAnalysis = await buildSchoolReportAnalysis(filters);
+          if (isStale()) return;
+          state.analysis = schoolAnalysis;
           renderSchoolReport(state.analysis);
           setStatus('Whole-school academic report loaded for ' + filters.year + '.', true);
         } else {
           renderClassTeachers(filters);
-          state.analysis = await buildClassReportAnalysis(filters, filters.className);
+          const analysis = await buildClassReportAnalysis(filters, filters.className);
+          if (isStale()) return;
+          state.analysis = analysis;
           renderAll(state.analysis);
           setStatus('Academic report loaded for ' + filters.className + ' (' + filters.year + ').', true);
         }
       } catch (error) {
+        if (isStale()) return;
         state.analysis = null;
         setStatus(error && error.message ? error.message : 'Failed to load academic report.', false);
       }
@@ -4719,7 +4824,7 @@
         dom.fromDate.value = query.get('from') || (year + '-01-01');
         dom.toDate.value = query.get('to') || (year === String(today.getFullYear()) ? todayIso : year + '-12-31');
       } else {
-        dom.fromDate.value = query.get('from') || (year + '-' + month + '-01');
+        dom.fromDate.value = query.get('from') || (year + '-01-01');
         dom.toDate.value = query.get('to') || (year === String(today.getFullYear()) && month === String(today.getMonth() + 1).padStart(2, '0') ? todayIso : year + '-' + month + '-' + String(monthEnd.getDate()).padStart(2, '0'));
         if (requestedClass || state.assignedClass) {
           dom.classSelect.value = requestedClass || state.assignedClass;
@@ -4782,6 +4887,16 @@
         opt.value = String(y);
         opt.textContent = String(y);
         dom.yearSelect.appendChild(opt);
+      }
+      // The class list comes from the subjects module, which can load after sign-in resolves.
+      // Without it the requested class cannot be selected and the report runs for "Unknown".
+      if (!window.SomapSubjects || !window.SomapSubjects.SUBJECTS_BY_CLASS) {
+        setStatus('Loading class list...', false);
+        await new Promise((resolve) => {
+          const done = () => { clearTimeout(timer); window.removeEventListener('somap-subjects-ready', done); resolve(); };
+          const timer = setTimeout(done, 15000);
+          window.addEventListener('somap-subjects-ready', done);
+        });
       }
       state.assignedClass = (role === 'teacher' && !openedAsAcademicTeacher) ? normalizeDisplayClass(parseClassFromEmail(user.email) || userData.class || userData.classLevel || '') : '';
       populateClasses(state.assignedClass);

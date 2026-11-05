@@ -1250,6 +1250,8 @@ function buildFinanceStudents(
             .trim()
             .toLowerCase() === 'socrates-school';
 
+        // Start the large approvals-history read now, in parallel with the dataset reads.
+        const approvalsPromise = loadApprovedFinanceApprovals(y);
         const [
           baseSnap,
           anchorEnrollSnap,
@@ -1336,7 +1338,7 @@ function buildFinanceStudents(
           }
         });
         const mergedPlans = { ...(dataset.plans || {}), ...(financePlansRaw || {}) };
-        const approvalsByStudent = await loadApprovedFinanceApprovals(y);
+        const approvalsByStudent = await approvalsPromise;
         const built = buildFinanceStudents(
           dataset.baseStudents,
           dataset.anchorEnrollments,
