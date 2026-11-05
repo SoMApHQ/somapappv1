@@ -18,6 +18,7 @@
   <script src="../somapappv1multischool/js/context.js"></script>
   <script src="../Todashboardhtml/yearContext.js"></script>
   <script src="../js/modules/class_teachers.js"></script>
+  <script src="../shared/finance_math.js"></script>
   <script src="../js/finance_core.js"></script>
   <script src="../shared/school_calendar.js"></script>
   <script type="module">
@@ -1436,6 +1437,55 @@
           };
         });
       } catch (_) {}
+      // Same figures as finance.html and the teacher check-in: the shared finance engine
+      // (class fee / special plan / student override, all approved payments, year rules).
+      // The typed feePerYear on the student record is NOT the fee and must not be trusted.
+      try {
+        if (window.SomapFinance && typeof window.SomapFinance.getFinanceRoster === 'function') {
+          const roster = await window.SomapFinance.getFinanceRoster(year, { includeGraduated: true });
+          const byId = {};
+          const byAdm = {};
+          (roster || []).forEach((row) => {
+            if (!row || row.finance === undefined) return;
+            byId[row.id] = row;
+            const a = normalizeAdm(row.admissionNumber);
+            if (a && !byAdm[a]) byAdm[a] = row;
+          });
+          (students || []).forEach((student) => {
+            const adm = normalizeAdm(student && student.adm);
+            if (!adm) return;
+            const row = byId[student.id] || byAdm[adm];
+            // Rows without a built finance record carry the raw typed fee; skip them.
+            if (!row || !row.rawStudent || row.rawStudent.hasYearData === false) return;
+            const fin = row.finance || {};
+            const required = Math.max(0, Number(row.fee || 0));
+            const paid = Math.max(0, Number(row.paid || 0));
+            const balance = Math.max(0, Number(row.balance || 0));
+            const debtNow = Math.max(0, Number(fin.periodDebtValue || 0));
+            const schedule = normalizeScheduleItems(fin.scheduleItems, required);
+            let status = 'On Track';
+            let tone = 'warn';
+            let hint = 'Balance exists but no overdue window.';
+            if (balance <= 0.5) { status = 'Cleared'; tone = 'ok'; hint = 'No outstanding balance.'; }
+            else if (debtNow > 0.5) { status = 'In Debt'; tone = 'danger'; hint = fin.overdueWindowLabel && fin.overdueWindowLabel !== '-' ? 'Overdue: ' + fin.overdueWindowLabel : 'Overdue balance detected.'; }
+            out[adm] = {
+              required,
+              paid,
+              balance,
+              planName: firstText(row.paymentPlan, out[adm] && out[adm].planName, 'Not set'),
+              schedule,
+              debtStatus: status,
+              debtTone: tone,
+              debtHint: hint,
+              debtNow,
+              nextDueLabel: fin.periodDebtLabel || '-',
+              source: 'finance-engine'
+            };
+          });
+        }
+      } catch (engineErr) {
+        console.warn('Academic report: finance engine unavailable, using page figures', engineErr);
+      }
       return out;
     }
 
