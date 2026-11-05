@@ -758,6 +758,27 @@
                 </div>
               </div>
             </button>
+            <a
+              id="shifted-kids-card"
+              href="Toattendancehtml/shiftedkids.html"
+              class="block w-full text-left rounded-2xl border border-amber-300/30 bg-slate-950/55 p-4 shadow-xl shadow-slate-950/20 hover:border-amber-300/70 hover:bg-slate-900/80 transition"
+            >
+              <div class="flex items-start gap-4">
+                <div class="w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-400 to-rose-500 text-white grid place-items-center text-lg">
+                  <i class="fas fa-person-walking-arrow-right"></i>
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <p class="text-xs font-black tracking-[0.28em] text-amber-200 uppercase">MY SHIFTED LEARNERS</p>
+                      <p class="text-sm text-slate-300">View • Statement PDF • Return to class</p>
+                    </div>
+                    <span id="shifted-kids-count" class="text-2xl font-black text-amber-200">–</span>
+                  </div>
+                  <div id="shifted-kids-mini" class="mt-3 text-xs leading-5 text-slate-300">Loading shifted learners…</div>
+                </div>
+              </div>
+            </a>
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
               <button class="quick-link" data-link="classattendance">
                 <div
@@ -1734,22 +1755,32 @@
                 return;
               }
               try {
-                const path = await getShiftedPath();
-                const node = `${path}/${
-                  pendingShiftStudent.lookupKey ||
-                  normalizeAdm(pendingShiftStudent.adm) ||
-                  pendingShiftStudent.id
-                }`;
-                await schoolRef(node).set({
-                  name: pendingShiftStudent.name,
-                  adm: pendingShiftStudent.adm || "",
-                  class: userCtx.className,
-                  recordedBy: userCtx.email,
+                // A teacher files a shift REPORT; the admin approves it (attendance.html), which
+                // moves the learner to shiftedStudents with the debt worked out to the shift date.
+                const sid = pendingShiftStudent.id;
+                const existingSnap = await schoolRef(`shiftReports/${sid}`).get();
+                const existing = existingSnap.exists() ? existingSnap.val() || {} : {};
+                const now = Date.now();
+                await schoolRef(`shiftReports/${sid}`).set({
+                  ...existing,
+                  studentId: sid,
+                  studentName: pendingShiftStudent.name,
+                  admissionNo: pendingShiftStudent.adm || "",
+                  className: userCtx.className,
+                  teacherClass: userCtx.className,
+                  parentName: pendingShiftStudent.parent || "",
+                  parentContact: pendingShiftStudent.contact || "",
+                  shiftChoice: "YES",
                   reason,
-                  contact: pendingShiftStudent.contact || "",
-                  time: Date.now(),
+                  infoSource: existing.infoSource || "Class teacher",
+                  dateShifted: existing.dateShifted || getTodayKey(),
+                  probableSchool: existing.probableSchool || "",
+                  recordedBy: userCtx.email,
+                  teacherReportedAt: existing.teacherReportedAt || now,
+                  updatedAt: now,
+                  status: existing.status === "shifted" ? "shifted" : "pending",
                 });
-                showToast("Shift record saved.");
+                showToast("Shift report sent to admin for approval.");
                 hideModal(els.shiftModal);
               } catch (err) {
                 console.error("Shift save failed", err);
@@ -2150,26 +2181,65 @@
           );
         }
 
+        // Shifted learners are stored by student id under shiftedStudents/. A learner belongs to
+        // this teacher when the class they shifted from, moved up one class per year since the
+        // shift, is this teacher's class for the selected year (shifted from Class 2 in 2025 ->
+        // Class 4 teacher in 2027).
+        const SHIFT_CLASS_ORDER = ["Baby Class", "Middle Class", "Pre Unit Class", "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7"];
+        function shiftCanonClass(name) {
+          const low = String(name || "").trim().toLowerCase();
+          if (!low) return "";
+          if (low.includes("baby")) return "baby";
+          if (low.includes("middle")) return "middle";
+          if (low.includes("pre") || low.includes("unit") || low.includes("nursery")) return "preunit";
+          const m = low.match(/(\d+)/);
+          return m ? "class" + parseInt(m[1], 10) : low.replace(/[^a-z0-9]/g, "");
+        }
+        function shiftExpectedClass(className, shiftYear, year) {
+          const idx = SHIFT_CLASS_ORDER.findIndex((c) => shiftCanonClass(c) === shiftCanonClass(className));
+          if (idx < 0) return className || "";
+          const next = idx + (Number(year) - Number(shiftYear) || 0);
+          if (next >= SHIFT_CLASS_ORDER.length) return "GRADUATED";
+          return SHIFT_CLASS_ORDER[Math.max(0, next)];
+        }
+        function renderShiftedCard() {
+          const card = document.getElementById("shifted-kids-card");
+          if (!card) return;
+          const year = getSelectedAcademicYear();
+          const mine = Object.entries(state.shifted || {}).filter(([, rec]) => {
+            if (!rec || String(rec.status || "").toLowerCase() === "returned") return false;
+            const from = rec.classResolvedAtShift || rec.className || rec.studentData?.classLevel || rec.classLevel || "";
+            const shiftYear = rec.shiftYear || String(rec.dateShifted || rec.shiftedAt || "").slice(0, 4) || year;
+            return shiftCanonClass(shiftExpectedClass(from, shiftYear, year)) === shiftCanonClass(userCtx.className);
+          });
+          const debt = mine.reduce((s, [, r]) => s + toNumber(r.totalDebtAtShift ?? r.outstandingBalance), 0);
+          card.href = `Toattendancehtml/shiftedkids.html?class=${encodeURIComponent(userCtx.className || "")}&year=${encodeURIComponent(year)}`;
+          const countEl = document.getElementById("shifted-kids-count");
+          const miniEl = document.getElementById("shifted-kids-mini");
+          if (countEl) countEl.textContent = String(mine.length);
+          if (miniEl) {
+            miniEl.textContent = mine.length
+              ? `${mine.length} learner${mine.length === 1 ? "" : "s"} of ${userCtx.className} (${year}) in the shifted hub · recorded debt ${formatCurrency(debt)}. Open to return a learner or print a statement.`
+              : `No shifted learners belong to ${userCtx.className} for ${year}.`;
+          }
+        }
+
         async function subscribeShifted(className) {
-          const encoded = encodeURIComponent(className);
-          const paths = [
-            `shiftedStudents/${encoded}`,
-            `shifted/${encoded}`,
-            `shifted/${className}`,
-            `studentsShifted/${encoded}`,
-          ];
-          const resolved = await resolveFirstPath(paths);
-          const path = resolved || `shiftedStudents/${encoded}`;
+          const path = "shiftedStudents";
           pathCache.shifted = path;
           schoolRef(path).on(
             "value",
             (snap) => {
               state.shifted = snap.val() || {};
+              renderShiftedCard();
               refreshAlerts();
               scheduleRender();
             },
             (err) => console.error("shifted listener error", err)
           );
+          if (window.somapYearContext?.onYearChanged) {
+            window.somapYearContext.onYearChanged(() => renderShiftedCard());
+          }
         }
 
         async function ensureDailyResponsibilities() {
@@ -2829,7 +2899,11 @@
         function refreshAlerts() {
           const alerts = [];
           const shiftedKeys = new Set(
-            Object.keys(state.shifted || {}).map(normalizeAdm)
+            Object.entries(state.shifted || {})
+              .filter(([, rec]) => String(rec?.status || "").toLowerCase() !== "returned")
+              .flatMap(([key, rec]) => [key, rec?.admissionNo, rec?.studentData?.admissionNumber])
+              .filter(Boolean)
+              .map(normalizeAdm)
           );
 
           state.students.forEach((student) => {

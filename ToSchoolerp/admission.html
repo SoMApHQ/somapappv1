@@ -494,6 +494,11 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-database-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-storage-compat.js"></script>
   <script src="../firebase.js"></script> <!-- Adjusted path to firebase.js in root -->
+  <script src="../shared/finance_math.js"></script>
+  <script src="../transporthtml/modules/transport_pricing.js"></script>
+  <script src="../transporthtml/modules/transport_debt_engine.js"></script>
+  <script src="../shared/shift_settlement.js"></script>
+  <script src="../shared/shift_engine.js"></script>
   <!-- Cloudinary Upload Library -->
   <script src="https://widget.cloudinary.com/v2.0/global/all.js"></script>
 
@@ -1140,6 +1145,26 @@
           alert("Duplicate student detected (same name, DOB, class, parent contact, or admission number). Update aborted.");
           if (registerBtn) registerBtn.disabled = false;
           return;
+        }
+
+        // A shifted learner is still in our database: return them, never register them again.
+        if (!editingKey && window.SomapShift?.findShiftedMatch) {
+          let shiftedMatches = [];
+          try { shiftedMatches = await window.SomapShift.findShiftedMatch(studentData); } catch (lookupErr) { console.warn('Shifted lookup failed', lookupErr); }
+          const describe = (m) => `- ${m.name} (${m.admissionNo || '-'}) - ${m.className || '-'}, shifted ${m.dateShifted || m.shiftYear || ''}${m.dob ? ', DOB ' + m.dob : ''}: ${m.why.join(', ')}`;
+          const strong = shiftedMatches.filter((m) => m.strength === 'strong');
+          const possible = shiftedMatches.filter((m) => m.strength !== 'strong');
+          if (strong.length) {
+            alert('This learner was already registered and is in SHIFTED STUDENTS:\n\n' + strong.map(describe).join('\n') +
+              '\n\nDo not register again. Go to Shifted Students (or the class teacher dashboard) and RETURN the learner, so all their data and payments come back.');
+            if (registerBtn) registerBtn.disabled = false;
+            return;
+          }
+          if (possible.length && !confirm('Possible match in SHIFTED STUDENTS:\n\n' + possible.map(describe).join('\n') +
+            '\n\nIf this is the same child, press Cancel and return them from Shifted Students instead.\nPress OK only if this is a DIFFERENT child.')) {
+            if (registerBtn) registerBtn.disabled = false;
+            return;
+          }
         }
 
         if (!editingKey) {
@@ -2902,6 +2927,23 @@
       const shiftInfo = shiftReports ? shiftReports[key] : null;
       if (!shiftInfo) {
         alert('No shift alert details found for this student.');
+        return;
+      }
+      // Same engine as attendance.html: fair debt to the shift date, transport kept, one class.
+      if (window.SomapShift?.approveShiftFromReport) {
+        const year = String(getWorkingYear());
+        let result;
+        try {
+          result = await window.SomapShift.approveShiftFromReport(year, key, { approvedBy: 'admin', shiftDateISO: shiftInfo.dateShifted });
+        } catch (engineErr) {
+          if (engineErr && engineErr.code === 'CLASS_MISMATCH') {
+            if (!confirm(engineErr.message + '\n\nPress OK only if the learner has really LEFT the school.')) return;
+            result = await window.SomapShift.approveShiftFromReport(year, key, { approvedBy: 'admin', shiftDateISO: shiftInfo.dateShifted, allowClassMismatch: true });
+          } else {
+            throw engineErr;
+          }
+        }
+        alert(result?.alreadyShifted ? 'Student already shifted.' : 'Student shifted to SHIFTED HUB successfully.');
         return;
       }
       const snap = await schoolRef('students/' + key).get();

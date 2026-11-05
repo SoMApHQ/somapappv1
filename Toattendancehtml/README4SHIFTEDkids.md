@@ -44,3 +44,15 @@ This document captures how the shifted-student experience operates across the at
 - The hub only shows learners who have fully transitioned; alerts still waiting decision remain on the attendance dashboard.
 
 Maintain this README near the shifted kids resources to keep the handoff clear for future contributors or audits. Any changes to the data paths or password flow should be documented here.*** End Patch
+
+
+## 2026-11-05 update — fair debt, one class, return, reports
+- **Debt rules (2026+, all schools)** live in `shared/shift_settlement.js`:
+  - Shifted in **January** of year Y (or earlier) ⇒ never studied Y ⇒ no Y school fee, no Y transport. Earlier-year books untouched.
+  - Otherwise ⇒ every instalment of Y (class plan / special plan / per-student override) whose window opened by the shift date; monthly plans count the shift month; after 10 Oct the whole year. Payments clear carry-forward first.
+  - Transport ⇒ months up to the shift month (TransportDebtEngine, same as transportpayments.html) minus approved transport payments.
+  - Previous-year debt only counts when finance carried it forward (`financeCarryForward/Y`).
+- `shared/shift_engine.js` (used by attendance.html and admission.html): uses those rules at approval, refuses a **class mix-up** (reported class ≠ resolved class) unless the admin confirms the learner really left, copies transport records into `transportData` before clearing route lists, never deletes transport payment ledgers. Adds `returnShiftedStudent()` (same record, enrollment written for the return year, class = shift class + years since shift) and `findShiftedMatch()` (admission.html blocks re-registering a shifted learner).
+- `shared/shift_reasons.js`: reason analyser (English + Kiswahili, typo tolerant).
+- `shiftedkids.html`: fair vs recorded debt, reason cards, Return, per-learner statement PDF, full report PDF (cover cards, class bars, reasons, timeline per month/week/year, register), admin "Save fair debts" (writes only `shiftedStudents/*`, keeps `recordedBeforeRule`). `?class=X&year=Y` = teacher view.
+- `staff.html`: "My shifted learners" card → hub teacher view. The teacher shift form now files a `shiftReports/{id}` report for admin approval (it used to write a stray record into `shiftedStudents`).
