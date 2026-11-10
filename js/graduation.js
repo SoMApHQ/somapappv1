@@ -112,6 +112,9 @@
     access: { mode: 'none', teacherClass: '', teacherEmail: '' },
     watchers: [],
     galleryUploading: false,
+    graduandExtras: {},
+    schoolBrand: null,
+    certFilter: { group: 'all', search: '' },
   };
 
   // ---------- DOM HELPERS ----------
@@ -542,6 +545,7 @@
     state.currentYear = normalizeYear(options.year || new Date().getFullYear());
     buildYearSelector();
     attachBaseListeners();
+    wireCertificatePage();
     auth().onAuthStateChanged(handleAuthChange);
   }
 
@@ -626,7 +630,6 @@
         try {
           setBusy('#generateAllCertificates', true);
           await generateAllCertificates();
-          showToast('Certificates generated for all graduands.');
         } catch (err) {
           console.error(err);
           showToast(err?.message || 'Bulk generation failed', 'error');
@@ -1115,6 +1118,11 @@
       listen(gradPath(year, 'certificates'), (certificates) => {
         state.certificates = certificates;
         renderCertificatesTable();
+      });
+      listen(gradPath(year, 'graduandExtras'), (extras) => {
+        state.graduandExtras = extras || {};
+        renderCertificatesTable();
+        renderPullUpResults();
       });
     }
     const needsGallery = document.querySelector('#galleryGrid') || document.querySelector('#galleryForm');
@@ -1613,38 +1621,102 @@
     return `<code class="text-xs break-all">${json.slice(0, 120)}${json.length > 120 ? '...' : ''}</code>`;
   }
 
+  // ---------- CERTIFICATE ROSTER (graduands + pulled-up children) ----------
+  // A child "pulled up" to graduate on merit is stored at graduation/{year}/graduandExtras/{adm}.
+  // This is certificate-only: their graduation fee (expectedFee / isGraduand) is never touched.
+  function isPulledUp(student) {
+    const adm = sanitizeKey(student?.admissionNo || student?.admissionNumber);
+    return Boolean(adm && state.graduandExtras?.[adm]);
+  }
+
+  function isCertificateGraduand(student) {
+    return Boolean(student && (student.isGraduand || isPulledUp(student)));
+  }
+
+  function certificateKind(student) {
+    const designs = window.GradCertDesigns;
+    const cls = toStr(student?.class || student?.classLevel);
+    return designs ? designs.kindFor(cls) : (/baby|middle|pre/i.test(cls) ? 'preunit' : 'class7');
+  }
+
+  function getCertificateRoster() {
+    return getValidStudents().filter(isCertificateGraduand)
+      .sort((a, b) => toStr(a.name).localeCompare(toStr(b.name)));
+  }
+
+  function escHtml(value) {
+    return toStr(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
   function renderCertificatesTable() {
-    const tbody = $('#certificatesBody');
-    if (!tbody) return;
-    const rows = getValidStudents().filter((student) => student.isGraduand);
+    const host = $('#certificatesBody');
+    if (!host) return;
+    document.body.classList.toggle('cert-readonly', Boolean(state.readOnly));
+    const roster = getCertificateRoster();
+    const filter = state.certFilter || { group: 'all', search: '' };
+    const q = toStr(filter.search).trim().toLowerCase();
+    const rows = roster.filter((student) => {
+      const kind = certificateKind(student);
+      if (filter.group === 'preunit' && kind !== 'preunit') return false;
+      if (filter.group === 'class7' && kind !== 'class7') return false;
+      if (filter.group === 'pulled' && !isPulledUp(student)) return false;
+      if (q && !`${student.name} ${student.admissionNo} ${student.class}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+
+    const ready = roster.filter((s) => state.certificates?.[sanitizeKey(s.admissionNo)]?.urlPdf).length;
+    const counts = {
+      all: roster.length,
+      preunit: roster.filter((s) => certificateKind(s) === 'preunit').length,
+      class7: roster.filter((s) => certificateKind(s) === 'class7').length,
+      pulled: roster.filter(isPulledUp).length,
+    };
+    setText('#certStatTotal', counts.all);
+    setText('#certStatReady', ready);
+    setText('#certStatPending', Math.max(0, counts.all - ready));
+    document.querySelectorAll('[data-cert-group]').forEach((chip) => {
+      const g = chip.dataset.certGroup;
+      chip.classList.toggle('active', g === (filter.group || 'all'));
+      const badge = chip.querySelector('[data-count]');
+      if (badge) badge.textContent = counts[g] ?? 0;
+    });
+
     if (!rows.length) {
-      tbody.innerHTML = `
-        <tr>
-          <td colspan="6" class="py-8 text-center text-slate-500">No graduands for ${state.currentYear}.</td>
-        </tr>`;
+      host.innerHTML = `<div class="cert-empty">${roster.length ? 'No graduand matches this filter.' : `No graduands for ${escHtml(state.currentYear)} yet.`}</div>`;
       return;
     }
-    rows.sort((a, b) => toStr(a.name).localeCompare(toStr(b.name)));
-    tbody.innerHTML = rows.map((student) => {
-      const certificate = state.certificates?.[sanitizeKey(student.admissionNo)];
+    const canWrite = !state.readOnly;
+    host.innerHTML = rows.map((student) => {
+      const adm = sanitizeKey(student.admissionNo);
+      const certificate = state.certificates?.[adm];
       const generatedAt = certificate?.generatedAt ? new Date(Number(certificate.generatedAt)) : null;
+      const kind = certificateKind(student);
+      const pulled = isPulledUp(student);
+      const initials = toStr(student.name).trim().split(/\s+/).slice(0, 2).map((p) => p[0] || '').join('').toUpperCase();
       return `
-        <tr>
-          <td>
-            <div class="font-semibold">${toStr(student.name)}</div>
-            <div class="text-xs text-slate-400">${toStr(student.class)}  -  ${toStr(student.admissionNo)}</div>
-          </td>
-          <td>${certificate?.urlPdf ? 'Ready' : 'Pending'}</td>
-          <td>${generatedAt ? generatedAt.toLocaleDateString('en-GB') : '--'}</td>
-          <td>${certificate?.generatedBy ? toStr(certificate.generatedBy).split('@')[0] : '--'}</td>
-          <td class="text-right">
-            <button class="action-btn" data-action="generate-cert" data-adm="${sanitizeKey(student.admissionNo)}">Generate</button>
-          </td>
-          <td class="text-right">
-            ${certificate?.urlPdf ? `<a class="action-btn tertiary" target="_blank" href="${certificate.urlPdf}">PDF</a>` : '<span class="text-xs text-slate-400">No PDF</span>'}
-            ${certificate?.urlPreview ? `<a class="action-btn tertiary" target="_blank" href="${certificate.urlPreview}">Preview</a>` : ''}
-          </td>
-        </tr>`;
+        <article class="cert-card ${kind}">
+          <div class="cert-avatar">
+            ${student.photoUrl ? `<img src="${escHtml(student.photoUrl)}" alt="" loading="lazy" decoding="async" onerror="this.remove()">` : ''}
+            <span>${escHtml(initials)}</span>
+          </div>
+          <div class="cert-info">
+            <div class="cert-name">${escHtml(student.name)}</div>
+            <div class="cert-meta">${escHtml(student.class)} · ${escHtml(student.admissionNo)}</div>
+            <div class="cert-tags">
+              <span class="tag tag-${kind}">${kind === 'preunit' ? 'Little Graduate' : 'Primary Completion'}</span>
+              ${pulled ? '<span class="tag tag-pulled">Pulled up on merit</span>' : ''}
+              ${certificate?.urlPdf
+                ? `<span class="tag tag-ready">Saved ${generatedAt ? generatedAt.toLocaleDateString('en-GB') : ''}</span>`
+                : '<span class="tag tag-pending">Not saved yet</span>'}
+            </div>
+          </div>
+          <div class="cert-actions">
+            <button class="cbtn ghost" data-action="preview-cert" data-adm="${adm}" title="Preview"><i class="fa-regular fa-eye"></i><span>Preview</span></button>
+            ${canWrite ? `<button class="cbtn primary" data-action="generate-cert" data-adm="${adm}" title="Create, save & download"><i class="fa-solid fa-download"></i><span>Download</span></button>` : ''}
+            ${certificate?.urlPdf ? `<a class="cbtn ghost" target="_blank" rel="noopener" href="${escHtml(certificate.urlPdf)}" title="Saved PDF"><i class="fa-regular fa-file-pdf"></i><span>Saved</span></a>` : ''}
+            ${pulled && canWrite ? `<button class="cbtn danger" data-action="remove-pullup" data-adm="${adm}" title="Remove from graduands"><i class="fa-solid fa-xmark"></i></button>` : ''}
+          </div>
+        </article>`;
     }).join('');
   }
 
@@ -3133,95 +3205,148 @@
   }
 
   // ---------- CERTIFICATE GENERATION ----------
-  async function generateCertificate(admissionNoRaw, options = {}) {
-    const { triggerDownload = false } = options;
-    const admissionNo = sanitizeKey(admissionNoRaw);
-    const student = state.students?.[admissionNo];
-    if (!student) throw new Error('Student not found');
-    if (!student.isGraduand) throw new Error('Certificates available only for graduands');
+  // School branding for certificates: each school's own profile; Socrates keeps its long-standing wording.
+  async function loadSchoolBrand() {
+    const schoolId = getCurrentSchoolId();
+    if (state.schoolBrand && state.schoolBrand.id === schoolId) return state.schoolBrand;
+    let profile = {};
+    try {
+      const snap = await db().ref(schoolPath('profile')).once('value');
+      profile = snap.val() || {};
+    } catch (err) {
+      console.warn('School profile read failed', err?.message || err);
+    }
+    const isSocrates = schoolId === 'socrates-school';
+    const contextName = toStr(window.SOMAP?.getSchool?.()?.name);
+    const name = toStr(profile.name || profile.schoolName || contextName || (isSocrates ? 'Socrates School' : schoolId)).trim();
+    const tagline = toStr(profile.motto || profile.tagline || profile.schoolType || (isSocrates ? 'English Medium Pre & Primary School' : '')).trim();
+    const phones = [profile.phone || profile.phoneNumber, profile.phone2 || profile.altPhone].filter(Boolean).join(' / ');
+    const address = toStr(profile.poBox || profile.address || profile.location).trim();
+    const contact = isSocrates && !address && !phones
+      ? 'P.O. Box 14256 · 0686 828 732 / 0689 649 822'
+      : [address, phones].filter(Boolean).join(' · ');
+    state.schoolBrand = { id: schoolId, name, tagline, contact, logoUrl: toStr(profile.logoUrl).trim() };
+    return state.schoolBrand;
+  }
 
-    // Use <template>.content and an offscreen sandbox so html2canvas can render it.
-    const template = document.getElementById('certificateTemplate');
-    if (!template || !template.content) throw new Error('Certificate template missing in DOM');
+  async function lookupStudentPhoto(admissionNo) {
+    const adm = toStr(admissionNo).trim();
+    if (!adm) return '';
+    const pick = (s) => toStr(s?.passportPhotoUrl || s?.passportPhotoURL || s?.photoUrl || s?.photo || s?.passportUrl).trim();
+    // Only this school's students (Socrates also has the legacy root list).
+    const bases = [schoolPath('students')];
+    if (getCurrentSchoolId() === 'socrates-school') bases.push('students');
+    for (const base of bases) {
+      try {
+        const direct = await db().ref(`${base}/${sanitizeKey(adm)}`).once('value');
+        if (pick(direct.val())) return pick(direct.val());
+        const snap = await db().ref(base).orderByChild('admissionNumber').equalTo(adm).limitToFirst(1).once('value');
+        const found = Object.values(snap.val() || {})[0];
+        if (pick(found)) return pick(found);
+      } catch (err) {
+        console.warn('Photo lookup failed', base, err?.message || err);
+      }
+    }
+    return '';
+  }
 
+  async function buildCertificateData(student) {
+    const adm = sanitizeKey(student.admissionNo);
+    const photoUrl = student.photoUrl || await lookupStudentPhoto(student.admissionNo);
+    const school = await loadSchoolBrand();
+    const year = Number(state.currentYear);
+    return {
+      kind: certificateKind(student),
+      name: toStr(student.name),
+      className: normalizeClassName(student.class) || toStr(student.class),
+      admissionNo: toStr(student.admissionNo),
+      year,
+      issuedDate: new Date(),
+      photoUrl,
+      school,
+      pulledUp: isPulledUp(student) && !student.isGraduand,
+      serial: `G${String(year).slice(-2)}-${adm}`.toUpperCase(),
+    };
+  }
+
+  function ensureRenderSandbox() {
     let sandbox = document.getElementById('renderSandbox');
     if (!sandbox) {
       sandbox = document.createElement('div');
       sandbox.id = 'renderSandbox';
-      sandbox.style.position = 'fixed';
-      sandbox.style.left = '-10000px';
-      sandbox.style.top = '-10000px';
-      sandbox.style.pointerEvents = 'none';
+      sandbox.style.cssText = 'position:fixed;left:-10000px;top:-10000px;pointer-events:none;';
       document.body.appendChild(sandbox);
     }
+    return sandbox;
+  }
+
+  let fontWarningShown = false;
+  // Render a student's certificate into `host` (DOM node, not rasterised).
+  async function renderCertificateNode(student, host) {
+    const designs = window.GradCertDesigns;
+    if (!designs) throw new Error('Certificate designs failed to load. Refresh the page.');
+    const data = await buildCertificateData(student);
+    const result = await designs.render(host, data);
+    if (result.missingFonts.length && !fontWarningShown) {
+      fontWarningShown = true;
+      showToast(`Some certificate fonts did not load (${result.missingFonts.join(', ')}). Check internet and retry for best quality.`, 'warn', 7000);
+    }
+    return { ...result, data };
+  }
+
+  function certificateFileName(student) {
+    const base = toStr(student.name).replace(/[^\w\s-]+/g, ' ').trim().replace(/\s+/g, '_') || sanitizeKey(student.admissionNo);
+    return `${base}_Graduation_${state.currentYear}.pdf`;
+  }
+
+  function newCertificatePdf() {
+    if (!window.jspdf?.jsPDF) throw new Error('jsPDF is required for certificate generation');
+    return new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4', compress: true });
+  }
+
+  function addCanvasPage(pdf, canvas, isFirst) {
+    if (!isFirst) pdf.addPage('a4', 'landscape');
+    const w = pdf.internal.pageSize.getWidth();
+    const h = pdf.internal.pageSize.getHeight();
+    pdf.addImage(canvas.toDataURL('image/jpeg', 0.93), 'JPEG', 0, 0, w, h, undefined, 'FAST');
+  }
+
+  function downloadBlob(blob, fileName) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => { URL.revokeObjectURL(url); link.remove(); }, 1500);
+  }
+
+  function previewBlobFromCanvas(canvas) {
+    const small = document.createElement('canvas');
+    small.width = 1123;
+    small.height = Math.round((1123 * canvas.height) / canvas.width);
+    small.getContext('2d').drawImage(canvas, 0, 0, small.width, small.height);
+    return new Promise((resolve) => small.toBlob((blob) => resolve(blob), 'image/png'));
+  }
+
+  async function generateCertificate(admissionNoRaw, options = {}) {
+    const { triggerDownload = false, upload = true } = options;
+    const admissionNo = sanitizeKey(admissionNoRaw);
+    const student = state.students?.[admissionNo];
+    if (!student) throw new Error('Student not found');
+    if (!isCertificateGraduand(student)) throw new Error('Certificates available only for graduands');
+
+    const sandbox = ensureRenderSandbox();
+    const { node } = await renderCertificateNode(student, sandbox);
+    const canvas = await window.GradCertDesigns.toCanvas(node);
     sandbox.innerHTML = '';
-    const fragment = template.content.cloneNode(true);
-    sandbox.appendChild(fragment);
-    const certNode = sandbox.firstElementChild;
 
-    // hydrate
-    certNode.querySelector('[data-cert="studentName"]').textContent = toStr(student.name);
-    certNode.querySelector('[data-cert="classLevel"]').textContent = `${toStr(student.class)}  -  ${state.currentYear}`;
-    certNode.querySelector('[data-cert="issuedDate"]').textContent = new Date().toLocaleDateString('en-GB');
-    certNode.querySelector('[data-cert="admission"]').textContent = toStr(student.admissionNo);
-
-    // photo with crossOrigin - fetch from master students if not in graduation record
-    const photoNode = certNode.querySelector('[data-cert="photo"]');
-    if (photoNode) {
-      photoNode.crossOrigin = 'anonymous';
-      let photoUrl = student.photoUrl || '';
-      // If no photo in graduation record, fetch from master students RTDB
-      if (!photoUrl) {
-        try {
-          const masterSnapshot = await db().ref('students').orderByChild('admissionNumber').equalTo(student.admissionNo).once('value');
-          const masterData = masterSnapshot.val() || {};
-          const masterStudent = Object.values(masterData)[0];
-          if (masterStudent) {
-            photoUrl = masterStudent.passportPhotoUrl || masterStudent.passportPhotoURL || masterStudent.photoUrl || masterStudent.photo || '';
-          }
-        } catch (err) {
-          console.warn('Failed to fetch photo from RTDB:', err?.message || err);
-        }
-      }
-      photoNode.src = photoUrl || '../images/somap-logo.png.jpg';
-      await new Promise((resolve) => {
-        if (photoNode.complete) return resolve();
-        photoNode.onload = () => resolve();
-        photoNode.onerror = () => resolve(); // don't block if image fails
-      });
-    }
-
-    if (!window.html2canvas || !window.jspdf || !window.jspdf.jsPDF) {
-      throw new Error('html2canvas + jsPDF are required for certificate generation');
-    }
-
-    const canvas = await window.html2canvas(certNode, {
-      scale: 2,
-      useCORS: true,
-      backgroundColor: null,
-    });
-
-    const dataUrl = canvas.toDataURL('image/png');
-    const pdf = new window.jspdf.jsPDF('landscape', 'pt', 'a4');
-    const width = pdf.internal.pageSize.getWidth();
-    const height = pdf.internal.pageSize.getHeight();
-    pdf.addImage(dataUrl, 'PNG', 0, 0, width, height);
+    const pdf = newCertificatePdf();
+    addCanvasPage(pdf, canvas, true);
     const pdfBlob = pdf.output('blob');
-
-    if (triggerDownload) {
-      const safeName = `${toStr(student.name).replace(/[^\w\s-]+/g, ' ').trim().replace(/\s+/g, '_') || admissionNo}_${state.currentYear}.pdf`;
-      const downloadUrl = URL.createObjectURL(pdfBlob);
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.download = safeName;
-      link.style.display = 'none';
-      document.body.appendChild(link);
-      link.click();
-      setTimeout(() => {
-        URL.revokeObjectURL(downloadUrl);
-        link.remove();
-      }, 1200);
-    }
+    if (triggerDownload) downloadBlob(pdfBlob, certificateFileName(student));
+    if (!upload || state.readOnly) return { pdfBlob };
 
     const year = state.currentYear;
     const base = gradPath(year, `certificates/${admissionNo}`);
@@ -3231,14 +3356,11 @@
     await pdfRef.put(pdfBlob, { contentType: 'application/pdf' });
     let urlPreview = null;
     try {
-      const previewBlob = await new Promise((resolve, reject) => {
-        canvas.toBlob((blob) => {
-          if (blob) resolve(blob);
-          else reject(new Error('Canvas could not produce a preview blob'));
-        }, 'image/png');
-      });
-      await pngRef.put(previewBlob, { contentType: 'image/png' });
-      urlPreview = await pngRef.getDownloadURL();
+      const previewBlob = await previewBlobFromCanvas(canvas);
+      if (previewBlob) {
+        await pngRef.put(previewBlob, { contentType: 'image/png' });
+        urlPreview = await pngRef.getDownloadURL();
+      }
     } catch (err) {
       console.warn('Certificate preview upload skipped', err?.message || err);
     }
@@ -3248,6 +3370,7 @@
     await db().ref(gradPath(year, `certificates/${admissionNo}`)).set({
       urlPdf,
       urlPreview,
+      design: certificateKind(student),
       generatedAt: firebase.database.ServerValue.TIMESTAMP,
       generatedBy: state.user?.email || 'unknown',
     });
@@ -3260,25 +3383,272 @@
       after: { urlPdf },
       at: firebase.database.ServerValue.TIMESTAMP,
     });
+    return { pdfBlob, urlPdf };
+  }
+
+  // ---------- progress overlay (certificates page) ----------
+  const certJob = { cancelled: false, running: false };
+  function setCertProgress(done, total, label) {
+    const box = document.getElementById('certProgress');
+    if (!box) return;
+    if (total == null) { box.classList.remove('show'); return; }
+    box.classList.add('show');
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    const bar = box.querySelector('[data-progress-bar]');
+    const text = box.querySelector('[data-progress-text]');
+    const sub = box.querySelector('[data-progress-sub]');
+    if (bar) bar.style.width = `${pct}%`;
+    if (text) text.textContent = `${done} / ${total}`;
+    if (sub) sub.textContent = label || '';
+  }
+
+  const yieldToBrowser = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+  // One multi-page PDF for a group (all / preunit / class7 / pulled). Download only, nothing is overwritten.
+  async function downloadCertificateBundle(group = 'all') {
+    if (certJob.running) { showToast('A certificate job is already running.', 'warn'); return; }
+    const roster = getCertificateRoster().filter((s) => {
+      if (group === 'preunit') return certificateKind(s) === 'preunit';
+      if (group === 'class7') return certificateKind(s) === 'class7';
+      if (group === 'pulled') return isPulledUp(s);
+      return true;
+    });
+    if (!roster.length) { showToast('No graduands in this group.', 'warn'); return; }
+    certJob.running = true;
+    certJob.cancelled = false;
+    const sandbox = ensureRenderSandbox();
+    const pdf = newCertificatePdf();
+    let pages = 0;
+    const failed = [];
+    try {
+      for (let i = 0; i < roster.length; i += 1) {
+        if (certJob.cancelled) break;
+        const student = roster[i];
+        setCertProgress(i, roster.length, `Designing ${student.name}…`);
+        try {
+          const { node } = await renderCertificateNode(student, sandbox);
+          const canvas = await window.GradCertDesigns.toCanvas(node);
+          addCanvasPage(pdf, canvas, pages === 0);
+          pages += 1;
+          canvas.width = 0; canvas.height = 0; // release memory early
+        } catch (err) {
+          console.warn('Bundle certificate failed', student.admissionNo, err);
+          failed.push(student.name);
+        }
+        sandbox.innerHTML = '';
+        await yieldToBrowser();
+      }
+      if (pages && !certJob.cancelled) {
+        setCertProgress(roster.length, roster.length, 'Packing the PDF…');
+        await yieldToBrowser();
+        const label = { all: 'All', preunit: 'PreUnit', class7: 'Class7', pulled: 'PulledUp' }[group] || 'All';
+        downloadBlob(pdf.output('blob'), `Graduation_Certificates_${label}_${state.currentYear}.pdf`);
+        showToast(`${pages} certificate${pages > 1 ? 's' : ''} ready.${failed.length ? ` Failed: ${failed.join(', ')}` : ''}`, failed.length ? 'warn' : 'success', 6000);
+      } else if (certJob.cancelled) {
+        showToast('Bundle cancelled.', 'warn');
+      }
+    } finally {
+      certJob.running = false;
+      setCertProgress(null, null);
+    }
   }
 
   async function generateAllCertificates() {
-    const graduands = getValidStudents().filter((s) => s.isGraduand);
+    if (!window.GradCertDesigns || state.readOnly) return; // only on the certificates page, staff only
+    const graduands = getCertificateRoster().filter((s) => !state.certificates?.[sanitizeKey(s.admissionNo)]?.urlPdf);
     if (!graduands.length) {
-      showToast('No graduands available.', 'warn');
+      showToast('All graduand certificates are already saved.', 'success');
       return;
     }
-    for (const s of graduands) {
-      const adm = sanitizeKey(s.admissionNo);
-      const existing = state.certificates?.[adm];
-      if (existing?.urlPdf) continue;
-      try {
-        await generateCertificate(adm);
-        await new Promise((r) => setTimeout(r, 400));
-      } catch (err) {
-        console.warn('Certificate generation failed for', adm, err?.message || err);
+    if (certJob.running) { showToast('A certificate job is already running.', 'warn'); return; }
+    certJob.running = true;
+    certJob.cancelled = false;
+    let saved = 0;
+    try {
+      for (let i = 0; i < graduands.length; i += 1) {
+        if (certJob.cancelled) break;
+        const s = graduands[i];
+        setCertProgress(i, graduands.length, `Saving ${s.name}…`);
+        try {
+          await generateCertificate(sanitizeKey(s.admissionNo));
+          saved += 1;
+        } catch (err) {
+          console.warn('Certificate generation failed for', s.admissionNo, err?.message || err);
+        }
+        await yieldToBrowser();
       }
+      if (document.getElementById('certProgress')) showToast(`${saved} certificate${saved === 1 ? '' : 's'} saved.`, 'success');
+    } finally {
+      certJob.running = false;
+      setCertProgress(null, null);
     }
+  }
+
+  // ---------- preview modal ----------
+  async function previewCertificate(admissionNo) {
+    const modal = document.getElementById('certPreviewModal');
+    const stage = document.getElementById('certPreviewStage');
+    const student = state.students?.[sanitizeKey(admissionNo)];
+    if (!modal || !stage || !student) return;
+    modal.classList.add('show');
+    modal.dataset.adm = sanitizeKey(admissionNo);
+    const title = document.getElementById('certPreviewTitle');
+    if (title) title.textContent = `${student.name} · ${student.class}`;
+    stage.innerHTML = '<div class="preview-loading"><span class="spinner"></span>Designing certificate…</div>';
+    const holder = document.createElement('div');
+    holder.style.cssText = 'position:fixed;left:-10000px;top:0;';
+    document.body.appendChild(holder);
+    try {
+      await renderCertificateNode(student, holder);
+      const node = holder.firstElementChild;
+      if (modal.dataset.adm !== sanitizeKey(admissionNo)) return; // another preview was opened meanwhile
+      const host = document.createElement('div');
+      host.className = 'preview-host';
+      host.appendChild(node);
+      stage.innerHTML = '';
+      stage.appendChild(host);
+      const fit = () => {
+        const scale = Math.min(stage.clientWidth / 1123, (window.innerHeight * 0.74) / 794, 1);
+        node.style.transformOrigin = 'top left';
+        node.style.transform = `scale(${scale})`;
+        host.style.width = `${1123 * scale}px`;
+        host.style.height = `${794 * scale}px`;
+      };
+      fit();
+      modal._fit = fit;
+    } catch (err) {
+      console.error(err);
+      stage.innerHTML = `<div class="preview-loading">${escHtml(err?.message || 'Preview failed')}</div>`;
+    } finally {
+      holder.remove();
+    }
+  }
+
+  // ---------- pull up a child to graduate (certificate only, never fees) ----------
+  async function addPulledUpGraduand(admissionNo, reason) {
+    if (state.readOnly) throw new Error('Only authorised staff can add graduands.');
+    const adm = sanitizeKey(admissionNo);
+    const student = state.students?.[adm];
+    if (!student) throw new Error('Student not found for this year.');
+    if (student.isGraduand) throw new Error(`${student.name} is already a graduand.`);
+    const entry = {
+      admissionNo: toStr(student.admissionNo || adm),
+      name: toStr(student.name),
+      fromClass: toStr(student.class),
+      reason: toStr(reason).trim() || 'Promoted on merit',
+      feeImpact: 'none',
+      addedBy: state.user?.email || 'unknown',
+      addedAt: firebase.database.ServerValue.TIMESTAMP,
+    };
+    await db().ref(gradPath(state.currentYear, `graduandExtras/${adm}`)).set(entry);
+    await db().ref(gradPath(state.currentYear, 'audits')).push({
+      actor: state.user?.email || 'unknown',
+      action: 'graduand:pullup',
+      refType: 'student',
+      refId: adm,
+      after: { name: entry.name, fromClass: entry.fromClass, reason: entry.reason },
+      at: firebase.database.ServerValue.TIMESTAMP,
+    });
+  }
+
+  async function removePulledUpGraduand(admissionNo) {
+    if (state.readOnly) throw new Error('Only authorised staff can change graduands.');
+    const adm = sanitizeKey(admissionNo);
+    const before = state.graduandExtras?.[adm] || null;
+    await db().ref(gradPath(state.currentYear, `graduandExtras/${adm}`)).remove();
+    await db().ref(gradPath(state.currentYear, 'audits')).push({
+      actor: state.user?.email || 'unknown',
+      action: 'graduand:pullup-remove',
+      refType: 'student',
+      refId: adm,
+      before,
+      at: firebase.database.ServerValue.TIMESTAMP,
+    });
+  }
+
+  function renderPullUpResults() {
+    const box = document.getElementById('pullUpResults');
+    const input = document.getElementById('pullUpSearch');
+    if (!box || !input) return;
+    const q = toStr(input.value).trim().toLowerCase();
+    if (q.length < 2) { box.innerHTML = ''; return; }
+    const matches = getValidStudents()
+      .filter((s) => !isCertificateGraduand(s))
+      .filter((s) => `${s.name} ${s.admissionNo} ${s.class}`.toLowerCase().includes(q))
+      .slice(0, 8);
+    box.innerHTML = matches.length
+      ? matches.map((s) => `
+        <button type="button" class="pull-row" data-pull-adm="${sanitizeKey(s.admissionNo)}">
+          <span><b>${escHtml(s.name)}</b><small>${escHtml(s.class)} · ${escHtml(s.admissionNo)}</small></span>
+          <i class="fa-solid fa-graduation-cap"></i>
+        </button>`).join('')
+      : '<div class="pull-empty">No matching non-graduand.</div>';
+  }
+
+  function wireCertificatePage() {
+    if (!document.getElementById('certificatesBody') || wireCertificatePage.done) return;
+    wireCertificatePage.done = true;
+    state.certFilter = { group: 'all', search: '' };
+    document.addEventListener('click', (event) => {
+      const chip = event.target.closest('[data-cert-group]');
+      if (chip) {
+        state.certFilter.group = chip.dataset.certGroup;
+        renderCertificatesTable();
+        return;
+      }
+      const bundle = event.target.closest('[data-cert-bundle]');
+      if (bundle) {
+        downloadCertificateBundle(bundle.dataset.certBundle).catch((err) => showToast(err?.message || 'Bundle failed', 'error'));
+        return;
+      }
+      if (event.target.closest('[data-cert-cancel]')) {
+        certJob.cancelled = true;
+        return;
+      }
+      const pull = event.target.closest('[data-pull-adm]');
+      if (pull) {
+        const student = state.students?.[pull.dataset.pullAdm];
+        const reasonInput = document.getElementById('pullUpReason');
+        if (!student) return;
+        if (!window.confirm(`Graduate ${student.name} (${student.class}) with the ${state.currentYear} graduands?\n\nCertificate only — no graduation fee is added.`)) return;
+        addPulledUpGraduand(pull.dataset.pullAdm, reasonInput?.value)
+          .then(() => {
+            showToast(`${student.name} added to graduands.`);
+            const input = document.getElementById('pullUpSearch');
+            if (input) input.value = '';
+            if (reasonInput) reasonInput.value = '';
+            renderPullUpResults();
+          })
+          .catch((err) => showToast(err?.message || 'Could not add graduand', 'error'));
+        return;
+      }
+      const modal = document.getElementById('certPreviewModal');
+      if (modal && (event.target.closest('[data-preview-close]') || event.target === modal)) {
+        modal.classList.remove('show');
+        modal.dataset.adm = '';
+        return;
+      }
+      const dl = event.target.closest('[data-preview-download]');
+      if (dl && modal?.dataset.adm) {
+        if (state.readOnly) { showToast('Only authorised staff can download certificates.', 'warn'); return; }
+        dl.disabled = true;
+        generateCertificate(modal.dataset.adm, { triggerDownload: true })
+          .then(() => showToast('Certificate downloaded and saved.'))
+          .catch((err) => showToast(err?.message || 'Download failed', 'error'))
+          .finally(() => { dl.disabled = false; });
+      }
+    });
+    document.getElementById('certSearch')?.addEventListener('input', (e) => {
+      state.certFilter.search = e.target.value;
+      renderCertificatesTable();
+    });
+    document.getElementById('pullUpSearch')?.addEventListener('input', renderPullUpResults);
+    window.addEventListener('resize', () => document.getElementById('certPreviewModal')?._fit?.());
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') document.getElementById('certPreviewModal')?.classList.remove('show');
+    });
+    // Warm fonts while the roster loads so the first certificate is quick.
+    window.GradCertDesigns?.ensureFonts?.();
   }
 
   // ---------- ATTENDANCE SUMMARY ----------
@@ -3471,18 +3841,28 @@
         at: firebase.database.ServerValue.TIMESTAMP,
       }));
     } else if (action === 'generate-cert') {
+      const original = button.innerHTML;
       button.disabled = true;
-      button.textContent = 'Generating...';
+      button.innerHTML = '<span class="spinner"></span><span>Designing…</span>';
       generateCertificate(admission, { triggerDownload: true })
-        .then(() => showToast('Certificate ready.'))
+        .then(() => showToast('Certificate downloaded and saved.'))
         .catch((err) => {
           console.error(err);
           showToast(err?.message || 'Generation failed', 'error');
         })
         .finally(() => {
           button.disabled = false;
-          button.textContent = 'Generate';
+          button.innerHTML = original;
         });
+    } else if (action === 'preview-cert') {
+      previewCertificate(admission);
+    } else if (action === 'remove-pullup') {
+      if (state.readOnly) { showToast('Read-only view.', 'warn'); return; }
+      const student = state.students?.[admission];
+      if (!window.confirm(`Remove ${student?.name || admission} from this year's graduands?`)) return;
+      removePulledUpGraduand(admission)
+        .then(() => showToast('Removed from graduands.'))
+        .catch((err) => showToast(err?.message || 'Could not remove', 'error'));
     }
   });
 
