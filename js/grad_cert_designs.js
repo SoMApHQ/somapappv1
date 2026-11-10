@@ -384,7 +384,7 @@
         <ellipse cx="${cx}" cy="${cy}" rx="${w / 2 + 11.5}" ry="${h / 2 + 11.5}" fill="none" stroke="#7a1f2b" stroke-width=".8"/>
       </svg>`;
     } else {
-      const colors = ['#ff8a7a', '#ffc94d', '#7fd1ae', '#79bde8', '#b79be3'];
+      const colors = ['#ff8a7a', '#ffc94d', '#f6c56b', '#f4a58a', '#e9a23b'];
       const R = w / 2 + 9;
       let dots = '';
       const n = 28;
@@ -403,7 +403,7 @@
   }
 
   // ---------- Pre-Unit art ----------
-  const PASTEL = { coral: '#ff8a7a', sun: '#ffc94d', mint: '#7fd1ae', sky: '#79bde8', lilac: '#b79be3', plum: '#5b3a8c', teal: '#1f8a8a', ink: '#3d2a5c' };
+  const PASTEL = { coral: '#ff8a7a', sun: '#ffc94d', mint: '#f6c56b', sky: '#f4a58a', lilac: '#e9a23b', plum: '#8f3a22', teal: '#1f8a8a', ink: '#22304f' };
 
   function preunitFrameArt() {
     if (ART.preFrame) return ART.preFrame;
@@ -416,14 +416,14 @@
       <defs>
         <radialGradient id="bgP" cx=".5" cy=".5" r=".8"><stop offset="0" stop-color="#fffdf8"/><stop offset="1" stop-color="#fff3e2"/></radialGradient>
         <radialGradient id="blobA" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffd6cc" stop-opacity=".9"/><stop offset="1" stop-color="#ffd6cc" stop-opacity="0"/></radialGradient>
-        <radialGradient id="blobB" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#cdeffd" stop-opacity=".9"/><stop offset="1" stop-color="#cdeffd" stop-opacity="0"/></radialGradient>
-        <radialGradient id="blobC" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#d9f5e8" stop-opacity=".9"/><stop offset="1" stop-color="#d9f5e8" stop-opacity="0"/></radialGradient>
-        <radialGradient id="blobD" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ece0ff" stop-opacity=".9"/><stop offset="1" stop-color="#ece0ff" stop-opacity="0"/></radialGradient>
+        <radialGradient id="blobB" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#fff0d6" stop-opacity=".9"/><stop offset="1" stop-color="#fff0d6" stop-opacity="0"/></radialGradient>
+        <radialGradient id="blobC" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffeccc" stop-opacity=".9"/><stop offset="1" stop-color="#ffeccc" stop-opacity="0"/></radialGradient>
+        <radialGradient id="blobD" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffe3d6" stop-opacity=".9"/><stop offset="1" stop-color="#ffe3d6" stop-opacity="0"/></radialGradient>
         <radialGradient id="sunG" cx=".4" cy=".4" r=".7"><stop offset="0" stop-color="#fff2b3"/><stop offset="1" stop-color="#ffb938"/></radialGradient>
         <linearGradient id="balA" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffb3a8"/><stop offset="1" stop-color="#f2685a"/></linearGradient>
-        <linearGradient id="balB" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#bfe3fb"/><stop offset="1" stop-color="#4c9fd8"/></linearGradient>
+        <linearGradient id="balB" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffe3b0"/><stop offset="1" stop-color="#f0a73a"/></linearGradient>
         <linearGradient id="balC" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff0a8"/><stop offset="1" stop-color="#f2b01e"/></linearGradient>
-        <linearGradient id="balD" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ddcbff"/><stop offset="1" stop-color="#9474d6"/></linearGradient>
+        <linearGradient id="balD" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffd0bf"/><stop offset="1" stop-color="#e0674a"/></linearGradient>
       </defs>
       <rect width="${W}" height="${H}" fill="#fffaf2"/>
       ${scallops}
@@ -451,14 +451,14 @@
 
       <!-- balloons right side -->
       <g>
-        <path d="M948 352 C 940 420, 968 470, 952 540" stroke="#a58fb5" stroke-width="1.3" fill="none"/>
-        <path d="M1002 330 C 1010 410, 980 460, 958 540" stroke="#a58fb5" stroke-width="1.3" fill="none"/>
-        <path d="M1046 372 C 1030 440, 990 480, 962 540" stroke="#a58fb5" stroke-width="1.3" fill="none"/>
-        <path d="M912 398 C 930 460, 950 500, 956 540" stroke="#a58fb5" stroke-width="1.3" fill="none"/>
+        <path d="M948 352 C 940 420, 968 470, 952 540" stroke="#c9a27a" stroke-width="1.3" fill="none"/>
+        <path d="M1002 330 C 1010 410, 980 460, 958 540" stroke="#c9a27a" stroke-width="1.3" fill="none"/>
+        <path d="M1046 372 C 1030 440, 990 480, 962 540" stroke="#c9a27a" stroke-width="1.3" fill="none"/>
+        <path d="M912 398 C 930 460, 950 500, 956 540" stroke="#c9a27a" stroke-width="1.3" fill="none"/>
         <ellipse cx="948" cy="306" rx="34" ry="42" fill="url(#balA)"/><path d="M943 347 l5 7 l5 -7z" fill="#f2685a"/>
-        <ellipse cx="1002" cy="282" rx="31" ry="39" fill="url(#balB)"/><path d="M997 320 l5 7 l5 -7z" fill="#4c9fd8"/>
+        <ellipse cx="1002" cy="282" rx="31" ry="39" fill="url(#balB)"/><path d="M997 320 l5 7 l5 -7z" fill="#f0a73a"/>
         <ellipse cx="1044" cy="332" rx="27" ry="34" fill="url(#balC)"/><path d="M1039 365 l5 7 l5 -7z" fill="#f2b01e"/>
-        <ellipse cx="910" cy="362" rx="25" ry="31" fill="url(#balD)"/><path d="M905 392 l5 7 l5 -7z" fill="#9474d6"/>
+        <ellipse cx="910" cy="362" rx="25" ry="31" fill="url(#balD)"/><path d="M905 392 l5 7 l5 -7z" fill="#e0674a"/>
         <ellipse cx="936" cy="290" rx="8" ry="13" fill="#ffffff" opacity=".45" transform="rotate(-20 936 290)"/>
         <ellipse cx="991" cy="266" rx="7" ry="12" fill="#ffffff" opacity=".45" transform="rotate(-20 991 266)"/>
         <ellipse cx="1035" cy="320" rx="6" ry="10" fill="#ffffff" opacity=".45" transform="rotate(-20 1035 320)"/>
@@ -470,7 +470,7 @@
       ${star(250, 92, 9, PASTEL.sun)}${star(860, 70, 7, PASTEL.coral)}${star(1060, 220, 8, PASTEL.lilac)}
       ${star(84, 300, 7, PASTEL.sky)}${star(92, 520, 8, PASTEL.coral)}${star(1066, 470, 7, PASTEL.mint)}
       ${star(300, 718, 8, PASTEL.lilac)}${star(820, 722, 9, PASTEL.sun)}${star(560, 66, 6, PASTEL.mint, 0.9)}
-      ${sparkle(206, 236, 8, '#ffcf57')}${sparkle(1080, 600, 9, '#79bde8')}${sparkle(70, 410, 7, '#b79be3')}${sparkle(880, 470, 7, '#ff8a7a')}
+      ${sparkle(206, 236, 8, '#ffcf57')}${sparkle(1080, 600, 9, '#f4a58a')}${sparkle(70, 410, 7, '#e9a23b')}${sparkle(880, 470, 7, '#ff8a7a')}
 
       <!-- confetti -->
       ${[[140, 690, PASTEL.coral], [200, 700, PASTEL.sky], [960, 690, PASTEL.mint], [1030, 700, PASTEL.lilac], [700, 70, PASTEL.sky], [420, 70, PASTEL.coral]].map(([x, y, c], i) => `<rect x="${x}" y="${y}" width="10" height="5" rx="2" fill="${c}" transform="rotate(${(i * 37) % 90 - 30} ${x} ${y})"/>`).join('')}
@@ -482,9 +482,9 @@
   function gradCapArt() {
     if (ART.cap) return ART.cap;
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="90" viewBox="0 0 120 90">
-      <path d="M30 40 L30 62 Q60 78 90 62 L90 40 Z" fill="#3d2a5c"/>
-      <path d="M60 14 L116 36 L60 58 L4 36 Z" fill="#4b3470" stroke="#2c1d45" stroke-width="1.5"/>
-      <path d="M60 14 L116 36 L60 40 Z" fill="#5d4389" opacity=".6"/>
+      <path d="M30 40 L30 62 Q60 78 90 62 L90 40 Z" fill="#22304f"/>
+      <path d="M60 14 L116 36 L60 58 L4 36 Z" fill="#2c3d63" stroke="#18223a" stroke-width="1.5"/>
+      <path d="M60 14 L116 36 L60 40 Z" fill="#3d5280" opacity=".6"/>
       <circle cx="60" cy="36" r="4" fill="#ffc94d"/>
       <path d="M60 36 Q92 40 98 62" stroke="#ffc94d" stroke-width="2.6" fill="none"/>
       <path d="M93 60 l5 22 l6 -22 z" fill="#ffc94d"/>
@@ -498,7 +498,7 @@
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="170" height="190" viewBox="0 0 170 190">
       <defs><radialGradient id="bdg" cx=".4" cy=".35" r=".7"><stop offset="0" stop-color="#fff3b8"/><stop offset=".6" stop-color="#ffcf57"/><stop offset="1" stop-color="#f2a81e"/></radialGradient></defs>
       <path d="M58 118 L38 186 L56 174 L68 188 L80 126 Z" fill="#ff8a7a"/>
-      <path d="M112 118 L132 186 L114 174 L102 188 L90 126 Z" fill="#79bde8"/>
+      <path d="M112 118 L132 186 L114 174 L102 188 L90 126 Z" fill="#f4a58a"/>
       <path d="${starPolygon(85, 80, 74, 62, 24)}" fill="url(#bdg)" stroke="#e59a12" stroke-width="1.2"/>
       <circle cx="85" cy="80" r="52" fill="#ffffff" opacity=".92"/>
       <circle cx="85" cy="80" r="52" fill="none" stroke="#ff8a7a" stroke-width="2" stroke-dasharray="1 5" stroke-linecap="round"/>
@@ -612,15 +612,15 @@
       <img src="${preunitFrameArt()}" alt="" style="position:absolute;left:0;top:0;width:${W}px;height:${H}px;"/>
 
       <div style="position:absolute;left:0;right:0;top:62px;text-align:center;">
-        ${crestHtml(d.crestData, 62, 'linear-gradient(135deg,#ff8a7a,#ffc94d,#7fd1ae,#79bde8,#b79be3)')}
+        ${crestHtml(d.crestData, 62, 'linear-gradient(135deg,#ff8a7a,#ffc94d,#f6c56b,#f4a58a,#e9a23b)')}
       </div>
       <div style="position:absolute;left:250px;right:250px;top:138px;text-align:center;">
         <div data-fit="school" style="font-family:'Fredoka','Nunito',sans-serif;font-weight:700;font-size:26px;letter-spacing:.06em;color:${PASTEL.teal};white-space:nowrap;">${esc(s.name)}</div>
-        ${s.tagline ? `<div style="font-family:'Nunito',sans-serif;font-weight:700;font-size:12.5px;letter-spacing:.16em;color:#a07a9c;text-transform:uppercase;">${esc(s.tagline)}</div>` : ''}
+        ${s.tagline ? `<div style="font-family:'Nunito',sans-serif;font-weight:700;font-size:12.5px;letter-spacing:.16em;color:#b07a52;text-transform:uppercase;">${esc(s.tagline)}</div>` : ''}
       </div>
 
       <div style="position:absolute;left:0;right:0;top:190px;text-align:center;">
-        <div style="font-family:'Fredoka','Nunito',sans-serif;font-weight:700;font-size:54px;line-height:1.05;color:#f26b5b;letter-spacing:.01em;text-shadow:0 3px 0 #ffffff,0 5px 0 #ffd9cf,0 8px 14px rgba(242,107,91,.25);">Certificate of Graduation</div>
+        <div style="font-family:'Fredoka','Nunito',sans-serif;font-weight:700;font-size:54px;line-height:1.05;color:#f26b5b;letter-spacing:.01em;text-shadow:0 3px 0 #ffffff,0 5px 0 #ffe2cf,0 8px 14px rgba(242,107,91,.25);">Certificate of Graduation</div>
         <div style="margin-top:10px;display:inline-block;padding:6px 22px;border-radius:999px;background:#ffffff;border:2px solid #ffe1d6;font-family:'Nunito',sans-serif;font-weight:800;font-size:13.5px;letter-spacing:.3em;color:${PASTEL.teal};">PRE-PRIMARY · CLASS OF ${esc(d.year)}</div>
       </div>
 
@@ -633,9 +633,9 @@
       </div>
 
       <div style="position:absolute;left:320px;right:250px;top:312px;text-align:center;">
-        <div style="font-family:'Nunito',sans-serif;font-weight:700;font-size:18px;color:#8a6f9e;letter-spacing:.04em;">This certificate is proudly presented to</div>
+        <div style="font-family:'Nunito',sans-serif;font-weight:700;font-size:18px;color:#9a6b4f;letter-spacing:.04em;">This certificate is proudly presented to</div>
         <div data-fit="name" style="margin-top:2px;font-family:'Pacifico','Fredoka',cursive;font-size:50px;line-height:1.45;color:${PASTEL.plum};white-space:nowrap;">${esc(toTitleCase(d.name))}</div>
-        <div style="margin:0 auto;width:420px;height:6px;border-radius:6px;background:linear-gradient(90deg,#ff8a7a,#ffc94d,#7fd1ae,#79bde8,#b79be3);opacity:.85;"></div>
+        <div style="margin:0 auto;width:420px;height:6px;border-radius:6px;background:linear-gradient(90deg,#ff8a7a,#ffc94d,#f6c56b,#f4a58a,#e9a23b);opacity:.85;"></div>
         <div style="margin-top:14px;font-family:'Nunito',sans-serif;font-weight:700;font-size:18.5px;line-height:1.5;color:#4a3b63;">${body}</div>
         <div style="margin-top:8px;font-family:'Fredoka',sans-serif;font-weight:600;font-size:15px;color:#f26b5b;letter-spacing:.04em;">Awarded on the ${esc(date.day)} of ${esc(date.month)} ${esc(date.year)}</div>
       </div>
@@ -650,11 +650,11 @@
         <div style="position:absolute;left:0;right:0;top:44px;text-align:center;font-family:'Fredoka',sans-serif;color:#f26b5b;">
           <div style="font-weight:700;font-size:20px;line-height:1;">WELL</div>
           <div style="font-weight:700;font-size:20px;line-height:1.05;color:${PASTEL.teal};">DONE!</div>
-          <div style="font-weight:600;font-size:11px;letter-spacing:.14em;color:#a07a9c;margin-top:3px;">${esc(d.year)}</div>
+          <div style="font-weight:600;font-size:11px;letter-spacing:.14em;color:#b07a52;margin-top:3px;">${esc(d.year)}</div>
         </div>
       </div>
 
-      <div style="position:absolute;left:0;right:0;top:722px;display:flex;align-items:center;justify-content:center;gap:9px;font-family:'Nunito',sans-serif;font-weight:700;font-size:10px;letter-spacing:.14em;color:#9b86ad;">
+      <div style="position:absolute;left:0;right:0;top:722px;display:flex;align-items:center;justify-content:center;gap:9px;font-family:'Nunito',sans-serif;font-weight:700;font-size:10px;letter-spacing:.14em;color:#a88468;">
         <img src="${esc(d.somapLogoUrl)}" alt="" style="width:16px;height:16px;object-fit:contain;"/>
         <span>ADM ${esc(d.admissionNo)} · CERT NO. ${esc(d.serial)}${s.contact ? ` · ${esc(s.contact)}` : ''}</span>
       </div>`;
@@ -728,5 +728,9 @@
     });
   }
 
-  window.GradCertDesigns = { W, H, kindFor, render, toCanvas, ensureFonts, fontsMissing, formalDate, toTitleCase };
+  window.GradCertDesigns = {
+    W, H, kindFor, render, toCanvas, ensureFonts, fontsMissing, formalDate, toTitleCase,
+    // Drawing kit shared with js/award_cert_designs.js (Top Students awards).
+    _kit: { esc, svgUri, f, GOLD_DEFS, guillocheBand, rosette, starPolygon, roundedRectSamples, laurelArt, preparePortrait, makeCrest, crestHtml, imageToDataUrl, fitText, initials, signatureCell, ART, SOMAP_LOGO, SOMAP_LOGO_FALLBACK },
+  };
 }(window));

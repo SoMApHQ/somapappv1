@@ -39,6 +39,7 @@
   <script src="../shared/finance_math.js"></script>
   <script src="../js/finance_core.js"></script>
   <script src="../js/modules/class_teachers.js"></script>
+  <script src="../shared/academic_annual.js"></script>
 
   <style>
     :root { color-scheme: only dark; }
@@ -1225,32 +1226,16 @@
     // Attempt/grade helpers (inline; do not import other files)
     function isNumber(n){ return Number.isFinite(n) && !Number.isNaN(n); }
     function hasRecordedScorePayload(item){
-      if (!item || typeof item !== 'object') return false;
-      return (
-        Object.prototype.hasOwnProperty.call(item, 'score') ||
-        Object.prototype.hasOwnProperty.call(item, 'max') ||
-        Object.prototype.hasOwnProperty.call(item, 'Score') ||
-        Object.prototype.hasOwnProperty.call(item, 'Max')
-      );
+      // Shared engine (shared/academic_annual.js): one formula for report cards and awards.
+      return window.SomapAcademicAnnual.hasRecordedScorePayload(item);
     }
     function attemptedItem(item){
-      if (item && typeof item.attempted === 'boolean') return item.attempted;
-      const score = Number(item?.score);
-      const max   = Number(item?.max);
-      if (!isNumber(score) || !isNumber(max) || max <= 0 || score <= 0) return false;
-      return hasRecordedScorePayload(item);
+      // Shared engine (shared/academic_annual.js): one formula for report cards and awards.
+      return window.SomapAcademicAnnual.attemptedItem(item);
     }
     function studentPercentFrom(subjects){
-      let s = 0, m = 0, count = 0;
-      for (const it of (subjects || [])){
-        const score = Number(it?.score);
-        const max   = Number(it?.max);
-        if (attemptedItem(it)){
-          s += score; m += max; count++;
-        }
-      }
-      if (m <= 0 || count === 0) return { pct: 0, total: 0, max: 0, attemptedCount: 0 };
-      return { pct: (s * 100) / m, total: s, max: m, attemptedCount: count };
+      // Shared engine (shared/academic_annual.js): one formula for report cards and awards.
+      return window.SomapAcademicAnnual.studentPercentFrom(subjects);
     }
     // Display-normalised average: uses dispScore/dispMax so the result matches
     // what is shown in the subject table rows. For monthly (non-window) exams
@@ -1258,12 +1243,8 @@
     // normalises every subject to its preferredDisplayMax so all subjects carry
     // equal weight regardless of how many months contributed.
     function displayPercentFrom(subjects){
-      const normed = toNormalizedRows(subjects);
-      const attempted = normed.filter(e => e.attempted);
-      const totalScore = attempted.reduce((sum, e) => sum + e.dispScore, 0);
-      const totalMax   = attempted.reduce((sum, e) => sum + e.dispMax,  0);
-      const pct = totalMax > 0 ? (totalScore * 100) / totalMax : 0;
-      return { pct, total: totalScore, max: totalMax, attemptedCount: attempted.length };
+      // Shared engine (shared/academic_annual.js): one formula for report cards and awards.
+      return window.SomapAcademicAnnual.displayPercentFrom(subjects);
     }
     // Unified grading
     function gradeFromPercent(p){
@@ -3984,75 +3965,13 @@
     }
 
     function preferredDisplayMaxFromLogs(logs, fallbackMax = 100){
-      const values = (logs || [])
-        .map((log) => Number(log?.max || 0))
-        .filter((value) => isNumber(value) && value > 0);
-      if (!values.length) return Math.max(1, Number(fallbackMax || 100));
-      const counts = new Map();
-      values.forEach((value) => counts.set(value, (counts.get(value) || 0) + 1));
-      let bestValue = values[0];
-      let bestCount = counts.get(bestValue) || 0;
-      counts.forEach((count, value) => {
-        if (count > bestCount || (count === bestCount && value < bestValue)) {
-          bestValue = value;
-          bestCount = count;
-        }
-      });
-      return bestValue;
+      // Shared engine (shared/academic_annual.js): one formula for report cards and awards.
+      return window.SomapAcademicAnnual.preferredDisplayMaxFromLogs(logs, fallbackMax);
     }
 
-    function appendSyntheticExamWindowRecords(root, months, records, seen) {
-      Object.entries(root || {}).forEach(([topKey, topVal]) => {
-        if (!topVal || typeof topVal !== 'object' || Array.isArray(topVal)) return;
-
-        const topMonth = resolveMonthKey(topKey);
-        if (topMonth) {
-          if (!months.includes(topMonth)) return;
-          const directMonthly = normalizeMonthlyScoreMap(topVal);
-          if (Object.keys(directMonthly).length) {
-            const dedupe = `monthly::${topMonth}`;
-            if (!seen.has(dedupe)) {
-              seen.add(dedupe);
-              records.push({
-                ...examRecordMeta('monthly', topMonth, 'Monthly'),
-                data: directMonthly
-              });
-            }
-            return;
-          }
-          Object.entries(topVal).forEach(([nestedExamKey, nestedBucket]) => {
-            if (!nestedBucket || typeof nestedBucket !== 'object' || Array.isArray(nestedBucket)) return;
-            const normalizedExamKey = slugifyExamKey(nestedExamKey);
-            if (SYNTHETIC_WINDOW_EXAM_KEYS.has(normalizedExamKey)) return;
-            const examScores = normalizeMonthlyScoreMap(nestedBucket);
-            if (!Object.keys(examScores).length) return;
-            const dedupe = `${normalizedExamKey}::${topMonth}`;
-            if (seen.has(dedupe)) return;
-            seen.add(dedupe);
-            records.push({
-              ...examRecordMeta(normalizedExamKey, topMonth, examLabelFromKey(nestedExamKey)),
-              data: examScores
-            });
-          });
-          return;
-        }
-
-        const topExamKey = slugifyExamKey(topKey);
-        if (SYNTHETIC_WINDOW_EXAM_KEYS.has(topExamKey)) return;
-        Object.entries(topVal).forEach(([monthKey, monthBucket]) => {
-          const resolvedMonth = resolveMonthKey(monthKey);
-          if (!resolvedMonth || !months.includes(resolvedMonth)) return;
-          const examScores = normalizeMonthlyScoreMap(monthBucket);
-          if (!Object.keys(examScores).length) return;
-          const dedupe = `${topExamKey}::${resolvedMonth}`;
-          if (seen.has(dedupe)) return;
-          seen.add(dedupe);
-          records.push({
-            ...examRecordMeta(topExamKey, resolvedMonth, examLabelFromKey(topKey)),
-            data: examScores
-          });
-        });
-      });
+    function appendSyntheticExamWindowRecords(root, months, records, seen){
+      // Shared engine (shared/academic_annual.js): one formula for report cards and awards.
+      return window.SomapAcademicAnnual.appendSyntheticExamWindowRecords(root, months, records, seen, { examLabelFromKey });
     }
 
     async function collectExamWindowRecords({ year, className, examKey, month, rawMonth }) {
@@ -4145,54 +4064,9 @@
       return records;
     }
 
-    function mergeWindowRecords(records) {
-      const mergedScores = {};
-      const detailsByAdm = {};
-      (records || []).forEach((record) => {
-        Object.entries(record?.data || {}).forEach(([adm, subjects]) => {
-          mergedScores[adm] = mergedScores[adm] || {};
-          detailsByAdm[adm] = detailsByAdm[adm] || { subjects: {}, exams: [] };
-          Object.entries(subjects || {}).forEach(([subjectKey, raw]) => {
-            const subject = canonicalSubjectName(raw?.subject || subjectKey || '');
-            const score = Number(raw?.score || 0);
-            const max = Number(raw?.max || 0);
-            if (!attemptedItem({ score, max })) return;
-            const current = mergedScores[adm][subject] || { score: 0, max: 0, attempts: 0 };
-            mergedScores[adm][subject] = { score: current.score + score, max: current.max + max };
-            detailsByAdm[adm].subjects[subject] = detailsByAdm[adm].subjects[subject] || [];
-            detailsByAdm[adm].subjects[subject].push({
-              examKey: record.examKey,
-              examLabel: record.examLabel,
-              monthKey: record.monthKey,
-              monthLabel: record.monthLabel,
-              dateLabel: raw?.date ? formatDate(raw.date) : `${record.examLabel} - ${record.monthLabel}`,
-              score,
-              max,
-              pct: max > 0 ? (score * 100) / max : 0
-            });
-          });
-        });
-      });
-      Object.entries(detailsByAdm).forEach(([adm, entry]) => {
-        Object.entries(entry.subjects || {}).forEach(([subject, list]) => {
-          list.sort((a, b) => {
-            const ai = MONTHS.indexOf(a.monthKey);
-            const bi = MONTHS.indexOf(b.monthKey);
-            if (ai !== bi) return ai - bi;
-            return String(a.examLabel || '').localeCompare(String(b.examLabel || ''));
-          });
-          const merged = mergedScores?.[adm]?.[subject];
-          if (!merged) return;
-          merged.attempts = list.length;
-          if (isSyntheticWindowExam(state.examKey)) {
-            const displayMax = preferredDisplayMaxFromLogs(list, merged.max);
-            const pct = merged.max > 0 ? (merged.score * 100) / merged.max : 0;
-            merged.displayMax = displayMax;
-            merged.displayScore = (pct * displayMax) / 100;
-          }
-        });
-      });
-      return { mergedScores, detailsByAdm };
+    function mergeWindowRecords(records){
+      // Shared engine (shared/academic_annual.js): one formula for report cards and awards.
+      return window.SomapAcademicAnnual.mergeWindowRecords(records, { synthetic: isSyntheticWindowExam(state.examKey), canonicalSubjectName, formatDate });
     }
 
     async function fetchScores({ year, className, examKey, month, rawMonth }) {
@@ -4215,78 +4089,9 @@
       return merged.mergedScores;
     }
 
-    function normalizeMonthlyScoreMap(raw) {
-      const out = {};
-      if (!raw || typeof raw !== 'object') return out;
-
-      for (const [studentId, subjects] of Object.entries(raw)) {
-        if (!subjects || typeof subjects !== 'object') continue;
-
-        const normalizedSubjects = {};
-
-        for (const [subjectKey, scoreObj] of Object.entries(subjects)) {
-          const o = scoreObj;
-          const isPrimitiveScore = typeof o === 'number' && Number.isFinite(o);
-          if (!isPrimitiveScore && (!o || typeof o !== 'object')) continue;
-
-          const hasScore = isPrimitiveScore || ((o && typeof o === 'object') && (
-            Object.prototype.hasOwnProperty.call(o, 'score') ||
-            Object.prototype.hasOwnProperty.call(o, 'Score')
-          ));
-
-          const hasMax = !isPrimitiveScore && (o && typeof o === 'object') && (
-            Object.prototype.hasOwnProperty.call(o, 'max') ||
-            Object.prototype.hasOwnProperty.call(o, 'Max')
-          );
-
-          if (!hasScore && !hasMax) continue;
-
-          // Score
-          let safeScore = 0;
-          if (hasScore) {
-            safeScore = isPrimitiveScore ? Number(o) : Number(o.score ?? o.Score ?? 0);
-            if (!Number.isFinite(safeScore)) safeScore = 0;
-            if (safeScore < 0) safeScore = 0;
-            if (safeScore > 10000) safeScore = 10000;
-          }
-
-          // Label
-          let label =
-            (!isPrimitiveScore && typeof o.label === 'string' && o.label.trim()) ||
-            (!isPrimitiveScore && typeof o.name === 'string' && o.name.trim()) ||
-            subjectKey;
-          if (!label) label = subjectKey;
-          if (label.length > 60) label = label.slice(0, 57) + '...';
-
-          // Max
-          let maxVal = 100;
-          if (hasMax && !isPrimitiveScore) {
-            maxVal = Number(o.max ?? o.Max ?? 0);
-            if (!Number.isFinite(maxVal) || maxVal <= 0) maxVal = 100;
-          }
-          if (!Number.isFinite(maxVal) || maxVal <= 0) {
-            maxVal = 100;
-          }
-
-          // If score is clearly insane compared to max, clamp.
-          if (safeScore > maxVal * 1.2) {
-            safeScore = maxVal;
-          }
-
-          normalizedSubjects[subjectKey] = {
-            subject: label,
-            score: safeScore,
-            max: maxVal,
-            date: (!isPrimitiveScore && (o.date || o.dateDone || o.examDate || o.doneOn || o.timestamp)) || ''
-          };
-        }
-
-        if (Object.keys(normalizedSubjects).length) {
-          out[studentId] = normalizedSubjects;
-        }
-      }
-
-      return out;
+    function normalizeMonthlyScoreMap(raw){
+      // Shared engine (shared/academic_annual.js): one formula for report cards and awards.
+      return window.SomapAcademicAnnual.normalizeMonthlyScoreMap(raw);
     }
 
     async function getMonthlyScores(year, className, mon, rawMon, examKey = 'monthly') {
@@ -4486,36 +4291,8 @@
     }
 
     function buildSubjectStats(subjects, scoreEntry){
-      const stats = { totalScore: 0, totalMax: 0, subjects: [], subjectMap: {} };
-      subjects.forEach(subject => {
-        const subEntry = scoreEntry?.[subject] || {};
-        const score = Number(subEntry.score || 0);
-        const rawMax = Number(subEntry.max);
-        const max = Number.isFinite(rawMax) ? rawMax : 100;
-        const percent = max ? (score / max) * 100 : 0;
-        const attempted = attemptedItem({ ...subEntry, score, max });
-        const rawDisplayScore = Number(subEntry.displayScore);
-        const rawDisplayMax = Number(subEntry.displayMax);
-        const displayScore = Number.isFinite(rawDisplayScore) ? rawDisplayScore : score;
-        const displayMax = Number.isFinite(rawDisplayMax) && rawDisplayMax > 0 ? rawDisplayMax : max;
-        const record = {
-          subject,
-          score,
-          max,
-          percent,
-          attempted,
-          displayScore,
-          displayMax,
-          attempts: Number(subEntry.attempts || 0)
-        };
-        stats.subjects.push(record);
-        stats.subjectMap[subject] = record;
-        if (attempted) {
-          stats.totalScore += score;
-          stats.totalMax += max;
-        }
-      });
-      return stats;
+      // Shared engine (shared/academic_annual.js): one formula for report cards and awards.
+      return window.SomapAcademicAnnual.buildSubjectStats(subjects, scoreEntry);
     }
 
     function percentFromPairs(pairs){
@@ -4979,25 +4756,8 @@
     }
 
     function toNormalizedRows(subjects){
-      return (subjects || []).map(entry => {
-        const rawScore = Number(entry?.score) || 0;
-        const rawMaxVal = Number(entry?.max);
-        const safeMax = Number.isFinite(rawMaxVal) && rawMaxVal > 0 ? rawMaxVal : 100;
-        const pct = safeMax > 0 ? (rawScore / safeMax) * 100 : 0;
-        const syntheticDisplayScore = Number(entry?.displayScore);
-        const syntheticDisplayMax = Number(entry?.displayMax);
-        const dispScore = Number.isFinite(syntheticDisplayScore) ? syntheticDisplayScore : rawScore;
-        const dispMax = Number.isFinite(syntheticDisplayMax) && syntheticDisplayMax > 0 ? syntheticDisplayMax : safeMax;
-
-        return {
-          ...entry,
-          rawScore,
-          rawMax: safeMax,
-          pct,
-          dispScore,
-          dispMax
-        };
-      });
+      // Shared engine (shared/academic_annual.js): one formula for report cards and awards.
+      return window.SomapAcademicAnnual.toNormalizedRows(subjects);
     }
 
     function attemptedSubjectsOnly(subjects){
