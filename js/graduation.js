@@ -1247,7 +1247,8 @@
       const status = computeStatus(student);
       statuses[status] = (statuses[status] || 0) + 1;
     });
-    statuses.unpaid += statuses.partial;
+    // Everyone still owing: not paid, partly paid, or past the debt cutoff (status 'debt').
+    statuses.unpaid += statuses.partial + statuses.debt;
 
     setText('#cardTotalStudents', totalStudents ? totalStudents.toLocaleString('en-US') : '--');
     setText('#cardTotalPresent', state.totalPresentToday != null ? state.totalPresentToday.toLocaleString('en-US') : '--');
@@ -2637,24 +2638,53 @@
       event.preventDefault();
       event.stopImmediatePropagation();
     }
-    await generateAuditPDF();
+    await runPdfJob('Full report', generateAuditPDF);
   }
 
   // Fancy Audit PDF with logo, Swahili intro, and signatories
+  // Never hangs: canvas errors reject, and a slow/unreachable logo gives up after 5 s.
   function imgToDataURL(url) {
     return new Promise((resolve, reject) => {
       const img = new Image();
+      const timer = setTimeout(() => reject(new Error('Logo timed out')), 5000);
       img.crossOrigin = 'anonymous';
       img.onload = function () {
-        const c = document.createElement('canvas');
-        c.width = img.width; c.height = img.height;
-        const ctx = c.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-        resolve(c.toDataURL('image/png'));
+        clearTimeout(timer);
+        try {
+          const c = document.createElement('canvas');
+          c.width = img.naturalWidth || img.width; c.height = img.naturalHeight || img.height;
+          c.getContext('2d').drawImage(img, 0, 0);
+          resolve(c.toDataURL('image/png'));
+        } catch (err) { reject(err); }
       };
-      img.onerror = reject;
+      img.onerror = () => { clearTimeout(timer); reject(new Error('Logo failed to load')); };
       img.src = url;
     });
+  }
+
+  // PDF engines load with `defer`; wait for them (max 15 s) instead of silently doing nothing.
+  async function pdfEnginesReady() {
+    const t0 = Date.now();
+    while (!(window.jspdf?.jsPDF && window.jspdf.jsPDF.API?.autoTable && window.GradReportPdf)) {
+      if (Date.now() - t0 > 15000) throw new Error('PDF tools did not load. Check the internet connection and refresh the page.');
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  }
+  async function runPdfJob(label, job) {
+    showToast(`Preparing ${label} PDF…`, 'info', 3000);
+    try {
+      await pdfEnginesReady();
+      await job();
+      showToast(`${label} PDF downloaded.`, 'success');
+    } catch (err) {
+      console.error(err);
+      showToast(`${label} PDF failed: ${err?.message || err}`, 'error', 8000);
+    }
+  }
+  function downloadPdf(type) {
+    const labels = { students: 'Student ledger', unpaid: 'Debts', paid: 'Payments', expenses: 'Expenses', audit: 'Full report' };
+    if (type === 'expenses') return exportExpensesPDF();
+    return runPdfJob(labels[type] || 'Graduation', () => (type === 'audit' ? generateAuditPDF() : downloadLedgerPdf(type)));
   }
 
   // ---------- BEAUTIFUL REPORT PDFS (js/grad_report_pdf.js) ----------
@@ -2767,11 +2797,14 @@
 
   async function exportExpensesPDF(event) {
     if (event) { event.preventDefault(); event.stopImmediatePropagation(); }
-    try {
+    return runPdfJob('Expenses', buildExpensesPdf);
+  }
+  async function buildExpensesPdf() {
+    {
       const K = window.GradReportPdf;
       const y = getSelectedYear();
       const list = (await loadGradExpenses(y)).map((e) => ({ ...e, proofLabel: e.proofUrl ? 'Yes' : 'No' })).sort((a, b) => b.total - a.total);
-      if (!list.length) { showToast('No expenses found for this year.', 'warn'); return; }
+      if (!list.length) throw new Error('No expenses recorded for this year yet.');
       const total = list.reduce((a, b) => a + (Number(b.total) || 0), 0); // fixed: was summing a field that does not exist
       const vendors = new Set(list.map((e) => toStr(e.seller).trim().toLowerCase()).filter((v) => v && v !== '-'));
       const withProof = list.filter((e) => e.proofUrl).length;
@@ -2793,9 +2826,6 @@
         totals: { item: 'TOTAL', total },
       });
       K.finish(ctx, `${pdfFileBase()}_Graduation_Expenses_${y}.pdf`);
-    } catch (err) {
-      console.error(err);
-      showToast(err?.message || 'Expenses PDF failed', 'error');
     }
   }
 
@@ -2997,116 +3027,6 @@
     document.body.removeChild(link);
   }
 
-  function downloadPdf(type) {
-    if (!window.jspdf || !window.jspdf.jsPDF) {
-      showToast('jsPDF library required for PDF export.', 'error');
-      return;
-    }
-    if (type === 'audit') {
-      generateAuditPDF().catch((err) => {
-        console.error(err);
-        showToast(err?.message || 'PDF export failed', 'error');
-      });
-      return;
-    }
-    const doc = new window.jspdf.jsPDF('landscape');
-    doc.setFontSize(16);
-    doc.text(`Graduation ${state.currentYear}  -  ${type.toUpperCase()}`, 14, 16);
-    doc.setFontSize(10);
-    doc.text(`Generated ${new Date().toLocaleString()}`, 14, 26);
-
-    let headers = [];
-    let body = [];
-    if (type === 'students') {
-      headers = ['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Balance', 'Status'];
-      body = getValidStudents().map((student) => {
-        const expected = getExpectedFee(student);
-        const paid = getPaidTotal(student);
-        const balance = getBalance(student);
-        return [
-          toStr(student.admissionNo),
-          toStr(student.name),
-          toStr(student.class),
-          formatCurrency(expected),
-          formatCurrency(paid),
-          formatCurrency(balance),
-          computeStatus(student).toUpperCase(),
-        ];
-      });
-    } else if (type === 'paid') {
-      headers = ['Admission', 'Name', 'Amount', 'Method', 'Recorded By', 'When'];
-      body = getVisiblePayments().map((payment) => [
-        toStr(payment.admissionNo),
-        state.students?.[sanitizeKey(payment.admissionNo)]?.name || '--',
-        formatCurrency(payment.amount),
-        toStr(payment.method),
-        toStr(payment.recordedBy),
-        new Date(Number(payment.createdAt || payment.timestamp || Date.now())).toLocaleString('en-GB'),
-      ]);
-    } else if (type === 'unpaid') {
-      headers = ['Admission', 'Name', 'Class', 'Expected', 'Paid', 'Balance', 'Status'];
-      const allStudents = getValidStudents();
-      // Fix: If a student appears twice (once paid, once unpaid/debt), exclude the debt record.
-      const paidNames = new Set(allStudents.filter(s => !hasOutstanding(s)).map(s => toStr(s.name).trim().toLowerCase()));
-
-      body = allStudents.filter((student) => {
-        if (!hasOutstanding(student)) return false;
-        // If this student has debt, but the same name exists as fully paid/cleared, treat this as a duplicate ghost record
-        const name = toStr(student.name).trim().toLowerCase();
-        if (paidNames.has(name)) return false;
-        return true;
-      }).map((student) => {
-        const expected = getExpectedFee(student);
-        const paid = getPaidTotal(student);
-        const balance = getBalance(student);
-        return [
-          toStr(student.admissionNo),
-          toStr(student.name),
-          toStr(student.class),
-          formatCurrency(expected),
-          formatCurrency(paid),
-          formatCurrency(balance),
-          computeStatus(student).toUpperCase(),
-        ];
-      });
-    } else if (type === 'expenses') {
-      headers = ['Item', 'Seller', 'Qty', 'Price Each', 'Total', 'Recorded', 'Proof'];
-      body = Object.values(state.expenses || {}).map((expense) => [
-        toStr(expense.item),
-        `${toStr(expense.seller)}  -  ${toStr(expense.sellerPhone)}`,
-        Number(expense.quantity || 0),
-        formatCurrency(expense.priceEach),
-        formatCurrency(expense.total || (Number(expense.priceEach || 0) * Number(expense.quantity || 0))),
-        `${toStr(expense.recordedBy)}  -  ${new Date(Number(expense.createdAt || Date.now())).toLocaleString('en-GB')}`,
-        expense.proofUrl ? 'Attached' : 'Missing',
-      ]);
-    } else if (type === 'audit') {
-      headers = ['When', 'Actor', 'Action', 'Ref', 'Details'];
-      body = Object.values(state.audits || {}).map((entry) => [
-        new Date(Number(entry.at || Date.now())).toLocaleString('en-GB'),
-        toStr(entry.actor),
-        toStr(entry.action),
-        `${toStr(entry.refType)}  -  ${toStr(entry.refId)}`,
-        JSON.stringify(entry.after || {}),
-      ]);
-    } else {
-      showToast(`Unknown export type: ${type}`, 'error');
-      return;
-    }
-
-    if (doc.autoTable) {
-      doc.autoTable({
-        head: [headers],
-        body,
-        startY: 32,
-        styles: { fontSize: 8 },
-        headStyles: { fillColor: [15, 23, 42] },
-      });
-    } else {
-      doc.text('jsPDF AutoTable plugin missing.', 14, 42);
-    }
-    doc.save(`graduation_${state.currentYear}_${type}.pdf`);
-  }
 
   // ---------- CERTIFICATE GENERATION ----------
   // School branding for certificates: each school's own profile; Socrates keeps its long-standing wording.
@@ -3556,26 +3476,47 @@
   }
 
   // ---------- ATTENDANCE SUMMARY ----------
+  // Today's class registers: attendance/{class}/{YYYY-MM}/{YYYY-MM-DD}/{studentId} = { status|daily, am, pm }
+  // (Socrates at the root, other schools under schools/{id}/). Present = status/daily P, as attendance.html counts.
   async function refreshTodayAttendance() {
     try {
       const master = await fetchMasterStudents();
       const classes = Array.from(new Set(master.map((student) => toStr(student.classLevel).trim()).filter(Boolean)));
       if (!classes.length) return;
-      const today = new Date();
-      const yymm = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}`;
-      const day = String(today.getDate()).padStart(2, '0');
+      const now = new Date(Date.now() + 3 * 3600 * 1000); // Africa/Nairobi
+      const ymd = now.toISOString().slice(0, 10);
+      const ym = ymd.slice(0, 7);
+      const base = getCurrentSchoolId() === 'socrates-school' ? '' : `schools/${getCurrentSchoolId()}/`;
+      const variants = (cls) => {
+        const out = new Set([cls]);
+        if (/pre\s*-?\s*unit/i.test(cls)) ['Pre Unit Class', 'Pre-Unit', 'Pre Unit', 'PreUnit'].forEach((k) => out.add(k));
+        return Array.from(out);
+      };
       let present = 0;
+      let marked = 0;
       await Promise.all(classes.map(async (cls) => {
-        try {
-          const snap = await db().ref(`attendance/${cls}/${yymm}/${day}`).once('value');
-          const record = snap.val();
-          if (record && typeof record.present === 'number') present += record.present;
-        } catch (err) {
-          console.warn('Attendance read failed', cls, err?.message || err);
-        }
+        const seen = new Set();
+        await Promise.all(variants(cls).map(async (key) => {
+          try {
+            const snap = await db().ref(`${base}attendance/${key}/${ym}/${ymd}`).once('value');
+            Object.entries(snap.val() || {}).forEach(([stuId, rec]) => {
+              if (!rec || typeof rec !== 'object' || seen.has(stuId)) return;
+              const code = toStr(rec.status || rec.daily || '').toUpperCase();
+              if (!code && !rec.am && !rec.pm) return;
+              seen.add(stuId);
+              marked += 1;
+              if (code === 'P' || code === 'PRESENT' || code === 'PR') present += 1;
+            });
+          } catch (err) {
+            console.warn('Attendance read failed', key, err?.message || err);
+          }
+        }));
       }));
-      state.totalPresentToday = present || null;
+      state.totalPresentToday = marked ? present : null;
+      state.totalMarkedToday = marked;
       renderDashboardSummary();
+      const sub = document.querySelector('#cardTotalPresent')?.parentElement?.querySelector('.stat-sub');
+      if (sub) sub.textContent = marked ? `of ${marked.toLocaleString('en-US')} marked in today's registers` : 'No class register taken yet today';
     } catch (err) {
       console.warn('Attendance summary unavailable', err?.message || err);
     }
