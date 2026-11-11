@@ -81,19 +81,21 @@
   // ---------- DOM: Card + Modal ----------
   function buildCard(opts) {
     const { onOpenModal } = opts;
-    const container = el('div', 'glass-card p-4 md:p-5 mt-3');
-    const header = el('div', 'flex items-center justify-between mb-2', [
-      el('div', 'text-sm uppercase tracking-wide opacity-80', 'Donations'),
-      el('button', 'px-3 py-1.5 text-sm rounded-xl glass-border hover:opacity-90 transition', 'Record Donation'),
-    ]);
-    const amountEl = el('div', 'text-2xl md:text-3xl font-semibold skeleton', formatTsh(0));
-    const updatedEl = el('div', 'text-xs opacity-70 mt-1 skeleton', 'Updated: —');
-
-    header.lastChild.addEventListener('click', () => onOpenModal());
-
-    container.appendChild(header);
-    container.appendChild(amountEl);
-    container.appendChild(updatedEl);
+    const container = el('div', 'don-band mt-3');
+    const ico = el('div', 'don-ico', []);
+    ico.innerHTML = '<i class="fas fa-hand-holding-heart"></i>';
+    const body = el('div', 'min-w-0', []);
+    body.appendChild(el('div', 'don-label', 'Graduation donations'));
+    const amountEl = el('div', 'don-amount skeleton', formatTsh(0));
+    const updatedEl = el('div', 'don-meta skeleton', 'Updated: —');
+    body.appendChild(amountEl);
+    body.appendChild(updatedEl);
+    const btn = el('button', 'don-btn', 'Record donation');
+    btn.type = 'button';
+    btn.addEventListener('click', () => onOpenModal());
+    container.appendChild(ico);
+    container.appendChild(body);
+    container.appendChild(btn);
     return { container, amountEl, updatedEl };
   }
 
@@ -287,10 +289,13 @@
       donationsRef(db, schoolId, year).on('value', (snap) => {
         let total = 0;
         let latestTs = null;
+        let donors = 0;
+        let latestName = '';
         snap.forEach((child) => {
           const v = child.val();
           const amt = Number((v && v.amount) || 0);
           total += amt > 0 ? amt : 0;
+          if (amt > 0) donors += 1;
           let ts = null;
           if (v && v.donationDateTs) {
             ts = Number(v.donationDateTs);
@@ -301,7 +306,7 @@
             ts = typeof v.createdAt === 'number' ? v.createdAt : Date.now();
           }
           if (ts) {
-            if (!latestTs || ts > latestTs) latestTs = ts;
+            if (!latestTs || ts > latestTs) { latestTs = ts; latestName = String((v && (v.donorName || v.name)) || ''); }
           }
         });
 
@@ -309,7 +314,9 @@
         ui.amountEl.classList.remove('skeleton');
         ui.updatedEl.classList.remove('skeleton');
         ui.amountEl.textContent = formatTsh(total);
-        ui.updatedEl.textContent = 'Updated: ' + (latestTs ? nowPretty(new Date(latestTs)) : nowPretty());
+        ui.updatedEl.textContent = donors
+          ? `${donors} donation${donors === 1 ? '' : 's'} · latest${latestName ? ` from ${latestName}` : ''} on ${nowPretty(new Date(latestTs || Date.now()))}`
+          : 'No donations yet. Every gift is counted in Collected.';
 
         refreshCollectedDisplay();
       }, (err) => {

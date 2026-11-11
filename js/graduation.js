@@ -495,7 +495,7 @@
     // certificates, galleries, audit or delete tools), across all classes.
     const teacherMode = state.access?.mode === 'teacher' || secretaryMode;
     document.body.classList.toggle('teacher-grad-view', teacherMode);
-    document.querySelectorAll('[data-link="expenses"], [data-link="certificates"], [data-link="galleries"]').forEach((node) => {
+    document.querySelectorAll('[data-link="expenses"], [data-link="certificates"], [data-link="galleries"], [data-link="staffawards"]').forEach((node) => {
       node.style.display = teacherMode ? 'none' : '';
     });
     const paymentForm = $('#paymentForm');
@@ -679,6 +679,10 @@
 
   function startYearLoad(message) {
     showToast(message, 'info');
+    loadSchoolBrand().then((brand) => {
+      const eyebrow = document.querySelector('.hero .hero-eyebrow');
+      if (eyebrow && brand?.name) eyebrow.textContent = brand.name;
+    }).catch(() => {});
 
     ensureYearReady(state.currentYear)
       .then(() => {
@@ -1323,59 +1327,53 @@
       return;
     }
 
+    const money = (n) => toNumberSafe(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    const initialsOf = (name) => toStr(name).trim().split(/\s+/).slice(0, 2).map((p) => p[0] || '').join('').toUpperCase() || '•';
     tbody.innerHTML = filtered.map((student) => {
       const status = computeStatus(student);
       const expected = getExpectedFee(student);
       const paid = getPaidTotal(student);
       const id = sanitizeKey(student.admissionNo);
-       const isGhost = isGhostStudent(student);
+      const isGhost = isGhostStudent(student);
       const canEdit = !state.readOnly;
       const canPay = canRecordPayment();
-      const debtTag = status === 'debt' ? '<span class="debt-pill">DEBT</span>' : '';
-      const badge = status === 'paid'
-        ? 'status-badge paid'
-        : status === 'partial'
-          ? 'status-badge partial'
-          : status === 'debt'
-            ? 'status-badge debt'
-            : 'status-badge unpaid';
       const balance = getBalance(student);
+      const pct = expected > 0 ? Math.min(100, Math.round((paid / expected) * 100)) : 100;
+      const adm = toStr(student.admissionNo);
+      const phone = toStr(student.parentPhone);
       return `
         <tr class="${status === 'debt' ? 'row-debt' : ''} ${isGhost ? 'bg-amber-50' : ''}">
           <td>
-            <div class="flex items-center gap-3">
-              ${student.photoUrl
-                ? `<img src="${student.photoUrl}" class="w-10 h-10 rounded-full object-cover border border-white/10" alt="${toStr(student.name)}">`
-                : '<div class="w-10 h-10 rounded-full bg-sky-200 flex items-center justify-center text-sky-700 font-semibold">GR</div>'}
-              <div>
-                <div class="font-semibold text-slate-900">${toStr(student.name)}${isGhost ? ' <span class="text-xs text-amber-600 font-semibold">(ghost)</span>' : ''}</div>
-                <div class="text-xs text-slate-500">${toStr(student.admissionNo)}</div>
+            <div class="name-cell">
+              <div class="avatar-i">${student.photoUrl ? `<img src="${student.photoUrl}" alt="" loading="lazy" onerror="this.remove()">` : ''}<span>${initialsOf(student.name)}</span></div>
+              <div class="min-w-0">
+                <div class="name-main" title="${toStr(student.name)}">${toStr(student.name)}${isGhost ? ' <span class="text-xs text-amber-600 font-semibold">(ghost)</span>' : ''}</div>
+                <span class="adm-chip" title="Admission ${adm}">${adm}</span>
               </div>
             </div>
           </td>
-          <td>${toStr(student.class) || '--'}</td>
-          <td class="text-right">
-            <span data-col="expected" data-id="${id}" data-val="${expected}">${formatCurrency(expected)}</span>
-            ${canEdit ? `<button class="btn-xs ml-2" data-edit="expected" data-id="${id}">Edit</button>` : ''}
+          <td><span class="class-chip" title="${toStr(student.class)}">${toStr(student.class).replace(/^Pre[\s-]*Unit Class$/i, 'Pre-Unit') || '--'}</span></td>
+          <td class="text-right money-cell">
+            <span data-col="expected" data-id="${id}" data-val="${expected}">${money(expected)}</span>
+            ${canEdit ? `<button class="ico-btn" data-edit="expected" data-id="${id}" title="Edit expected"><i class="fas fa-pen"></i></button>` : ''}
           </td>
-          <td class="text-right ${paid >= expected ? 'text-emerald-600 font-semibold' : ''}">
-            <span data-col="paid" data-id="${id}" data-val="${paid}">${formatCurrency(paid)}</span>
-            ${canEdit ? `<button class="btn-xs ml-2" data-edit="paid" data-id="${id}">Edit</button>` : ''}
+          <td class="text-right money-cell">
+            <span class="${paid >= expected ? 'text-emerald-600 font-semibold' : ''}" data-col="paid" data-id="${id}" data-val="${paid}">${money(paid)}</span>
+            ${canEdit ? `<button class="ico-btn" data-edit="paid" data-id="${id}" title="Edit paid (creates adjustment)"><i class="fas fa-pen"></i></button>` : ''}
+            <div class="pay-bar" title="${pct}% paid"><i style="width:${pct}%"></i></div>
           </td>
-          <td class="text-right">
-            <span data-col="balance" data-id="${id}" data-val="${balance}">${formatCurrency(balance)}</span>
-          </td>
-          <td><span class="${badge}" data-col="status" data-id="${id}">${status.toUpperCase()}</span> ${debtTag}</td>
+          <td class="text-right money-cell"><span class="${balance > 0 ? 'balance-due' : 'balance-zero'}" data-col="balance" data-id="${id}" data-val="${balance}">${money(balance)}</span></td>
+          <td><span class="status-badge ${status}" data-col="status" data-id="${id}">${status.toUpperCase()}</span>${status === 'debt' ? '<span class="debt-pill">DEBT</span>' : ''}</td>
           <td>
-            <div class="text-sm text-slate-700">${toStr(student.parentPhone) || '--'}</div>
-            <div class="text-xs text-slate-400">${toStr(student.parentName) || ''}</div>
+            ${phone ? `<a class="phone-link" href="tel:${phone}"><i class="fas fa-phone"></i>${phone}</a>` : '<span class="text-xs text-slate-400">--</span>'}
+            <div class="text-xs text-slate-400 truncate" style="max-width:150px;">${toStr(student.parentName) || ''}</div>
           </td>
-          <td class="text-right">
+          <td class="text-right whitespace-nowrap">
             ${canEdit ? `
-              <button class="action-btn" data-action="pay" data-adm="${id}">Record Payment</button>
-              <button class="action-btn secondary" data-action="note" data-adm="${id}">Note</button>
-              <button class="action-btn danger" data-action="delete" data-adm="${id}">Delete</button>
-            ` : canPay ? `<button class="action-btn" data-action="pay" data-adm="${id}">Record Payment</button>` : '<span class="text-xs text-slate-400">Class view</span>'}
+              <button class="ico-btn pay" data-action="pay" data-adm="${id}" title="Record payment"><i class="fas fa-money-bill-wave"></i></button>
+              <button class="ico-btn" data-action="note" data-adm="${id}" title="Note"><i class="fas fa-note-sticky"></i></button>
+              <button class="ico-btn danger" data-action="delete" data-adm="${id}" title="Delete"><i class="fas fa-trash"></i></button>
+            ` : canPay ? `<button class="ico-btn pay" data-action="pay" data-adm="${id}" title="Record payment"><i class="fas fa-money-bill-wave"></i></button>` : '<span class="text-xs text-slate-400">Class view</span>'}
           </td>
         </tr>`;
     }).join('');
@@ -1434,11 +1432,11 @@
       const adjustTag = isAdjustment ? '<span class="adjust-pill" title="Manually edited by staff, not a parent payment"><i class="fas fa-pen"></i> Manual</span>' : '';
       return `
         <tr>
-          <td>${student?.name || payment.admissionNo || '--'}</td>
-          <td>${formatCurrency(payment.amount)}</td>
-          <td>${timestamp.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
-          <td>${toStr(payment.method) || 'Cash'}${adjustTag}${payment.note ? `<div class="text-xs text-slate-500">${toStr(payment.note)}</div>` : ''}</td>
-          <td class="text-right text-xs text-slate-400 uppercase">${toStr(payment.recordedBy || '').split('@')[0]}</td>
+          <td><div class="name-main" style="max-width:150px" title="${toStr(student?.name)}">${student?.name || '--'}</div>${student?.class ? `<span class="adm-chip">${toStr(student.class)}</span>` : ''}</td>
+          <td class="money-cell font-semibold text-right" style="color:var(--emerald-ink)">${toNumberSafe(payment.amount).toLocaleString('en-US')}</td>
+          <td class="whitespace-nowrap text-xs"><div class="font-semibold" style="color:var(--ink)">${timestamp.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</div><div style="color:var(--ink-faint)">${timestamp.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</div></td>
+          <td class="text-xs">${toStr(payment.method) || 'Cash'}${adjustTag}${payment.note ? `<div class="text-slate-500 truncate" style="max-width:120px" title="${toStr(payment.note)}">${toStr(payment.note)}</div>` : ''}</td>
+          <td class="text-right text-xs" style="color:var(--ink-faint)">${toStr(payment.recordedBy || '').split('@')[0]}</td>
         </tr>`;
     }).join('');
   }
@@ -2519,46 +2517,6 @@
     downloadCSV(`graduation_expenses_${y}`, rows);
   }
 
-  async function exportExpensesPDF(event) {
-    if (event) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    }
-    const y = getSelectedYear();
-    const list = await loadGradExpenses(y);
-    if (!list.length) { alert('No expenses found.'); return; }
-    const { jsPDF } = window.jspdf || {};
-    if (!jsPDF) { alert('PDF library missing'); return; }
-
-    const doc = new jsPDF({ orientation: 'p', unit: 'pt', format: 'a4' });
-    if (!doc.autoTable) { alert('PDF table plugin missing'); return; }
-    doc.setFontSize(16);
-    doc.text(`Socrates School — Graduation Expenses (${y})`, 40, 50);
-    const total = list.reduce((a, b) => a + (Number(b.amount || 0)), 0);
-    doc.setFontSize(11);
-    doc.text(`Total spent: TSh ${total.toLocaleString()}`, 40, 70);
-
-    const rows = list.map((e) => [
-      e.item,
-      e.seller,
-      e.contact,
-      e.quantity,
-      `TSh ${Number(e.priceEach || 0).toLocaleString()}`,
-      `TSh ${Number(e.total || 0).toLocaleString()}`,
-      e.recordedAt,
-      e.recordedBy,
-      e.proof,
-    ]);
-    doc.autoTable({
-      startY: 90,
-      head: [['Item', 'Seller', 'Contact', 'Qty', 'Price Each', 'Total', 'Recorded', 'By', 'Proof']],
-      body: rows,
-      styles: { fontSize: 9, cellPadding: 4 },
-      headStyles: { fillColor: [33, 37, 41], textColor: 255 },
-    });
-
-    doc.save(`graduation_expenses_${y}.pdf`);
-  }
 
   async function exportAuditCSV(event) {
     if (event) {
@@ -2646,19 +2604,154 @@
     });
   }
 
-  async function generateAuditPDF(options = {}) {
-    const { jsPDF } = window.jspdf || {};
-    if (!jsPDF) { alert('PDF library missing'); return; }
-    const doc = new jsPDF('p', 'pt', 'a4');
-    if (!doc.autoTable) { alert('PDF table plugin missing'); return; }
+  // ---------- BEAUTIFUL REPORT PDFS (js/grad_report_pdf.js) ----------
+  async function reportContext(title, orientation = 'p') {
+    const K = window.GradReportPdf;
+    if (!K) throw new Error('Report designer failed to load. Refresh the page.');
+    const brand = await loadSchoolBrand();
+    let logoData = '';
+    for (const src of [brand.logoUrl, '../images/somap-logo.png', '../images/somap-logo.png.jpg'].filter(Boolean)) {
+      try { logoData = await imgToDataURL(src); break; } catch (_) { /* try next */ }
+    }
+    return K.start({ orientation, school: brand, title, year: getSelectedYear(), logoData });
+  }
+  const pdfFileBase = () => (state.schoolBrand?.name || 'School').replace(/[^\w\s-]+/g, ' ').trim().replace(/\s+/g, '_');
+  const byClassThenName = (a, b) => {
+    const ia = CLASS_ORDER.indexOf(normalizeClassName(a.className || a.class));
+    const ib = CLASS_ORDER.indexOf(normalizeClassName(b.className || b.class));
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || toStr(a.name).localeCompare(toStr(b.name));
+  };
+  function ledgerRows(list) {
+    return list.map((s) => {
+      const expected = getExpectedFee(s); const paid = getPaidTotal(s); const balance = getBalance(s);
+      return { name: toStr(s.name), className: toStr(s.class), expected, paid, balance, status: computeStatus(s).toUpperCase(), adm: toStr(s.admissionNo), parent: toStr(s.parentPhone) };
+    }).sort(byClassThenName);
+  }
+  function sumOf(rows, key) { return rows.reduce((a, r) => a + (Number(r[key]) || 0), 0); }
 
+
+  async function downloadLedgerPdf(type) {
+    const K = window.GradReportPdf;
     const year = getSelectedYear();
-    
-    // Load Data
+    if (type === 'students') {
+      const rows = ledgerRows(getValidStudents());
+      const ctx = await reportContext('Graduation Student Ledger');
+      K.header(ctx, { title: 'Graduation Student Ledger', subtitle: `Every learner's graduation contribution for ${year}, sorted by class.`, compact: false });
+      const expected = sumOf(rows, 'expected'); const paid = sumOf(rows, 'paid'); const balance = sumOf(rows, 'balance');
+      K.cards(ctx, [
+        { label: 'Learners', value: rows.length, sub: `${rows.filter((r) => r.status === 'PAID').length} fully paid`, tone: 'navy' },
+        { label: 'Expected', value: K.tsh(expected), tone: 'amber' },
+        { label: 'Collected', value: K.tsh(paid), sub: 'Graduation payments only', tone: 'emerald' },
+        { label: 'Balance', value: K.tsh(balance), tone: 'rose' },
+        { label: 'Partial', value: rows.filter((r) => r.status === 'PARTIAL').length, sub: 'Paid something, still owe', tone: 'amber' },
+        { label: 'Not paid / debt', value: rows.filter((r) => r.status === 'UNPAID' || r.status === 'DEBT').length, tone: 'rose' },
+      ]);
+      K.progress(ctx, { label: 'Collection progress', value: paid, max: expected, note: `${K.tsh(paid)} of ${K.tsh(expected)} collected` });
+      K.section(ctx, 'Learners', { tone: 'navy', sub: 'Name first · admission number at the end' });
+      K.table(ctx, {
+        tone: 'navy', rows,
+        columns: [{ header: 'Learner', key: 'name', kind: 'name' }, { header: 'Class', key: 'className', width: 62 }, { header: 'Expected', key: 'expected', kind: 'money', width: 62 }, { header: 'Paid', key: 'paid', kind: 'money', width: 62 }, { header: 'Balance', key: 'balance', kind: 'money', width: 62 }, { header: 'Status', key: 'status', kind: 'status', width: 54 }, { header: 'Adm', key: 'adm', kind: 'muted', width: 56 }],
+        totals: { name: 'TOTAL', expected, paid, balance },
+      });
+      K.finish(ctx, `${pdfFileBase()}_Graduation_Ledger_${year}.pdf`);
+      return;
+    }
+    if (type === 'unpaid') {
+      const all = getValidStudents();
+      const paidNames = new Set(all.filter((s) => !hasOutstanding(s)).map((s) => toStr(s.name).trim().toLowerCase()));
+      const rows = ledgerRows(all.filter((s) => hasOutstanding(s) && !paidNames.has(toStr(s.name).trim().toLowerCase()))).sort((a, b) => b.balance - a.balance);
+      const ctx = await reportContext('Graduation Debts Follow-up');
+      K.header(ctx, { title: 'Graduation Debts Follow-up', subtitle: 'Learners with a balance, largest balance first, with the parent contact for each call.' });
+      const owed = sumOf(rows, 'balance');
+      const classes = new Set(rows.map((r) => r.className));
+      K.cards(ctx, [
+        { label: 'Learners owing', value: rows.length, tone: 'rose' },
+        { label: 'Total owed', value: K.tsh(owed), tone: 'rose' },
+        { label: 'Classes affected', value: classes.size, tone: 'amber' },
+        { label: 'Largest balance', value: rows[0] ? K.tsh(rows[0].balance) : '—', sub: rows[0]?.name || '', tone: 'amber' },
+        { label: 'Average balance', value: rows.length ? K.tsh(owed / rows.length) : '—', tone: 'slate' },
+        { label: 'Already paid by them', value: K.tsh(sumOf(rows, 'paid')), tone: 'emerald' },
+      ]);
+      K.section(ctx, 'Learners with a balance', { tone: 'rose' });
+      K.table(ctx, {
+        tone: 'rose', rows,
+        columns: [{ header: 'Learner', key: 'name', kind: 'name' }, { header: 'Class', key: 'className', width: 58 }, { header: 'Parent', key: 'parent', width: 78 }, { header: 'Paid', key: 'paid', kind: 'money', width: 58 }, { header: 'Balance', key: 'balance', kind: 'money', width: 62 }, { header: 'Status', key: 'status', kind: 'status', width: 52 }, { header: 'Adm', key: 'adm', kind: 'muted', width: 52 }],
+        totals: { name: 'TOTAL OWED', paid: sumOf(rows, 'paid'), balance: owed },
+      });
+      K.finish(ctx, `${pdfFileBase()}_Graduation_Debts_${year}.pdf`);
+      return;
+    }
+    if (type === 'paid') {
+      const rows = getVisiblePayments().map((p) => {
+        const s = state.students?.[sanitizeKey(p.admissionNo)] || {};
+        const when = Number(p.createdAt || p.timestamp || 0);
+        return { name: toStr(s.name) || '--', className: toStr(s.class), amount: toNumberSafe(p.amount), method: toStr(p.method) || '—', by: toStr(p.recordedBy).split('@')[0] || '—', when: when ? new Date(when).toLocaleDateString('en-GB') : '—', ts: when, adm: toStr(p.admissionNo) };
+      }).sort((a, b) => b.ts - a.ts);
+      const ctx = await reportContext('Graduation Payments Received');
+      K.header(ctx, { title: 'Graduation Payments Received', subtitle: 'Every recorded graduation payment, newest first.' });
+      const total = sumOf(rows, 'amount');
+      const methods = rows.reduce((m, r) => { m[r.method] = (m[r.method] || 0) + 1; return m; }, {});
+      const topMethod = Object.entries(methods).sort((a, b) => b[1] - a[1])[0];
+      K.cards(ctx, [
+        { label: 'Payments', value: rows.length, tone: 'navy' },
+        { label: 'Total received', value: K.tsh(total), tone: 'emerald' },
+        { label: 'Average payment', value: rows.length ? K.tsh(total / rows.length) : '—', tone: 'blue' },
+        { label: 'Most used method', value: topMethod ? topMethod[0] : '—', sub: topMethod ? `${topMethod[1]} payments` : '', tone: 'violet', big: false },
+        { label: 'Latest payment', value: rows[0]?.when || '—', sub: rows[0]?.name || '', tone: 'slate', big: false },
+        { label: 'Families who paid', value: new Set(rows.map((r) => r.adm)).size, tone: 'emerald' },
+      ]);
+      K.section(ctx, 'Payments', { tone: 'emerald' });
+      K.table(ctx, {
+        tone: 'emerald', rows,
+        columns: [{ header: 'Learner', key: 'name', kind: 'name' }, { header: 'Class', key: 'className', width: 58 }, { header: 'Amount', key: 'amount', kind: 'money', width: 64 }, { header: 'Method', key: 'method', width: 60 }, { header: 'Recorded by', key: 'by', width: 74 }, { header: 'Date', key: 'when', width: 58 }, { header: 'Adm', key: 'adm', kind: 'muted', width: 50 }],
+        totals: { name: 'TOTAL', amount: total },
+      });
+      K.finish(ctx, `${pdfFileBase()}_Graduation_Payments_${year}.pdf`);
+      return;
+    }
+    showToast(`Unknown export type: ${type}`, 'error');
+  }
+
+  async function exportExpensesPDF(event) {
+    if (event) { event.preventDefault(); event.stopImmediatePropagation(); }
+    try {
+      const K = window.GradReportPdf;
+      const y = getSelectedYear();
+      const list = (await loadGradExpenses(y)).map((e) => ({ ...e, proofLabel: e.proofUrl ? 'Yes' : 'No' })).sort((a, b) => b.total - a.total);
+      if (!list.length) { showToast('No expenses found for this year.', 'warn'); return; }
+      const total = list.reduce((a, b) => a + (Number(b.total) || 0), 0); // fixed: was summing a field that does not exist
+      const vendors = new Set(list.map((e) => toStr(e.seller).trim().toLowerCase()).filter((v) => v && v !== '-'));
+      const withProof = list.filter((e) => e.proofUrl).length;
+      const ctx = await reportContext('Graduation Expenses');
+      K.header(ctx, { title: 'Graduation Expenses', subtitle: 'Every graduation purchase, biggest first, with seller and proof status.' });
+      K.cards(ctx, [
+        { label: 'Total spent', value: K.tsh(total), tone: 'rose' },
+        { label: 'Items bought', value: list.length, tone: 'navy' },
+        { label: 'Sellers', value: vendors.size, tone: 'violet' },
+        { label: 'Biggest expense', value: K.tsh(list[0].total), sub: list[0].item, tone: 'amber' },
+        { label: 'Average item', value: K.tsh(total / list.length), tone: 'slate' },
+        { label: 'Proof attached', value: `${withProof} of ${list.length}`, sub: withProof < list.length ? 'Attach missing receipts' : 'All receipts attached', tone: withProof < list.length ? 'amber' : 'emerald' },
+      ]);
+      K.progress(ctx, { label: 'Receipts attached', value: withProof, max: list.length, tone: withProof < list.length ? 'amber' : 'emerald' });
+      K.section(ctx, 'Expenses', { tone: 'blue' });
+      K.table(ctx, {
+        tone: 'blue', rows: list,
+        columns: [{ header: 'Item', key: 'item', kind: 'name' }, { header: 'Seller', key: 'seller', width: 82 }, { header: 'Contact', key: 'contact', kind: 'muted', width: 62 }, { header: 'Qty', key: 'quantity', kind: 'num', width: 30 }, { header: 'Each', key: 'priceEach', kind: 'money', width: 56 }, { header: 'Total', key: 'total', kind: 'money', width: 62 }, { header: 'Proof', key: 'proofLabel', kind: 'status', width: 38 }],
+        totals: { item: 'TOTAL', total },
+      });
+      K.finish(ctx, `${pdfFileBase()}_Graduation_Expenses_${y}.pdf`);
+    } catch (err) {
+      console.error(err);
+      showToast(err?.message || 'Expenses PDF failed', 'error');
+    }
+  }
+
+  // Full graduation report: cover with summary, then donations, paid, partial, unpaid, expenses, signatures.
+  async function generateAuditPDF() {
+    const K = window.GradReportPdf;
+    const year = getSelectedYear();
     const [students, expenses, donations] = await Promise.all([loadGradLedger(year), loadGradExpenses(year), loadGradDonations(year)]);
     const { paid, partial, unpaid } = partitionStudents(students);
-    
-    // Calculate Metrics
     const totalExpected = students.reduce((a, b) => a + toNumberSafe(b.expected), 0);
     const totalPaid = students.reduce((a, b) => a + toNumberSafe(b.paid), 0);
     const donationTotal = donations.total || 0;
@@ -2667,308 +2760,66 @@
     const totalExp = expenses.reduce((a, b) => a + (Number(b.total) || Number(b.amount) || 0), 0);
     const netBalance = totalCollected - totalExp;
 
-    const left = 40;
-    let top = 40;
-    
-    // --- LOGO (Attempt to load) ---
-    try {
-      const logoUrl = options.schoolLogoUrl || '../images/somap-logo.png.jpg';
-      const logoData = await imgToDataURL(logoUrl);
-      doc.addImage(logoData, 'PNG', left, top, 50, 50);
-    } catch (err) {
-      console.warn('Logo load skipped', err);
-    }
-
-    // --- TITLE & ADDRESS ---
-    doc.setFont('times', 'bold');
-    doc.setFontSize(16);
-    doc.text(`Socrates School — Ripoti ya Ukaguzi wa Graduation (${year})`, left + 60, top + 20);
-    
-    doc.setFont('times', 'normal');
-    doc.setFontSize(10);
-    doc.text('P.O. Box 14256 Arusha, Arusha • +255 686828732 • info@socrates.ac.tz', left + 60, top + 36);
-    
-    top += 60;
-
-    // --- INTRO (SWAHILI) ---
-    doc.setFontSize(10);
-    const intro = [
+    const ctx = await reportContext('Graduation Full Report');
+    K.header(ctx, { title: 'Graduation Full Report', subtitle: 'Ripoti ya Ukaguzi wa Graduation: makusanyo, michango, matumizi na madeni.' });
+    K.cards(ctx, [
+      { label: 'Expected', value: K.tsh(totalExpected), sub: `${students.length} learners`, tone: 'amber' },
+      { label: 'Payments collected', value: K.tsh(totalPaid), tone: 'emerald' },
+      { label: 'Donations', value: K.tsh(donationTotal), sub: `${donations.list.length} donations`, tone: 'violet' },
+      { label: 'Collected incl. donations', value: K.tsh(totalCollected), tone: 'emerald' },
+      { label: 'Still uncollected', value: K.tsh(totalUncol), tone: 'rose' },
+      { label: 'Expenses', value: K.tsh(totalExp), sub: `${expenses.length} items`, tone: 'blue' },
+      { label: 'Net balance', value: K.tsh(netBalance), sub: 'Collected minus expenses', tone: netBalance >= 0 ? 'emerald' : 'rose' },
+      { label: 'Paid · partial', value: `${paid.length} · ${partial.length}`, sub: 'Learners', tone: 'navy', big: false },
+      { label: 'Not yet paid', value: unpaid.length, sub: 'Learners', tone: 'rose' },
+    ]);
+    K.progress(ctx, { label: 'Collection progress (incl. donations)', value: totalCollected, max: totalExpected, tone: 'emerald', note: `${K.tsh(totalCollected)} of ${K.tsh(totalExpected)}` });
+    K.progress(ctx, { label: 'Money spent so far', value: totalExp, max: totalCollected, tone: totalExp > totalCollected ? 'rose' : 'blue', note: `${K.tsh(totalExp)} of ${K.tsh(totalCollected)} collected` });
+    K.paragraph(ctx, [
       'Kwenye ripoti hii, tunawasilisha tathmini ya makusanyo yote ya ada za graduation kwa mwaka huu.',
       'Ripoti imeainisha kiasi kilichotarajiwa, kiasi kilicholipwa, na salio linalodaiwa na kila mwanafunzi.',
       'Takwimu zimechambuliwa kulingana na madarasa na hadhi ya malipo ili kuwezesha ufuatiliaji sahihi.',
       'Tunalenga kusaidia kamati ya shule kupanga maamuzi thabiti kuhusu ukamilishaji wa malipo.',
-      'Ripoti pia inaangazia tofauti za makadirio na malipo halisi kwa uwazi mkubwa.',
       'Vyanzo vya data ni sajili za wanafunzi, leja ya graduation, na stakabadhi zinazohusiana.',
       'Uongozi wa shule umetumia tahadhari kuhakikisha usahihi na uadilifu wa taarifa zote zilizowasilishwa.',
-      'Mwisho, ripoti ina mapendekezo ya hatua za uboreshaji wa ukusanyaji wa ada zijazo.'
-    ].join(' ');
-    const splitIntro = doc.splitTextToSize(intro, 515);
-    doc.text(splitIntro, left, top);
-    top += splitIntro.length * 12 + 10;
+    ].join(' '), { size: 9, font: 'times', style: 'italic' });
 
-    // --- SUMMARY TABLE ---
-    doc.setFont('times', 'bold');
-    doc.setFontSize(12);
-    doc.text('Summary', left, top);
-    top += 12;
+    const studentCols = [{ header: 'Learner', key: 'name', kind: 'name' }, { header: 'Class', key: 'className', width: 60 }, { header: 'Parent', key: 'parent', width: 80 }, { header: 'Expected', key: 'expected', kind: 'money', width: 60 }, { header: 'Paid', key: 'paid', kind: 'money', width: 60 }, { header: 'Adm', key: 'admission', kind: 'muted', width: 52 }];
+    const sortRows = (rows) => rows.slice().sort(byClassThenName);
 
-    const summaryData = [
-      ['Students total', students.length],
-      ['Paid count', paid.length],
-      ['Partial count', partial.length],
-      ['Unpaid count', unpaid.length],
-      ['Total expected', `TSh ${totalExpected.toLocaleString()}`],
-      ['Total collected (payments)', `TSh ${totalPaid.toLocaleString()}`],
-      ['Donations total', `TSh ${donationTotal.toLocaleString()}`],
-      ['Total collected (incl donations)', `TSh ${totalCollected.toLocaleString()}`],
-      ['Uncollected after donations', `TSh ${totalUncol.toLocaleString()}`],
-      ['Expenses total', `TSh ${totalExp.toLocaleString()}`],
-      ['Net (collected incl donations - expenses)', `TSh ${netBalance.toLocaleString()}`],
-    ];
+    K.section(ctx, 'Donations · Michango', { tone: 'violet', newPage: true, sub: `${donations.list.length} donations · ${K.tsh(donationTotal)}` });
+    if (donations.list.length) {
+      K.table(ctx, { tone: 'violet', rows: donations.list.map((d) => ({ ...d, amount: toNumberSafe(d.amount) })), columns: [{ header: 'Donor', key: 'donorName', kind: 'name' }, { header: 'Contact', key: 'donorContact', width: 86 }, { header: 'Amount', key: 'amount', kind: 'money', width: 70 }, { header: 'Date', key: 'recordedAt', width: 96 }, { header: 'Proof note', key: 'proofNote', kind: 'muted' }], totals: { donorName: 'TOTAL', amount: donationTotal } });
+    } else K.paragraph(ctx, 'No donations recorded for this year.');
 
-    doc.autoTable({
-      startY: top,
-      head: [['Metric', 'Value']],
-      body: summaryData,
-      theme: 'grid',
-      styles: { fontSize: 10, cellPadding: 5 },
-      headStyles: { fillColor: [40, 40, 40], textColor: 255, fontStyle: 'bold' },
-      columnStyles: { 0: { fontStyle: 'bold', cellWidth: 200 }, 1: { halign: 'right' } },
-    });
-    
-    top = doc.lastAutoTable.finalY + 24;
+    K.section(ctx, 'Paid in full · Waliolipa kikamilifu', { tone: 'emerald', sub: `${paid.length} learners · ${K.tsh(paid.reduce((a, s) => a + s.paid, 0))}` });
+    if (paid.length) K.table(ctx, { tone: 'emerald', rows: sortRows(paid), columns: studentCols, totals: { name: 'TOTAL', expected: paid.reduce((a, s) => a + s.expected, 0), paid: paid.reduce((a, s) => a + s.paid, 0) } });
+    else K.paragraph(ctx, 'No learner has paid in full yet.');
 
-    // --- DONATIONS ---
-    if (donations.list && donations.list.length) {
-      if (top > 750) { doc.addPage(); top = 40; }
-      doc.setFontSize(12);
-      doc.setFont('times', 'bold');
-      doc.text('Donations', left, top);
-      top += 10;
-      doc.autoTable({
-        startY: top,
-        head: [['Donor', 'Contact', 'Amount', 'Date', 'Proof note', 'Recorded by']],
-        body: donations.list.map((d) => [
-          d.donorName,
-          d.donorContact,
-          `TSh ${toNumberSafe(d.amount).toLocaleString()}`,
-          d.recordedAt || '',
-          d.proofNote || '',
-          d.recordedBy || '',
-        ]),
-        styles: { fontSize: 9, cellPadding: 3 },
-        headStyles: { fillColor: [59, 130, 246], textColor: 255 },
-        foot: [[
-          'TOTAL', '', `TSh ${toNumberSafe(donations.total).toLocaleString()}`, '', '', ''
-        ]],
-        footStyles: { fillColor: [219, 234, 254], textColor: [30, 64, 175], fontStyle: 'bold' },
-      });
-      top = doc.lastAutoTable.finalY + 24;
-    } else {
-      doc.setFont('times', 'italic');
-      doc.setFontSize(10);
-      doc.text('No donations recorded for this year.', left, top);
-      top += 20;
-    }
+    K.section(ctx, 'Partial payments · Waliolipa sehemu', { tone: 'amber', sub: `${partial.length} learners · balance ${K.tsh(partial.reduce((a, s) => a + Math.max(0, s.expected - s.paid), 0))}` });
+    if (partial.length) K.table(ctx, { tone: 'amber', rows: sortRows(partial), columns: studentCols, totals: { name: 'TOTAL', expected: partial.reduce((a, s) => a + s.expected, 0), paid: partial.reduce((a, s) => a + s.paid, 0) } });
+    else K.paragraph(ctx, 'No partial payments.');
 
-    // Helper for section totals
-    const calcSectionTotals = (list) => {
-      const exp = list.reduce((a, b) => a + toNumberSafe(b.expected), 0);
-      const pd = list.reduce((a, b) => a + toNumberSafe(b.paid), 0);
-      return { count: list.length, exp, pd };
-    };
+    K.section(ctx, 'Not yet paid · Hawajalipa', { tone: 'rose', sub: `${unpaid.length} learners · ${K.tsh(unpaid.reduce((a, s) => a + s.expected, 0))} expected` });
+    if (unpaid.length) K.table(ctx, { tone: 'rose', rows: sortRows(unpaid), columns: studentCols, totals: { name: 'TOTAL', expected: unpaid.reduce((a, s) => a + s.expected, 0), paid: 0 } });
+    else K.paragraph(ctx, 'Every learner has paid something. Well done.');
 
-    // --- PAID STUDENTS ---
-    if (paid.length > 0) {
-      if (top > 750) { doc.addPage(); top = 40; }
-      doc.setFontSize(12);
-      doc.setFont('times', 'bold');
-      doc.text('Paid Students', left, top);
-      top += 10;
-      
-      const pT = calcSectionTotals(paid);
-      doc.autoTable({
-        startY: top,
-        head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
-        body: paid.map(s => [
-            s.admission, 
-            s.name, 
-            s.className, 
-            `TSh ${toNumberSafe(s.expected).toLocaleString()}`, 
-            `TSh ${toNumberSafe(s.paid).toLocaleString()}`, 
-            s.parent
-        ]),
-        foot: [[
-          'TOTAL', 
-          `${pT.count} Students`, 
-          '-', 
-          `TSh ${pT.exp.toLocaleString()}`, 
-          `TSh ${pT.pd.toLocaleString()}`, 
-          '-'
-        ]],
-        styles: { fontSize: 9, cellPadding: 3 },
-        headStyles: { fillColor: [22, 163, 74], textColor: 255 }, // Green
-        footStyles: { fillColor: [220, 252, 231], textColor: [20, 83, 45], fontStyle: 'bold' },
-      });
-      top = doc.lastAutoTable.finalY + 24;
-    }
+    K.section(ctx, 'Expenses · Matumizi', { tone: 'blue', sub: `${expenses.length} items · ${K.tsh(totalExp)}` });
+    if (expenses.length) K.table(ctx, { tone: 'blue', rows: expenses.slice().sort((a, b) => b.total - a.total).map((e) => ({ ...e, proofLabel: e.proofUrl ? 'Yes' : 'No' })), columns: [{ header: 'Item', key: 'item', kind: 'name' }, { header: 'Seller', key: 'seller', width: 82 }, { header: 'Qty', key: 'quantity', kind: 'num', width: 30 }, { header: 'Each', key: 'priceEach', kind: 'money', width: 58 }, { header: 'Total', key: 'total', kind: 'money', width: 64 }, { header: 'Proof', key: 'proofLabel', kind: 'status', width: 40 }, { header: 'By', key: 'recordedBy', kind: 'muted', width: 70 }], totals: { item: 'TOTAL', total: totalExp } });
+    else K.paragraph(ctx, 'No expenses recorded.');
 
-    // --- PARTIAL PAYMENTS ---
-    if (partial.length > 0) {
-      if (top > 750) { doc.addPage(); top = 40; }
-      doc.setFontSize(12);
-      doc.setFont('times', 'bold');
-      doc.text('Partial Payments', left, top);
-      top += 10;
-      
-      const pT = calcSectionTotals(partial);
-      doc.autoTable({
-        startY: top,
-        head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
-        body: partial.map(s => [
-            s.admission, 
-            s.name, 
-            s.className, 
-            `TSh ${toNumberSafe(s.expected).toLocaleString()}`, 
-            `TSh ${toNumberSafe(s.paid).toLocaleString()}`, 
-            s.parent
-        ]),
-        foot: [[
-          'TOTAL', 
-          `${pT.count} Students`, 
-          '-', 
-          `TSh ${pT.exp.toLocaleString()}`, 
-          `TSh ${pT.pd.toLocaleString()}`, 
-          '-'
-        ]],
-        styles: { fontSize: 9, cellPadding: 3 },
-        headStyles: { fillColor: [245, 158, 11], textColor: 0 }, // Orange
-        footStyles: { fillColor: [254, 243, 199], textColor: [146, 64, 14], fontStyle: 'bold' },
-      });
-      top = doc.lastAutoTable.finalY + 24;
-    }
-
-    // --- UNPAID ---
-    if (unpaid.length > 0) {
-      if (top > 750) { doc.addPage(); top = 40; }
-      doc.setFontSize(12);
-      doc.setFont('times', 'bold');
-      doc.text('Unpaid', left, top);
-      top += 10;
-      
-      const pT = calcSectionTotals(unpaid);
-      doc.autoTable({
-        startY: top,
-        head: [['Adm', 'Name', 'Class', 'Expected', 'Paid', 'Parent']],
-        body: unpaid.map(s => [
-            s.admission, 
-            s.name, 
-            s.className, 
-            `TSh ${toNumberSafe(s.expected).toLocaleString()}`, 
-            `TSh ${toNumberSafe(s.paid).toLocaleString()}`, 
-            s.parent
-        ]),
-        foot: [[
-          'TOTAL', 
-          `${pT.count} Students`, 
-          '-', 
-          `TSh ${pT.exp.toLocaleString()}`, 
-          `TSh ${pT.pd.toLocaleString()}`, 
-          '-'
-        ]],
-        styles: { fontSize: 9, cellPadding: 3 },
-        headStyles: { fillColor: [239, 68, 68], textColor: 255 }, // Red
-        footStyles: { fillColor: [254, 226, 226], textColor: [153, 27, 27], fontStyle: 'bold' },
-      });
-      top = doc.lastAutoTable.finalY + 24;
-    }
-
-    // --- EXPENSES ---
-    if (expenses.length > 0) {
-       if (top > 750) { doc.addPage(); top = 40; }
-       
-       doc.setFontSize(12);
-       doc.setFont('times', 'bold');
-       doc.text('Expenses', left, top);
-       top += 10;
-       
-       doc.autoTable({
-        startY: top,
-        head: [['Item', 'Seller', 'Contact', 'Qty', 'Price Each', 'Total', 'Recorded', 'Proof']],
-        body: expenses.map(e => [
-            e.item, 
-            e.seller, 
-            e.contact, 
-            e.quantity, 
-            `TSh ${Number(e.priceEach || 0).toLocaleString()}`, 
-            `TSh ${Number(e.total || 0).toLocaleString()}`, 
-            e.recordedAt, 
-            e.proof
-        ]),
-        foot: [[
-          'TOTAL EXPENSES', '', '', '', '', 
-          `TSh ${totalExp.toLocaleString()}`, 
-          '', ''
-        ]],
-        styles: { fontSize: 8, cellPadding: 3 },
-        headStyles: { fillColor: [30, 64, 175], textColor: 255 }, // Blue
-        footStyles: { fillColor: [219, 234, 254], textColor: [30, 58, 138], fontStyle: 'bold' },
-      });
-      top = doc.lastAutoTable.finalY + 24;
-    }
-
-    // --- FINAL SUMMARY & SIGNATURES ---
-    if (top > 650) { doc.addPage(); top = 40; }
-    
-    doc.setFont('times', 'bold'); 
-    doc.setFontSize(14);
-    doc.text('Muhtasari wa Takwimu', left, top);
-    top += 20;
-    
-    doc.setFontSize(11);
-    doc.setFont('times', 'normal');
-    doc.text([
-      `Wote (halali): ${students.length}`,
-      `WalioLipa Kikamilifu: ${paid.length} (TSh ${totalPaid.toLocaleString()})`,
-      `Wenye Madeni/Salio: ${unpaid.length + partial.length} (TSh ${totalUncol.toLocaleString()})`,
-      `Jumla Matumizi: TSh ${totalExp.toLocaleString()}`,
-      `Mlinganyo wa mwisho (makusanyo - matumizi): TSh ${netBalance.toLocaleString()}`,
-    ], left, top);
-    
-    top += 100;
-    
-    doc.setFont('times', 'bold'); 
-    doc.setFontSize(14);
-    doc.text('Saini za Uidhinishaji', left, top);
-    top += 20;
-    
-    doc.setFontSize(11);
-    doc.setFont('times', 'normal');
-    const signLines = [
-      'Mkuu wa Shule: ____________________________  Tarehe: __________',
-      'Mwalimu wa Taaluma: _______________________  Tarehe: __________',
-      'Kiongozi wa Bajeti ya Graduation: __________  Tarehe: __________',
-      'Mwenyekiti wa Kamati: ______________________  Tarehe: __________',
-      'Mjumbe wa Kamati 1: _______________________  Tarehe: __________',
-      'Mjumbe wa Kamati 2: _______________________  Tarehe: __________',
-      'Mjumbe wa Kamati 3: _______________________  Tarehe: __________',
-    ];
-    // Increase spacing for signatures
-    signLines.forEach(line => {
-      doc.text(line, left, top);
-      top += 30; 
-    });
-
-    // --- FOOTER / PAGE NUMBERS ---
-    const pageCount = doc.internal.getNumberOfPages();
-    for (let i = 1; i <= pageCount; i += 1) {
-      doc.setPage(i);
-      doc.setFontSize(9);
-      doc.text(`Generated by SoMAp Graduation Suite • ${year}`, left, 820);
-      doc.text(`Page ${i} / ${pageCount}`, 500, 820);
-    }
-
-    doc.save(`Socrates_Graduation_Audit_${year}.pdf`);
+    K.section(ctx, 'Muhtasari wa Takwimu', { tone: 'navy', newPage: true });
+    K.cards(ctx, [
+      { label: 'Wote (halali)', value: students.length, tone: 'navy' },
+      { label: 'Walilipa kikamilifu', value: `${paid.length}`, sub: K.tsh(paid.reduce((a, s) => a + s.paid, 0)), tone: 'emerald' },
+      { label: 'Wenye madeni / salio', value: `${unpaid.length + partial.length}`, sub: K.tsh(totalUncol), tone: 'rose' },
+      { label: 'Jumla matumizi', value: K.tsh(totalExp), tone: 'blue' },
+      { label: 'Michango', value: K.tsh(donationTotal), tone: 'violet' },
+      { label: 'Mlinganyo wa mwisho', value: K.tsh(netBalance), sub: 'Makusanyo ukitoa matumizi', tone: netBalance >= 0 ? 'emerald' : 'rose' },
+    ]);
+    K.section(ctx, 'Saini za Uidhinishaji', { tone: 'slate' });
+    K.signatures(ctx, ['Mkuu wa Shule', 'Mwalimu wa Taaluma', 'Kiongozi wa Bajeti ya Graduation', 'Mwenyekiti wa Kamati', 'Mjumbe wa Kamati 1', 'Mjumbe wa Kamati 2', 'Mjumbe wa Kamati 3']);
+    K.finish(ctx, `${pdfFileBase()}_Graduation_Report_${year}.pdf`);
   }
 
   // Override exports for expenses & audit with secure handlers
