@@ -684,21 +684,71 @@
       if (eyebrow && brand?.name) eyebrow.textContent = brand.name;
     }).catch(() => {});
 
-    ensureYearReady(state.currentYear)
+    runYearLoad(state.currentYear, { announce: true });
+  }
+
+  // ---------- FAST YEAR LOAD ----------
+  // The finance roster (who is active, in which class) is expensive to build. The page used to
+  // wait for it before drawing anything. Now: draw at once from the last good roster saved on
+  // this device + the stored graduation records, then sync the roster in the background.
+  function rosterCacheKey(year) { return `gradRosterKeys:${getCurrentSchoolId()}:${year}`; }
+  function saveRosterCache(year, keys) {
+    try { localStorage.setItem(rosterCacheKey(year), JSON.stringify({ at: Date.now(), keys: Array.from(keys) })); } catch (_) { /* storage full or blocked */ }
+  }
+  function primeRosterFromCache(year) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(rosterCacheKey(year)) || 'null');
+      if (!raw || !Array.isArray(raw.keys) || !raw.keys.length) return false;
+      state.activeRosterKeys = new Set(raw.keys);
+      state.activeRosterLoaded = true;
+      return true;
+    } catch (_) { return false; }
+  }
+  // No saved list on this device yet: the last sync (from any device) already marked every
+  // learner who left as inactive on graduation/{year}/students, so those records are the list.
+  async function primeRosterFromStoredRecords(year) {
+    try {
+      const snap = await db().ref(gradPath(year, 'students')).once('value');
+      const keys = Object.entries(snap.val() || {})
+        .filter(([, s]) => s && s.inactive !== true && Number(s.rosterSyncedYear) === Number(year))
+        .map(([key, s]) => sanitizeKey(s.admissionNo || key));
+      if (!keys.length || state.activeRosterLoaded) return false;
+      state.activeRosterKeys = new Set(keys);
+      state.activeRosterLoaded = true;
+      return true;
+    } catch (_) { return false; }
+  }
+  let yearLoadSeq = 0;
+  function runYearLoad(year, { announce = false } = {}) {
+    const seq = ++yearLoadSeq;
+    let quick = primeRosterFromCache(year);
+    if (quick) {
+      attachYearListeners(year);
+      try { renderAll(); } catch (e) { console.error('Render failed', e); }
+    } else {
+      primeRosterFromStoredRecords(year).then((ok) => {
+        if (!ok || seq !== yearLoadSeq) return;
+        quick = true;
+        attachYearListeners(year);
+        try { renderAll(); } catch (e) { console.error('Render failed', e); }
+      });
+    }
+    const slowTimer = setTimeout(() => {
+      if (seq === yearLoadSeq) showToast(quick ? 'Showing the saved list while the class list syncs (slow network)…' : 'Still loading the class list — the network is slow. Please wait…', 'warn', 7000);
+    }, 15000);
+    ensureYearReady(year)
       .then(() => {
-        attachYearListeners(state.currentYear);
-        try {
-          renderAll();
-        } catch (e) {
-           console.error('Render failed', e);
-        }
+        if (seq !== yearLoadSeq) return; // a newer year was chosen meanwhile
+        if (!quick) attachYearListeners(year);
+        try { renderAll(); } catch (e) { console.error('Render failed', e); }
         refreshTodayAttendance();
-        showToast('Graduation data loaded.', 'success');
+        if (announce) showToast('Graduation data loaded.', 'success');
       })
       .catch((err) => {
         console.error(err);
         showToast(err?.message || 'Failed to load graduation data', 'error');
-      });
+      })
+      .finally(() => clearTimeout(slowTimer));
   }
 
   function wireAuthForm() {
@@ -790,10 +840,13 @@
     const ref = db().ref(gradPath(year, 'students'));
     const snapshot = await ref.once('value');
     const existing = snapshot.val() || {};
-    state.activeRosterLoaded = false;
+    // Keep showing the last good roster while the (slow) finance roster syncs.
     const master = await fetchMasterStudents(true, year);
     const rosterKeys = new Set(master.map((student) => sanitizeKey(student.admissionNumber || student.__key)).filter(Boolean));
-    state.activeRosterKeys = rosterKeys;
+    if (rosterKeys.size || !(state.activeRosterKeys instanceof Set) || !state.activeRosterKeys.size) {
+      state.activeRosterKeys = rosterKeys;
+      if (rosterKeys.size) saveRosterCache(year, rosterKeys);
+    }
     state.activeRosterLoaded = true;
 
     const updates = {};
@@ -3532,16 +3585,9 @@
   function loadYear(year) {
     const normalized = normalizeYear(year);
     state.currentYear = normalized;
-    ensureYearReady(normalized)
-      .then(() => {
-        attachYearListeners(normalized);
-        renderAll();
-        refreshTodayAttendance();
-      })
-      .catch((err) => {
-        console.error(err);
-        showToast(err?.message || 'Failed to switch academic year', 'error');
-      });
+    state.activeRosterKeys = new Set();
+    state.activeRosterLoaded = false;
+    runYearLoad(normalized);
   }
 
   function wireGalleryDropzone() {

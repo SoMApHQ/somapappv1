@@ -125,9 +125,10 @@
 
   // ---------- roster ----------
   async function loadRoster(year) {
-    await waitFor(() => window.SomapFinance?.getFinanceRoster && window.SomapSubjects);
+    await waitFor(() => (window.SomapYearRoster || window.SomapFinance?.getFinanceRoster) && window.SomapSubjects);
     let rows = [];
-    try { rows = await window.SomapFinance.getFinanceRoster(year); } catch (err) { console.warn('roster failed', err); }
+    // Light roster: same class-year rule, without building the whole finance dataset.
+    try { rows = await (window.SomapYearRoster ? window.SomapYearRoster.getYearRoster(year) : window.SomapFinance.getFinanceRoster(year)); } catch (err) { console.warn('roster failed', err); }
     const learners = [];
     (rows || []).forEach((row) => {
       const raw = row.rawStudent || {};
@@ -184,30 +185,33 @@
       const attendanceInput = [];
       const warnings = [];
 
-      for (let i = 0; i < classes.length; i += 1) {
-        if (state.job.cancelled) throw new Error('Analysis cancelled.');
-        const cls = classes[i];
-        const roster = byClass.get(cls);
-        progress('Analysing', i, classes.length, `${cls}: annual results and registers…`);
-
-        const [annual, days] = await Promise.all([
-          AA.computeClassAnnual({
-            className: cls,
-            classSubjects: subjectListForClass(cls, year),
-            readRoot: (cand) => read(P(`scores/${year}/${cand}`)),
-            roster,
-            canonicalSubjectName: canonSubject,
-            registry: [],
-          }),
-          loadClassAttendance(cls, roster, months),
-        ]);
+      // Classes run 4 at a time (results kept in class order).
+      let done = 0;
+      const perClass = new Array(classes.length);
+      let next = 0;
+      const worker = async () => {
+        while (next < classes.length) {
+          if (state.job.cancelled) return;
+          const i = next++;
+          const cls = classes[i];
+          const roster = byClass.get(cls);
+          const [annual, days] = await Promise.all([
+            AA.computeClassAnnual({ className: cls, classSubjects: subjectListForClass(cls, year), readRoot: (cand) => read(P(`scores/${year}/${cand}`)), roster, canonicalSubjectName: canonSubject, registry: [] }),
+            loadClassAttendance(cls, roster, months),
+          ]);
+          perClass[i] = { cls, roster, annual, days };
+          done += 1;
+          progress('Analysing', done, classes.length, `${cls}: annual results and registers ready`);
+        }
+      };
+      progress('Analysing', 0, classes.length, 'Annual results and registers for every class…');
+      await Promise.all([worker(), worker(), worker(), worker()]);
+      if (state.job.cancelled) throw new Error('Analysis cancelled.');
+      perClass.forEach(({ cls, roster, annual, days }) => {
         if (!annual.records.length) warnings.push(`<b>${esc(cls)}</b>: no exam results found for ${esc(year)} (January – November).`);
-        academicInput.push({
-          className: cls,
-          students: roster.map((l) => ({ key: l.key, name: l.name, admissionNo: l.admissionNo, photoUrl: l.photoUrl, annual: annual.students[l.key] })),
-        });
+        academicInput.push({ className: cls, students: roster.map((l) => ({ key: l.key, name: l.name, admissionNo: l.admissionNo, photoUrl: l.photoUrl, annual: annual.students[l.key] })) });
         attendanceInput.push({ className: cls, students: roster.map((l) => ({ key: l.key, name: l.name, admissionNo: l.admissionNo, photoUrl: l.photoUrl })), days });
-      }
+      });
 
       progress('Analysing', classes.length, classes.length, 'Ranking…');
       const until = untilIso(year);
@@ -677,7 +681,7 @@
       state.canApprove = APPROVER_ROLES.has(state.role) || APPROVER_EMAILS.has(L(user.email));
       await loadSchoolBrand();
       attachManualListeners(state.year);
-      loadApproved();
+      loadApproved().then(() => { if (!state.approved) analyse(); }); // no extra click needed
       loadRoster(state.year);
       window.GradCertDesigns?.ensureFonts?.();
     });

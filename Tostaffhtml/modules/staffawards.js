@@ -106,10 +106,11 @@
     state.job = { running: true, cancelled: false };
     $('#btnAnalyse').disabled = true;
     const year = state.year;
+    render();
     try {
       progress('Analysing', 0, 0, 'Loading workers…');
       await loadSchool();
-      await waitFor(() => window.SomapFinance?.getFinanceRoster && window.SomapSubjects);
+      await waitFor(() => (window.SomapYearRoster || window.SomapFinance?.getFinanceRoster) && window.SomapSubjects);
       const workers = await loadWorkers(year);
       if (!workers.length) throw new Error(`No active workers found for ${year}.`);
       const byKey = new Map(workers.map((w) => [w.key, w]));
@@ -134,7 +135,7 @@
       const classes = Array.from(new Set(teachers.flatMap((t) => t.claims.map((c) => c.className))));
 
       progress('Analysing', 0, classes.length, 'Loading class lists…');
-      const rows = await window.SomapFinance.getFinanceRoster(year).catch(() => []);
+      const rows = await (window.SomapYearRoster ? window.SomapYearRoster.getYearRoster(year) : window.SomapFinance.getFinanceRoster(year)).catch(() => []);
       const rosterByClass = new Map();
       (rows || []).forEach((r) => {
         if (r.isGraduated || EXCLUDED_STATUS.has(L(r.status))) return;
@@ -144,23 +145,23 @@
       });
       await AA.loadCustomSubjectsForYear(year, { api: Sub(), readScopedOrLegacy: (p) => read(P(p)), readLegacy: (p) => read(p) });
       const classResults = {};
-      for (let i = 0; i < classes.length; i += 1) {
-        if (state.job.cancelled) throw new Error('Analysis cancelled.');
-        const cls = classes[i];
-        progress('Analysing', i, classes.length, `${cls}: annual results…`);
+      let doneClasses = 0;
+      progress('Analysing', 0, classes.length, 'Annual results for every class…');
+      await Promise.all(classes.map(async (cls) => {
         const roster = rosterByClass.get(cls) || [];
         const annual = await AA.computeClassAnnual({ className: cls, classSubjects: subjectListForClass(cls, year), readRoot: (cand) => read(P(`scores/${year}/${cand}`)), roster, canonicalSubjectName: canonSubject, registry: [] });
         classResults[cls] = annual.students;
-      }
+        doneClasses += 1;
+        progress('Analysing', doneClasses, classes.length, `${cls}: annual results ready`);
+      }));
+      if (state.job.cancelled) throw new Error('Analysis cancelled.');
       const teacherResult = S.computeTeacherAwards(teachers, classResults);
 
       // ----- workers -----
       const from = `${year}0101`; const until = untilYmd(year);
-      const workerInputs = [];
-      for (let i = 0; i < workers.length; i += 1) {
-        if (state.job.cancelled) throw new Error('Analysis cancelled.');
-        const w = workers[i];
-        if (i % 4 === 0) progress('Analysing', i, workers.length, `Sign-in records: ${w.name}…`);
+      let doneWorkers = 0;
+      progress('Analysing', 0, workers.length, 'Sign-in records for every worker…');
+      const workerInputs = await Promise.all(workers.map(async (w) => {
         const [scoped, legacy, lpLetters] = await Promise.all([
           read(P(`years/${year}/workerAttendance/${w.key}`)),
           isSocrates() ? read(`attendance/${w.key}`) : Promise.resolve(null),
@@ -172,8 +173,11 @@
           Object.entries(byDay || {}).forEach(([day, rec]) => { if (/^\d{8}$/.test(day)) days[day] = { ...(days[day] || {}), ...(rec || {}) }; });
         }));
         const extraLetters = Object.values(lpLetters || {}).reduce((n, perDay) => n + (perDay && typeof perDay === 'object' ? Object.keys(perDay).length : 0), 0);
-        workerInputs.push({ key: w.key, name: w.name, role: w.role, photoUrl: w.photoUrl, days, extraLetters });
-      }
+        doneWorkers += 1;
+        if (doneWorkers % 3 === 0 || doneWorkers === workers.length) progress('Analysing', doneWorkers, workers.length, `Sign-in records: ${w.name}`);
+        return { key: w.key, name: w.name, role: w.role, photoUrl: w.photoUrl, days, extraLetters };
+      }));
+      if (state.job.cancelled) throw new Error('Analysis cancelled.');
       const workerResult = S.computeWorkerAwards(workerInputs, { from, until });
 
       const warnings = [];
@@ -248,7 +252,7 @@
     $('#btnDownloadAll').disabled = !state.approved?.awards?.length;
     renderAppreciation();
     const d = current();
-    if (!d) { $('#teacherGrid').innerHTML = '<div class="empty">Press <b>Analyse staff records</b> to see the rankings.</div>'; $('#workerGrid').innerHTML = $('#teacherGrid').innerHTML; return; }
+    if (!d) { $('#teacherGrid').innerHTML = state.job.running ? '<div class="empty"><span class="spinner"></span> Reading results, sign-ins and letters for the whole year…</div>' : '<div class="empty">Press <b>Analyse staff records</b> to see the rankings.</div>'; $('#workerGrid').innerHTML = $('#teacherGrid').innerHTML; return; }
     $('#statTeachers').textContent = d.teachersCount ?? '–';
     $('#statWorkers').textContent = d.workersCount ?? '–';
     $('#statDays').textContent = d.workDays ?? '–';
@@ -343,7 +347,7 @@
     sel.addEventListener('change', (e) => {
       state.year = e.target.value; window.somapYearContext?.setSelectedYear?.(state.year);
       state.live = null; state.approved = null; state.view = 'none';
-      render(); loadWorkers(state.year).then(render); loadApproved();
+      render(); loadWorkers(state.year).then(render); loadApproved().then(() => { if (!state.approved) analyse(); });
     });
     document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t));
@@ -381,7 +385,8 @@
       state.canApprove = APPROVER_ROLES.has(state.role) || isApproverEmail;
       await loadSchool();
       loadWorkers(state.year).then(render);
-      loadApproved();
+      await loadApproved();
+      if (!state.approved) analyse(); // nothing approved yet: analyse straight away, no extra click
       window.GradCertDesigns?.ensureFonts?.();
     });
   });
