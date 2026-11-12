@@ -722,8 +722,12 @@
     } catch (_) { return false; }
   }
   let yearLoadSeq = 0;
+  let attendanceTimer = null;
   function runYearLoad(year, { announce = false } = {}) {
     const seq = ++yearLoadSeq;
+    // Today's attendance does not depend on the roster: show it at once and keep it live.
+    refreshTodayAttendance();
+    if (!attendanceTimer) attendanceTimer = setInterval(() => { if (document.visibilityState !== 'hidden') refreshTodayAttendance(); }, 5 * 60 * 1000);
     let quick = primeRosterFromCache(year);
     if (quick) {
       attachYearListeners(year);
@@ -3554,9 +3558,12 @@
   // (Socrates at the root, other schools under schools/{id}/). Present = status/daily P, as attendance.html counts.
   async function refreshTodayAttendance() {
     try {
-      const master = await fetchMasterStudents();
-      const classes = Array.from(new Set(master.map((student) => toStr(student.classLevel).trim()).filter(Boolean)));
-      if (!classes.length) return;
+      // Don't wait for the (slow) class-list sync: standard classes + any classes already on the page.
+      const known = [
+        ...(state.masterStudents || []).map((student) => student.classLevel),
+        ...Object.values(state.students || {}).map((student) => student?.class),
+      ].map((c) => toStr(c).trim()).filter(Boolean);
+      const classes = Array.from(new Set([...CLASS_ORDER, ...known]));
       const now = new Date(Date.now() + 3 * 3600 * 1000); // Africa/Nairobi
       const ymd = now.toISOString().slice(0, 10);
       const ym = ymd.slice(0, 7);
@@ -3568,8 +3575,8 @@
       };
       let present = 0;
       let marked = 0;
+      const seen = new Set(); // one count per child, even if a register is found under two spellings
       await Promise.all(classes.map(async (cls) => {
-        const seen = new Set();
         await Promise.all(variants(cls).map(async (key) => {
           try {
             const snap = await db().ref(`${base}attendance/${key}/${ym}/${ymd}`).once('value');
