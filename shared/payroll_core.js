@@ -223,6 +223,55 @@
     };
   }
 
+  // ---- Exit-date justice (prorated last month) ----
+  // Every month counts as 30 days. A worker who stopped working on day D of a
+  // month is paid D/30 of the monthly salary for that month (exit day counts as
+  // worked; exiting on the month's last calendar day = full month). A worker
+  // whose exit date is before the month never appears in that month's payroll.
+  // The exit DATE decides, never the day the worker was removed in Admission.
+  const PRORATION_MONTH_DAYS = 30;
+
+  function dateKey(value) {
+    if (value == null || value === '') return '';
+    if (typeof value === 'number' || /^\d{11,14}$/.test(String(value).trim())) {
+      const d = new Date(Number(value));
+      return Number.isNaN(d.getTime()) ? '' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+    const raw = cleanText(value);
+    let m = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+    m = raw.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/); // DD/MM/YYYY (Tanzanian format)
+    if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    return '';
+  }
+
+  function workerExitDate(profile) {
+    const p = profile || {};
+    return dateKey(p.exitDate || p.employment?.exitDate || p.profile?.exitDate || p.lastWorkingDate || '');
+  }
+
+  function payrollMonthEmployment(month, exitDate) {
+    const key = monthKey(month);
+    const exit = dateKey(exitDate);
+    const full = { included: true, fullMonth: true, daysWorked: PRORATION_MONTH_DAYS, daysBase: PRORATION_MONTH_DAYS, exitDate: exit || '' };
+    if (!key || !exit) return full;
+    const y = Number(key.slice(0, 4)), mo = Number(key.slice(4));
+    const monthStart = `${key.slice(0, 4)}-${key.slice(4)}-01`;
+    const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    const monthEnd = `${key.slice(0, 4)}-${key.slice(4)}-${String(lastDay).padStart(2, '0')}`;
+    if (exit < monthStart) return { ...full, included: false, fullMonth: false, daysWorked: 0, reason: 'LEFT_BEFORE_MONTH' };
+    if (exit >= monthEnd) return full;
+    const day = Number(exit.slice(8, 10));
+    const daysWorked = Math.min(PRORATION_MONTH_DAYS, day);
+    return { ...full, fullMonth: daysWorked >= PRORATION_MONTH_DAYS, daysWorked, reason: 'LEFT_DURING_MONTH' };
+  }
+
+  function prorateSalary(amount, daysWorked, daysBase = PRORATION_MONTH_DAYS) {
+    const total = money(amount);
+    const days = Math.max(0, Math.min(daysBase, Number(daysWorked) || 0));
+    return days >= daysBase ? total : Math.round((total / daysBase) * days);
+  }
+
   function attendanceGateDecision(date, slip) {
     const day = date instanceof Date && !Number.isNaN(date.getTime()) ? date.getDate() : new Date(date).getDate();
     const status = cleanText(slip?.paymentStatus || slip?.status).toLowerCase();
@@ -239,6 +288,7 @@
     EARNING_KEYS, DEDUCTION_KEYS, RESPONSIBILITY_ALLOWANCE, money, cleanText, calculate, monthKey,
     monthLabel, previousMonth, maskAccount, numberToWords, nmbRow,
     attendanceGateDecision, responsibilityLateDeduction, responsibilitySummary,
-    splitInclusiveSalary
+    splitInclusiveSalary, PRORATION_MONTH_DAYS, dateKey, workerExitDate,
+    payrollMonthEmployment, prorateSalary
   };
 });

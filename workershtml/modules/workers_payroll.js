@@ -22,7 +22,13 @@ export async function computePayrollForWorker(workerId, monthKey) {
   ]);
 
   const profile = profileSnap.exists() ? profileSnap.val() : {};
-  const baseSalary = Number(profile.baseSalary || 0);
+  const fullBaseSalary = Number(profile.baseSalary || 0);
+  // 30-day month: a worker who stopped on day D is paid D/30 of the monthly salary.
+  const Core = globalThis.SomapPayrollCore;
+  const employment = Core ? Core.payrollMonthEmployment(monthKey, Core.workerExitDate(profile)) : null;
+  const baseSalary = employment && employment.exitDate && !employment.fullMonth
+    ? (employment.included ? Core.prorateSalary(fullBaseSalary, employment.daysWorked) : 0)
+    : fullBaseSalary;
 
   let penalties = 0;
   if (penaltiesSnap.exists()) {
@@ -47,6 +53,8 @@ export async function computePayrollForWorker(workerId, monthKey) {
     workerId,
     profile,
     baseSalary,
+    fullBaseSalary,
+    employmentProration: employment && employment.exitDate ? employment : null,
     penalties,
     advances,
     statutory,
