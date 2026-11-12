@@ -519,8 +519,11 @@
     renderSecretaryBanner();
   }
 
+  // The year shown on this page (its year tabs) is the only truth for reports, edits and deletes.
+  // The shared year context can still hold another year picked elsewhere (e.g. 2025), which made
+  // exports load last year's graduands while the screen showed this year's.
   function getSelectedYear() {
-    return String(window.somapYearContext?.getSelectedYear?.() || state.currentYear || new Date().getFullYear());
+    return String(state.currentYear || window.somapYearContext?.getSelectedYear?.() || new Date().getFullYear());
   }
 
   function getSchoolPrefix() {
@@ -841,7 +844,7 @@
     const snapshot = await ref.once('value');
     const existing = snapshot.val() || {};
     // Keep showing the last good roster while the (slow) finance roster syncs.
-    const master = await fetchMasterStudents(true, year);
+    const master = await leaveOutLastYearGraduands(await fetchMasterStudents(true, year), year);
     const rosterKeys = new Set(master.map((student) => sanitizeKey(student.admissionNumber || student.__key)).filter(Boolean));
     if (rosterKeys.size || !(state.activeRosterKeys instanceof Set) || !state.activeRosterKeys.size) {
       state.activeRosterKeys = rosterKeys;
@@ -920,7 +923,7 @@
         updates[adm] = {
           ...student,
           inactive: true,
-          inactiveReason: 'Not in active student list for this year',
+          inactiveReason: state.lastYearGraduandSet?.has(adm) ? `Graduated in ${Number(year) - 1}: on the ${Number(year) - 1} graduation list in the same class` : 'Not in active student list for this year',
           excludedFromReportsAt: firebase.database.ServerValue.TIMESTAMP,
         };
       });
@@ -943,6 +946,45 @@
     }
 
     return state.students;
+  }
+
+  // Children entered without a registration date can keep last year's class in the class list
+  // (e.g. a 2025 Class 7 leaver still shows "Class 7" in 2026). Evidence-based guard, graduation
+  // only (finance untouched): a learner on LAST year's graduation list in the same graduating class
+  // is a past graduate, unless they paid THIS year's graduation fee (then they stay, flagged).
+  const GRADUATING_CLASSES = new Set(['Class 7', 'Pre Unit Class']);
+  async function leaveOutLastYearGraduands(list, year) {
+    state.lastYearGraduands = [];
+    state.lastYearGraduandSet = new Set();
+    const prev = Number(year) - 1;
+    if (!Array.isArray(list) || !list.length || prev < YEAR_START) return list;
+    let prevStudents = {};
+    let payments = {};
+    try {
+      [prevStudents, payments] = await Promise.all([readObjectAt(gradPath(prev, 'students')), readObjectAt(gradPath(year, 'payments'))]);
+    } catch (_) { return list; }
+    const graduatedLastYear = new Map();
+    Object.entries(prevStudents || {}).forEach(([key, rec]) => {
+      if (!rec || rec.inactive === true) return;
+      const cls = normalizeClassName(rec.class || rec.classLevel);
+      if (GRADUATING_CLASSES.has(cls)) graduatedLastYear.set(sanitizeKey(rec.admissionNo || key), cls);
+    });
+    if (!graduatedLastYear.size) return list;
+    const totals = buildPaymentTotals(payments || {}, year);
+    const kept = [];
+    list.forEach((student) => {
+      const adm = sanitizeKey(student.admissionNumber || student.__key);
+      const cls = normalizeClassName(student.classLevel);
+      if (graduatedLastYear.get(adm) === cls) {
+        const paidThisYear = toNumberSafe(totals[adm] || 0) > 0;
+        state.lastYearGraduands.push({ adm, name: toStr(student.fullName), cls, paidThisYear });
+        if (paidThisYear) { kept.push(student); return; }
+        state.lastYearGraduandSet.add(adm);
+        return;
+      }
+      kept.push(student);
+    });
+    return kept;
   }
 
   async function fetchMasterStudents(force = false, year = state.currentYear) {
@@ -1258,6 +1300,15 @@
     setText('#cardBalance', formatCurrency(balance));
     setText('#cardPaidCount', statuses.paid ? statuses.paid.toLocaleString('en-US') : '0');
     setText('#cardUnpaidCount', statuses.unpaid ? statuses.unpaid.toLocaleString('en-US') : '0');
+
+    // A class teacher's figures cover only their class; say so instead of "entire school".
+    const teacherClass = state.access?.mode === 'teacher' ? toStr(state.access.teacherClass).trim() : '';
+    const subOf = (id) => document.querySelector(id)?.parentElement?.querySelector('.stat-sub');
+    const setSub = (id, text) => { const node = subOf(id); if (node) node.textContent = text; };
+    setSub('#cardTotalStudents', teacherClass ? `${teacherClass} · ${state.currentYear}` : `Across the entire school · ${state.currentYear}`);
+    setSub('#cardExpected', teacherClass ? `${teacherClass} only` : 'All classes combined');
+    setSub('#cardGraduands', teacherClass ? `Graduating from ${teacherClass}` : 'Preunit and Class 7');
+    if (teacherClass && state.totalMarkedToday) setSub('#cardTotalPresent', `Whole school · of ${state.totalMarkedToday.toLocaleString('en-US')} marked today`);
   }
 
   function computeStatus(student) {
@@ -1355,10 +1406,34 @@
     return adm ? Math.max(0, toNumberSafe(state.paymentTotals?.[adm] || 0)) : 0;
   }
 
+  function renderLastYearNotice() {
+    const wrap = $('#studentsBody')?.closest('.table-wrap');
+    if (!wrap) return;
+    let note = document.getElementById('lastYearGraduandsNote');
+    const list = (state.lastYearGraduands || []).filter((g) => classMatchesAccess(g.cls));
+    if (!list.length) { if (note) note.remove(); return; }
+    if (!note) {
+      note = document.createElement('div');
+      note.id = 'lastYearGraduandsNote';
+      note.className = 'banner-note';
+      note.style.cssText = 'display:block;background:#fffbeb;border:1px solid #fcd34d;color:#92400e;border-radius:12px;padding:12px 14px;font-size:.82rem;line-height:1.5;';
+      wrap.parentNode.insertBefore(note, wrap);
+    }
+    const prev = Number(state.currentYear) - 1;
+    const left = list.filter((g) => !g.paidThisYear);
+    const kept = list.filter((g) => g.paidThisYear);
+    const names = (rows) => rows.slice(0, 20).map((g) => `<b>${escHtml(g.name)}</b>`).join(', ') + (rows.length > 20 ? ` and ${rows.length - 20} more` : '');
+    note.innerHTML = `<div><i class="fas fa-user-graduate"></i> <b>Last year's graduands found in this year's class list.</b></div>`
+      + (left.length ? `<div style="margin-top:4px">${left.length} learner${left.length > 1 ? 's were' : ' was'} on the ${prev} graduation list in the same class, and ${left.length > 1 ? 'are' : 'is'} left out of ${state.currentYear} graduation: ${names(left)}.</div>` : '')
+      + (kept.length ? `<div style="margin-top:4px">Kept because they already paid ${state.currentYear} graduation money (please confirm they are repeating): ${names(kept)}.</div>` : '')
+      + `<div style="margin-top:4px;opacity:.85">Their class in the student records still says last year's class. Correct it (or record their ${state.currentYear} class) so Finance and other pages stop counting them too.</div>`;
+  }
+
   function renderStudentTable() {
     if (state.page !== 'dashboard') return;
     const tbody = $('#studentsBody');
     if (!tbody) return;
+    renderLastYearNotice();
 
     const search = toStr(state.filters.search).toLowerCase();
     const classFilter = state.filters.classLevel;
@@ -3515,7 +3590,8 @@
       state.totalMarkedToday = marked;
       renderDashboardSummary();
       const sub = document.querySelector('#cardTotalPresent')?.parentElement?.querySelector('.stat-sub');
-      if (sub) sub.textContent = marked ? `of ${marked.toLocaleString('en-US')} marked in today's registers` : 'No class register taken yet today';
+      const wholeSchool = state.access?.mode === 'teacher' ? 'Whole school · ' : '';
+      if (sub) sub.textContent = marked ? `${wholeSchool}of ${marked.toLocaleString('en-US')} marked in today's registers` : 'No class register taken yet today';
     } catch (err) {
       console.warn('Attendance summary unavailable', err?.message || err);
     }
