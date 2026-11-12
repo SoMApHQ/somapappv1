@@ -23,7 +23,10 @@
 
   const YEARS = Array.from({ length: 14 }, (_, i) => 2023 + i);
   const CLASS_ORDER = ['Baby Class', 'Middle Class', 'Pre-Unit', 'Class 1', 'Class 2', 'Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7'];
-  const ALLOWED_ROLES = new Set(['admin', 'head', 'headteacher', 'head teacher', 'academic', 'teacher', 'director', 'owner', 'principal']);
+  const ALLOWED_ROLES = new Set(['admin', 'head', 'headteacher', 'head teacher', 'academic', 'teacher', 'director', 'owner', 'principal', 'secretary']);
+  // Teacher awards made by staff wait for the Head Teacher (approvalStatus 'pending'); older awards
+  // without the field count as approved.
+  const awardApproved = (aw) => !aw?.approvalStatus || aw.approvalStatus === 'approved';
   const APPROVER_ROLES = new Set(['admin', 'head', 'headteacher', 'head teacher', 'director', 'owner', 'principal']);
   const APPROVER_EMAILS = new Set(['socratesschool2020@gmail.com', 'ssclass42023@gmail.com']);
   const EXCLUDED_STATUS = new Set(['shifted', 'graduated', 'archived', 'deleted', 'removed', 'inactive']);
@@ -547,10 +550,12 @@
       <td><b>${esc(aw.studentName || '—')}</b><div class="muted">${esc(aw.admissionNumber || '')}</div></td>
       <td>${esc(aw.categoryName || '—')}</td><td>${aw.scope === 'school' ? 'Whole school' : 'Class'}</td><td>${esc(aw.className || '—')}</td>
       <td><span class="pos p${Math.min(3, Number(aw.rank) || 3)}" style="width:28px;height:28px;font-size:.8rem">${esc(aw.rank || '—')}</span></td>
-      <td class="muted">${esc(String(aw.createdByEmail || aw.createdByUid || '—').split('@')[0])}</td>
-      <td style="white-space:nowrap"><button class="icon-btn" data-manual="prev" data-id="${esc(id)}" title="Preview"><i class="fa-regular fa-eye"></i></button>
-        <button class="icon-btn" data-manual="pdf" data-id="${esc(id)}" title="PDF"><i class="fa-solid fa-download"></i></button>
-        <button class="icon-btn" data-manual="del" data-id="${esc(id)}" title="Delete" style="color:#be123c"><i class="fa-solid fa-trash"></i></button></td></tr>`).join('')
+      <td class="muted">${esc(String(aw.createdByEmail || aw.createdByUid || '—').split('@')[0])}${aw.approvalStatus === 'pending' ? '<div><span class="status warn" style="padding:3px 8px;font-size:.7rem">Awaiting Head Teacher</span></div>' : aw.approvalStatus === 'rejected' ? `<div><span class="status" style="padding:3px 8px;font-size:.7rem;background:#fee2e2;color:#991b1b">Rejected${aw.rejectReason ? ` · ${esc(aw.rejectReason)}` : ''}</span></div>` : ''}</td>
+      <td style="white-space:nowrap">${aw.approvalStatus === 'pending' && state.canApprove ? `<button class="icon-btn" data-manual="approve" data-id="${esc(id)}" title="Approve" style="color:#166534"><i class="fa-solid fa-check"></i></button>
+        <button class="icon-btn" data-manual="reject" data-id="${esc(id)}" title="Reject" style="color:#9f1239"><i class="fa-solid fa-xmark"></i></button>` : ''}
+        <button class="icon-btn" data-manual="prev" data-id="${esc(id)}" title="Preview"><i class="fa-regular fa-eye"></i></button>
+        <button class="icon-btn" data-manual="pdf" data-id="${esc(id)}" ${awardApproved(aw) ? 'title="PDF"' : 'disabled title="Waiting for Head Teacher approval"'}><i class="fa-solid fa-download"></i></button>
+        ${state.canApprove || L(aw.createdByEmail) === L(state.user?.email) ? `<button class="icon-btn" data-manual="del" data-id="${esc(id)}" title="Delete" style="color:#be123c"><i class="fa-solid fa-trash"></i></button>` : ''}</td></tr>`).join('')
       : '<tr><td colspan="7" class="muted">No teacher awards yet.</td></tr>';
   }
   function handleStudentSearch() {
@@ -574,13 +579,16 @@
       categoryId: cid, categoryName, scope, className: cls, rank,
       studentId: l.id, studentName: l.name, admissionNumber: l.admissionNo, phone: l.phone, photoUrl: l.photoUrl,
       createdByUid: state.user?.uid || '', createdByEmail: state.user?.email || '', createdAt: Date.now(),
+      approvalStatus: state.canApprove ? 'approved' : 'pending',
+      ...(state.canApprove ? { approvedBy: state.user?.email || '', approvedAt: Date.now() } : {}),
     };
     const y = state.year;
     const ref = db.ref(P(`studentAwards/${y}`)).push();
     await ref.set(d);
     await db.ref(P(`studentAwardsByStudent/${y}/${l.id}/${ref.key}`)).set(true);
-    toast('Award saved. Downloading certificate…');
     $('#studentSearch').value = ''; $('#studentPick').innerHTML = ''; state.picked = null;
+    if (!state.canApprove) { toast('Award saved and sent to the Head Teacher for approval. The certificate unlocks once approved.', 'ok', 6500); return; }
+    toast('Award saved. Downloading certificate…');
     await downloadOne(manualCertData(d)).catch((err) => toast(err?.message || 'Certificate failed', 'error'));
   }
 
@@ -616,7 +624,7 @@
     $('#studentSearch').addEventListener('input', handleStudentSearch);
     $('#btnCreateAward').addEventListener('click', () => createAward().catch((err) => toast(err?.message || 'Could not save award', 'error')));
     $('#filterText').addEventListener('input', renderAwardsTable);
-    $('#btnBulkPdf').addEventListener('click', () => downloadBundle(Object.values(state.awards || {}).map(manualCertData), 'Teacher_Awards'));
+    $('#btnBulkPdf').addEventListener('click', () => downloadBundle(Object.values(state.awards || {}).filter(awardApproved).map(manualCertData), 'Teacher_Awards'));
 
     document.addEventListener('click', (e) => {
       const chip = e.target.closest('[data-class]');
@@ -649,8 +657,19 @@
           if (aw.studentId) db.ref(P(`studentAwardsByStudent/${state.year}/${aw.studentId}/${man.dataset.id}`)).remove();
           return;
         }
+        if ((man.dataset.manual === 'approve' || man.dataset.manual === 'reject') && state.canApprove) {
+          const ok = man.dataset.manual === 'approve';
+          const reason = ok ? '' : (window.prompt(`Reason for rejecting ${aw.studentName}'s award (optional):`) ?? null);
+          if (reason === null) return;
+          db.ref(P(`studentAwards/${state.year}/${man.dataset.id}`)).update(ok
+            ? { approvalStatus: 'approved', approvedBy: state.user?.email || '', approvedAt: Date.now() }
+            : { approvalStatus: 'rejected', rejectedBy: state.user?.email || '', rejectedAt: Date.now(), rejectReason: reason })
+            .then(() => toast(ok ? 'Award approved.' : 'Award rejected.'))
+            .catch((err) => toast(err?.message || 'Could not update award', 'error'));
+          return;
+        }
         if (man.dataset.manual === 'prev') preview(manualCertData(aw));
-        else downloadOne(manualCertData(aw)).catch((err) => toast(err?.message || 'Certificate failed', 'error'));
+        else if (man.dataset.manual === 'pdf' && awardApproved(aw)) downloadOne(manualCertData(aw)).catch((err) => toast(err?.message || 'Certificate failed', 'error'));
         return;
       }
       const modal = $('#previewModal');

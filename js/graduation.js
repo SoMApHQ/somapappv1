@@ -413,6 +413,8 @@
   function classMatchesAccess(className) {
     const teacherClass = toStr(state.access?.teacherClass).trim();
     if (!teacherClass || state.access?.mode !== 'teacher') return true;
+    // Class restriction is for the money ledger only; certificates & galleries show every graduand.
+    if (state.page !== 'dashboard') return true;
     return normalizeClassName(className).toLowerCase() === normalizeClassName(teacherClass).toLowerCase();
   }
 
@@ -491,19 +493,17 @@
 
   function applyAccessUi() {
     const secretaryMode = state.access?.mode === 'secretary';
-    // Secretaries get the same restricted surface as teachers (no expenses,
-    // certificates, galleries, audit or delete tools), across all classes.
+    // Staff (teachers & secretaries) see every card and every download, like the owner, EXCEPT
+    // the Expenses page (where entries are written). Anything staff upload waits for the Head
+    // Teacher (workershtml/headteacherapprovals.html → Graduation uploads). No audit/delete tools.
     const teacherMode = state.access?.mode === 'teacher' || secretaryMode;
     document.body.classList.toggle('teacher-grad-view', teacherMode);
-    document.querySelectorAll('[data-link="expenses"], [data-link="certificates"], [data-link="galleries"], [data-link="staffawards"]').forEach((node) => {
+    document.querySelectorAll('[data-link="expenses"]').forEach((node) => {
       node.style.display = teacherMode ? 'none' : '';
     });
     const paymentForm = $('#paymentForm');
     const paymentPanel = paymentForm?.closest('.glass, .panel, section, div');
     if (paymentPanel) paymentPanel.style.display = '';
-    document.querySelectorAll('[data-export="expenses"], [data-export="audit"], #btnExpCSV, #btnExpPDF, #btnAuditCSV, #btnAuditPDF').forEach((node) => {
-      node.style.display = teacherMode ? 'none' : '';
-    });
     const auditPanel = $('#auditBody')?.closest('section, .glass, .panel');
     if (auditPanel) auditPanel.style.display = teacherMode ? 'none' : '';
     document.querySelectorAll('button[onclick="cleanGhosts()"], button[onclick="clearDeleteMode()"]').forEach((node) => {
@@ -617,7 +617,7 @@
 
     document.querySelectorAll('[data-link]').forEach((button) => {
       const target = button.dataset.link;
-      if (state.readOnly && ['expenses', 'certificates', 'galleries'].includes(target)) return;
+      if (state.readOnly && target === 'expenses') return;
       if (target === 'expenses') button.addEventListener('click', () => { window.location.href = 'gradexpenses.html'; });
       if (target === 'certificates') button.addEventListener('click', () => { window.location.href = 'gradcertificates.html'; });
       if (target === 'galleries') button.addEventListener('click', () => { window.location.href = 'gradgalleries.html'; });
@@ -1764,7 +1764,7 @@
           </div>
           <div class="cert-actions">
             <button class="cbtn ghost" data-action="preview-cert" data-adm="${adm}" title="Preview"><i class="fa-regular fa-eye"></i><span>Preview</span></button>
-            ${canWrite ? `<button class="cbtn primary" data-action="generate-cert" data-adm="${adm}" title="Create, save & download"><i class="fa-solid fa-download"></i><span>Download</span></button>` : ''}
+            <button class="cbtn primary" data-action="generate-cert" data-adm="${adm}" title="${canWrite ? 'Create, save & download' : 'Download'}"><i class="fa-solid fa-download"></i><span>Download</span></button>
             ${certificate?.urlPdf ? `<a class="cbtn ghost" target="_blank" rel="noopener" href="${escHtml(certificate.urlPdf)}" title="Saved PDF"><i class="fa-regular fa-file-pdf"></i><span>Saved</span></a>` : ''}
             ${pulled && canWrite ? `<button class="cbtn danger" data-action="remove-pullup" data-adm="${adm}" title="Remove from graduands"><i class="fa-solid fa-xmark"></i></button>` : ''}
           </div>
@@ -3454,10 +3454,9 @@
       }
       const dl = event.target.closest('[data-preview-download]');
       if (dl && modal?.dataset.adm) {
-        if (state.readOnly) { showToast('Only authorised staff can download certificates.', 'warn'); return; }
         dl.disabled = true;
-        generateCertificate(modal.dataset.adm, { triggerDownload: true })
-          .then(() => showToast('Certificate downloaded and saved.'))
+        generateCertificate(modal.dataset.adm, { triggerDownload: true, upload: !state.readOnly })
+          .then(() => showToast(state.readOnly ? 'Certificate downloaded.' : 'Certificate downloaded and saved.'))
           .catch((err) => showToast(err?.message || 'Download failed', 'error'))
           .finally(() => { dl.disabled = false; });
       }
@@ -3639,7 +3638,7 @@
     if (!button) return;
     const action = button.dataset.action;
     const admission = button.dataset.adm;
-    if (state.readOnly && ['delete', 'note', 'generate-cert'].includes(action)) {
+    if (state.readOnly && ['delete', 'note'].includes(action)) {
       showToast('Teacher view is read-only.', 'warn');
       return;
     }
@@ -3682,8 +3681,8 @@
       const original = button.innerHTML;
       button.disabled = true;
       button.innerHTML = '<span class="spinner"></span><span>Designing…</span>';
-      generateCertificate(admission, { triggerDownload: true })
-        .then(() => showToast('Certificate downloaded and saved.'))
+      generateCertificate(admission, { triggerDownload: true, upload: !state.readOnly })
+        .then(() => showToast(state.readOnly ? 'Certificate downloaded.' : 'Certificate downloaded and saved.'))
         .catch((err) => {
           console.error(err);
           showToast(err?.message || 'Generation failed', 'error');

@@ -19,7 +19,8 @@
   const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
   const YEARS = Array.from({ length: 12 }, (_, i) => 2024 + i);
-  const VIEW_ROLES = new Set(['admin', 'head', 'headteacher', 'head teacher', 'director', 'owner', 'principal', 'academic', 'secretary']);
+  // All staff can view; only APPROVER_ROLES / APPROVER_EMAILS approve rankings.
+  const VIEW_ROLES = new Set(['admin', 'head', 'headteacher', 'head teacher', 'director', 'owner', 'principal', 'academic', 'secretary', 'teacher']);
   const APPROVER_ROLES = new Set(['admin', 'head', 'headteacher', 'head teacher', 'director', 'owner', 'principal']);
   const APPROVER_EMAILS = new Set(['socratesschool2020@gmail.com', 'ssclass42023@gmail.com']);
   const EXCLUDED_STATUS = new Set(['shifted', 'graduated', 'archived', 'deleted', 'removed', 'inactive']);

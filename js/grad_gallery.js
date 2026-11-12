@@ -21,14 +21,17 @@
   const CLD_UPLOAD_PRESET = localStorage.getItem('upload_preset') || 'books_unsigned';
   const CLD_GALLERY_FOLDER = 'somapappv1/graduation/gallery';
   const UPLOADER_EMAILS = new Set(['ssclass42023@gmail.com', 'socratesschool2020@gmail.com']);
-  const UPLOADER_ROLES = new Set(['admin', 'head', 'headteacher', 'head teacher', 'director', 'owner', 'principal', 'academic']);
+  // These publish straight to the gallery. Other staff upload into galleryPending and wait for the
+  // Head Teacher (workershtml/headteacherapprovals.html, Graduation uploads card).
+  const UPLOADER_ROLES = new Set(['admin', 'head', 'headteacher', 'head teacher', 'director', 'owner', 'principal']);
+  const NON_STAFF_ROLES = new Set(['parent', 'guardian', 'student', '']);
   const DEFAULT_ALBUM = 'Graduation Day';
   const MAX_EDGE = 2048;
   const CONCURRENCY = 3;
   const YEAR_START = 2024;
 
   const state = {
-    user: null, canUpload: false, year: new Date().getFullYear(), photos: [], album: 'all',
+    user: null, canUpload: false, isApprover: false, role: '', year: new Date().getFullYear(), photos: [], album: 'all',
     ref: null, token: null, tokenAt: 0, queue: [], running: 0, lbIndex: -1, lbList: [], school: null,
   };
 
@@ -370,7 +373,8 @@
       paint(item, 'Resizing…');
       const prepared = await prepareImage(item.file);
       item.preview = prepared.preview;
-      const entryRef = db.ref(gradPath(state.year, 'galleries')).push();
+      // Staff uploads wait for Head Teacher approval; parents never see them until approved.
+      const entryRef = db.ref(gradPath(state.year, state.isApprover ? 'galleries' : 'galleryPending')).push();
       const name = `${state.year}-${entryRef.key}-${safeName(item.file.name.replace(/\.[^.]+$/, ''))}.jpg`;
       const progress = (p) => { item.pct = p; paint(item, `Uploading ${p}%`); };
       let record;
@@ -394,14 +398,15 @@
       const entry = {
         caption: item.caption, album: item.album, width: prepared.width, height: prepared.height,
         uploadedBy: state.user?.email || 'unknown', uploadedAt: firebase.database.ServerValue.TIMESTAMP, ...record,
+        ...(state.isApprover ? {} : { approval: 'pending', uploaderRole: state.role || 'staff' }),
       };
       await entryRef.set(entry);
       await db.ref(gradPath(state.year, 'audits')).push({
-        actor: state.user?.email || 'unknown', action: 'gallery:add', refType: 'gallery', refId: entryRef.key,
+        actor: state.user?.email || 'unknown', action: state.isApprover ? 'gallery:add' : 'gallery:submit-for-approval', refType: 'gallery', refId: entryRef.key,
         after: { caption: entry.caption, url: entry.url, album: entry.album, storageProvider: entry.storageProvider }, at: firebase.database.ServerValue.TIMESTAMP,
       });
       item.status = 'done'; item.pct = 100;
-      paint(item, record.storageProvider === 'google_drive' ? 'Saved to Google Drive ✓' : 'Saved (backup storage) ✓');
+      paint(item, !state.isApprover ? 'Sent to Head Teacher for approval ✓' : record.storageProvider === 'google_drive' ? 'Saved to Google Drive ✓' : 'Saved (backup storage) ✓');
     } catch (err) {
       console.error(err);
       item.status = 'fail';
@@ -455,12 +460,15 @@
     window.addEventListener('beforeunload', (e) => { if (state.queue.some((q) => q.status === 'busy' || q.status === 'waiting')) { e.preventDefault(); e.returnValue = ''; } });
   }
 
+  // 'approver' publishes directly; 'staff' uploads for Head Teacher approval; null = view only (parents).
   async function resolveUploader(user) {
-    if (!user) return false;
-    if (UPLOADER_EMAILS.has(String(user.email || '').toLowerCase())) return true;
+    if (!user) return null;
+    if (UPLOADER_EMAILS.has(String(user.email || '').toLowerCase())) return 'approver';
     const key = String(user.email || '').trim().toLowerCase().replace(/\./g, '_');
     const role = String((await read(`users/${user.uid}/role`)) || (await read(`users/${key}/role`)) || '').trim().toLowerCase();
-    return UPLOADER_ROLES.has(role);
+    state.role = role;
+    if (UPLOADER_ROLES.has(role)) return 'approver';
+    return NON_STAFF_ROLES.has(role) ? null : 'staff';
   }
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -471,8 +479,12 @@
     auth.onAuthStateChanged(async (user) => {
       state.user = user;
       if (!started) { started = true; attachYear(Number.isFinite(y) ? y : new Date().getFullYear()); }
-      state.canUpload = await resolveUploader(user);
+      const access = await resolveUploader(user);
+      state.canUpload = Boolean(access);
+      state.isApprover = access === 'approver';
       $('#uploadPanel').classList.toggle('hidden', !state.canUpload);
+      const note = document.getElementById('approvalNote');
+      if (note) note.classList.toggle('hidden', !(state.canUpload && !state.isApprover));
       const profile = (await read(`schools/${schoolId()}/profile`)) || {};
       state.school = String(profile.name || profile.schoolName || window.SOMAP?.getSchool?.()?.name || (schoolId() === 'socrates-school' ? 'Socrates School' : schoolId())).trim();
       $('#schoolName').textContent = state.school;
