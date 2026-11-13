@@ -667,7 +667,13 @@
       state.filters.classLevel = teacherAccess.teacherClass;
     }
     const allowGalleries = state.page === 'galleries';
-    const allowRead = allowed || Boolean(teacherAccess) || allowGalleries;
+    // Certificates are free to download for every signed-in staff member (Head Teacher, teachers
+    // without a class, workers): no approval wait. They download only; saving stays with admins.
+    const openCertificates = state.page === 'certificates' && Boolean(user) && !allowed && !teacherAccess;
+    if (openCertificates) {
+      state.access = { mode: 'teacher', teacherClass: '', teacherEmail: toStr(user?.email || '').toLowerCase() };
+    }
+    const allowRead = allowed || Boolean(teacherAccess) || allowGalleries || openCertificates;
     state.readOnly = !allowed;
     showAuthGate(allowRead);
     applyAccessUi();
