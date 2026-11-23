@@ -21,6 +21,7 @@
   <script src="../shared/finance_math.js"></script>
   <script src="../js/finance_core.js"></script>
   <script src="../shared/school_calendar.js"></script>
+  <script src="js/academic_meeting_report.js"></script>
   <script type="module">
     import { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass, setCustomSubjectsMap } from '../js/modules/subjects.js';
     window.SomapSubjects = { SUBJECTS_BY_CLASS, getSubjectsForClass, canonSubject, canonClass, setCustomSubjectsMap };
@@ -253,6 +254,14 @@
               <label class="text-xs uppercase tracking-[0.16em] text-slate-500">To Date</label>
               <input id="toDate" type="date" class="soft-input mt-2" />
             </div>
+            <div id="meetingTypeWrap" class="md:col-span-2 hidden">
+              <label class="text-xs uppercase tracking-[0.16em] text-slate-500">Meeting Type / Aina ya Kikao</label>
+              <select id="meetingType" class="soft-select mt-2">
+                <option value="academic">Academic teachers&#39; meeting (English, full detail)</option>
+                <option value="committee">Kikao cha Kamati ya Shule (Kiswahili, kwa wazazi na walimu)</option>
+              </select>
+              <p class="text-xs text-slate-500 mt-1">Committee version: Kiswahili, unpaid fees only (no money collected), no learner movement figures, no names of weak learners.</p>
+            </div>
           </div>
           <div class="mt-4 flex flex-wrap items-center gap-2">
             <span class="mini-chip" id="selectionChip">No class loaded yet</span>
@@ -262,6 +271,8 @@
         </div>
       </div>
     </section>
+
+    <section id="meetingBrief" class="hidden"></section>
 
     <section class="grid lg:grid-cols-[1.05fr_.95fr] gap-4">
       <div class="shell-card rounded-[28px] p-5">
@@ -509,7 +520,10 @@
       financeStory: document.getElementById('financeStory'),
       financeBody: document.getElementById('financeBody'),
       watchMeta: document.getElementById('watchMeta'),
-      watchlists: document.getElementById('watchlists')
+      watchlists: document.getElementById('watchlists'),
+      meetingTypeWrap: document.getElementById('meetingTypeWrap'),
+      meetingType: document.getElementById('meetingType'),
+      meetingBrief: document.getElementById('meetingBrief')
     };
 
     const state = {
@@ -1579,6 +1593,12 @@
       return out;
     }
 
+    // A mark above the exam's max is a typing error (live example: Reading Skills 96,644,444 / 100
+    // gave a teacher a 83,968% average). Such marks are left out of every average and listed here
+    // so the scoresheet can be corrected. Set per class while that class's scores are read.
+    let scoreAnomalySink = null;
+    let scoreAnomalyContext = null;
+
     function normalizeMonthlyScoreMap(raw) {
       const out = {};
       Object.entries(raw || {}).forEach(([adm, subjects]) => {
@@ -1589,6 +1609,10 @@
           const max = Number(value && (value.max ?? value.Max ?? 100));
           const subject = canonicalSubjectName(firstText(value && value.subject, value && value.label, subjectKey));
           if (!Number.isFinite(score) || !Number.isFinite(max) || max <= 0 || score < 0) return;
+          if (score > max) {
+            if (scoreAnomalySink) scoreAnomalySink.push({ ...(scoreAnomalyContext || {}), adm, subject, score, max });
+            return;
+          }
           normalized[subject] = { score, max, subject };
         });
         if (Object.keys(normalized).length) out[adm] = normalized;
@@ -1638,41 +1662,62 @@
       });
     }
 
-    function appendExamRecordsFromRoot(root, records, seen, fromDate, toDate) {
-      Object.entries(root || {}).forEach(([topKey, topVal]) => {
-        if (!topVal || typeof topVal !== 'object' || Array.isArray(topVal)) return;
-        const topMonth = resolveMonthKey(topKey);
-        if (topMonth) {
-          if (!isMonthInsideRange(topMonth, fromDate, toDate)) return;
-          const directMonthly = normalizeMonthlyScoreMap(topVal);
-          if (Object.keys(directMonthly).length) {
-            pushExamRecord(records, seen, 'monthly', 'Monthly', topMonth, directMonthly);
+    function appendExamRecordsFromRoot(root, records, seen, fromDate, toDate, anomalies, className) {
+      const previousSink = scoreAnomalySink;
+      const previousContext = scoreAnomalyContext;
+      try {
+        Object.entries(root || {}).forEach(([topKey, topVal]) => {
+          if (!topVal || typeof topVal !== 'object' || Array.isArray(topVal)) return;
+          const topMonth = resolveMonthKey(topKey);
+          if (topMonth) {
+            if (!isMonthInsideRange(topMonth, fromDate, toDate)) return;
+            scoreAnomalySink = anomalies || null;
+            scoreAnomalyContext = { className: className || '', examLabel: 'Monthly', monthKey: topMonth };
+            const directMonthly = normalizeMonthlyScoreMap(topVal);
+            if (Object.keys(directMonthly).length) {
+              pushExamRecord(records, seen, 'monthly', 'Monthly', topMonth, directMonthly);
+              return;
+            }
+            Object.entries(topVal).forEach(([examKey, nested]) => {
+              scoreAnomalyContext = { className: className || '', examLabel: examLabelFromKey(examKey), monthKey: topMonth };
+              const normalized = normalizeMonthlyScoreMap(nested);
+              pushExamRecord(records, seen, slugifyExamKey(examKey), examLabelFromKey(examKey), topMonth, normalized);
+            });
             return;
           }
-          Object.entries(topVal).forEach(([examKey, nested]) => {
+          const normalizedExamKey = slugifyExamKey(topKey);
+          Object.entries(topVal).forEach(([monthKey, nested]) => {
+            const resolvedMonth = resolveMonthKey(monthKey);
+            if (!resolvedMonth || !isMonthInsideRange(resolvedMonth, fromDate, toDate)) return;
+            scoreAnomalySink = anomalies || null;
+            scoreAnomalyContext = { className: className || '', examLabel: examLabelFromKey(topKey), monthKey: resolvedMonth };
             const normalized = normalizeMonthlyScoreMap(nested);
-            pushExamRecord(records, seen, slugifyExamKey(examKey), examLabelFromKey(examKey), topMonth, normalized);
+            pushExamRecord(records, seen, normalizedExamKey, examLabelFromKey(topKey), resolvedMonth, normalized);
           });
-          return;
-        }
-        const normalizedExamKey = slugifyExamKey(topKey);
-        Object.entries(topVal).forEach(([monthKey, nested]) => {
-          const resolvedMonth = resolveMonthKey(monthKey);
-          if (!resolvedMonth || !isMonthInsideRange(resolvedMonth, fromDate, toDate)) return;
-          const normalized = normalizeMonthlyScoreMap(nested);
-          pushExamRecord(records, seen, normalizedExamKey, examLabelFromKey(topKey), resolvedMonth, normalized);
         });
-      });
+      } finally {
+        scoreAnomalySink = previousSink;
+        scoreAnomalyContext = previousContext;
+      }
     }
 
     async function collectScoreRecordsInDateRange(year, className, fromDate, toDate) {
       const records = [];
       const seen = new Set();
+      const anomalies = [];
       for (const classCandidate of getClassCandidates(className)) {
         const found = await readFirstExisting(['scores/' + year + '/' + classCandidate]);
         if (!(found && found.snap && found.snap.exists && found.snap.exists())) continue;
-        appendExamRecordsFromRoot(found.snap.val() || {}, records, seen, fromDate, toDate);
+        appendExamRecordsFromRoot(found.snap.val() || {}, records, seen, fromDate, toDate, anomalies, className);
       }
+      // The same exam can sit under two class keys ("Class 2" and "2"); list each bad mark once.
+      const anomalyKeys = new Set();
+      records.anomalies = anomalies.filter((item) => {
+        const key = [item.examLabel, item.monthKey, item.adm, item.subject].join('::').toLowerCase();
+        if (anomalyKeys.has(key)) return false;
+        anomalyKeys.add(key);
+        return true;
+      });
       records.sort((a, b) => {
         const monthDiff = monthIndexFromKey(a.monthKey) - monthIndexFromKey(b.monthKey);
         if (monthDiff !== 0) return monthDiff;
@@ -2557,6 +2602,26 @@
       dom.selectionChip.textContent = filters.className + ' • ' + (filters.stream || 'All Streams') + ' • ' + filters.year;
       dom.selectionChip.textContent = label + ' | ' + (filters.className === SCHOOL_WIDE_VALUE ? 'All Classes' : (filters.stream || 'All Streams')) + ' | ' + filters.year;
       dom.statusChip.textContent = 'Window: ' + filters.fromDate + ' to ' + filters.toDate;
+      const schoolWide = filters.className === SCHOOL_WIDE_VALUE;
+      if (dom.meetingTypeWrap) dom.meetingTypeWrap.classList.toggle('hidden', !schoolWide);
+      if (!schoolWide && dom.meetingBrief) { dom.meetingBrief.classList.add('hidden'); dom.meetingBrief.innerHTML = ''; }
+    }
+
+    function currentMeetingType() {
+      return dom.meetingType && dom.meetingType.value === 'committee' ? 'committee' : 'academic';
+    }
+
+    function renderMeetingBrief() {
+      if (!dom.meetingBrief) return;
+      if (!state.analysis || state.analysis.mode !== 'school' || !window.SomapAcademicMeeting) {
+        dom.meetingBrief.classList.add('hidden');
+        return;
+      }
+      try {
+        window.SomapAcademicMeeting.renderBrief(dom.meetingBrief, state.analysis, currentMeetingType());
+      } catch (error) {
+        console.warn('[academicreport] meeting brief render failed', error && error.message || error);
+      }
     }
 
     function setStatus(message, muted) {
@@ -2628,7 +2693,7 @@
       const teacherInsights = buildTeacherInsights(subjectStats);
       const movement = buildMovementSummary(studentAnalytics, classFilters.className, classFilters.year, shiftReports);
       const teacherEffort = await fetchTeacherEffortDataDetailed(classFilters.year, classFilters.className, classFilters.fromDate, classFilters.toDate);
-      return { ...analyzeClass(classFilters, studentAnalytics, timeline, subjectStats, teacherInsights, movement, shiftReports, examRecords, teacherEffort), className: classFilters.className };
+      return { ...analyzeClass(classFilters, studentAnalytics, timeline, subjectStats, teacherInsights, movement, shiftReports, examRecords, teacherEffort), className: classFilters.className, subjectList, scoreAnomalies: examRecords.anomalies || [] };
     }
 
     // Start the finance download (approvalsHistory is several MB) while the page is still setting up.
@@ -2852,8 +2917,9 @@
       const classWeak = classRows.slice().filter((row) => row.classAverage > 0).sort((a, b) => a.classAverage - b.classAverage)[0] || null;
       const bestAttendanceClass = classRows.slice().filter((row) => row.attendancePct > 0).sort((a, b) => b.attendancePct - a.attendancePct)[0] || null;
       const weakAttendanceClass = classRows.slice().filter((row) => row.attendancePct > 0).sort((a, b) => a.attendancePct - b.attendancePct)[0] || null;
-      const bestTeacher = teacherInsights.slice().filter((row) => row.avgPct > 0).sort((a, b) => b.avgPct - a.avgPct)[0] || null;
-      const weakTeacher = teacherInsights.slice().filter((row) => row.avgPct > 0).sort((a, b) => a.avgPct - b.avgPct)[0] || null;
+      const isRealTeacher = (row) => row && row.teacher && row.teacher !== 'Teacher not mapped';
+      const bestTeacher = teacherInsights.slice().filter((row) => isRealTeacher(row) && row.avgPct > 0).sort((a, b) => b.avgPct - a.avgPct)[0] || null;
+      const weakTeacher = teacherInsights.slice().filter((row) => isRealTeacher(row) && row.avgPct > 0).sort((a, b) => a.avgPct - b.avgPct)[0] || null;
       const earlyTeacher = teacherInsights.slice().filter((row) => row.attendancePct !== null).sort((a, b) => (b.attendancePct - a.attendancePct) || (a.lateDays - b.lateDays))[0] || null;
       const lateTeacher = teacherInsights.slice().filter((row) => row.lateDays > 0 || row.attendancePct !== null).sort((a, b) => (b.lateDays - a.lateDays) || (a.attendancePct || 0) - (b.attendancePct || 0))[0] || null;
       const topStudents = scored.slice().sort((a, b) => Number(b.overallPct || 0) - Number(a.overallPct || 0)).slice(0, 10);
@@ -2899,10 +2965,12 @@
         value: monthBuckets[m].sum / monthBuckets[m].count
       }));
 
-      return {
+      const scoreAnomalies = classAnalyses.flatMap((analysis) => analysis.scoreAnomalies || []);
+      const schoolReport = {
         mode: 'school',
         filters,
         summary,
+        scoreAnomalies,
         examEvidence,
         classAnalyses,
         classRows,
@@ -2914,6 +2982,21 @@
         cleared,
         monthlyTrend
       };
+      // Meeting brief (top learners, most improved, teacher bands, outstanding fees per class).
+      // Lives in js/academic_meeting_report.js; the report still works if it fails to load.
+      if (window.SomapAcademicMeeting && typeof window.SomapAcademicMeeting.buildMeeting === 'function') {
+        try {
+          schoolReport.meeting = await window.SomapAcademicMeeting.buildMeeting(schoolReport, {
+            year: filters.year,
+            canonClass: normalizeDisplayClass,
+            classTeacherFor,
+            schoolName: (state.currentSchool && state.currentSchool.name) || filters.schoolBranch || 'School'
+          });
+        } catch (error) {
+          console.warn('[academicreport] meeting brief failed', error && error.message || error);
+        }
+      }
+      return schoolReport;
     }
 
     function renderSchoolReport(report) {
@@ -2958,9 +3041,16 @@
       dom.subjectBody.innerHTML = report.subjectStats.length ? report.subjectStats.map((row) => '<tr><td class="font-semibold text-slate-900">' + safe(row.subject) + '</td><td>' + safe(row.teachers.slice(0, 3).join(', ')) + '</td><td><div class="font-semibold">' + formatPercent(row.avgPct) + '</div><div class="bar mt-2"><span style="width:' + Math.max(0, Math.min(100, row.avgPct)) + '%"></span></div></td><td>-</td><td>' + safe(String(row.classCount)) + ' classes</td><td>' + safe(String(row.attentionCount)) + '</td><td>-</td><td>-</td></tr>').join('') : '<tr><td colspan="8" class="text-slate-500">No subject data found.</td></tr>';
       dom.teacherMeta.textContent = report.teacherInsights.length + ' teacher blocks across the school';
       dom.teacherGrid.innerHTML = report.teacherInsights.slice().sort((a, b) => Number(b.avgPct || 0) - Number(a.avgPct || 0)).map((row) => '<article class="teacher-card p-4"><div class="flex items-center justify-between gap-3"><div class="text-base font-semibold text-slate-900">' + safe(row.teacher) + '</div><div class="mini-chip">' + safe(String(row.classCount)) + ' classes</div></div><div class="text-sm text-slate-500 mt-2">' + safe(row.subjects.slice(0, 6).join(', ') || 'Subject mapping only') + '</div><div class="grid grid-cols-2 gap-3 mt-4"><div><div class="text-xs text-slate-500 uppercase">Academic avg</div><div class="text-xl font-semibold mt-1">' + formatPercent(row.avgPct) + '</div></div><div><div class="text-xs text-slate-500 uppercase">Attendance</div><div class="text-xl font-semibold mt-1">' + (row.attendancePct === null ? '-' : formatPercent(row.attendancePct)) + '</div></div></div><div class="text-sm text-slate-700 mt-4">' + safe(String(row.lateDays || 0)) + ' late record(s), ' + safe(String(row.attention || 0)) + ' learner attention points.</div></article>').join('');
-      dom.financeMeta.textContent = formatCurrency(s.feeRequired) + ' required | ' + formatCurrency(s.feePaid) + ' paid | ' + formatCurrency(s.feeBalance) + ' balance';
-      dom.financeStory.innerHTML = '<div class="text-sm text-slate-700">Highest fee balances are shown together with academic and attendance signals so finance follow-up can protect lesson continuity, not only cash collection.</div>';
-      dom.financeBody.innerHTML = report.highDebt.map((student) => '<tr><td class="font-semibold text-slate-900">' + safe(student.name) + '<div class="text-xs text-slate-500">' + safe(student.className || student.class || '-') + '</div></td><td>' + safe(academicPercentLabel(student)) + '</td><td>' + formatPercent(student.attendancePct) + '</td><td>' + safe(formatCurrency(student.fee.required)) + '</td><td>' + safe(formatCurrency(student.fee.paid)) + '</td><td>' + safe(formatCurrency(student.fee.balance)) + '</td><td>' + safe(student.fee.debtStatus || '-') + '</td><td>' + safe(student.parentContact || '-') + '</td></tr>').join('');
+      // Whole-school view is meeting material: show only what is still unpaid, never totals due/collected.
+      // The balance is the sum of every learner's unpaid balance (finance engine). finance.html's
+      // "Total Outstanding" is Due - Collected, where advance payments by other parents offset it.
+      const debtorCount = report.students.filter((student) => Number(student.fee && student.fee.balance || 0) > 0.5).length;
+      dom.financeMeta.textContent = formatCurrency(s.feeBalance) + ' unpaid by ' + debtorCount + ' learner(s) | ' + s.clearedCount + ' fully paid';
+      dom.financeStory.innerHTML = '<div class="text-sm text-slate-700">Unpaid balances only (amounts collected are not shown in meeting reports). Highest balances are listed with academic and attendance signals so follow-up protects lesson continuity.</div>';
+      const financeTable = dom.financeBody.closest ? dom.financeBody.closest('table') : null;
+      const financeHead = financeTable ? financeTable.querySelector('thead tr') : null;
+      if (financeHead) financeHead.innerHTML = '<th>Learner</th><th>Average</th><th>Attendance</th><th>Unpaid Balance</th><th>Overdue</th><th>Debt Status</th><th>Parent Contact</th>';
+      dom.financeBody.innerHTML = report.highDebt.filter((student) => Number(student.fee && student.fee.balance || 0) > 0.5).map((student) => '<tr><td class="font-semibold text-slate-900">' + safe(student.name) + '<div class="text-xs text-slate-500">' + safe(student.className || student.class || '-') + '</div></td><td>' + safe(academicPercentLabel(student)) + '</td><td>' + (Number(student.attendance && student.attendance.days || 0) > 0 ? formatPercent(student.attendancePct) : '-') + '</td><td>' + safe(formatCurrency(student.fee.balance)) + '</td><td>' + safe(formatCurrency(student.fee.debtNow || 0)) + '</td><td>' + safe(student.fee.debtStatus || '-') + '</td><td>' + safe(student.parentContact || '-') + '</td></tr>').join('') || '<tr><td colspan="7" class="text-slate-500">No unpaid balances.</td></tr>';
       dom.watchMeta.textContent = 'School top ten, weakest learner, debt pressure, and paid-up learners.';
       dom.watchlists.innerHTML = [
         '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">Top 10 learners in the school</div><div class="mt-3 space-y-2">' + report.topStudents.map((student, idx) => '<div class="text-sm"><strong>' + (idx + 1) + '. ' + safe(student.name) + '</strong> | ' + safe(student.className || student.class || '-') + ' | ' + formatPercent(student.overallPct) + '</div>').join('') + '</div></article>',
@@ -2968,6 +3058,7 @@
         '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">Highest fee balances</div><div class="mt-3 space-y-2">' + report.highDebt.slice(0, 5).map((student) => '<div class="text-sm"><strong>' + safe(student.name) + '</strong> | ' + safe(student.className || student.class || '-') + ' | ' + safe(formatCurrency(student.fee.balance)) + '</div>').join('') + '</div></article>',
         '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">Fee cleared learners</div><div class="mt-3 text-sm text-slate-700">' + safe(String(report.cleared.length)) + ' learner(s) have cleared fees in this school year. Clearance rate: ' + formatPercent(s.clearedPct) + '.</div></article>'
       ].join('');
+      renderMeetingBrief();
     }
 
     function drawPdfCover(doc, analysis) {
@@ -4008,6 +4099,19 @@
         return;
       }
       if (state.analysis.mode === 'school') {
+        if (window.SomapAcademicMeeting && state.analysis.meeting) {
+          try {
+            const school = state.currentSchool || {};
+            const logo = await loadImageAsDataUrl(firstText(school.logoUrl, school.logo, '../images/somap-logo.png.jpg'))
+              || await loadImageAsDataUrl('../images/somap-logo.png.jpg');
+            const leaders = (state.analysis.summary.academicTeachers || []).map((p) => firstText(p && p.fullNameUpper, p && p.fullName, p && p.name));
+            await window.SomapAcademicMeeting.downloadPdf(state.analysis, currentMeetingType(), { logo, leaders });
+          } catch (error) {
+            console.error('[academicreport] meeting PDF failed', error);
+            alert('Meeting PDF failed: ' + (error && error.message ? error.message : error));
+          }
+          return;
+        }
         await downloadSchoolPdf(state.analysis);
         return;
       }
@@ -4817,6 +4921,7 @@
       dom.streamInput.value = query.get('stream') || '';
       dom.schoolBranch.value = (state.currentSchool && state.currentSchool.name) || query.get('schoolBranch') || 'School';
       const scope = String(query.get('scope') || '').toLowerCase();
+      if (dom.meetingType && String(query.get('meeting') || '').toLowerCase() === 'committee') dom.meetingType.value = 'committee';
       const requestedClass = query.get('class') ? normalizeDisplayClass(query.get('class')) : '';
       const isSchoolWide = !state.assignedClass && (scope === 'school' || query.get('schoolWide') === '1');
       if (isSchoolWide) {
@@ -4844,6 +4949,7 @@
       });
       dom.fromDate.addEventListener('change', run);
       dom.toDate.addEventListener('change', run);
+      if (dom.meetingType) dom.meetingType.addEventListener('change', renderMeetingBrief);
       document.getElementById('btnDownloadPdf').addEventListener('click', downloadPdf);
       document.getElementById('btnOpenScoresheet').addEventListener('click', () => {
         if (currentFilters().className === SCHOOL_WIDE_VALUE) { alert('Choose one class to open the scoresheet.'); return; }
