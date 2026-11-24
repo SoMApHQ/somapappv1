@@ -68,6 +68,8 @@
     const names = lang === 'sw' ? MONTHS_SW : MONTHS_EN;
     return Number(m[3]) + ' ' + names[Number(m[2]) - 1] + ' ' + m[1];
   }
+  function localIso(d) { d = d || new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  function isoPlusDays(iso, days) { const p = String(iso || '').split('-').map(Number); const d = p.length === 3 ? new Date(p[0], p[1] - 1, p[2]) : new Date(); d.setDate(d.getDate() + Number(days || 0)); return localIso(d); }
   const monthName = (idx, lang) => (lang === 'sw' ? MONTHS_SW : MONTHS_EN)[idx] || '';
 
   /** Positions with shared ties (1,1,3), compared at 2 decimals like the awards engine. */
@@ -199,19 +201,32 @@
    * gap = how far the teacher's subject sits above/below the class it is taught in. A teacher who
    * teaches (almost) every subject of a class owns the class average, so for them the class is
    * compared with its own group (Pre-Primary or Primary) instead; otherwise their gap is always 0.
+   *
+   * Accountability: every class-subject below 60% is named with its teacher (or "not assigned").
+   * A teacher is "support" when any of their subjects is below 55% or clearly below the class
+   * (gap <= -10); "watch" when a subject is 55-60%. Class teachers of classes below 55% are
+   * accountable for the class too.
    */
-  function analyseTeachers(classes, report, groupAverage) {
+  const WATCH_PCT = 60;
+  const SUPPORT_PCT = 55;
+  const targetFor = (avg) => Math.min(75, Math.max(SUPPORT_PCT, Math.ceil((num(avg) + 10) / 5) * 5));
+
+  function analyseTeachers(classes, report, groupAverage, opts) {
     const map = new Map();
+    const failing = [];
     classes.forEach((c) => {
       if (!(c.scoredCount > 0)) return;
       const perTeacher = {};
       c.subjects.forEach((row) => { perTeacher[row.teacher] = (perTeacher[row.teacher] || 0) + 1; });
       c.subjects.forEach((row) => {
+        if (row.avg < WATCH_PCT) {
+          failing.push({ className: c.className, subject: row.subject, teacher: row.teacher, avg: row.avg, gap: row.avg - c.average, below40: row.attention, learners: c.scoredCount, target: targetFor(row.avg) });
+        }
         if (!row.teacher || row.teacher === NOT_MAPPED) return;
         const ownsClass = c.subjects.length >= 3 && perTeacher[row.teacher] >= Math.ceil(0.8 * c.subjects.length);
         const gap = ownsClass ? c.average - num(groupAverage(c)) : row.avg - c.average;
         const t = map.get(row.teacher) || { teacher: row.teacher, items: [] };
-        t.items.push({ className: c.className, subject: row.subject, avg: row.avg, gap, ownsClass });
+        t.items.push({ className: c.className, subject: row.subject, avg: row.avg, gap, ownsClass, below40: row.attention, learners: c.scoredCount });
         map.set(row.teacher, t);
       });
     });
@@ -220,9 +235,11 @@
       const e = effort.get(t.teacher) || {};
       return {
         teacher: t.teacher,
+        workerId: opts && opts.resolveWorkerId ? opts.resolveWorkerId(t.teacher) || '' : '',
         items: t.items.sort((a, b) => a.avg - b.avg),
         avg: mean(t.items.map((i) => i.avg)),
         gap: mean(t.items.map((i) => i.gap)),
+        below40: t.items.reduce((s, i) => s + num(i.below40), 0),
         classes: Array.from(new Set(t.items.map((i) => i.className))),
         attendancePct: e.attendancePct == null ? null : num(e.attendancePct),
         lateDays: num(e.lateDays)
@@ -230,60 +247,132 @@
     });
     // Praise is kept modest on purpose: at most three names, only when clearly above their classes.
     const strong = rows.filter((r) => r.avg >= 65 && r.gap >= 3).sort((a, b) => b.gap - a.gap).slice(0, 3);
-    const support = rows.filter((r) => r.avg < 50 || r.gap <= -10).sort((a, b) => a.avg - b.avg);
-    const unmapped = classes.reduce((n, c) => n + c.subjects.filter((s) => s.teacher === NOT_MAPPED).length, 0);
-    return { rows: rows.sort((a, b) => b.avg - a.avg), strong, support, unmapped };
+    const support = rows.filter((r) => r.items.some((i) => i.avg < SUPPORT_PCT) || r.gap <= -10).sort((a, b) => a.avg - b.avg);
+    const watch = rows.filter((r) => !support.includes(r) && r.items.some((i) => i.avg < WATCH_PCT)).sort((a, b) => a.avg - b.avg);
+    const unmappedList = classes.flatMap((c) => c.subjects.filter((s) => s.teacher === NOT_MAPPED).map((s) => ({ className: c.className, subject: s.subject, avg: s.avg })));
+
+    // Class teachers of classes in trouble.
+    const classOwners = classes.filter((c) => c.scoredCount > 0 && c.average < SUPPORT_PCT).map((c) => ({
+      className: c.className, teacher: c.classTeacher, avg: c.average, target: targetFor(c.average),
+      workerId: opts && opts.resolveWorkerId && c.classTeacher ? opts.resolveWorkerId(c.classTeacher) || '' : ''
+    }));
+
+    // Pledges: one per accountable teacher (subject role and/or class role), plus a blank-name pledge
+    // for every weak subject nobody is assigned to, so the head teacher names the teacher in the meeting.
+    const pledgeMap = new Map();
+    support.forEach((r) => {
+      const weakItems = r.items.filter((i) => i.avg < WATCH_PCT);
+      pledgeMap.set(r.teacher, {
+        teacher: r.teacher, workerId: r.workerId, roles: ['subject'],
+        items: (weakItems.length ? weakItems : r.items).map((i) => ({ className: i.className, subject: i.subject, avg: i.avg })),
+        baseline: mean((weakItems.length ? weakItems : r.items).map((i) => i.avg))
+      });
+    });
+    classOwners.forEach((o) => {
+      if (!o.teacher) return;
+      const p = pledgeMap.get(o.teacher) || { teacher: o.teacher, workerId: o.workerId, roles: [], items: [], baseline: o.avg };
+      if (!p.roles.includes('class')) p.roles.push('class');
+      p.classRole = { className: o.className, avg: o.avg };
+      pledgeMap.set(o.teacher, p);
+    });
+    const pledges = Array.from(pledgeMap.values()).map((p) => ({ ...p, target: targetFor(p.classRole ? Math.min(p.baseline, p.classRole.avg) : p.baseline) }));
+    unmappedList.filter((u) => u.avg < SUPPORT_PCT).forEach((u) => pledges.push({
+      teacher: '', workerId: '', roles: ['subject'], unassigned: true, items: [{ className: u.className, subject: u.subject, avg: u.avg }], baseline: u.avg, target: targetFor(u.avg)
+    }));
+    pledges.forEach((p, i) => { p.id = 'p' + (i + 1); });
+
+    return {
+      rows: rows.sort((a, b) => b.avg - a.avg), strong, support, watch,
+      failing: failing.sort((a, b) => a.avg - b.avg),
+      unmapped: unmappedList.length, unmappedList, classOwners, pledges
+    };
   }
 
   // ---------------------------------------------------------------- fees (unpaid only)
+  /**
+   * Same per-learner figures as the rows of finance.html: the shared engine fee and payments for the
+   * year, plus finance.html's carry-forward step (last year's unpaid balance, minus any carry already
+   * recorded). Verified learner by learner on live data (2026-11-24): due 264,556,400, collected
+   * 253,373,800, outstanding 11,182,600 = finance.html's table. finance.html's KPI cards showed the
+   * carry-forward twice at the time (265,510,400 / 12,136,600).
+   */
   async function analyseFees(year, canonClass, classOrder) {
     const engine = global.SomapFinance;
     if (!engine || typeof engine.getFinanceRoster !== 'function') return null;
-    const rows = await engine.getFinanceRoster(String(year));
+    const y = String(year);
+    const [rows, prevRows] = await Promise.all([
+      engine.getFinanceRoster(y),
+      Number(y) - 1 >= 2025 ? engine.getFinanceRoster(String(Number(y) - 1), { includeGraduated: true }).catch(() => []) : Promise.resolve([])
+    ]);
+    const prevBalance = {};
+    (prevRows || []).forEach((r) => {
+      const adm = String(r && r.admissionNumber || '').trim();
+      if (!adm) return;
+      const fin = r.finance || {};
+      prevBalance[adm] = Math.max(0, num(fin.balance != null ? fin.balance : r.balance));
+    });
     const left = ['graduated', 'shifted', 'deleted', 'archived', 'removed'];
     const active = (rows || []).filter((r) => r && !r.isGraduated && !left.includes(String(r.status || '').toLowerCase()));
     const byClass = new Map();
+    let carryCount = 0; let carryAmount = 0;
     active.forEach((r) => {
       const cls = canonClass ? canonClass(r.classLevel || r.className || '') || r.classLevel : r.classLevel;
       const raw = r.rawStudent || {};
       const fin = r.finance || {};
-      const balance = Math.max(0, num(fin.balance != null ? fin.balance : r.balance));
+      const adm = String(r.admissionNumber || '').trim();
+      const fee = Math.max(0, num(fin.feePerYear != null ? fin.feePerYear : r.fee));
+      const paid = Math.max(0, num(fin.paidAmount != null ? fin.paidAmount : r.paid));
+      const carry = Math.max(0, num(prevBalance[adm]) - Math.max(0, num(raw.carryAmount)));
+      if (carry > 0) { carryCount += 1; carryAmount += carry; }
+      const due = fee + carry;
+      const balance = due - paid;
       const overdue = Math.max(0, num(fin.periodDebtValue));
-      const bucket = byClass.get(cls) || { className: cls, roll: 0, debtors: [], cleared: 0, owed: 0, overdueCount: 0, overdueAmount: 0 };
+      const bucket = byClass.get(cls) || { className: cls, roll: 0, debtors: [], cleared: 0, owed: 0, advance: 0, overdueCount: 0, overdueAmount: 0 };
       bucket.roll += 1;
       if (balance > 0.5) {
         bucket.owed += balance;
         bucket.debtors.push({
           name: titleName(r.fullName),
-          parent: firstText(raw.primaryParentName, raw.parentName, raw.guardianName, raw.secondaryGuardian),
-          contact: firstText(r.parentContact, raw.primaryParentContact, raw.parentPhone),
+          adm,
+          className: cls,
+          parent: titleName(firstText(raw.primaryParentName, raw.parentName, raw.guardianName, raw.secondaryGuardian)),
+          contact: firstText(r.parentContact, raw.primaryParentContact, raw.parentPhone, raw.guardianPhone),
+          contact2: firstText(raw.secondaryParentContact, raw.secondaryContact, raw.guardianContact),
           balance,
-          overdue
+          carry,
+          overdue: Math.min(balance, overdue + carry)
         });
       } else {
         bucket.cleared += 1;
+        if (balance < -0.5) bucket.advance += -balance;
       }
-      if (overdue > 0.5) { bucket.overdueCount += 1; bucket.overdueAmount += overdue; }
+      if (overdue + carry > 0.5 && balance > 0.5) { bucket.overdueCount += 1; bucket.overdueAmount += Math.min(balance, overdue + carry); }
       byClass.set(cls, bucket);
     });
     const order = (name) => { const i = classOrder.indexOf(name); return i < 0 ? 99 : i; };
-    const classes = Array.from(byClass.values()).map((c) => ({
-      ...c,
-      debtorCount: c.debtors.length,
-      topDebtors: c.debtors.sort((a, b) => b.balance - a.balance).slice(0, 5)
-    })).sort((a, b) => order(a.className) - order(b.className));
-    const roll = classes.reduce((s, c) => s + c.roll, 0);
-    const cleared = classes.reduce((s, c) => s + c.cleared, 0);
+    const classes = Array.from(byClass.values()).map((c) => {
+      const debtors = c.debtors.sort((a, b) => b.balance - a.balance);
+      return { ...c, debtors, debtorCount: debtors.length, net: c.owed - c.advance, topDebtors: debtors.slice(0, 5) };
+    }).sort((a, b) => order(a.className) - order(b.className));
+    const sum = (k) => classes.reduce((s, c) => s + num(c[k]), 0);
+    const roll = sum('roll');
+    const cleared = sum('cleared');
+    const allDebtors = classes.flatMap((c) => c.debtors);
     return {
       classes,
       roll,
       cleared,
       clearedPct: roll ? (cleared * 100) / roll : 0,
-      debtors: classes.reduce((s, c) => s + c.debtorCount, 0),
-      owed: classes.reduce((s, c) => s + c.owed, 0),
-      overdueCount: classes.reduce((s, c) => s + c.overdueCount, 0),
-      overdueAmount: classes.reduce((s, c) => s + c.overdueAmount, 0),
-      largestDebtors: classes.flatMap((c) => c.debtors.map((d) => ({ ...d, className: c.className }))).sort((a, b) => b.balance - a.balance).slice(0, 10)
+      debtors: allDebtors.length,
+      owed: sum('owed'),
+      advance: sum('advance'),
+      net: sum('owed') - sum('advance'),
+      carryCount,
+      carryAmount,
+      overdueCount: sum('overdueCount'),
+      overdueAmount: sum('overdueAmount'),
+      allDebtors,
+      largestDebtors: allDebtors.slice().sort((a, b) => b.balance - a.balance).slice(0, 10)
     };
   }
 
@@ -339,7 +428,7 @@
     const subjects = active.flatMap((c) => c.subjects.map((s) => ({ ...s, classAverage: c.average })));
     const preAvg = avgOf(pre);
     const priAvg = avgOf(pri);
-    const teachers = analyseTeachers(active, report, (c) => (c.prePrimary ? preAvg : priAvg));
+    const teachers = analyseTeachers(active, report, (c) => (c.prePrimary ? preAvg : priAvg), opts);
     let fees = null;
     try { fees = await analyseFees(opts.year || (report.filters && report.filters.year), opts.canonClass, classOrder); } catch (err) {
       console.warn('[meeting] fee summary failed', err && err.message || err);
@@ -350,11 +439,13 @@
     const anomalies = (report.scoreAnomalies || []).map((a) => {
       const cls = classes.find((c) => c.className === a.className);
       const learner = cls && cls.students.find((s) => String(s.adm || '').trim() === String(a.adm || '').trim());
-      return { ...a, name: learner ? learner.name : a.adm };
+      const subj = cls && cls.subjects.find((x) => String(x.subject).toLowerCase() === String(a.subject).toLowerCase());
+      return { ...a, name: learner ? learner.name : a.adm, onRoll: Boolean(learner), teacher: subj && subj.teacher !== NOT_MAPPED ? subj.teacher : '' };
     });
 
     return {
       generatedAt: new Date().toISOString(),
+      meetingDate: opts.meetingDate || localIso(),
       schoolName: opts.schoolName || 'School',
       filters: report.filters,
       classes,
@@ -416,8 +507,8 @@
     ];
     if (m.anomalies.length) {
       out.intro.push(sw
-        ? 'Alama ' + m.anomalies.length + ' ziliingizwa kimakosa (alama kubwa kuliko alama ya juu ya mtihani, mfano 700 kati ya 100). Alama hizo hazikutumika katika hesabu yoyote ya taarifa hii, na orodha yake imeandaliwa kwa walimu husika ili wazirekebishe.'
-        : m.anomalies.length + ' mark(s) were entered above the exam maximum (for example 700 out of 100). They are excluded from every figure in this report and listed in the data-correction appendix for the subject teachers to fix.');
+        ? 'Alama ' + m.anomalies.length + ' ziliingizwa kimakosa (alama kubwa kuliko alama ya juu ya mtihani, mfano 700 kati ya 100). Alama hizo hazikutumika katika hesabu yoyote ya taarifa hii. Jedwali lililo hapa chini linaonyesha kila alama: darasa, mtihani na mwezi, mwanafunzi, somo, mwalimu wa somo, alama iliyoandikwa na alama ya juu, ili kila mwalimu airekebishe.'
+        : m.anomalies.length + ' mark(s) were entered above the exam maximum (for example 700 out of 100). They are excluded from every figure in this report. The table below lists each one by class, exam, learner, subject and subject teacher so it can be corrected.');
     }
 
     const trendPri = m.trend.primary;
@@ -455,24 +546,43 @@
       : 'By grade: ' + gc.A + ' learners at A, ' + gc.B + ' at B, ' + gc.C + ' at C, ' + gc.D + ' at D and ' + gc.F + ' at F. In other words ' + Math.round(((gc.A + gc.B) * 100) / totalGraded) + '% are at B or better, and ' + Math.round(((gc.D + gc.F) * 100) / totalGraded) + '% are at grade D or F (below 40.5%) and need structured support.');
     out.overall = overall;
 
+    // Class cards: who teaches what, in plain words a parent can follow.
+    const tName = (t) => (!t || t === NOT_MAPPED)
+      ? (sw ? 'mwalimu hajapangwa kwenye mfumo' : 'no teacher assigned in SoMAp')
+      : (sw ? 'Mwalimu ' : 'Teacher ') + shortName(t);
+    const byTeacher = (t) => (!t || t === NOT_MAPPED) ? 'mwalimu wake hajapangwa kwenye mfumo' : 'linafundishwa na Mwalimu ' + shortName(t);
     out.classLines = m.active.map((c) => {
-      const parts = [];
-      parts.push(sw
-        ? c.className + ': wanafunzi ' + c.learners + ' (' + c.scoredCount + ' wamepimwa), wastani ' + pct(c.average) + (c.attendancePct ? ', mahudhurio ' + pct(c.attendancePct) : '') + '.'
-        : c.className + ': ' + c.learners + ' learners (' + c.scoredCount + ' assessed), average ' + pct(c.average) + (c.attendancePct ? ', attendance ' + pct(c.attendancePct) : '') + '.');
-      if (c.bestSubject && c.weakSubject) {
-        parts.push(sw
-          ? 'Somo linalofanya vizuri ni ' + c.bestSubject.subject + ' (' + pct(c.bestSubject.avg) + '), na linalohitaji juhudi zaidi ni ' + c.weakSubject.subject + ' (' + pct(c.weakSubject.avg) + ').'
-          : 'Strongest subject: ' + c.bestSubject.subject + ' (' + pct(c.bestSubject.avg) + '); weakest: ' + c.weakSubject.subject + ' (' + pct(c.weakSubject.avg) + ').');
+      const lines = [];
+      const good = c.gradeCounts.A + c.gradeCounts.B;
+      const low = c.gradeCounts.D + c.gradeCounts.F;
+      lines.push(sw
+        ? 'Mwalimu wa darasa: ' + (c.classTeacher ? shortName(c.classTeacher) : 'hajapangwa') + '. Wanafunzi ' + c.learners + ', kati yao ' + c.scoredCount + ' wamefanya mitihani. Wastani wa darasa ni ' + pct(c.average) + ' (daraja ' + c.grade + ' - ' + gw[c.grade].toLowerCase() + ')' + (c.attendancePct ? ', na mahudhurio ni ' + pct(c.attendancePct) : '') + '.'
+        : 'Class teacher: ' + (c.classTeacher ? shortName(c.classTeacher) : 'not assigned') + '. ' + c.learners + ' learners, ' + c.scoredCount + ' assessed. Class average ' + pct(c.average) + ' (grade ' + c.grade + ')' + (c.attendancePct ? ', attendance ' + pct(c.attendancePct) : '') + '.');
+      if (c.bestSubject) {
+        lines.push(sw
+          ? 'Somo linaloongoza: ' + c.bestSubject.subject + ' (' + pct(c.bestSubject.avg) + ') - ' + byTeacher(c.bestSubject.teacher) + '.'
+          : 'Strongest subject: ' + c.bestSubject.subject + ' (' + pct(c.bestSubject.avg) + ') - ' + tName(c.bestSubject.teacher) + '.');
       }
+      if (c.weakSubject) {
+        lines.push(sw
+          ? 'Somo la mwisho: ' + c.weakSubject.subject + ' (' + pct(c.weakSubject.avg) + ') - ' + byTeacher(c.weakSubject.teacher) + '.'
+          : 'Weakest subject: ' + c.weakSubject.subject + ' (' + pct(c.weakSubject.avg) + ') - ' + tName(c.weakSubject.teacher) + '.');
+      }
+      lines.push(sw
+        ? 'Kwa lugha rahisi: kati ya wanafunzi ' + c.scoredCount + ' waliopimwa, ' + good + ' wanafanya vizuri (A au B)' + (low ? ' na ' + low + ' wako chini ya 40% na wanahitaji msaada wa karibu.' : ', na hakuna aliye chini ya 40%.')
+        : 'In plain terms: of ' + c.scoredCount + ' assessed, ' + good + ' are doing well (A or B)' + (low ? ' and ' + low + ' are below 40% and need close support.' : ' and none is below 40%.'));
       if (c.trend && Math.abs(c.trend.last - c.trend.first) >= 3) {
         const up = c.trend.last > c.trend.first;
-        parts.push(sw
-          ? (up ? 'Darasa limepanda' : 'Darasa limeshuka') + ' kutoka ' + pct(c.trend.first) + ' (' + monthName(c.trend.from, lang) + ') hadi ' + pct(c.trend.last) + ' (' + monthName(c.trend.to, lang) + ').'
-          : (up ? 'Rose' : 'Fell') + ' from ' + pct(c.trend.first) + ' (' + monthName(c.trend.from, lang) + ') to ' + pct(c.trend.last) + ' (' + monthName(c.trend.to, lang) + ').');
+        lines.push(sw
+          ? (up ? 'Mwenendo: darasa limepanda' : 'Mwenendo: darasa limeshuka') + ' kutoka ' + pct(c.trend.first) + ' (' + monthName(c.trend.from, lang) + ') hadi ' + pct(c.trend.last) + ' (' + monthName(c.trend.to, lang) + ').'
+          : 'Trend: ' + (up ? 'rose' : 'fell') + ' from ' + pct(c.trend.first) + ' (' + monthName(c.trend.from, lang) + ') to ' + pct(c.trend.last) + ' (' + monthName(c.trend.to, lang) + ').');
       }
-      if (c.average < 50) parts.push(sw ? 'Darasa hili linahitaji mpango maalum wa kuinua ufaulu.' : 'This class needs a written recovery plan.');
-      return { className: c.className, text: parts.join(' '), tone: c.average >= 60.5 ? 'good' : c.average >= 50 ? 'mid' : 'low' };
+      if (c.average < SUPPORT_PCT) {
+        lines.push(sw
+          ? 'Darasa hili liko chini ya kiwango. Mwalimu wa darasa atasaini ahadi ya kulipandisha katika taarifa hii.'
+          : 'This class is below standard. The class teacher signs a recovery pledge in this report.');
+      }
+      return { className: c.className, lines, tone: c.average >= 60.5 ? 'good' : c.average >= 50 ? 'mid' : 'low' };
     });
 
     const strongSub = m.subjects.strong.slice(0, 4).map((x) => x.subject + ' (' + x.className + ', ' + pct(x.avg) + ')');
@@ -491,26 +601,55 @@
       ? 'Mafanikio si kuwa wa kwanza tu. Wanafunzi wafuatao wamepanda kwa kiwango kikubwa kutoka mwezi wa kwanza walipopimwa hadi mwezi wa karibuni, na wamewazidi wenzao katika kupanda huko. Wanastahili kutambuliwa ili waendelee kujituma.'
       : 'Success is not only being first. These learners rose the most from their first assessed month to their latest, and rose faster than their classmates over the same months. Recognise them so the effort continues.';
 
-    // Teachers: short, factual, modest.
+    // Teachers: name the subject, the class, the teacher and the number. Praise stays short.
     const t = m.teachers;
+    const itemText = (i) => i.subject + ' ' + i.className + ' (' + pct(i.avg) + (i.below40 ? (sw ? ', wanafunzi ' + i.below40 + ' kati ya ' + i.learners + ' chini ya 40%' : ', ' + i.below40 + ' of ' + i.learners + ' below 40%') : '') + ')';
     out.teachers = [];
+    out.teachers.push(sw
+      ? 'Sehemu hii inaonyesha wazi kila somo lililo chini ya 60%, darasa lake na mwalimu anayelifundisha. Lengo si kumdhalilisha mtu yeyote, bali kila mwalimu ajue eneo lake, awajibike kwa matokeo, na atoe ahadi inayopimika ya kuyabadilisha.'
+      : 'This section names every subject below 60%, its class and its teacher. The aim is not to shame anyone but to make each teacher own their results and give a measurable commitment to change them.');
     if (t.strong.length) {
       const names = t.strong.map((r) => shortName(r.teacher) + ' (' + pct(r.avg) + ')');
       out.teachers.push(sw
         ? 'Tunatambua kazi nzuri ya ' + listJoin(names, lang) + ', ambao matokeo yao yako juu ya wastani wa madarasa wanayofundisha. Tunawashukuru na tunawahimiza kuendelea hivyo.'
         : 'Good work is noted from ' + listJoin(names, lang) + ', whose results sit clearly above the classes they teach. Keep it up.');
     }
-    if (t.support.length) {
+    if (t.failing.length) {
       out.teachers.push(sw
-        ? 'Walimu ' + t.support.length + ' wana masomo yaliyo chini ya 50% au chini sana ya wastani wa darasa husika. Lengo si kulaumu bali kushirikiana: Mwalimu wa Taaluma atakagua maandalio ya masomo, madaftari ya mazoezi na namna ya ufundishaji, kisha kutoa mrejesho wa maandishi na kufuatilia maendeleo kila mwezi.'
-        : t.support.length + ' teacher(s) have subjects below 50% or clearly below their class average. The Academic Teacher will review lesson plans, exercise books and classroom delivery, give written feedback and track progress monthly. Results will be re-checked at the next meeting.');
-    } else {
-      out.teachers.push(sw ? 'Hakuna mwalimu mwenye matokeo chini ya kiwango cha hatari katika kipindi hiki.' : 'No teacher block is below the warning level in this window.');
+        ? 'Masomo ' + t.failing.length + ' katika madarasa mbalimbali yako chini ya 60%. Walimu ' + t.support.length + ' wana masomo yaliyo chini ya ' + SUPPORT_PCT + '% au chini sana ya wastani wa darasa; hawa ndio wanaoshusha wastani wa shule kwa kiasi kikubwa na watasaini ahadi katika taarifa hii.'
+        : t.failing.length + ' class-subjects are below 60%. ' + t.support.length + ' teacher(s) have a subject below ' + SUPPORT_PCT + '% or far below their class; they pull the school average down most and sign a pledge in this report.');
     }
-    if (t.unmapped) {
-      out.teachers.push(sw
-        ? 'Masomo ' + t.unmapped + ' hayajaunganishwa na mwalimu kwenye mfumo; yanapaswa kukamilishwa ili kila somo liwe na mwenyewe.'
-        : t.unmapped + ' class-subject(s) have no teacher mapped in SoMAp and must be assigned so every subject has an owner.');
+    out.teacherProfiles = t.support.map((r) => {
+      const weak = r.items.filter((i) => i.avg < WATCH_PCT);
+      const list = (weak.length ? weak : r.items).map(itemText);
+      const tgt = targetFor(mean((weak.length ? weak : r.items).map((i) => i.avg)));
+      const verdict = r.avg < 50
+        ? (sw ? 'Hili ni eneo kubwa linaloshusha shule; ufuatiliaji wa karibu unaanza mara moja.' : 'This is a major drag on the school; close supervision starts immediately.')
+        : (sw ? 'Matokeo haya yako chini ya kiwango tunachokitaka; juhudi za ziada zinahitajika.' : 'These results are below the standard we expect; extra effort is required.');
+      return {
+        teacher: r.teacher,
+        avg: r.avg,
+        text: sw
+          ? 'Mwalimu ' + shortName(r.teacher) + ' anafundisha ' + listJoin(list, lang) + '. Wastani wa masomo yake ni ' + pct(r.avg) + ', yaani alama ' + Math.abs(r.gap).toFixed(1) + (r.gap < 0 ? ' chini' : ' juu') + ' ya wastani wa madarasa husika. ' + verdict + ' Lengo la chini: ' + tgt + '% ndani ya siku 60.'
+          : shortName(r.teacher) + ' teaches ' + listJoin(list, lang) + '. Their subject average is ' + pct(r.avg) + ', ' + Math.abs(r.gap).toFixed(1) + ' points ' + (r.gap < 0 ? 'below' : 'above') + ' the classes concerned. ' + verdict + ' Minimum target: ' + tgt + '% within 60 days.'
+      };
+    });
+    out.teachersTail = [];
+    if (t.watch.length) {
+      out.teachersTail.push(sw
+        ? 'Walimu wa kuangaliwa (masomo kati ya 55% na 60%): ' + listJoin(t.watch.map((r) => shortName(r.teacher) + ' - ' + r.items.filter((i) => i.avg < WATCH_PCT).map((i) => i.subject + ' ' + i.className + ' ' + pct(i.avg)).join(', ')), lang) + '. Hawajaanguka, lakini wakiendelea hivi wataingia kwenye orodha ya ahadi kikao kijacho.'
+        : 'Watch list (subjects between 55% and 60%): ' + listJoin(t.watch.map((r) => shortName(r.teacher) + ' - ' + r.items.filter((i) => i.avg < WATCH_PCT).map((i) => i.subject + ' ' + i.className + ' ' + pct(i.avg)).join(', ')), lang) + '. Not failing yet, but they join the pledge list next meeting if this continues.');
+    }
+    if (t.classOwners.length) {
+      out.teachersTail.push(sw
+        ? 'Walimu wa darasa wanaowajibika kwa madarasa yaliyo chini ya ' + SUPPORT_PCT + '%: ' + listJoin(t.classOwners.map((o) => (o.teacher ? shortName(o.teacher) : 'hajapangwa') + ' (' + o.className + ', ' + pct(o.avg) + ')'), lang) + '.'
+        : 'Class teachers accountable for classes below ' + SUPPORT_PCT + '%: ' + listJoin(t.classOwners.map((o) => (o.teacher ? shortName(o.teacher) : 'not assigned') + ' (' + o.className + ', ' + pct(o.avg) + ')'), lang) + '.');
+    }
+    if (t.unmappedList.length) {
+      const weakUnmapped = t.unmappedList.filter((u) => u.avg < WATCH_PCT);
+      out.teachersTail.push(sw
+        ? 'Masomo ' + t.unmappedList.length + ' hayana mwalimu kwenye mfumo wa SoMAp' + (weakUnmapped.length ? ', yakiwemo yaliyo chini ya 60%: ' + listJoin(weakUnmapped.map((u) => u.subject + ' ' + u.className + ' (' + pct(u.avg) + ')'), lang) + '. Mwalimu Mkuu ataje walimu wa masomo haya kwenye kikao hiki, nao wasaini ahadi zilizoachwa wazi.' : '.')
+        : t.unmappedList.length + ' class-subject(s) have no teacher in SoMAp' + (weakUnmapped.length ? ', including these below 60%: ' + listJoin(weakUnmapped.map((u) => u.subject + ' ' + u.className + ' (' + pct(u.avg) + ')'), lang) + '. The head teacher names their teachers in this meeting and they sign the open pledges.' : '.'));
     }
 
     out.attendance = [];
@@ -527,14 +666,26 @@
 
     const f = m.fees;
     const link = m.feeLink;
+    const prevYear = Number(m.filters.year) - 1;
     out.fees = [];
     if (f) {
       out.fees.push(sw
-        ? 'Sehemu hii haionyeshi kiasi cha fedha kilichokusanywa. Inaonyesha tu kiasi ambacho bado hakijalipwa, ili kamati isaidie katika ufuatiliaji.'
-        : 'This section does not show money collected. It shows only what is still unpaid, for follow-up.');
+        ? 'Sehemu hii haionyeshi kiasi cha fedha kilichokusanywa. Inaonyesha kiasi ambacho bado hakijalipwa, darasa kwa darasa, pamoja na wazazi wanaohusika, ili kamati isaidie ufuatiliaji.'
+        : 'This section does not show money collected. It shows what is still unpaid, class by class, with the parents concerned, for follow-up.');
       out.fees.push(sw
-        ? 'Hadi ' + to + ', wanafunzi ' + f.debtors + ' kati ya ' + f.roll + ' bado wana salio la ada lenye jumla ya ' + money(f.owed) + '. Wanafunzi ' + f.cleared + ' (' + Math.round(f.clearedPct) + '%) wamekamilisha ada zao zote. Hongera kwa wazazi hawa; mfano wao uwe chachu kwa wengine.'
-        : 'As of ' + to + ', ' + f.debtors + ' of ' + f.roll + ' learners still carry a fee balance totalling ' + money(f.owed) + '. ' + f.cleared + ' learners (' + Math.round(f.clearedPct) + '%) have paid in full.');
+        ? 'Hadi ' + to + ', wanafunzi ' + f.debtors + ' kati ya ' + f.roll + ' wana salio la ada. Wazazi wao wanadaiwa jumla ya ' + money(f.owed) + (f.carryCount ? ' (pamoja na ' + money(f.carryAmount) + ' ya madeni ya mwaka ' + prevYear + ' ya wanafunzi ' + f.carryCount + ')' : '') + '.'
+        : 'As of ' + to + ', ' + f.debtors + ' of ' + f.roll + ' learners carry a fee balance. Their parents owe ' + money(f.owed) + (f.carryCount ? ' (including ' + money(f.carryAmount) + ' carried from ' + prevYear + ' for ' + f.carryCount + ' learner(s))' : '') + '.');
+      if (f.advance > 0.5) {
+        out.fees.push(sw
+          ? 'Wazazi wengine wamelipa mapema kwa ajili ya muda ujao jumla ya ' + money(f.advance) + '. Kwa hiyo deni halisi la shule (ada inayotakiwa kutoa ada iliyolipwa) ni ' + money(f.net) + '. Hiki ndicho kiasi cha "Total Outstanding" kwenye jedwali la finance.html.'
+          : 'Other parents have paid ahead a total of ' + money(f.advance) + '. The school\'s net outstanding (due minus collected) is therefore ' + money(f.net) + ', the same as the rows of finance.html.');
+      }
+      out.fees.push(sw
+        ? 'Wanafunzi ' + f.cleared + ' (' + Math.round(f.clearedPct) + '%) wamekamilisha ada zao zote. Hongera kwa wazazi hawa; mfano wao uwe chachu kwa wengine.'
+        : f.cleared + ' learners (' + Math.round(f.clearedPct) + '%) have paid in full.');
+      out.fees.push(sw
+        ? 'Wanafunzi ' + f.overdueCount + ' wamepitisha muda wao wa kulipa. Kamati ya Shule inaombwa kuwaita wazazi 10 wenye madeni makubwa zaidi (wameorodheshwa hapa chini pamoja na namba zao za simu) waje shuleni waeleze sababu ya kuchelewa na tarehe kamili watakayolipa. Ahadi zao ziandikwe kwenye orodha kamili iliyo mwishoni mwa sehemu hii, nayo isainiwe.'
+        : f.overdueCount + ' learners are past their payment date. The committee is asked to call in the 10 largest debtors (listed below with phone numbers) to explain and give a firm payment date, recorded on the full list at the end of this section.');
     }
     if (link.debtCount && link.clearCount) {
       const diff = link.clearAvg - link.debtAvg;
@@ -549,43 +700,116 @@
           + (link.weakCount ? ' Of the ' + link.weakCount + ' learners at grade D or F, ' + link.weakInDebt + ' carry a fee balance.' : ''));
     }
 
-    // Recommendations built from the evidence, most important first.
-    const rec = [];
-    if (s.weakClass) {
-      rec.push(sw
-        ? [s.weakClass.className, 'Mwalimu wa darasa na walimu wa masomo waandae mpango wa wiki sita wa kuinua ufaulu, wenye mazoezi ya ziada na majaribio mafupi kila wiki. Mwalimu wa Taaluma aukague mpango huu kila mwezi.']
-        : [s.weakClass.className, 'Class and subject teachers submit a six-week recovery plan with extra practice and a short weekly test. The Academic Teacher reviews it monthly.']);
+    // Resolutions: every row has an action, a named owner, a deadline and a measure.
+    const meet = m.meetingDate;
+    const by = (days) => formatDate(isoPlusDays(meet, days), lang);
+    const res = [];
+    t.support.forEach((r) => {
+      const weak = r.items.filter((i) => i.avg < WATCH_PCT);
+      const use = weak.length ? weak : r.items;
+      res.push({
+        action: sw
+          ? 'Kupandisha ' + listJoin(use.map((i) => i.subject + ' ' + i.className + ' (' + pct(i.avg) + ')'), lang) + ': kuwasilisha mpango wa maandishi kwa Mwalimu wa Taaluma, vipindi 2 vya ziada kila wiki, jaribio fupi kila Ijumaa na kusahihisha madaftari yote.'
+          : 'Raise ' + listJoin(use.map((i) => i.subject + ' ' + i.className + ' (' + pct(i.avg) + ')'), lang) + ': written plan to the Academic Teacher, 2 extra periods a week, a short test every Friday and all exercise books marked.',
+        owner: shortName(r.teacher),
+        due: (sw ? 'Mpango: ' : 'Plan: ') + by(7) + (sw ? '; Lengo: ' : '; Target: ') + by(60),
+        measure: (sw ? 'Wastani ufike angalau ' : 'Average reaches at least ') + targetFor(mean(use.map((i) => i.avg))) + '%'
+      });
+    });
+    t.classOwners.forEach((o) => res.push({
+      action: sw
+        ? 'Mpango wa kuokoa darasa la ' + o.className + ' (wastani ' + pct(o.avg) + '): kikao na walimu wote wa darasa, ratiba ya vipindi vya ziada, kufuatilia kazi za nyumbani na kuwaita wazazi wa wanafunzi walio chini ya 40%.'
+        : 'Recovery plan for ' + o.className + ' (average ' + pct(o.avg) + '): meeting with all its subject teachers, extra-period timetable, homework follow-up and calls to parents of learners below 40%.',
+      owner: o.teacher ? shortName(o.teacher) + (sw ? ' (mwalimu wa darasa)' : ' (class teacher)') : (sw ? 'Mwalimu Mkuu' : 'Head Teacher'),
+      due: (sw ? 'Mpango: ' : 'Plan: ') + by(7) + (sw ? '; Lengo: ' : '; Target: ') + by(60),
+      measure: (sw ? 'Wastani wa darasa ufike angalau ' : 'Class average reaches at least ') + o.target + '%'
+    }));
+    const weakUnmapped = t.unmappedList.filter((u) => u.avg < WATCH_PCT);
+    if (weakUnmapped.length) {
+      res.push({
+        action: sw
+          ? 'Kuwapangia walimu masomo yasiyo na mwalimu kwenye SoMAp: ' + listJoin(weakUnmapped.map((u) => u.subject + ' ' + u.className + ' (' + pct(u.avg) + ')'), lang) + '. Walimu hao wasaini ahadi zilizoachwa wazi.'
+          : 'Assign teachers in SoMAp for: ' + listJoin(weakUnmapped.map((u) => u.subject + ' ' + u.className + ' (' + pct(u.avg) + ')'), lang) + '. They sign the open pledges.',
+        owner: sw ? 'Mwalimu Mkuu' : 'Head Teacher',
+        due: by(3),
+        measure: sw ? 'Kila somo lina mwalimu kwenye mfumo' : 'Every subject has a teacher in SoMAp'
+      });
     }
-    if (m.subjects.weak.length) {
-      rec.push(sw
-        ? ['Masomo dhaifu', 'Kwa masomo yaliyo chini ya 50%, walimu wake waandae vipindi vya ziada (remedial) na Mwalimu wa Taaluma akague ufundishaji darasani angalau mara mbili kwa mwezi.']
-        : ['Weak subjects', 'Subjects under 50%: remedial periods, and at least two classroom observations a month by the Academic Teacher.']);
+    if (t.support.length || t.classOwners.length) {
+      res.push({
+        action: sw
+          ? 'Kukagua maandalio ya masomo ya walimu walio kwenye orodha hii kila Ijumaa, kuingia darasani kwao angalau mara 2 kwa mwezi, na kutoa mrejesho wa maandishi.'
+          : 'Check the lesson plans of every teacher on this list each Friday, observe each of them at least twice a month and give written feedback.',
+        owner: sw ? 'Mwalimu wa Taaluma' : 'Academic Teacher',
+        due: sw ? 'Kila wiki' : 'Weekly',
+        measure: sw ? 'Ripoti ya maandishi kwa Mwalimu Mkuu kila mwezi' : 'Monthly written report to the Head Teacher'
+      });
     }
     if (s.weakLearners) {
-      rec.push(sw
-        ? ['Wanafunzi ' + s.weakLearners + ' wa daraja D au F', 'Wapewe msaada wa karibu (vikundi vidogo, kazi za nyumbani zinazofuatiliwa) na wazazi wao waitwe kwa mazungumzo ya pamoja na mwalimu wa darasa.']
-        : [s.weakLearners + ' learners at grade D or F', 'Small-group support, checked homework, and a joint meeting with each parent and the class teacher.']);
-    }
-    if (f && f.debtors) {
-      rec.push(sw
-        ? ['Ada', 'Wazazi wenye madeni makubwa wafikiwe kwa heshima na wapewe mpango wa malipo wa maandishi, ili mtoto asiathirike kitaaluma. Kamati isaidie kuhamasisha ulipaji kwa wakati.']
-        : ['Fees', 'Reach the largest debtors respectfully with a written payment plan so the learner is not affected academically.']);
-    }
-    if (s.noAttendance.length || (s.weakAttendance && s.weakAttendance.attendancePct < 92)) {
-      rec.push(sw
-        ? ['Mahudhurio', 'Daftari la mahudhurio lijazwe kila siku kwa kila darasa; mwanafunzi akikosa siku mbili mfululizo mzazi apigiwe simu siku hiyo hiyo.']
-        : ['Attendance', 'Every class marks the register daily; two consecutive absences trigger a same-day call to the parent.']);
+      res.push({
+        action: sw
+          ? 'Wanafunzi ' + s.weakLearners + ' wa daraja D au F: vikundi vidogo vya msaada, kazi za nyumbani zinazofuatiliwa, na kuonana na kila mzazi.'
+          : s.weakLearners + ' learners at grade D or F: small-group support, checked homework, and a meeting with each parent.',
+        owner: sw ? 'Walimu wa darasa' : 'Class teachers',
+        due: by(14),
+        measure: sw ? 'Kila mzazi ameonana na mwalimu; mwanafunzi amepanda daraja' : 'Every parent met; learner moves up a grade'
+      });
     }
     if (m.anomalies.length) {
-      rec.push(sw
-        ? ['Usahihi wa alama', 'Walimu warekebishe alama ' + m.anomalies.length + ' zilizokosewa ndani ya wiki moja, na kila alama ihakikiwe kabla ya kuhifadhiwa.']
-        : ['Mark accuracy', 'Correct the ' + m.anomalies.length + ' invalid mark(s) within one week; double-check marks before saving.']);
+      const owners = Array.from(new Set(m.anomalies.map((a) => (a.teacher ? shortName(a.teacher) : '')).filter(Boolean)));
+      res.push({
+        action: sw ? 'Kurekebisha alama ' + m.anomalies.length + ' zilizokosewa (orodha iko Sehemu ya 1) na kuhakiki kila alama kabla ya kuhifadhi.' : 'Correct the ' + m.anomalies.length + ' invalid marks listed in Section 1 and double-check every mark before saving.',
+        owner: owners.length && owners.length <= 2 ? owners.join(', ') : (sw ? 'Walimu ' + (owners.length || '') + ' wa masomo husika (Sehemu ya 1)' : (owners.length || '') + ' subject teachers (Section 1)'),
+        due: by(7),
+        measure: sw ? 'Alama zote sahihi kwenye scoresheet' : 'All marks valid in the scoresheet'
+      });
     }
-    rec.push(sw
-      ? ['Motisha', 'Wanafunzi bora na walioimarika zaidi watambuliwe hadharani (vyeti au zawadi ndogo) ili kuhamasisha wengine.']
-      : ['Recognition', 'Recognise top and most-improved learners publicly (certificates or small prizes) to motivate others.']);
-    if (sw) rec.push(['Wazazi', 'Kamati ihamasishe wazazi kufuatilia kazi za nyumbani, kusoma na mtoto nyumbani, na kuhudhuria vikao vya wazazi.']);
-    out.recommendations = rec;
+    if (f && f.debtors) {
+      res.push({
+        action: sw
+          ? 'Kuwaita wazazi 10 wenye madeni makubwa zaidi waeleze sababu na tarehe ya kulipa; wazazi wengine wenye salio wapigiwe simu.'
+          : 'Call in the 10 largest debtors for a reason and a payment date; phone every other parent with a balance.',
+        owner: sw ? 'Kamati ya Shule na Mhasibu' : 'School Committee and Bursar',
+        due: by(14),
+        measure: sw ? 'Kila mzazi ametoa tarehe ya kulipa kwa maandishi' : 'Every parent has given a written payment date'
+      });
+    }
+    s.noAttendance.forEach((cls) => {
+      const c = m.active.find((x) => x.className === cls);
+      res.push({
+        action: sw ? 'Kujaza daftari la mahudhurio la ' + cls + ' kila siku kwenye SoMAp.' : 'Mark the ' + cls + ' attendance register daily in SoMAp.',
+        owner: c && c.classTeacher ? shortName(c.classTeacher) : (sw ? 'Mwalimu wa darasa' : 'Class teacher'),
+        due: sw ? 'Kuanzia kesho' : 'From tomorrow',
+        measure: sw ? 'Mahudhurio yanaonekana kwenye mfumo' : 'Attendance visible in SoMAp'
+      });
+    });
+    res.push({
+      action: sw ? 'Kuwatambua hadharani wanafunzi bora na walioimarika zaidi (vyeti au zawadi ndogo).' : 'Publicly recognise the top and most-improved learners (certificates or small prizes).',
+      owner: sw ? 'Uongozi wa shule' : 'School leadership',
+      due: by(30),
+      measure: sw ? 'Wanafunzi wametambuliwa' : 'Learners recognised'
+    });
+    if (sw) {
+      res.push({
+        action: 'Kuhamasisha wazazi kufuatilia kazi za nyumbani, kusoma na mtoto nyumbani na kuhudhuria vikao vya wazazi.',
+        owner: 'Kamati ya Shule',
+        due: by(30),
+        measure: 'Mahudhurio ya wazazi kwenye vikao yameongezeka'
+      });
+    }
+    res.push({
+      action: sw ? 'Kuwasilisha taarifa ya utekelezaji wa maazimio haya na ahadi za walimu kwenye kikao kijacho.' : 'Report on these resolutions and the teachers\' pledges at the next meeting.',
+      owner: sw ? 'Mwalimu wa Taaluma' : 'Academic Teacher',
+      due: by(60),
+      measure: sw ? 'Taarifa mpya ya taaluma imesomwa' : 'New academic report presented'
+    });
+    out.resolutions = res;
+    out.resolutionsNote = sw
+      ? 'Maazimio haya yakishakubaliwa na kusainiwa na kikao, yanakuwa maagizo rasmi ya shule. Kila mhusika atapimwa kwa kipimo kilichoandikwa, na matokeo yatasomwa hadharani kwenye kikao kijacho.'
+      : 'Once agreed and signed by this meeting, these resolutions are formal school instructions. Each owner is measured against the stated measure and results are read out at the next meeting.';
+    out.pledgeIntro = sw
+      ? 'Kila mwalimu aliyetajwa hapa chini atajaza na kusaini ahadi yake mbele ya kikao. Siku, lengo na hatua anayoomba ichukuliwe asipotimiza vitaandikwa kwa mkono, kisha vitahifadhiwa kwenye SoMAp na mwalimu atakumbushwa kila siku kwenye ukurasa wake hadi tarehe ya mwisho.'
+      : 'Each teacher named below completes and signs their pledge in front of the meeting. Days, target and the consequence they accept are handwritten, then recorded in SoMAp, where the teacher is reminded daily on their dashboard until the deadline.';
 
     out.closing = sw
       ? 'Matokeo haya ni kioo cha juhudi zetu sote: walimu, wazazi na wanafunzi. Yapo mafanikio ya kujivunia na yapo maeneo yanayohitaji kazi zaidi. Tukishirikiana, tuna uwezo wa kupandisha wastani wa shule katika kipindi kijacho.'
@@ -608,7 +832,7 @@
       printed: 'Tarehe ya taarifa',
       confidential: 'Kwa matumizi ya kikao',
       page: 'Ukurasa',
-      sections: ['Utangulizi', 'Hali ya Taaluma kwa Ujumla', 'Matokeo kwa Kila Darasa', 'Masomo', 'Wanafunzi Bora', 'Wanafunzi Walioimarika Zaidi', 'Walimu na Ufundishaji', 'Mahudhurio ya Wanafunzi', 'Ada: Kiasi Ambacho Hakijalipwa', 'Mapendekezo', 'Hitimisho'],
+      sections: ['Utangulizi', 'Hali ya Taaluma kwa Ujumla', 'Matokeo kwa Kila Darasa', 'Masomo', 'Wanafunzi Bora', 'Wanafunzi Walioimarika Zaidi', 'Walimu na Ufundishaji', 'Mahudhurio ya Wanafunzi', 'Ada: Kiasi Ambacho Hakijalipwa', 'Maazimio ya Kikao', 'Ahadi za Walimu', 'Hitimisho'],
       card: {
         avg: ['Wastani wa Shule', (g, w) => 'Daraja ' + g + ' - ' + w],
         scored: ['Wanafunzi Waliopimwa', (n) => 'kati ya ' + n + ' walioandikishwa'],
@@ -616,7 +840,7 @@
         exams: ['Mitihani', () => 'iliyofanyika madarasa yote'],
         best: ['Darasa Bora', (p) => 'wastani ' + p],
         weak: ['Darasa la Kusaidiwa', (p) => 'wastani ' + p],
-        owed: ['Ada Haijalipwa', (n) => 'wanafunzi ' + n + ' wenye salio'],
+        owed: ['Deni la Ada', (n) => 'wanafunzi ' + n + ' wenye salio'],
         cleared: ['Wamekamilisha Ada', (p) => p + ' ya wanafunzi wote']
       },
       col: {
@@ -643,7 +867,17 @@
       noDebt: 'Hakuna salio',
       signatures: ['Mwalimu wa Taaluma', 'Mwalimu Mkuu', 'Mwenyekiti wa Kamati ya Shule'],
       signName: 'Jina', signSign: 'Sahihi', signDate: 'Tarehe',
-      monthWord: (m) => MONTHS_SW[m]
+      monthWord: (m) => MONTHS_SW[m],
+      x: {
+        anomTitle: 'Alama zilizokosewa (zirekebishwe)', anomHead: ['Darasa', 'Mtihani / Mwezi', 'Mwanafunzi', 'Somo', 'Mwalimu wa somo', 'Iliyoandikwa', 'Juu'], notOnRoll: '(hayupo kwenye orodha ya sasa)', noTeacher: 'Hajapangwa',
+        failingTitle: 'Masomo yaliyo chini ya 60% na walimu wake', failingHead: ['Darasa', 'Somo', 'Mwalimu', 'Wastani', 'Na darasa', 'Chini ya 40%', 'Lengo'],
+        profilesTitle: 'Walimu wanaoshusha wastani wa shule', feeHead: ['Darasa', 'Wanafunzi', 'Wamemaliza', 'Wenye salio', 'Wanadaiwa', 'Wamelipa mapema', 'Deni halisi', 'Wamechelewa'],
+        callTitle: 'Wazazi 10 wa kuitwa na Kamati ya Shule', callHead: ['#', 'Mwanafunzi', 'Darasa', 'Mzazi / Mlezi', 'Simu', 'Salio', 'Tarehe ya kulipa'],
+        fullTitle: 'Orodha kamili ya wanafunzi wenye salio la ada', fullNote: 'Wanafunzi 5 wa kwanza wa kila darasa (rangi ya njano) ndio wenye salio kubwa zaidi. Safu ya mwisho ijazwe kwa mkono wazazi wanapotoa ahadi.', fullHead: ['#', 'Mwanafunzi', 'Mzazi / Mlezi', 'Simu', 'Salio', 'Ahadi ya kulipa'],
+        listSign: ['Mhasibu', 'Mwalimu Mkuu', 'Mwenyekiti wa Kamati'],
+        resHead: ['#', 'Hatua', 'Mhusika', 'Muda', 'Kipimo cha mafanikio'],
+        pledgeLabel: 'AHADI'
+      }
     },
     en: {
       kicker: 'OFFICIAL ACADEMIC REPORT',
@@ -658,7 +892,7 @@
       printed: 'Report date',
       confidential: 'Staff meeting use',
       page: 'Page',
-      sections: ['Introduction', 'Overall Academic Position', 'Results by Class', 'Subjects', 'Top Learners', 'Most Improved Learners', 'Teachers and Teaching', 'Learner Attendance', 'Fees: Amount Still Unpaid', 'Recommendations', 'Conclusion'],
+      sections: ['Introduction', 'Overall Academic Position', 'Results by Class', 'Subjects', 'Top Learners', 'Most Improved Learners', 'Teachers and Teaching', 'Learner Attendance', 'Fees: Amount Still Unpaid', 'Resolutions', 'Teacher Pledges', 'Conclusion'],
       card: {
         avg: ['School Average', (g, w) => 'Grade ' + g + ' - ' + w],
         scored: ['Learners Assessed', (n) => 'of ' + n + ' on the roll'],
@@ -666,7 +900,7 @@
         exams: ['Exam Sittings', () => 'across all classes'],
         best: ['Strongest Class', (p) => 'average ' + p],
         weak: ['Class to Support', (p) => 'average ' + p],
-        owed: ['Fees Unpaid', (n) => n + ' learners with a balance'],
+        owed: ['Fees Outstanding', (n) => n + ' learners with a balance'],
         cleared: ['Fully Paid', (p) => p + ' of all learners']
       },
       col: {
@@ -693,7 +927,17 @@
       noDebt: 'No balance',
       signatures: ['Academic Teacher', 'Head Teacher', 'Chairperson'],
       signName: 'Name', signSign: 'Signature', signDate: 'Date',
-      monthWord: (m) => MONTHS_EN[m]
+      monthWord: (m) => MONTHS_EN[m],
+      x: {
+        anomTitle: 'Invalid marks to correct', anomHead: ['Class', 'Exam / Month', 'Learner', 'Subject', 'Subject teacher', 'Entered', 'Max'], notOnRoll: '(not on current roll)', noTeacher: 'Not assigned',
+        failingTitle: 'Subjects below 60% and their teachers', failingHead: ['Class', 'Subject', 'Teacher', 'Average', 'vs class', 'Below 40%', 'Target'],
+        profilesTitle: 'Teachers pulling the school average down', feeHead: ['Class', 'Learners', 'Fully paid', 'With balance', 'Owed', 'Paid ahead', 'Net unpaid', 'Overdue'],
+        callTitle: '10 parents for the committee to call in', callHead: ['#', 'Learner', 'Class', 'Parent / Guardian', 'Phone', 'Balance', 'Payment date'],
+        fullTitle: 'Full list of learners with a fee balance', fullNote: 'The first five in each class (shaded) are the largest balances. Fill the last column by hand as parents commit.', fullHead: ['#', 'Learner', 'Parent / Guardian', 'Phone', 'Balance', 'Payment promise'],
+        listSign: ['Bursar', 'Head Teacher', 'Committee Chair'],
+        resHead: ['#', 'Action', 'Owner', 'When', 'Measure of success'],
+        pledgeLabel: 'PLEDGE'
+      }
     }
   };
 
@@ -707,6 +951,21 @@
   };
   const toneOf = (p) => (p >= 60.5 ? 'green' : p >= 50 ? 'amber' : 'red');
   const tintOf = (tone) => C[tone + 'Tint'] || C.navyTint;
+
+  /** The words a teacher signs. Blanks are filled by hand at the meeting. */
+  function pledgeText(p, lang) {
+    const sw = lang === 'sw';
+    const who = p.teacher ? shortName(p.teacher) : '________________________';
+    const bySub = {};
+    (p.items || []).forEach((i) => { (bySub[i.subject] = bySub[i.subject] || []).push(i); });
+    const subj = Object.keys(bySub).map((sub) => (sw ? sub + ' katika ' : sub + ' in ') + listJoin(bySub[sub].map((i) => i.className + ' (' + pct(i.avg) + ')'), lang));
+    const roles = [];
+    if (subj.length) roles.push((sw ? 'kama mwalimu wa somo la ' : 'as subject teacher of ') + listJoin(subj, lang));
+    if (p.classRole) roles.push((sw ? 'kama mwalimu wa darasa la ' : 'as class teacher of ') + p.classRole.className + (sw ? ' (wastani ' : ' (average ') + pct(p.classRole.avg) + ')');
+    return sw
+      ? 'Mimi Mwalimu ' + who + ', ' + roles.join(', na pia ') + ', natambua kwamba matokeo haya yako chini ya kiwango na yameshusha wastani wa shule. Naahidi kwamba ndani ya siku ______ nitakuwa nimejitahidi na kupandisha wastani hadi ______% (lengo la chini ni ' + p.target + '%). Nisipotimiza ahadi hii, naomba ____________________________________________________.'
+      : 'I, ' + who + ', ' + roles.join(', and also ') + ', acknowledge that these results are below standard and have pulled the school average down. I commit that within ______ days I will have raised the average to ______% (minimum target ' + p.target + '%). If I do not, I ask that ____________________________________________________.';
+  }
 
   function createPdf(m, mode, assets) {
     const jsPDF = global.jspdf && global.jspdf.jsPDF;
@@ -925,87 +1184,155 @@
     }
 
     // ================================================================ cover
+    const X = L.x;
+    const lighten = (c, t) => c.map((v) => Math.round(v + (255 - v) * t));
     fill(C.cream); doc.rect(0, 0, W, H, 'F');
-    fill(C.navy); doc.rect(0, 0, W, 116, 'F');
-    fill(C.navy2); doc.circle(W - 18, 18, 44, 'F'); doc.circle(W - 52, 102, 22, 'F');
-    fill(C.gold); doc.rect(0, 116, W, 1.6, 'F');
-    // logo
-    fill(C.white); doc.roundedRect(M, 16, 24, 24, 4, 4, 'F');
-    if (assets && assets.logo) { try { doc.addImage(assets.logo, /^data:image\/png/i.test(assets.logo) ? 'PNG' : 'JPEG', M + 2, 18, 20, 20); } catch (_) {} }
-    ink(C.white); font('bold', 13); doc.text(m.schoolName, M + 30, 25.5);
-    font('normal', 9.5); ink([203, 213, 225]); doc.text(L.year + ' ' + m.filters.year, M + 30, 31.5);
-    ink(C.gold); font('bold', 8.5); doc.text(L.kicker, M, 56, { charSpace: 0.6 });
-    ink(C.white); font('bold', 27); doc.text(L.title1, M, 68); doc.text(L.title2, M, 79.5);
-    font('normal', 12.5); ink([226, 232, 240]); doc.text(L.meeting, M, 90);
+    // Slim header band: identity only, no wasted space.
+    fill(C.navy); doc.rect(0, 0, W, 50, 'F');
+    fill(C.navy2); doc.circle(W - 8, 4, 30, 'F');
+    fill(C.gold); doc.rect(0, 50, W, 1.4, 'F');
+    fill(C.white); doc.roundedRect(M, 11, 27, 27, 4, 4, 'F');
+    if (assets && assets.logo) { try { doc.addImage(assets.logo, /^data:image\/png/i.test(assets.logo) ? 'PNG' : 'JPEG', M + 2, 13, 23, 23); } catch (_) {} }
+    ink(C.gold); font('bold', 7.6); doc.text(L.kicker, M + 33, 16, { charSpace: 0.5 });
+    ink(C.white); font('bold', 18); doc.text(L.title1 + ' ' + L.title2, M + 33, 24.5);
+    font('normal', 10); ink([226, 232, 240]); doc.text(m.schoolName + '   |   ' + L.meeting + '   |   ' + L.year + ' ' + m.filters.year, M + 33, 31.5);
     const period = formatDate(m.filters.fromDate, lang) + '  -  ' + formatDate(m.filters.toDate, lang);
-    font('bold', 9.5); const pw = doc.getTextWidth(period) + 12;
-    fill(C.navy2); doc.roundedRect(M, 96, pw, 9, 4.5, 4.5, 'F'); ink(C.white); doc.text(period, M + 6, 101.8);
+    font('bold', 8.6); const pw = doc.getTextWidth(period) + 10;
+    fill(C.gold); doc.roundedRect(M + 33, 35.5, pw, 7.5, 3.7, 3.7, 'F'); ink(C.navy); doc.text(period, M + 38, 40.4);
 
-    // cards
-    y = 126;
-    ink(C.navy); font('bold', 13); doc.text(L.glance, M, y + 4); fill(C.gold); doc.rect(M, y + 6.5, 18, 0.9, 'F');
-    y += 11;
+    // Colour cards: every card carries its own colour; value and words in white.
+    y = 58;
+    ink(C.navy); font('bold', 12.5); doc.text(L.glance, M, y + 3.5); fill(C.gold); doc.rect(M, y + 5.6, 18, 0.9, 'F');
+    y += 9;
     const f = m.fees;
     const g = gradeOf(s.average);
+    const toneColor = { green: [21, 101, 52], amber: [161, 98, 7], red: [153, 27, 27] };
     const cards = [
-      [L.card.avg[0], pct(s.average), L.card.avg[1](g, GRADE_WORDS[lang][g]), toneOf(s.average)],
-      [L.card.scored[0], String(s.scored), L.card.scored[1](s.learners), 'navy'],
-      [L.card.att[0], s.attendancePct > 0 ? pct(s.attendancePct) : '-', L.card.att[1](), s.attendancePct >= 92 ? 'green' : s.attendancePct >= 85 ? 'amber' : 'red'],
-      [L.card.exams[0], String(s.exams), L.card.exams[1](), 'navy'],
-      [L.card.best[0], s.bestClass ? s.bestClass.className : '-', s.bestClass ? L.card.best[1](pct(s.bestClass.average)) : '', 'green'],
-      [L.card.weak[0], s.weakClass ? s.weakClass.className : '-', s.weakClass ? L.card.weak[1](pct(s.weakClass.average)) : '', toneOf(s.weakClass ? s.weakClass.average : 0)],
-      [L.card.owed[0], f ? money(f.owed) : '-', f ? L.card.owed[1](f.debtors) : '', 'gold'],
-      [L.card.cleared[0], f ? String(f.cleared) : '-', f ? L.card.cleared[1](Math.round(f.clearedPct) + '%') : '', 'teal']
+      [L.card.avg[0], pct(s.average), L.card.avg[1](g, GRADE_WORDS[lang][g]), toneColor[toneOf(s.average)]],
+      [L.card.scored[0], String(s.scored), L.card.scored[1](s.learners), C.navy],
+      [L.card.att[0], s.attendancePct > 0 ? pct(s.attendancePct) : '-', L.card.att[1](), C.teal],
+      [L.card.exams[0], String(s.exams), L.card.exams[1](), [30, 62, 104]],
+      [L.card.best[0], s.bestClass ? s.bestClass.className : '-', s.bestClass ? L.card.best[1](pct(s.bestClass.average)) : '', [21, 128, 61]],
+      [L.card.weak[0], s.weakClass ? s.weakClass.className : '-', s.weakClass ? L.card.weak[1](pct(s.weakClass.average)) : '', [153, 27, 27]],
+      [L.card.owed[0], f ? money(f.net) : '-', f ? L.card.owed[1](f.debtors) : '', [161, 98, 7]],
+      [L.card.cleared[0], f ? String(f.cleared) : '-', f ? L.card.cleared[1](Math.round(f.clearedPct) + '%') : '', [15, 94, 88]]
     ];
-    const cw = (CW - 3 * 4) / 4; const ch = 31;
+    const cw = (CW - 3 * 4) / 4; const ch = 30;
     cards.forEach((card, i) => {
       const cx = M + (i % 4) * (cw + 4); const cy = y + Math.floor(i / 4) * (ch + 4);
-      const tone = card[3]; const accent = C[tone] || C.navy;
-      fill(C.white); doc.roundedRect(cx, cy, cw, ch, 3, 3, 'F');
-      fill(accent); doc.roundedRect(cx, cy, cw, 5, 3, 3, 'F');
-      fill(C.white); doc.rect(cx, cy + 2.4, cw, 2.8, 'F');
-      stroke(C.line); doc.setLineWidth(0.2); doc.roundedRect(cx, cy, cw, ch, 3, 3, 'S');
-      ink(C.muted); font('bold', 6.9); doc.text(card[0].toUpperCase(), cx + 3.5, cy + 8.2);
-      ink(accent); font('bold', card[1].length > 11 ? 11 : 15.5); doc.text(card[1], cx + 3.5, cy + 17.5);
-      ink(C.muted); font('normal', 7.2); doc.text(split(card[2], cw - 7).slice(0, 2), cx + 3.5, cy + 23.5);
+      const base = card[3];
+      fill(base); doc.roundedRect(cx, cy, cw, ch, 3.5, 3.5, 'F');
+      // Decoration stays inside the card.
+      fill(lighten(base, 0.12)); doc.circle(cx + cw - 9, cy + 9.5, 6.5, 'F');
+      fill(lighten(base, 0.22)); doc.circle(cx + cw - 5, cy + ch - 5, 2.6, 'F');
+      ink(lighten(base, 0.78)); font('bold', 6.8); doc.text(card[0].toUpperCase(), cx + 3.5, cy + 7.4);
+      ink(C.white); font('bold', card[1].length > 11 ? 11.5 : 16); doc.text(card[1], cx + 3.5, cy + 17);
+      ink(lighten(base, 0.82)); font('normal', 7.1); doc.text(split(card[2], cw - 7).slice(0, 2), cx + 3.5, cy + 23);
     });
-    y += 2 * ch + 4 + 6;
+    y += 2 * ch + 4 + 5;
 
-    // key message
     const keyLines = [];
     keyLines.push(lang === 'sw'
       ? 'Wastani wa shule ni ' + pct(s.average) + ' (daraja ' + g + '). ' + (s.bestClass ? s.bestClass.className + ' linaongoza; ' : '') + (s.weakClass ? s.weakClass.className + ' linahitaji msaada wa karibu.' : '')
       : 'The school average is ' + pct(s.average) + ' (grade ' + g + '). ' + (s.bestClass ? s.bestClass.className + ' leads; ' : '') + (s.weakClass ? s.weakClass.className + ' needs the closest support.' : ''));
-    if (m.subjects.weak.length) {
-      const ws = Array.from(new Set(m.subjects.weak.map((x) => x.subject))).slice(0, 3);
-      keyLines.push(lang === 'sw' ? 'Masomo yanayohitaji msukumo zaidi: ' + listJoin(ws, lang) + '.' : 'Subjects needing the strongest push: ' + listJoin(ws, lang) + '.');
+    if (m.teachers.failing.length) {
+      keyLines.push(lang === 'sw'
+        ? 'Masomo ' + m.teachers.failing.length + ' yako chini ya 60%; walimu ' + m.teachers.pledges.length + ' (pamoja na nafasi zisizo na mwalimu) watasaini ahadi za kupandisha matokeo.'
+        : m.teachers.failing.length + ' subjects are below 60%; ' + m.teachers.pledges.length + ' pledge(s) will be signed to raise them.');
     }
     if (m.improvers.length) keyLines.push(lang === 'sw' ? 'Wanafunzi ' + m.improvers.length + ' wameimarika kwa kiwango kikubwa na wanatambuliwa katika taarifa hii.' : m.improvers.length + ' learners improved strongly and are recognised in this report.');
     callout(L.keyMessage, keyLines.join(' '), 'gold');
 
-    // contents
-    ink(C.navy); font('bold', 10); doc.text(L.contents, M, y + 3); y += 6;
+    // Mini class chart on the cover.
+    const rowsC = m.active;
+    const chH = 11 + rowsC.length * 5.2;
+    stroke(C.line); fill(C.white); doc.roundedRect(M, y, CW, chH, 3, 3, 'FD');
+    ink(C.navy); font('bold', 9); doc.text(L.classBars, M + 4, y + 6);
+    const bx0 = M + 30; const bx1 = M + CW - 18; const span = bx1 - bx0;
+    rowsC.forEach((c, i) => {
+      const ry = y + 9 + i * 5.2;
+      ink(C.ink); font('normal', 7.6); doc.text(c.className, bx0 - 2.5, ry + 3.2, { align: 'right' });
+      fill(C.soft); doc.roundedRect(bx0, ry + 0.8, span, 3.2, 1.4, 1.4, 'F');
+      fill(C[toneOf(c.average)]); doc.roundedRect(bx0, ry + 0.8, Math.max(1.5, span * c.average / 100), 3.2, 1.4, 1.4, 'F');
+      ink(C.ink); font('bold', 7.4); doc.text(pct(c.average), bx0 + span * c.average / 100 + 1.8, ry + 3.4);
+    });
+    const avx = bx0 + span * s.average / 100;
+    stroke(C.gold); doc.setLineWidth(0.5); doc.setLineDashPattern([1, 0.8], 0); doc.line(avx, y + 8.5, avx, y + chH - 1.5); doc.setLineDashPattern([], 0); doc.setLineWidth(0.2);
+    y += chH + 5;
+
+    ink(C.navy); font('bold', 9.5); doc.text(L.contents, M, y + 3); y += 5.5;
     const secList = L.sections;
     const half = Math.ceil(secList.length / 2);
-    font('normal', 8.4);
     secList.forEach((name, i) => {
-      const cx = M + (i < half ? 0 : CW / 2); const cy = y + (i % half) * 4.9;
-      ink(C.gold); font('bold', 8.4); doc.text(String(i + 1).padStart(2, '0'), cx, cy + 3);
-      ink(C.ink); font('normal', 8.4); doc.text(name, cx + 7, cy + 3);
+      const cx = M + (i < half ? 0 : CW / 2); const cy = y + (i % half) * 4.5;
+      ink(C.gold); font('bold', 8); doc.text(String(i + 1).padStart(2, '0'), cx, cy + 3);
+      ink(C.ink); font('normal', 8); doc.text(name, cx + 7, cy + 3);
     });
-    y += half * 4.9 + 3;
-    stroke(C.line); doc.line(M, 280, W - M, 280);
-    ink(C.muted); font('normal', 7.8);
+    stroke(C.line); doc.line(M, 281, W - M, 281);
+    ink(C.muted); font('normal', 7.6);
     const leaders = (assets && assets.leaders || []).filter(Boolean);
-    doc.text(L.preparedBy + (leaders.length ? ': ' + leaders.join(' & ') : ''), M, 285);
-    const now = new Date();
-    const localIso = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-    doc.text(L.printed + ': ' + formatDate(localIso, lang), W - M, 285, { align: 'right' });
+    doc.text(L.preparedBy + (leaders.length ? ': ' + leaders.join(' & ') : ''), M, 286);
+    doc.text(L.printed + ': ' + formatDate(localIso(), lang), W - M, 286, { align: 'right' });
 
     // ================================================================ body
+    function classCard(cl) {
+      const tone = cl.tone === 'good' ? 'green' : cl.tone === 'mid' ? 'amber' : 'red';
+      const wrapped = cl.lines.map((ln, i) => { font(i === 0 ? 'bold' : 'normal', 9.3); return split(ln, CW - 12); });
+      const h = 10.5 + wrapped.reduce((sum, w) => sum + w.length * 3.95 + 0.9, 0);
+      ensure(h + 3);
+      fill(tintOf(tone)); doc.roundedRect(M, y, CW, h, 3, 3, 'F');
+      fill(C[tone]); doc.rect(M, y, 2.4, h, 'F');
+      ink(C[tone]); font('bold', 10.5); doc.text(cl.className, M + 7, y + 6.3);
+      let ty = y + 11.3;
+      wrapped.forEach((w, i) => { ink(C.ink); font(i === 0 ? 'bold' : 'normal', 9.3); doc.text(w, M + 7, ty); ty += w.length * 3.95 + 0.9; });
+      y += h + 3;
+    }
+    function signatureRow(titles) {
+      ensure(34);
+      const sw3 = (CW - 8) / titles.length;
+      titles.forEach((title, i) => {
+        const sx = M + i * (sw3 + 4);
+        fill(C.white); stroke(C.line); doc.roundedRect(sx, y, sw3, 30, 3, 3, 'FD');
+        ink(C.navy); font('bold', 8.4); doc.text(title, sx + 4, y + 6);
+        ink(C.muted); font('normal', 7.6);
+        [L.signName, L.signSign].forEach((lab, k) => {
+          doc.text(lab + ':', sx + 4, y + 15 + k * 9);
+          stroke([203, 213, 225]); doc.line(sx + 19, y + 15.4 + k * 9, sx + sw3 - 4, y + 15.4 + k * 9);
+        });
+      });
+      y += 35;
+    }
+    function pledgeBox(p, n) {
+      font('normal', 8.7);
+      const lines = split(pledgeText(p, lang), CW - 22);
+      const h = 7 + lines.length * 3.75 + 10;
+      ensure(h + 2.5);
+      const tone = p.unassigned ? C.red : C.amber;
+      fill(C.white); stroke(C.line); doc.roundedRect(M, y, CW, h, 2.5, 2.5, 'FD');
+      fill(tone); doc.roundedRect(M, y, 14, h, 2.5, 2.5, 'F'); doc.rect(M + 10, y, 4, h, 'F');
+      ink(C.white); font('bold', 6.4); doc.text(X.pledgeLabel, M + 7, y + 6, { align: 'center' });
+      font('bold', 13); doc.text(String(n), M + 7, y + 13.5, { align: 'center' });
+      ink(C.ink); font('normal', 8.7); doc.text(lines, M + 18, y + 6);
+      const sy = y + 7 + lines.length * 3.75 + 5;
+      ink(C.muted); font('normal', 7.6);
+      const cols = [[L.signSign, M + 18], [L.signDate, M + 78], [lang === 'sw' ? 'Shahidi (Mwalimu wa Taaluma)' : 'Witness (Academic Teacher)', M + 118]];
+      cols.forEach(([lab, x], k) => {
+        doc.text(lab + ':', x, sy);
+        const end = k === 2 ? M + CW - 4 : cols[k + 1][1] - 4;
+        stroke([203, 213, 225]); doc.line(x + doc.getTextWidth(lab + ':') + 2, sy + 0.4, end, sy + 0.4);
+      });
+      y += h + 2.5;
+    }
+
     addPage();
     section(1, L.sections[0]);
     words.intro.forEach((t) => para(t));
+    if (m.anomalies.length) {
+      subheading(X.anomTitle);
+      table(X.anomHead,
+        m.anomalies.map((a) => [a.className, a.examLabel + ' / ' + L.monthWord(monthIndex(a.monthKey)), titleName(a.name) + (a.onRoll ? '' : ' ' + X.notOnRoll), a.subject, a.teacher ? shortName(a.teacher) : X.noTeacher, Number(a.score).toLocaleString('en-US'), String(a.max)]),
+        { headColor: C.red, fontSize: 8, columnStyles: { 5: { halign: 'right', textColor: C.red, fontStyle: 'bold' }, 6: { halign: 'center' } } });
+    }
 
     section(2, L.sections[1]);
     words.overall.forEach((t) => para(t));
@@ -1023,20 +1350,20 @@
       m.active.map((c) => [c.className, String(c.learners), String(c.scoredCount), pct(c.average), c.grade, c.attendancePct ? pct(c.attendancePct) : '-', shortName(c.classTeacher) || '-']),
       { columnStyles: { 1: { halign: 'center' }, 2: { halign: 'center' }, 3: { halign: 'center' }, 4: { halign: 'center' }, 5: { halign: 'center' } }, didParseCell: toneCell(3, (i) => m.active[i] && m.active[i].average) }
     );
-    words.classLines.forEach((cl) => callout(null, cl.text, cl.tone === 'good' ? 'green' : cl.tone === 'mid' ? 'amber' : 'red'));
+    words.classLines.forEach(classCard);
 
     section(4, L.sections[3]);
     words.subjects.forEach((t) => para(t));
     if (m.subjects.weak.length) {
       subheading(L.weakSubjects);
       table([L.col.cls, L.col.subject, L.col.teacher, L.col.avg],
-        m.subjects.weak.map((x) => [x.className, x.subject, x.teacher === NOT_MAPPED ? (lang === 'sw' ? 'Hajapangwa kwenye mfumo' : 'Not mapped') : shortName(x.teacher), pct(x.avg)]),
+        m.subjects.weak.map((x) => [x.className, x.subject, x.teacher === NOT_MAPPED ? X.noTeacher : shortName(x.teacher), pct(x.avg)]),
         { headColor: C.red, columnStyles: { 3: { halign: 'center', fontStyle: 'bold', textColor: C.red } } });
     }
     if (m.subjects.strong.length) {
       subheading(L.strongSubjects);
       table([L.col.cls, L.col.subject, L.col.teacher, L.col.avg],
-        m.subjects.strong.map((x) => [x.className, x.subject, x.teacher === NOT_MAPPED ? '-' : shortName(x.teacher), pct(x.avg)]),
+        m.subjects.strong.map((x) => [x.className, x.subject, x.teacher === NOT_MAPPED ? X.noTeacher : shortName(x.teacher), pct(x.avg)]),
         { headColor: C.teal, columnStyles: { 3: { halign: 'center', fontStyle: 'bold', textColor: C.green } } });
     }
 
@@ -1073,14 +1400,29 @@
 
     section(7, L.sections[6]);
     words.teachers.forEach((t) => para(t));
-    if (m.teachers.support.length) {
-      subheading(L.supportTitle);
-      table([L.col.teacher, L.col.subjects, L.col.avg, L.col.vsClass],
-        m.teachers.support.map((r) => [shortName(r.teacher), r.items.slice(0, 4).map((i) => i.subject + ' (' + i.className + ') ' + pct(i.avg)).join('; '), pct(r.avg), (r.gap >= 0 ? '+' : '') + r.gap.toFixed(1)]),
-        { headColor: C.amber, columnStyles: { 0: { cellWidth: 40, fontStyle: 'bold' }, 2: { halign: 'center', cellWidth: 18 }, 3: { halign: 'center', cellWidth: 26 } } });
+    if (m.teachers.failing.length) {
+      subheading(X.failingTitle);
+      const fl = m.teachers.failing;
+      table(X.failingHead,
+        fl.map((r) => [r.className, r.subject, r.teacher === NOT_MAPPED ? X.noTeacher : shortName(r.teacher), pct(r.avg), (r.gap >= 0 ? '+' : '') + r.gap.toFixed(1), r.below40 + ' / ' + r.learners, r.target + '%']),
+        { fontSize: 8, headColor: C.red,
+          columnStyles: { 3: { halign: 'center', fontStyle: 'bold' }, 4: { halign: 'center' }, 5: { halign: 'center' }, 6: { halign: 'center', fontStyle: 'bold', textColor: C.teal } },
+          didParseCell: (d) => {
+            if (d.section !== 'body') return;
+            const r = fl[d.row.index]; if (!r) return;
+            if (d.column.index === 3) d.cell.styles.textColor = C[toneOf(r.avg)];
+            if (d.column.index === 2 && r.teacher === NOT_MAPPED) { d.cell.styles.textColor = C.red; d.cell.styles.fontStyle = 'bold'; }
+          } });
+      ink(C.muted); font('normal', 7.4);
+      doc.text(lang === 'sw' ? '"Na darasa" = tofauti kati ya somo na wastani wa darasa lake. "Chini ya 40%" = wanafunzi walio chini ya 40% kati ya waliofanya.' : '"vs class" = subject minus its class average. "Below 40%" = learners under 40% of those assessed.', M, y - 1.5);
+      y += 3;
     }
+    if (words.teacherProfiles.length) {
+      subheading(X.profilesTitle);
+      words.teacherProfiles.forEach((p) => callout(shortName(p.teacher) + '  -  ' + pct(p.avg), p.text, p.avg < 50 ? 'red' : 'amber'));
+    }
+    (words.teachersTail || []).forEach((t) => para(t));
     if (mode !== 'committee' && m.teachers.rows.length) {
-      // Worker attendance columns only when the attendance data actually matched these teachers.
       const hasEffort = m.teachers.rows.some((r) => r.attendancePct != null || r.lateDays > 0);
       subheading(hasEffort ? 'All teacher blocks (subject results, worker attendance)' : 'All teacher blocks (subject results)');
       table(['Teacher', 'Classes', 'Average', 'vs class'].concat(hasEffort ? ['Attendance', 'Late'] : []),
@@ -1098,52 +1440,58 @@
     words.fees.forEach((t) => para(t));
     if (f) {
       subheading(L.feeTable);
-      table([L.col.cls, L.col.learners, L.col.cleared, L.col.debtors, L.col.owed, L.col.late],
-        f.classes.map((c) => [c.className, String(c.roll), String(c.cleared), String(c.debtorCount), c.owed > 0 ? money(c.owed) : '-', String(c.overdueCount)]),
-        { headColor: C.navy, foot: [L.col.total, String(f.roll), String(f.cleared), String(f.debtors), money(f.owed), String(f.overdueCount)],
-          columnStyles: { 1: { halign: 'center' }, 2: { halign: 'center', textColor: C.green, fontStyle: 'bold' }, 3: { halign: 'center' }, 4: { halign: 'right', fontStyle: 'bold' }, 5: { halign: 'center' } } });
+      table(X.feeHead,
+        f.classes.map((c) => [c.className, String(c.roll), String(c.cleared), String(c.debtorCount), c.owed > 0 ? money(c.owed) : '-', c.advance > 0.5 ? money(c.advance) : '-', money(c.net), String(c.overdueCount)]),
+        { headColor: C.navy, fontSize: 7.8, foot: [L.col.total, String(f.roll), String(f.cleared), String(f.debtors), money(f.owed), money(f.advance), money(f.net), String(f.overdueCount)],
+          columnStyles: { 1: { halign: 'center' }, 2: { halign: 'center', textColor: C.green, fontStyle: 'bold' }, 3: { halign: 'center' }, 4: { halign: 'right' }, 5: { halign: 'right' }, 6: { halign: 'right', fontStyle: 'bold' }, 7: { halign: 'center' } } });
       const maxOwed = Math.max(1, ...f.classes.map((c) => c.owed));
-      hbars(lang === 'sw' ? 'Salio lililobaki kwa darasa' : 'Unpaid balance by class',
+      hbars(lang === 'sw' ? 'Kiasi wanachodaiwa wazazi kwa darasa' : 'Amount owed by class',
         f.classes.map((c) => ({ label: c.className, value: (c.owed * 78) / maxOwed, text: c.owed > 0 ? money(c.owed) : '-', color: C.gold })),
         { ticks: [], labelW: 30 });
-      subheading(L.debtorsTitle);
-      const debtorRows = [];
-      const groupRows = [];
-      f.classes.filter((c) => c.topDebtors.length).forEach((c) => {
-        groupRows.push(debtorRows.length);
-        debtorRows.push([{ content: c.className + '  -  ' + (lang === 'sw' ? 'wenye salio: ' : 'learners with a balance: ') + c.debtorCount, colSpan: mode === 'committee' ? 3 : 4 }]);
-        c.topDebtors.forEach((d) => {
-          const row = [titleName(d.name), titleName(d.parent) || '-', money(d.balance)];
-          if (mode !== 'committee') row.splice(2, 0, d.contact || '-');
-          debtorRows.push(row);
+      subheading(X.callTitle);
+      table(X.callHead,
+        f.largestDebtors.map((d, i) => [String(i + 1), d.name, d.className, d.parent || '-', d.contact || '-', money(d.balance), '']),
+        { headColor: C.red, fontSize: 8, columnStyles: { 0: { cellWidth: 9, halign: 'center' }, 5: { halign: 'right', fontStyle: 'bold', cellWidth: 25 }, 6: { cellWidth: 26 } } });
+
+      // Full list, grouped by class, largest first; first five per class shaded.
+      currentSection = X.fullTitle;
+      if (y + 60 > BOTTOM) addPage(); else y += 3;
+      subheading(X.fullTitle);
+      para(X.fullNote, { size: 8.4, color: C.muted });
+      const fullRows = []; const groupRows = []; const topRows = [];
+      f.classes.filter((c) => c.debtorCount).forEach((c) => {
+        groupRows.push(fullRows.length);
+        fullRows.push([{ content: c.className + '   -   ' + (lang === 'sw' ? 'wenye salio ' : 'with balance ') + c.debtorCount + '   -   ' + money(c.owed), colSpan: 6 }]);
+        c.debtors.forEach((d, i) => {
+          if (i < 5) topRows.push(fullRows.length);
+          fullRows.push([String(i + 1), d.name, d.parent || '-', [d.contact, d.contact2].filter(Boolean).join(' / ') || '-', money(d.balance), '']);
         });
       });
-      const head = mode === 'committee' ? [L.col.name, L.col.parent, L.col.balance] : [L.col.name, L.col.parent, 'Contact', L.col.balance];
-      const lastCol = head.length - 1;
-      table(head, debtorRows, {
-        fontSize: 8.2,
-        columnStyles: { [lastCol]: { halign: 'right', fontStyle: 'bold' } },
+      table(X.fullHead, fullRows, {
+        fontSize: 7.9,
+        columnStyles: { 0: { cellWidth: 9, halign: 'center' }, 4: { halign: 'right', fontStyle: 'bold', cellWidth: 25 }, 5: { cellWidth: 30 } },
         didParseCell: (d) => {
-          if (d.section === 'body' && groupRows.includes(d.row.index)) { d.cell.styles.fillColor = C.navyTint; d.cell.styles.fontStyle = 'bold'; d.cell.styles.textColor = C.navy; }
+          if (d.section !== 'body') return;
+          if (groupRows.includes(d.row.index)) { d.cell.styles.fillColor = C.navyTint; d.cell.styles.fontStyle = 'bold'; d.cell.styles.textColor = C.navy; }
+          else if (topRows.includes(d.row.index)) { d.cell.styles.fillColor = C.goldTint; }
         }
       });
+      para(lang === 'sw' ? 'Orodha hii imehakikiwa na:' : 'List verified by:', { size: 9, bold: true });
+      signatureRow(X.listSign);
     }
 
     section(10, L.sections[9]);
-    words.recommendations.forEach((r, i) => {
-      font('normal', 9.6);
-      const lines = split(r[1], CW - 20);
-      const h = 10 + lines.length * 3.95;
-      ensure(h + 3);
-      fill(C.white); stroke(C.line); doc.roundedRect(M, y, CW, h, 3, 3, 'FD');
-      fill(C.teal); doc.circle(M + 7, y + 6.5, 3.6, 'F');
-      ink(C.white); font('bold', 9); doc.text(String(i + 1), M + 7, y + 7.8, { align: 'center' });
-      ink(C.navy); font('bold', 10); doc.text(r[0], M + 14, y + 7.4);
-      ink(C.ink); font('normal', 9.6); doc.text(lines, M + 14, y + 12.4);
-      y += h + 3;
-    });
+    table(X.resHead,
+      words.resolutions.map((r, i) => [String(i + 1), r.action, r.owner, r.due, r.measure]),
+      { headColor: C.teal, fontSize: 7.9,
+        columnStyles: { 0: { cellWidth: 9, halign: 'center', fontStyle: 'bold' }, 1: { cellWidth: 70 }, 2: { cellWidth: 30, fontStyle: 'bold', textColor: C.navy }, 3: { cellWidth: 30 } } });
+    callout(null, words.resolutionsNote, 'navy');
 
     section(11, L.sections[10]);
+    para(words.pledgeIntro);
+    m.teachers.pledges.forEach((p, i) => pledgeBox(p, i + 1));
+
+    section(12, L.sections[11]);
     para(words.closing);
     ensure(52);
     y += 4;
@@ -1162,20 +1510,11 @@
 
     // ================================================================ appendices (teachers only)
     if (mode !== 'committee') {
-      if (m.anomalies.length) {
-        currentSection = 'Appendix A - Marks to correct';
-        addPage();
-        ink(C.red); font('bold', 14); doc.text('Appendix A - Marks to correct in the scoresheet', M, y + 6); y += 11;
-        para('These marks are higher than the exam maximum, so they cannot be real. They were left out of every figure above. Subject teachers should enter the correct mark.', { size: 9.4 });
-        table(['Class', 'Exam', 'Month', 'Learner', 'Subject', 'Entered', 'Max'],
-          m.anomalies.map((a) => [a.className, a.examLabel, a.monthKey, titleName(a.name), a.subject, Number(a.score).toLocaleString('en-US'), String(a.max)]),
-          { headColor: C.red, fontSize: 8, columnStyles: { 5: { halign: 'right', textColor: C.red, fontStyle: 'bold' }, 6: { halign: 'center' } } });
-      }
       const weakRows = m.active.flatMap((c) => c.weakLearners.map((st) => [c.className, titleName(st.name), pct(st.overallPct), st.attendancePct ? pct(st.attendancePct) : '-', num(st.fee && st.fee.balance) > 0.5 ? money(st.fee.balance) : 'Clear']));
       if (weakRows.length) {
-        currentSection = 'Appendix B - Learner support list';
+        currentSection = 'Appendix - Learner support list';
         addPage();
-        ink(C.amber); font('bold', 14); doc.text('Appendix B - Learners at grade D or F (support list)', M, y + 6); y += 11;
+        ink(C.amber); font('bold', 14); doc.text('Appendix - Learners at grade D or F (support list)', M, y + 6); y += 11;
         para('Learners who sat at least half of their class\'s exams and average below 40.5% (grade D or F). Each needs a named teacher, small-group support and a parent meeting.', { size: 9.4 });
         table(['Class', 'Learner', 'Average', 'Attendance', 'Fee balance'], weakRows, { headColor: C.amber, fontSize: 8.2, columnStyles: { 2: { halign: 'center', textColor: C.red, fontStyle: 'bold' }, 3: { halign: 'center' }, 4: { halign: 'right' } } });
       }
@@ -1187,7 +1526,7 @@
       }
       const notes = [];
       m.dataNotes.unscored.forEach((u) => notes.push(u.className + ': ' + u.count + ' learner(s) on the roll have no mark in this window.'));
-      if (m.teachers.unmapped) notes.push(m.teachers.unmapped + ' class-subject pair(s) have no teacher mapped.');
+      if (m.teachers.unmappedList.length) notes.push('No teacher mapped: ' + m.teachers.unmappedList.map((u) => u.subject + ' ' + u.className).join(', ') + '.');
       s.noAttendance.forEach((c) => notes.push(c + ': no attendance register found for the window.'));
       if (notes.length) {
         subheading('Data notes for the Academic Office');
@@ -1224,7 +1563,103 @@
   // ---------------------------------------------------------------- on-screen brief
   function esc(v) { return String(v == null ? '' : v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-  function renderBrief(el, report, mode) {
+  // ---------------------------------------------------------------- pledges saved to SoMAp
+  // Path: academicCommitments/{year}/{key} (school-scoped via SOMAP.P). The teacher dashboard
+  // (shared/academic_commitments_reminder.js) reminds each teacher until the deadline.
+  const slugKey = (v) => String(v || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'X';
+  function commitmentsRef(year, key) {
+    const db = global.firebase && global.firebase.database ? global.firebase.database() : null;
+    if (!db) return null;
+    const path = 'academicCommitments/' + year + (key ? '/' + key : '');
+    return db.ref(global.SOMAP && global.SOMAP.P ? global.SOMAP.P(path) : path);
+  }
+  function pledgeKey(m, p) {
+    const subject = (p.items || []).map((i) => i.subject + '_' + i.className).join('_');
+    return slugKey(m.meetingDate + '_' + (p.teacher || 'UNASSIGNED_' + subject));
+  }
+
+  function renderCommitments(box, m, lang, opts) {
+    const sw = lang === 'sw';
+    const pledges = m.teachers.pledges || [];
+    if (!pledges.length) { box.innerHTML = ''; return; }
+    const canSave = Boolean(opts && opts.canSave);
+    const itemsText = (p) => [(p.items || []).map((i) => i.subject + ' ' + i.className + ' ' + pct(i.avg)).join(', '), p.classRole ? (sw ? 'Darasa ' : 'Class ') + p.classRole.className + ' ' + pct(p.classRole.avg) : ''].filter(Boolean).join(' | ');
+    box.innerHTML = '<div class="mt-5 rounded-2xl border border-amber-200 bg-white p-4">'
+      + '<div class="flex flex-wrap items-center justify-between gap-2"><div><div class="text-sm font-semibold text-slate-900">' + esc(sw ? 'Ahadi za walimu (jaza baada ya kikao kutoka kwenye karatasi iliyosainiwa)' : 'Teacher pledges (enter from the signed paper after the meeting)') + '</div>'
+      + '<div class="text-xs text-slate-500 mt-1">' + esc(sw ? 'Ikihifadhiwa, mwalimu ataona ukumbusho kwenye ukurasa wake kila siku hadi tarehe ya mwisho.' : 'Once saved, the teacher sees a reminder on their dashboard every day until the deadline.') + '</div></div>'
+      + (canSave ? '' : '<span class="mini-chip">' + esc(sw ? 'Mwalimu wa Taaluma / Mwalimu Mkuu pekee' : 'Academic Teacher / Head only') + '</span>') + '</div>'
+      + '<div class="mt-3 space-y-3">' + pledges.map((p, i) => '<div class="rounded-xl border border-slate-200 p-3" data-pledge="' + i + '">'
+        + '<div class="flex flex-wrap items-center gap-2 text-sm"><span class="mini-chip" style="background:' + (p.unassigned ? '#fee2e2;color:#991b1b' : '#fef3c7;color:#92400e') + '">' + (i + 1) + '</span>'
+        + (p.unassigned
+          ? '<input data-f="teacher" class="soft-input" style="max-width:260px;padding:.45rem .7rem" placeholder="' + esc(sw ? 'Jina la mwalimu' : 'Teacher name') + '">'
+          : '<strong>' + esc(shortName(p.teacher)) + '</strong>')
+        + '<span class="text-slate-500">' + esc(itemsText(p)) + '</span></div>'
+        + '<div class="grid sm:grid-cols-[110px_110px_1fr_auto] gap-2 mt-2">'
+        + '<input data-f="days" type="number" min="1" class="soft-input" style="padding:.45rem .7rem" placeholder="' + esc(sw ? 'Siku' : 'Days') + '">'
+        + '<input data-f="target" type="number" min="1" max="100" class="soft-input" style="padding:.45rem .7rem" placeholder="' + esc((sw ? 'Lengo % (min ' : 'Target % (min ') + p.target + ')') + '">'
+        + '<input data-f="consequence" class="soft-input" style="padding:.45rem .7rem" placeholder="' + esc(sw ? 'Nisipotimiza, naomba...' : 'If I fail, I ask that...') + '">'
+        + '<button data-f="save" class="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm"' + (canSave ? '' : ' disabled style="opacity:.45"') + '>' + esc(sw ? 'Hifadhi' : 'Save') + '</button>'
+        + '</div><div data-f="status" class="text-xs text-slate-500 mt-1"></div></div>').join('') + '</div></div>';
+
+    const ref = commitmentsRef(m.filters.year);
+    // Prefill from anything already saved for this meeting.
+    if (ref) {
+      ref.once('value').then((snap) => {
+        const saved = (snap && snap.val && snap.val()) || {};
+        pledges.forEach((p, i) => {
+          const row = box.querySelector('[data-pledge="' + i + '"]');
+          const rec = saved[pledgeKey(m, p)];
+          if (!row || !rec) return;
+          if (rec.teacher && row.querySelector('[data-f="teacher"]')) row.querySelector('[data-f="teacher"]').value = rec.teacher;
+          row.querySelector('[data-f="days"]').value = rec.days || '';
+          row.querySelector('[data-f="target"]').value = rec.targetPct || '';
+          row.querySelector('[data-f="consequence"]').value = rec.consequence || '';
+          row.querySelector('[data-f="status"]').textContent = (sw ? 'Imehifadhiwa. Mwisho: ' : 'Saved. Deadline: ') + formatDate(rec.deadline, lang);
+        });
+      }).catch(() => {});
+    }
+    box.querySelectorAll('[data-f="save"]').forEach((btn) => btn.addEventListener('click', async () => {
+      const row = btn.closest('[data-pledge]');
+      const p = pledges[Number(row.getAttribute('data-pledge'))];
+      const status = row.querySelector('[data-f="status"]');
+      const teacherInput = row.querySelector('[data-f="teacher"]');
+      const teacher = p.teacher || (teacherInput ? teacherInput.value.trim().toUpperCase() : '');
+      const days = Math.round(Number(row.querySelector('[data-f="days"]').value));
+      const targetPct = Number(row.querySelector('[data-f="target"]').value);
+      const consequence = row.querySelector('[data-f="consequence"]').value.trim();
+      if (!teacher) { status.textContent = sw ? 'Andika jina la mwalimu.' : 'Enter the teacher name.'; return; }
+      if (!(days > 0) || !(targetPct > 0 && targetPct <= 100)) { status.textContent = sw ? 'Jaza siku na lengo (%) kama zilivyoandikwa kwenye karatasi.' : 'Fill days and target (%) as written on the paper.'; return; }
+      const r = commitmentsRef(m.filters.year, pledgeKey(m, { ...p, teacher: p.teacher || '' }));
+      if (!r) { status.textContent = 'Database not available.'; return; }
+      const record = {
+        teacher,
+        workerId: p.workerId || (opts && opts.resolveWorkerId ? opts.resolveWorkerId(teacher) || '' : ''),
+        roles: p.roles || ['subject'],
+        items: (p.items || []).map((i) => ({ className: i.className, subject: i.subject, baselinePct: Math.round(i.avg * 10) / 10 })),
+        classRole: p.classRole ? { className: p.classRole.className, baselinePct: Math.round(p.classRole.avg * 10) / 10 } : null,
+        baselinePct: Math.round(num(p.baseline) * 10) / 10,
+        minimumTargetPct: p.target,
+        targetPct,
+        days,
+        consequence,
+        meetingDate: m.meetingDate,
+        deadline: isoPlusDays(m.meetingDate, days),
+        window: { from: m.filters.fromDate, to: m.filters.toDate },
+        status: 'active',
+        savedBy: (opts && opts.savedBy) || '',
+        savedAt: Date.now()
+      };
+      btn.disabled = true;
+      try {
+        await r.set(record);
+        status.textContent = (sw ? 'Imehifadhiwa. Mwisho: ' : 'Saved. Deadline: ') + formatDate(record.deadline, lang);
+      } catch (err) {
+        status.textContent = (sw ? 'Imeshindikana: ' : 'Failed: ') + (err && err.message || err);
+      } finally { btn.disabled = false; }
+    }));
+  }
+
+  function renderBrief(el, report, mode, opts) {
     if (!el) return;
     const m = report && report.meeting;
     if (!m) { el.classList.add('hidden'); el.innerHTML = ''; return; }
@@ -1246,7 +1681,7 @@
       card(L.card.avg[0], pct(s.average), L.card.avg[1](g, GRADE_WORDS[lang][g]), toneOf(s.average)),
       card(L.card.best[0], s.bestClass ? s.bestClass.className : '-', s.bestClass ? L.card.best[1](pct(s.bestClass.average)) : '', 'green'),
       card(L.card.weak[0], s.weakClass ? s.weakClass.className : '-', s.weakClass ? L.card.weak[1](pct(s.weakClass.average)) : '', s.weakClass ? toneOf(s.weakClass.average) : ''),
-      card(L.card.owed[0], f ? money(f.owed) : '-', f ? L.card.owed[1](f.debtors) + ' | ' + L.card.cleared[0] + ': ' + f.cleared : '', 'amber'),
+      card(L.card.owed[0], f ? money(f.net) : '-', f ? L.card.owed[1](f.debtors) + ' | ' + L.card.cleared[0] + ': ' + f.cleared : '', 'amber'),
       '</div>',
       '<div class="mt-4 space-y-2 text-sm text-slate-700">' + w.overall.slice(0, 3).map((t) => '<p>' + esc(t) + '</p>').join('') + '</div>',
       '<div class="grid lg:grid-cols-3 gap-4 mt-5">',
@@ -1261,8 +1696,9 @@
       (mode !== 'committee' && m.anomalies.length) ? '<div class="mt-4 rounded-2xl bg-red-50 border border-red-200 p-4 text-sm text-red-800"><strong>' + m.anomalies.length + ' mark(s) above the exam maximum were excluded:</strong> ' + m.anomalies.map((a) => esc(a.className + ' ' + a.subject + ' (' + a.monthKey + ') ' + titleName(a.name) + ': ' + Number(a.score).toLocaleString('en-US') + '/' + a.max)).join('; ') + '</div>' : '',
       '</div>'
     ].join('');
-    el.innerHTML = html;
+    el.innerHTML = html + '<div data-commitments></div>';
     el.classList.remove('hidden');
+    try { renderCommitments(el.querySelector('[data-commitments]'), m, lang, opts); } catch (err) { console.warn('[meeting] pledges panel failed', err); }
   }
 
   global.SomapAcademicMeeting = Object.assign(global.SomapAcademicMeeting || {}, {
