@@ -85,6 +85,44 @@
       return { ...row, position: pos };
     });
   }
+  /**
+   * Top-learner order (agreed with the school 2026-11-24): highest average first, but when two
+   * neighbours are within CLOSE_MARGIN points, the one who sat more exam papers goes higher.
+   * Every such move is recorded so the report can explain it to parents.
+   */
+  const CLOSE_MARGIN = 1;
+  function rankLearners(list) {
+    // Compare the SHARE of the class's exams sat (classes sit different numbers of papers).
+    const share = (r) => Math.round(num(r.participation) * 1000) / 1000;
+    const rows = list.slice().sort((a, b) => num(b.overallPct) - num(a.overallPct) || share(b) - share(a));
+    const moves = [];
+    for (let pass = 0; pass < rows.length; pass += 1) {
+      let swapped = false;
+      for (let i = 0; i < rows.length - 1; i += 1) {
+        const hi = rows[i]; const lo = rows[i + 1];
+        const gap = num(hi.overallPct) - num(lo.overallPct);
+        if (gap <= CLOSE_MARGIN && share(lo) > share(hi)) {
+          rows[i] = lo; rows[i + 1] = hi; swapped = true;
+          moves.push({ up: lo, down: hi });
+        }
+      }
+      if (!swapped) break;
+    }
+    let lastKey = null; let lastPos = 0;
+    const ranked = rows.map((r, i) => {
+      const key = num(r.overallPct).toFixed(2) + '|' + share(r);
+      const position = key === lastKey ? lastPos : i + 1;
+      lastKey = key; lastPos = position;
+      return { ...r, position };
+    });
+    return { ranked, moves };
+  }
+  /** High scorers kept out of a top list by the gates (exams sat / attendance), for the explanation. */
+  function gateExclusions(scored, cutoff) {
+    return scored.filter((s) => !s.isEligible && num(s.overallPct) >= cutoff)
+      .sort((a, b) => num(b.overallPct) - num(a.overallPct))
+      .slice(0, 6);
+  }
   const takeTop = (ranked, n, cap) => ranked.filter((r) => r.position <= n).slice(0, cap || n + 3);
 
   // ---------------------------------------------------------------- learner profiles
@@ -133,7 +171,9 @@
     });
     const eligible = scored.filter((s) => s.participation >= 0.8 && s.attendanceOk
       && num(s.attemptedCount) >= Math.ceil(0.8 * maxSubjects));
-    const ranked = rankRows(eligible, (s) => num(s.rankScore));
+    scored.forEach((s) => { s.isEligible = eligible.includes(s); s.classPapers = maxPapers; });
+    const classOrder = rankLearners(eligible);
+    const ranked = classOrder.ranked;
 
     // Monthly profiles: a month counts for a learner only when they sat enough of that month's subjects.
     const profiles = new Map();
@@ -420,8 +460,18 @@
     const allScored = active.flatMap((c) => c.students.filter((s) => num(s.attemptedCount) > 0));
     const avgOf = (list) => mean(list.flatMap((c) => c.students.filter((s) => num(s.attemptedCount) > 0).map((s) => s.overallPct)));
 
-    const schoolTop = takeTop(rankRows(pri.flatMap((c) => c.eligible), (s) => num(s.rankScore)), 10, 12);
-    const preTop = takeTop(rankRows(pre.flatMap((c) => c.eligible), (s) => num(s.rankScore)), 5, 7);
+    const priOrder = rankLearners(pri.flatMap((c) => c.eligible));
+    const preOrder = rankLearners(pre.flatMap((c) => c.eligible));
+    const schoolTop = takeTop(priOrder.ranked, 10, 12);
+    const preTop = takeTop(preOrder.ranked, 5, 7);
+    const inList = (list) => (s) => list.some((t) => t.id === s.id && t.className === s.className);
+    const movesIn = (order, list) => order.moves.filter((mv) => inList(list)(mv.up) || inList(list)(mv.down))
+      .filter((mv, i, arr) => arr.findIndex((x) => x.up.id === mv.up.id && x.down.id === mv.down.id) === i);
+    const cutoff = (list) => (list.length ? Math.min(...list.map((t) => num(t.overallPct))) : 101);
+    const rankingNotes = {
+      primary: { moves: movesIn(priOrder, schoolTop), excluded: gateExclusions(pri.flatMap((c) => c.students.filter((s) => num(s.attemptedCount) > 0)), cutoff(schoolTop)) },
+      pre: { moves: movesIn(preOrder, preTop), excluded: gateExclusions(pre.flatMap((c) => c.students.filter((s) => num(s.attemptedCount) > 0)), cutoff(preTop)) }
+    };
     const improvers = active.flatMap((c) => c.improvers).sort((a, b) => b.gain - a.gain).slice(0, 10);
 
     // School month trend, Primary and Pre-Primary separately (different curricula).
@@ -483,6 +533,7 @@
       trend: { primary: trendFor(pri), pre: trendFor(pre) },
       schoolTop,
       preTop,
+      rankingNotes,
       improvers,
       drops: active.flatMap((c) => c.drops).sort((a, b) => a.gain - b.gain).slice(0, 10),
       subjects: {
@@ -608,8 +659,34 @@
       : (sw ? 'Hakuna somo lenye wastani chini ya 50% katika kipindi hiki. Hongera kwa walimu.' : 'No subject averaged below 50% in this window.'));
 
     out.top = sw
-      ? 'Wanafunzi hawa wamefanya vizuri mfululizo katika kipindi chote. Kanuni ni zile zile za mahafali: mwanafunzi anaingia kwenye nafasi tu kama amefanya angalau 80% ya mitihani ya darasa lake na amehudhuria shule angalau 70% ya siku. Kisha alama ya nafasi ni wastani wake ukizidishwa kwa sehemu ya mitihani aliyofanya: mwanafunzi aliyefanya mitihani yote kwa 86% anamzidi aliyefanya michache kwa 89%. Elimu ya Awali na Elimu ya Msingi zimepangwa kila moja peke yake.'
-      : 'These learners performed consistently across the window. Same rules as graduation: a learner is ranked only after sitting at least 80% of the class\'s exams and attending at least 70% of school days. The rank score is the average multiplied by the share of exams sat, so a learner who sat every exam at 86% ranks above one who sat few at 89%. Pre-Primary and Primary are ranked separately.';
+      ? 'Jinsi nafasi zilivyopangwa (kanuni zile zile za mahafali): (1) mwanafunzi anaingia kwenye nafasi tu kama amefanya angalau 80% ya mitihani ya darasa lake na amehudhuria shule angalau 70% ya siku; (2) kisha wanapangwa kwa wastani, wa juu kwanza; (3) wanafunzi wawili wakikaribiana sana (tofauti ya alama 1 au chini), aliyefanya mitihani mingi zaidi anatangulia, kwa sababu wastani wake umethibitishwa na mitihani mingi zaidi. Lakini tofauti ikiwa kubwa kuliko alama 1, wastani ndio unaoamua. Elimu ya Awali na Elimu ya Msingi zimepangwa kila moja peke yake.'
+      : 'How positions were set (same rules as graduation): (1) a learner is ranked only after sitting at least 80% of the class\'s exams and attending at least 70% of school days; (2) learners are then ordered by average, highest first; (3) when two are very close (1 point or less), the one who sat more exams goes first, because their average rests on more evidence. A gap larger than 1 point is decided by the average. Pre-Primary and Primary are ranked separately.';
+    // Plain explanations of every judgement, so parents see why each learner is where they are.
+    const explain = (notes) => {
+      const lines = [];
+      (notes.excluded || []).forEach((x) => {
+        const why = [];
+        if (num(x.participation) < 0.8) why.push(sw ? 'alifanya mitihani ' + x.papersSat + ' tu kati ya ' + x.papersMax + ' (' + Math.round(x.participation * 100) + '%)' : 'sat only ' + x.papersSat + ' of ' + x.papersMax + ' exam papers (' + Math.round(x.participation * 100) + '%)');
+        if (!x.attendanceOk) why.push(sw ? 'alihudhuria shule ' + pct(x.attendancePct) + ' ya siku' : 'attended ' + pct(x.attendancePct) + ' of school days');
+        if (!why.length) why.push(sw ? 'hakufanya masomo yote ya darasa' : 'did not sit all the class subjects');
+        const fewExams = num(x.participation) < 0.8;
+        const reasonSw = fewExams ? 'wastani wake unatokana na sehemu ndogo tu ya mitihani ya darasa, si kipindi chote'
+          : (!x.attendanceOk ? 'kanuni inataka mahudhurio ya angalau 70%; mwanafunzi asiyekuwepo shuleni mara nyingi hawezi kuwekwa juu ya wenzake waliokuwepo kila siku' : 'kanuni inataka masomo yote ya darasa');
+        const reasonEn = fewExams ? 'the average rests on only part of the class exams'
+          : (!x.attendanceOk ? 'the rule requires at least 70% attendance' : 'the rule requires all the class subjects');
+        lines.push(sw
+          ? titleName(x.name) + ' (' + x.className + ') alipata wastani wa ' + pct(x.overallPct) + ', lakini ' + listJoin(why, lang) + '. Hakuingizwa kwenye nafasi za juu kwa sababu ' + reasonSw + '.'
+          : titleName(x.name) + ' (' + x.className + ') averaged ' + pct(x.overallPct) + ' but ' + listJoin(why, lang) + ', so is not ranked: ' + reasonEn + '.');
+      });
+      (notes.moves || []).forEach((mv) => {
+        lines.push(sw
+          ? titleName(mv.up.name) + ' (wastani ' + pct(mv.up.overallPct) + ', mitihani ' + mv.up.papersSat + '/' + mv.up.papersMax + ') amewekwa juu ya ' + titleName(mv.down.name) + ' (wastani ' + pct(mv.down.overallPct) + ', mitihani ' + mv.down.papersSat + '/' + mv.down.papersMax + '). Ingawa wastani wake ni mdogo kidogo, tofauti ni ya alama ' + (num(mv.down.overallPct) - num(mv.up.overallPct)).toFixed(1) + ' tu, na yeye alifanya sehemu kubwa zaidi ya mitihani ya darasa lake (' + Math.round(num(mv.up.participation) * 100) + '% dhidi ya ' + Math.round(num(mv.down.participation) * 100) + '%).'
+          : titleName(mv.up.name) + ' (' + pct(mv.up.overallPct) + ', ' + mv.up.papersSat + '/' + mv.up.papersMax + ' exams) is placed above ' + titleName(mv.down.name) + ' (' + pct(mv.down.overallPct) + ', ' + mv.down.papersSat + '/' + mv.down.papersMax + ' exams): the averages differ by only ' + (num(mv.down.overallPct) - num(mv.up.overallPct)).toFixed(1) + ' point(s) and they sat a larger share of their class exams (' + Math.round(num(mv.up.participation) * 100) + '% vs ' + Math.round(num(mv.down.participation) * 100) + '%).');
+      });
+      return lines;
+    };
+    out.rankExplainPrimary = explain(m.rankingNotes ? m.rankingNotes.primary : {});
+    out.rankExplainPre = explain(m.rankingNotes ? m.rankingNotes.pre : {});
 
     out.improvers = sw
       ? 'Mafanikio si kuwa wa kwanza tu. Wanafunzi wafuatao wamepanda kwa kiwango kikubwa kutoka mwezi wa kwanza walipopimwa hadi mwezi wa karibuni, na wamewazidi wenzao katika kupanda huko. Wanastahili kutambuliwa ili waendelee kujituma.'
@@ -1186,7 +1263,7 @@
         list.forEach((st) => {
           ink(C.navy); font('bold', 8); doc.text(String(st.position) + '.', x + 3.5, ly);
           ink(C.ink); font('normal', 8); doc.text(split(shortName(st.name), colW - 26)[0], x + 9, ly);
-          ink(C[toneOf(st.rankScore)]); font('bold', 8); doc.text(num(st.rankScore).toFixed(1), x + colW - 3.5, ly, { align: 'right' });
+          ink(C[toneOf(st.overallPct)]); font('bold', 8); doc.text(pct(st.overallPct), x + colW - 3.5, ly, { align: 'right' });
           ly += 4.7;
         });
         rowH = Math.max(rowH, h);
@@ -1383,18 +1460,21 @@
 
     section(5, L.sections[4]);
     para(words.top);
-    const topHead = [L.col.pos, L.col.name, L.col.cls, L.col.avg, (lang === 'sw' ? 'Mitihani' : 'Exams sat'), (lang === 'sw' ? 'Mahudhurio' : 'Attendance'), (lang === 'sw' ? 'Alama ya nafasi' : 'Rank score')];
-    const topRow = (st) => [String(st.position), titleName(st.name), st.className, pct(st.overallPct), st.papersSat + '/' + st.papersMax, st.attendancePct ? pct(st.attendancePct) : '-', num(st.rankScore).toFixed(1)];
-    const topCols = { 0: { halign: 'center', cellWidth: 15, fontStyle: 'bold' }, 3: { halign: 'center' }, 4: { halign: 'center' }, 5: { halign: 'center' }, 6: { halign: 'center', fontStyle: 'bold', textColor: C.teal } };
+    const topHead = [L.col.pos, L.col.name, L.col.cls, L.col.avg, (lang === 'sw' ? 'Mitihani aliyofanya' : 'Exams sat'), (lang === 'sw' ? 'Mahudhurio' : 'Attendance'), L.col.grade];
+    const topRow = (st) => [String(st.position), titleName(st.name), st.className, pct(st.overallPct), st.papersSat + '/' + st.papersMax, st.attendancePct ? pct(st.attendancePct) : '-', gradeOf(st.overallPct)];
+    const topCols = { 0: { halign: 'center', cellWidth: 15, fontStyle: 'bold' }, 3: { halign: 'center', fontStyle: 'bold', textColor: C.teal }, 4: { halign: 'center' }, 5: { halign: 'center' }, 6: { halign: 'center' } };
+    const explainBox = (lines) => { if (lines.length) callout(lang === 'sw' ? 'Maelezo ya nafasi hizi' : 'Why these positions', lines.join('  '), 'navy'); };
     if (m.schoolTop.length) {
       subheading(L.topPrimary);
       table(topHead, m.schoolTop.map(topRow),
         { headColor: C.teal, fontSize: 8.2, columnStyles: topCols,
           didParseCell: (d) => { if (d.section === 'body' && d.row.index < 3) { d.cell.styles.fillColor = C.goldTint; } } });
+      explainBox(words.rankExplainPrimary);
     }
     if (m.preTop.length) {
       subheading(L.topPre);
       table(topHead, m.preTop.map(topRow), { headColor: C.gold, fontSize: 8.2, columnStyles: topCols });
+      explainBox(words.rankExplainPre);
     }
     subheading(L.topPerClass);
     miniCardsTopPerClass(m.active);
@@ -1699,7 +1779,7 @@
       '</div>',
       '<div class="mt-4 space-y-2 text-sm text-slate-700">' + w.overall.slice(0, 3).map((t) => '<p>' + esc(t) + '</p>').join('') + '</div>',
       '<div class="grid lg:grid-cols-3 gap-4 mt-5">',
-      '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">' + esc(L.topPrimary) + '</div>' + list(m.schoolTop, (st) => '<li class="text-sm flex justify-between gap-2"><span><strong>' + st.position + '.</strong> ' + esc(titleName(st.name)) + ' <span class="text-slate-500">' + esc(st.className) + '</span></span><span class="font-semibold text-emerald-700">' + num(st.rankScore).toFixed(1) + '</span></li>') + '</article>',
+      '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">' + esc(L.topPrimary) + '</div>' + list(m.schoolTop, (st) => '<li class="text-sm flex justify-between gap-2"><span><strong>' + st.position + '.</strong> ' + esc(titleName(st.name)) + ' <span class="text-slate-500">' + esc(st.className) + '</span></span><span class="font-semibold text-emerald-700">' + pct(st.overallPct) + '</span></li>') + '</article>',
       '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">' + esc(L.sections[5]) + '</div>' + list(m.improvers, (r) => '<li class="text-sm flex justify-between gap-2"><span>' + esc(titleName(r.name)) + ' <span class="text-slate-500">' + esc(r.className) + '</span><span class="block text-xs text-slate-500">' + esc(L.monthWord(r.firstMonth) + ' ' + pct(r.firstPct) + ' > ' + L.monthWord(r.lastMonth) + ' ' + pct(r.lastPct)) + '</span></span><span class="font-semibold text-emerald-700">+' + r.gain.toFixed(1) + '</span></li>') + '</article>',
       '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">' + esc(L.sections[6]) + '</div>' + w.teachers.map((t) => '<p class="text-sm text-slate-700 mt-2">' + esc(t) + '</p>').join('') +
         (m.teachers.support.length ? '<div class="flex flex-wrap gap-2 mt-3">' + m.teachers.support.map((r) => '<span class="mini-chip" style="background:#fef3c7;color:#92400e">' + esc(shortName(r.teacher)) + ' ' + pct(r.avg) + '</span>').join('') + '</div>' : '') + '</article>',
