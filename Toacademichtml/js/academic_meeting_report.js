@@ -117,9 +117,23 @@
     const maxSubjects = Math.max(0, ...scored.map((s) => num(s.attemptedCount)));
 
     // Fair ranking: a learner who sat one easy test must not top the class.
-    const eligible = scored.filter((s) => (s.examSeries || []).length >= Math.ceil(0.8 * maxExams)
+    // Top-learner rules (same as graduation): sat at least 80% of the papers the class sat
+    // (a paper = one subject in one exam) and attended at least 70% of recorded school days.
+    // The rank score then multiplies the average by the share of papers sat, so a learner who
+    // sat every exam beats one with a slightly higher average from fewer exams.
+    const papersOf = (s) => (s.subjectRows || []).reduce((n, row) => n + (row.history || []).length, 0);
+    const maxPapers = Math.max(0, ...scored.map(papersOf));
+    const classHasRegister = students.some((s) => num(s.attendance && s.attendance.days) > 0);
+    scored.forEach((s) => {
+      s.papersSat = papersOf(s);
+      s.papersMax = maxPapers;
+      s.participation = maxPapers > 0 ? s.papersSat / maxPapers : 0;
+      s.rankScore = num(s.overallPct) * s.participation;
+      s.attendanceOk = !classHasRegister || (num(s.attendance && s.attendance.days) > 0 && num(s.attendancePct) >= 70);
+    });
+    const eligible = scored.filter((s) => s.participation >= 0.8 && s.attendanceOk
       && num(s.attemptedCount) >= Math.ceil(0.8 * maxSubjects));
-    const ranked = rankRows(eligible, (s) => num(s.overallPct));
+    const ranked = rankRows(eligible, (s) => num(s.rankScore));
 
     // Monthly profiles: a month counts for a learner only when they sat enough of that month's subjects.
     const profiles = new Map();
@@ -406,8 +420,8 @@
     const allScored = active.flatMap((c) => c.students.filter((s) => num(s.attemptedCount) > 0));
     const avgOf = (list) => mean(list.flatMap((c) => c.students.filter((s) => num(s.attemptedCount) > 0).map((s) => s.overallPct)));
 
-    const schoolTop = takeTop(rankRows(pri.flatMap((c) => c.eligible), (s) => num(s.overallPct)), 10, 12);
-    const preTop = takeTop(rankRows(pre.flatMap((c) => c.eligible), (s) => num(s.overallPct)), 5, 7);
+    const schoolTop = takeTop(rankRows(pri.flatMap((c) => c.eligible), (s) => num(s.rankScore)), 10, 12);
+    const preTop = takeTop(rankRows(pre.flatMap((c) => c.eligible), (s) => num(s.rankScore)), 5, 7);
     const improvers = active.flatMap((c) => c.improvers).sort((a, b) => b.gain - a.gain).slice(0, 10);
 
     // School month trend, Primary and Pre-Primary separately (different curricula).
@@ -594,8 +608,8 @@
       : (sw ? 'Hakuna somo lenye wastani chini ya 50% katika kipindi hiki. Hongera kwa walimu.' : 'No subject averaged below 50% in this window.'));
 
     out.top = sw
-      ? 'Wanafunzi hawa wamefanya vizuri mfululizo katika kipindi chote. Ili kuwe na haki, mwanafunzi ameingizwa kwenye nafasi tu kama amefanya angalau 80% ya mitihani na masomo ya darasa lake. Elimu ya Awali na Elimu ya Msingi zimepangwa kila moja peke yake.'
-      : 'These learners performed consistently across the window. To be fair, a learner is ranked only if they sat at least 80% of their class\'s exams and subjects. Pre-Primary and Primary are ranked separately.';
+      ? 'Wanafunzi hawa wamefanya vizuri mfululizo katika kipindi chote. Kanuni ni zile zile za mahafali: mwanafunzi anaingia kwenye nafasi tu kama amefanya angalau 80% ya mitihani ya darasa lake na amehudhuria shule angalau 70% ya siku. Kisha alama ya nafasi ni wastani wake ukizidishwa kwa sehemu ya mitihani aliyofanya: mwanafunzi aliyefanya mitihani yote kwa 86% anamzidi aliyefanya michache kwa 89%. Elimu ya Awali na Elimu ya Msingi zimepangwa kila moja peke yake.'
+      : 'These learners performed consistently across the window. Same rules as graduation: a learner is ranked only after sitting at least 80% of the class\'s exams and attending at least 70% of school days. The rank score is the average multiplied by the share of exams sat, so a learner who sat every exam at 86% ranks above one who sat few at 89%. Pre-Primary and Primary are ranked separately.';
 
     out.improvers = sw
       ? 'Mafanikio si kuwa wa kwanza tu. Wanafunzi wafuatao wamepanda kwa kiwango kikubwa kutoka mwezi wa kwanza walipopimwa hadi mwezi wa karibuni, na wamewazidi wenzao katika kupanda huko. Wanastahili kutambuliwa ili waendelee kujituma.'
@@ -1172,7 +1186,7 @@
         list.forEach((st) => {
           ink(C.navy); font('bold', 8); doc.text(String(st.position) + '.', x + 3.5, ly);
           ink(C.ink); font('normal', 8); doc.text(split(shortName(st.name), colW - 26)[0], x + 9, ly);
-          ink(C[toneOf(st.overallPct)]); font('bold', 8); doc.text(pct(st.overallPct), x + colW - 3.5, ly, { align: 'right' });
+          ink(C[toneOf(st.rankScore)]); font('bold', 8); doc.text(num(st.rankScore).toFixed(1), x + colW - 3.5, ly, { align: 'right' });
           ly += 4.7;
         });
         rowH = Math.max(rowH, h);
@@ -1369,18 +1383,18 @@
 
     section(5, L.sections[4]);
     para(words.top);
+    const topHead = [L.col.pos, L.col.name, L.col.cls, L.col.avg, (lang === 'sw' ? 'Mitihani' : 'Exams sat'), (lang === 'sw' ? 'Mahudhurio' : 'Attendance'), (lang === 'sw' ? 'Alama ya nafasi' : 'Rank score')];
+    const topRow = (st) => [String(st.position), titleName(st.name), st.className, pct(st.overallPct), st.papersSat + '/' + st.papersMax, st.attendancePct ? pct(st.attendancePct) : '-', num(st.rankScore).toFixed(1)];
+    const topCols = { 0: { halign: 'center', cellWidth: 15, fontStyle: 'bold' }, 3: { halign: 'center' }, 4: { halign: 'center' }, 5: { halign: 'center' }, 6: { halign: 'center', fontStyle: 'bold', textColor: C.teal } };
     if (m.schoolTop.length) {
       subheading(L.topPrimary);
-      table([L.col.pos, L.col.name, L.col.cls, L.col.avg, L.col.grade],
-        m.schoolTop.map((st) => [String(st.position), titleName(st.name), st.className, pct(st.overallPct), gradeOf(st.overallPct)]),
-        { headColor: C.teal, columnStyles: { 0: { halign: 'center', cellWidth: 14, fontStyle: 'bold' }, 3: { halign: 'center', fontStyle: 'bold' }, 4: { halign: 'center' } },
+      table(topHead, m.schoolTop.map(topRow),
+        { headColor: C.teal, fontSize: 8.2, columnStyles: topCols,
           didParseCell: (d) => { if (d.section === 'body' && d.row.index < 3) { d.cell.styles.fillColor = C.goldTint; } } });
     }
     if (m.preTop.length) {
       subheading(L.topPre);
-      table([L.col.pos, L.col.name, L.col.cls, L.col.avg, L.col.grade],
-        m.preTop.map((st) => [String(st.position), titleName(st.name), st.className, pct(st.overallPct), gradeOf(st.overallPct)]),
-        { headColor: C.gold, columnStyles: { 0: { halign: 'center', cellWidth: 14, fontStyle: 'bold' }, 3: { halign: 'center', fontStyle: 'bold' }, 4: { halign: 'center' } } });
+      table(topHead, m.preTop.map(topRow), { headColor: C.gold, fontSize: 8.2, columnStyles: topCols });
     }
     subheading(L.topPerClass);
     miniCardsTopPerClass(m.active);
@@ -1685,7 +1699,7 @@
       '</div>',
       '<div class="mt-4 space-y-2 text-sm text-slate-700">' + w.overall.slice(0, 3).map((t) => '<p>' + esc(t) + '</p>').join('') + '</div>',
       '<div class="grid lg:grid-cols-3 gap-4 mt-5">',
-      '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">' + esc(L.topPrimary) + '</div>' + list(m.schoolTop, (st) => '<li class="text-sm flex justify-between gap-2"><span><strong>' + st.position + '.</strong> ' + esc(titleName(st.name)) + ' <span class="text-slate-500">' + esc(st.className) + '</span></span><span class="font-semibold text-emerald-700">' + pct(st.overallPct) + '</span></li>') + '</article>',
+      '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">' + esc(L.topPrimary) + '</div>' + list(m.schoolTop, (st) => '<li class="text-sm flex justify-between gap-2"><span><strong>' + st.position + '.</strong> ' + esc(titleName(st.name)) + ' <span class="text-slate-500">' + esc(st.className) + '</span></span><span class="font-semibold text-emerald-700">' + num(st.rankScore).toFixed(1) + '</span></li>') + '</article>',
       '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">' + esc(L.sections[5]) + '</div>' + list(m.improvers, (r) => '<li class="text-sm flex justify-between gap-2"><span>' + esc(titleName(r.name)) + ' <span class="text-slate-500">' + esc(r.className) + '</span><span class="block text-xs text-slate-500">' + esc(L.monthWord(r.firstMonth) + ' ' + pct(r.firstPct) + ' > ' + L.monthWord(r.lastMonth) + ' ' + pct(r.lastPct)) + '</span></span><span class="font-semibold text-emerald-700">+' + r.gain.toFixed(1) + '</span></li>') + '</article>',
       '<article class="watch-card p-4"><div class="text-sm font-semibold text-slate-900">' + esc(L.sections[6]) + '</div>' + w.teachers.map((t) => '<p class="text-sm text-slate-700 mt-2">' + esc(t) + '</p>').join('') +
         (m.teachers.support.length ? '<div class="flex flex-wrap gap-2 mt-3">' + m.teachers.support.map((r) => '<span class="mini-chip" style="background:#fef3c7;color:#92400e">' + esc(shortName(r.teacher)) + ' ' + pct(r.avg) + '</span>').join('') + '</div>' : '') + '</article>',
