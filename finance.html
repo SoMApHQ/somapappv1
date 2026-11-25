@@ -139,6 +139,7 @@
         <button id="downloadDebtNowCsv" class="px-3 py-1 bg-amber-600 text-white rounded"><i class="fa fa-file-excel mr-1"></i> Debt (current) CSV</button>
         <button id="downloadDebtNowPdf" class="px-3 py-1 bg-amber-700 text-white rounded"><i class="fa fa-file-pdf mr-1"></i> Debt (current) PDF</button>
         <button id="downloadSmsExcel" class="px-3 py-1 bg-green-600 text-white rounded" title="Download SMS-ready Excel: Phone, Child Name, Debt"><i class="fa fa-mobile-alt mr-1"></i> SMS Debt Excel</button>
+        <button id="sendSmsDebtors" class="px-3 py-1 bg-emerald-700 text-white rounded" title="Fungua Mawasiliano na wadaiwa hawa (orodha ileile ya SMS Debt Excel)"><i class="fa fa-paper-plane mr-1"></i> Tuma SMS kwa wadaiwa</button>
         <button id="downloadDebtLettersBulk" class="px-3 py-1 bg-rose-600 text-white rounded" title="Download debt letters for students with debt (4-6 per A4)"><i class="fa fa-file-pdf mr-1"></i> Debt Letters (Bulk)</button>
         <button id="downloadBreakdownCsv" class="px-3 py-1 bg-teal-600 text-white rounded"><i class="fa fa-file-excel mr-1"></i> Breakdown CSV</button>
         <button id="downloadBreakdownPdf" class="px-3 py-1 bg-teal-700 text-white rounded"><i class="fa fa-file-pdf mr-1"></i> Breakdown PDF</button>
@@ -2941,6 +2942,38 @@ function buildFinanceStudents(
     XLSX.writeFile(wb, `sms_debt_${Date.now()}.xlsx`);
   }
 
+  // Mawasiliano: hand the SAME debtor rows as "SMS Debt Excel" to smshtml/sms.html.
+  // Read-only: no finance calculation changes; the list lives in this browser only
+  // (sms.html reads it once, deletes it, and ignores it after 30 minutes).
+  function openSmsForDebtors() {
+    const tableRows = getTableRowsForExport();
+    const clearedSet = clearedExportSignatures(tableRows);
+    const debtorRows = tableRows.filter((r) => (
+      r.balance > 0 &&
+      r.periodDebtValue > 0 &&
+      !isClearedDuplicateExportRow(r, clearedSet)
+    ));
+    if (!debtorRows.length) { alert('Hakuna wadaiwa kwenye jedwali hili.'); return; }
+    const rows = debtorRows.map((r) => {
+      const lookup = lookupStudentByAdmission(r.admissionNumber);
+      const st = (lookup && lookup.student) || {};
+      return {
+        admissionNumber: r.admissionNumber, fullName: r.fullName, classLevel: r.classLevel,
+        parentContact: r.parentContact, parentName: st.primaryParentName || st.parentName || '',
+        debt: r.periodDebtValue, balance: r.balance, debtLabel: r.periodDebtLabel,
+      };
+    });
+    const classSel = document.getElementById('classFilter');
+    try {
+      localStorage.setItem('somap.sms.handoff.v1', JSON.stringify({
+        schoolId: (window.SOMAP && SOMAP.getSchoolId && SOMAP.getSchoolId()) || '',
+        year: String(financeYear), createdAt: Date.now(),
+        filter: classSel && classSel.value ? classSel.value : '', rows,
+      }));
+    } catch (err) { alert('Imeshindwa kuandaa orodha ya SMS: ' + err.message); return; }
+    window.open('smshtml/sms.html?from=finance', '_blank');
+  }
+
   function downloadPDF_DebtNow() {
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation: 'landscape' });
@@ -3833,7 +3866,7 @@ function buildFinanceStudents(
     
     // Hide filters & bulk exports that could reveal other students
     ['classFilter','showOnlyDebtors','downloadDebtNowCsv','downloadDebtNowPdf',
-     'downloadSmsExcel','downloadDebtLettersBulk','downloadBreakdownCsv','downloadBreakdownPdf'].forEach(id=>{
+     'downloadSmsExcel','sendSmsDebtors','downloadDebtLettersBulk','downloadBreakdownCsv','downloadBreakdownPdf'].forEach(id=>{
       const el = document.getElementById(id); 
       if (el) el.style.display = 'none';
     });
@@ -4067,6 +4100,7 @@ function buildFinanceStudents(
   downloadDebtNowCsvBtn.addEventListener('click', downloadCSV_DebtNow);
   downloadDebtNowPdfBtn.addEventListener('click', downloadPDF_DebtNow);
   if (downloadSmsExcelBtn) downloadSmsExcelBtn.addEventListener('click', downloadSMSDebtExcel);
+  document.getElementById('sendSmsDebtors')?.addEventListener('click', openSmsForDebtors);
   downloadBreakdownCsvBtn.addEventListener('click', downloadCSV_Breakdown);
   downloadBreakdownPdfBtn.addEventListener('click', downloadPDF_Breakdown);
   if (downloadDebtLettersBulkBtn) downloadDebtLettersBulkBtn.addEventListener('click', downloadBulkDebtLettersPDF);

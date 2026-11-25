@@ -40,10 +40,16 @@
   // ------------------------------------------------------------------ boot
   function fatal(msg) { $('fatal').textContent = msg; $('fatal').hidden = false; }
 
-  function readHandoff() {
+  // Take (and always delete) the Finance hand-over at once, before any permission check,
+  // so a debtor list never stays in this browser. It is only USED after /me allows it.
+  function takeHandoff() {
     let data = null;
     try { data = JSON.parse(localStorage.getItem(HANDOFF_KEY) || 'null'); } catch (_) { data = null; }
     try { localStorage.removeItem(HANDOFF_KEY); } catch (_) { /* ignore */ }
+    return data;
+  }
+
+  function validHandoff(data) {
     if (!data || !Array.isArray(data.rows)) return null;
     if (data.schoolId !== state.schoolId) return null;
     if (!(Date.now() - Number(data.createdAt || 0) < HANDOFF_MAX_AGE_MS)) return null;
@@ -53,6 +59,7 @@
   async function boot() {
     if (window.SOMAP && SOMAP.adoptSchoolFromUrl) SOMAP.adoptSchoolFromUrl('school');
     state.schoolId = window.SOMAP && SOMAP.getSchoolId ? SOMAP.getSchoolId() : '';
+    const rawHandoff = takeHandoff();
     if (!state.schoolId) { fatal('Chagua shule kwanza: fungua SoMAp na uchague shule yako.'); return; }
     let me;
     try {
@@ -63,20 +70,25 @@
     }
     state.me = me;
     $('schoolName').textContent = me.schoolName || state.schoolId;
-    if (!me.belongs) { fatal('Akaunti hii haijasajiliwa kama mfanyakazi wa shule hii, hivyo haiwezi kutumia Mawasiliano.'); return; }
+    // Permission gate FIRST: only staff of this school with a sending role go further.
+    // Nobody else gets any student or phone list loaded.
+    const roleOk = Boolean(me.belongs && Array.isArray(me.allowedRoles) && me.allowedRoles.includes(me.role));
+    if (!roleOk) {
+      fatal(`Huna ruhusa ya kutumia Mawasiliano kwa ${me.schoolName || 'shule hii'}. `
+        + (me.belongs ? `Nafasi yako (${me.role || 'haijulikani'}) haiwezi kutuma SMS; wanaoruhusiwa: ${(me.allowedRoles || []).join(', ')}.`
+          : 'Akaunti hii haijasajiliwa kama mfanyakazi wa shule hii.'));
+      return;
+    }
     showMode();
     $('tabs').hidden = false;
     $('panel-send').hidden = false;
     $('fSchool').value = me.schoolName || '';
     if (!me.canSend) {
-      const why = !me.allowedRoles.includes(me.role)
-        ? `Nafasi yako (${me.role || 'haijulikani'}) inaweza kuangalia tu. Wanaoruhusiwa kutuma: ${me.allowedRoles.join(', ')}.`
-        : 'Shule bado haina jina la mtumaji (Sender ID) lililoidhinishwa, hivyo haiwezi kutuma kwa wazazi bado.';
-      $('cantSend').textContent = why;
+      $('cantSend').textContent = 'Shule bado haina jina la mtumaji (Sender ID) lililoidhinishwa, hivyo haiwezi kutuma kwa wazazi bado. Unaweza kuandaa ujumbe.';
       $('cantSend').hidden = false;
     }
 
-    const handoff = readHandoff();
+    const handoff = validHandoff(rawHandoff);
     if (handoff) {
       state.debtors = handoff.rows.map((r) => ({
         phone: r.parentContact, parentName: r.parentName || '', studentName: r.fullName, className: r.classLevel,
