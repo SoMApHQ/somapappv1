@@ -197,6 +197,9 @@
       health: () => fetchImpl(workerUrl + '/health').then((r) => r.json()),
       listCampaigns: (schoolId) => api('GET', '/campaigns?' + q(schoolId)),
       getCampaign: (schoolId, id) => api('GET', '/campaigns/get?' + q(schoolId) + '&id=' + encodeURIComponent(id)),
+      listTemplates: (schoolId) => api('GET', '/templates?' + q(schoolId)),
+      saveTemplate: (schoolId, t) => api('POST', '/templates/save', { schoolId, id: t.id || undefined, name: t.name, purpose: t.purpose, body: t.body }),
+      deleteTemplate: (schoolId, id) => api('POST', '/templates/delete', { schoolId, id }),
       sendAll,
       retryable,
     };

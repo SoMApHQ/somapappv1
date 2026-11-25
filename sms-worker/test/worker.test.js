@@ -359,3 +359,29 @@ test('CORS: only somapv2i.com and localhost get access headers', async () => {
   const tricky = await call(worker, w, 'GET', '/health', { origin: 'http://localhost.evil.example:80' });
   assert.equal(tricky.headers.get('access-control-allow-origin'), null);
 });
+
+// ------------------------------------------------------------------ templates (Violezo)
+test('templates: per school, senders can save/delete, teachers only read, schools isolated', async () => {
+  const w = await makeWorld();
+  const save = await call(worker, w, 'POST', '/templates/save', { email: ADMIN, body: { schoolId: SOC, name: 'Kikao', purpose: 'invitation', body: '{school}: Kikao tarehe {date} saa {time}.' } });
+  assert.equal(save.status, 200, JSON.stringify(save.data));
+  const list = await call(worker, w, 'GET', `/templates?school=${SOC}`, { email: ADMIN });
+  assert.deepEqual(list.data.templates.map((t) => [t.name, t.purpose]), [['Kikao', 'invitation']]);
+  const edit = await call(worker, w, 'POST', '/templates/save', { email: ADMIN, body: { schoolId: SOC, id: save.data.id, name: 'Kikao cha wazazi', purpose: 'invitation', body: 'Habari' } });
+  assert.equal(edit.status, 200);
+  assert.equal((await call(worker, w, 'GET', `/templates?school=${SOC}`, { email: ADMIN })).data.templates[0].name, 'Kikao cha wazazi');
+
+  const mapList = await call(worker, w, 'GET', `/templates?school=${MAP}`, { email: 'acct@example.com' });
+  assert.equal(mapList.data.templates.length, 0, 'MAP cannot see Socrates templates');
+  const crossEdit = await call(worker, w, 'POST', '/templates/save', { email: 'acct@example.com', body: { schoolId: MAP, id: save.data.id, name: 'x', purpose: 'general', body: 'x' } });
+  assert.equal(crossEdit.status, 404, 'cannot edit another school\'s template');
+
+  const teacherRead = await call(worker, w, 'GET', `/templates?school=${MAP}`, { email: 'teacher@example.com' });
+  assert.equal(teacherRead.status, 200);
+  const teacherSave = await call(worker, w, 'POST', '/templates/save', { email: 'teacher@example.com', body: { schoolId: MAP, name: 'x', purpose: 'general', body: 'x' } });
+  assert.equal(teacherSave.data.code, 'ROLE_NOT_ALLOWED');
+
+  const del = await call(worker, w, 'POST', '/templates/delete', { email: ADMIN, body: { schoolId: SOC, id: save.data.id } });
+  assert.equal(del.data.ok, true);
+  assert.equal((await call(worker, w, 'GET', `/templates?school=${SOC}`, { email: ADMIN })).data.templates.length, 0);
+});

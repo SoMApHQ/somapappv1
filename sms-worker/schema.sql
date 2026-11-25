@@ -132,6 +132,20 @@ CREATE TABLE IF NOT EXISTS pipe_tests (
   created_at INTEGER NOT NULL
 );
 
+-- Saved message templates (Violezo), per school. (Added in Phase 4.)
+CREATE TABLE IF NOT EXISTS templates (
+  id TEXT PRIMARY KEY,
+  school_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  updated_by TEXT,
+  updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS templates_school ON templates (school_id, updated_at);
+
 INSERT OR IGNORE INTO config (key, value, updated_at, updated_by) VALUES
   ('mode', 'dryrun', 0, 'schema'),
   ('active_gateway', 'swalasms', 0, 'schema'),

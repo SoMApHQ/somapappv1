@@ -8,6 +8,9 @@
 //  POST /campaigns/finish               { schoolId, campaignId }
 //  GET  /campaigns?school=ID            history
 //  GET  /campaigns/get?school=ID&id=    one campaign with its messages
+//  GET  /templates?school=ID            saved templates (Violezo)
+//  POST /templates/save                 { schoolId, id?, name, purpose, body }
+//  POST /templates/delete               { schoolId, id }
 //  HQ only:
 //  GET  /hq/overview
 //  POST /hq/config                      { mode, fallbackSenderId, sandboxSenderId, buyPricePerSms }
@@ -22,9 +25,10 @@ import { HttpError, corsHeaders, errorResponse, json, readJson } from './http.js
 import { adjustWallet, assertHq, gatewayInfo, overview, pipeTest, updateConfig, updateSchoolSettings } from './hq.js';
 import { finishCampaign, getCampaign, listCampaigns, resolveSender, sendChunk, startCampaign } from './send.js';
 import { handleWebhook } from './webhook.js';
+import { deleteTemplate, listTemplates, saveTemplate } from './templates.js';
 import { eatDayStart } from './util.js';
 
-export const VERSION = 'phase2-2026-11-25';
+export const VERSION = 'phase4-2026-11-25';
 
 async function me(env, staff) {
   const db = env.DB;
@@ -99,6 +103,9 @@ export async function handle(request, env) {
     return json(r, r.retry ? 202 : 200);
   }
   if (method === 'POST' && path === '/campaigns/finish') return json(await finishCampaign(env, staff, body));
+  if (method === 'GET' && path === '/templates') return json(await listTemplates(env, staff));
+  if (method === 'POST' && path === '/templates/save') return json(await saveTemplate(env, staff, body));
+  if (method === 'POST' && path === '/templates/delete') return json(await deleteTemplate(env, staff, body));
   if (!staff.belongs) throw new HttpError(403, 'NOT_ALLOWED', 'Huna ruhusa kwa shule hii.', 'Not a member of this school.');
   if (method === 'GET' && path === '/campaigns') return json(await listCampaigns(env, staff));
   if (method === 'GET' && path === '/campaigns/get') return json(await getCampaign(env, staff, String(url.searchParams.get('id') || '')));
