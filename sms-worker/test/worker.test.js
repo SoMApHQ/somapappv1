@@ -385,3 +385,17 @@ test('templates: per school, senders can save/delete, teachers only read, school
   assert.equal(del.data.ok, true);
   assert.equal((await call(worker, w, 'GET', `/templates?school=${SOC}`, { email: ADMIN })).data.templates.length, 0);
 });
+
+test('head teachers can send in every school (headteacher / head_teacher / "Head Teacher"); teachers still cannot', async () => {
+  const w = await makeWorld();
+  for (const [email, school] of [['ht1@example.com', MAP], ['ht2@example.com', SOC], ['ht3@example.com', MAP]]) {
+    const me = await call(worker, w, 'GET', `/me?school=${school}`, { email });
+    assert.equal(me.data.role, 'head_teacher', email);
+    assert.equal(me.data.canSend, true, email);
+    assert.ok(me.data.allowedRoles.includes('head_teacher'));
+    const st = await start(w, email, school, { estimatedUnits: 0 });
+    assert.equal(st.status, 200, `${email}: ${JSON.stringify(st.data)}`);
+  }
+  const teacher = await call(worker, w, 'GET', `/me?school=${MAP}`, { email: 'teacher@example.com' });
+  assert.equal(teacher.data.canSend, false);
+});

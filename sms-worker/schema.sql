@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS config (
 -- Per-school SMS settings (who may send, limits, price).
 CREATE TABLE IF NOT EXISTS school_settings (
   school_id TEXT PRIMARY KEY,
-  allowed_roles TEXT NOT NULL DEFAULT '["admin","accountant"]',
+  allowed_roles TEXT NOT NULL DEFAULT '["admin","accountant","head_teacher"]',
   daily_limit INTEGER NOT NULL DEFAULT 1000,
   approval_above INTEGER NOT NULL DEFAULT 0,
   price_per_sms INTEGER,

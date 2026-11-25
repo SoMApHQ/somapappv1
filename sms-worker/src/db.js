@@ -2,7 +2,7 @@
 // Wallet rule: every change is ONE atomic batch = the balance update + its ledger row.
 import { HttpError } from './http.js';
 
-export const DEFAULT_SETTINGS = { allowedRoles: ['admin', 'accountant'], dailyLimit: 1000, approvalAbove: 0, pricePerSms: null };
+export const DEFAULT_SETTINGS = { allowedRoles: ['admin', 'accountant', 'head_teacher'], dailyLimit: 1000, approvalAbove: 0, pricePerSms: null };
 
 export async function getConfig(db) {
   const { results } = await db.prepare('SELECT key, value FROM config').all();
