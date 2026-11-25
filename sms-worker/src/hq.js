@@ -132,10 +132,10 @@ export async function pipeTest(env, staff, body) {
   const recent = await env.DB.prepare('SELECT COUNT(*) AS n FROM pipe_tests WHERE created_at > ?1').bind(Date.now() - 60 * 1000).first();
   if (Number(recent?.n || 0) > 0) throw new HttpError(429, 'WAIT', 'Subiri dakika 1 kabla ya jaribio jingine.', 'One pipe test per minute.');
 
+  const gw = gatewayForKey('live', env); // fails early (NO_LIVE_KEY) before anything is recorded
   const id = crypto.randomUUID();
   await env.DB.prepare("INSERT INTO pipe_tests (id, actor, msisdn, sender_id, text, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'sending', ?6)")
     .bind(id, staff.email, phone.msisdn, senderId, text, Date.now()).run();
-  const gw = gatewayForKey('live', env);
   const res = await gw.sendOne({ senderId, msisdn: phone.msisdn, text, idempotencyKey: id });
   await env.DB.prepare('UPDATE pipe_tests SET status = ?2, gateway_uid = ?3, response = ?4 WHERE id = ?1')
     .bind(id, res.accepted ? res.status : 'failed', res.uid || null, JSON.stringify(res).slice(0, 2000)).run();

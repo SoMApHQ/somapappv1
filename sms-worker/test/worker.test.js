@@ -307,6 +307,18 @@ test('pipe test: live key, HQ test numbers only, one per minute', async () => {
   assert.equal(sent.length, 1);
 });
 
+test('pipe test without a live key: clear NO_LIVE_KEY, nothing recorded, no rate-limit lockout', async () => {
+  const w = await makeWorld();
+  delete w.env.SWALASMS_LIVE_KEY;
+  const r = await call(worker, w, 'POST', '/hq/pipe-test', { email: HQ, body: { to: '0686000111', senderId: 'SWALATECH', text: 'Jaribio' } });
+  assert.equal(r.data.code, 'NO_LIVE_KEY');
+  assert.equal(w.env.DB.one('SELECT COUNT(*) AS n FROM pipe_tests').n, 0);
+  w.env.SWALASMS_LIVE_KEY = 'swl_live_xyz';
+  w.swala = async () => ({ status: 202, json: { success: true, data: { uid: '33333333-3333-4333-8333-333333333333', status: 'queued', units: 1 } } });
+  const ok = await call(worker, w, 'POST', '/hq/pipe-test', { email: HQ, body: { to: '0686000111', senderId: 'SWALATECH', text: 'Jaribio' } });
+  assert.equal(ok.status, 200, 'not blocked by the earlier failed attempt');
+});
+
 test('wrong key type is refused before any call', async () => {
   const w = await makeWorld();
   w.env.SWALASMS_TEST_KEY = 'swl_live_oops';
