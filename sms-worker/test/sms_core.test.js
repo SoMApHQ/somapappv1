@@ -114,9 +114,12 @@ test('fee reminders: one message per parent, children combined with each debt an
   assert.equal(fam.totalDebt, 200000);
   assert.equal(fam.values.parentName, 'Mama Amina');
   assert.equal(fam.values.studentName, 'Amina na Juma');
-  assert.equal(fam.values.children, 'Amina (Class 3) 120,000, Juma (Class 1) 80,000');
+  assert.equal(fam.values.children, 'Amina 120,000, Juma 80,000');
+  assert.equal(fam.values.feeDetails, 'deni la ada: Amina 120,000, Juma 80,000. Jumla TSh 200,000');
+  assert.equal(groups[1].values.feeDetails, 'deni la ada ni TSh 50,000');
   assert.equal(fam.values.total, '200,000');
-  const msg = core.fillTemplate('{school}: Mzazi {parentName}, ada inayodaiwa: {children}. Jumla TSh {total}. Asante.', { ...fam.values, school: 'SOCRATES' });
+  const msg = core.fillTemplate('{school}: Mzazi wa {studentName}, {feeDetails}. Tafadhali lipa kabla ya {date}. Asante.', { ...fam.values, school: 'Socrates School', date: core.formatDateSw('2026-12-10') });
+  assert.equal(msg.text, 'Socrates School: Mzazi wa Amina na Juma, deni la ada: Amina 120,000, Juma 80,000. Jumla TSh 200,000. Tafadhali lipa kabla ya 10 Desemba 2026. Asante.');
   assert.equal(msg.ok, true);
   assert.equal(core.countSmsParts(msg.text).parts, 1, msg.text);
   assert.equal(groups[1].values.children, 'Neema');
@@ -125,4 +128,28 @@ test('fee reminders: one message per parent, children combined with each debt an
 test('groupByPhone keeps first-seen order and merges duplicate phones', () => {
   const { groups } = core.groupByPhone([{ phone: '0755000111', n: 1 }, { phone: '0712345678', n: 2 }, { phone: '755000111', n: 3 }]);
   assert.deepEqual(groups.map((g) => g.rows.map((r) => r.n)), [[1, 3], [2]]);
+});
+
+test('Swahili dates in words', () => {
+  assert.equal(core.formatDateSw('2026-12-10'), '10 Desemba 2026');
+  assert.equal(core.formatDateSw('05/01/2027'), '5 Januari 2027');
+  assert.equal(core.formatDateSw('2026-03-01'), '1 Machi 2026');
+  assert.equal(core.formatDateSw('Ijumaa hii'), 'Ijumaa hii');
+  assert.equal(core.formatDateSw(''), '');
+  assert.equal(core.formatDateSw('2026-13-01'), '2026-13-01');
+});
+
+test('default fee reminder reads naturally and stays in 1 SMS for 1 and 2 children', () => {
+  const tpl = '{school}: Mzazi wa {studentName}, {feeDetails}. Tafadhali lipa kabla ya {date}. Asante.';
+  const send = (kids) => {
+    const { groups } = core.buildFeeReminderGroups(kids.map(([n, d]) => ({ phone: '0712345678', studentName: n, debt: d })), { shortNames: true });
+    return core.fillTemplate(tpl, { ...groups[0].values, school: 'Socrates School', date: core.formatDateSw('2026-12-10') }).text;
+  };
+  const one = send([['IKRAM HAMISI', 143000]]);
+  assert.equal(one, 'Socrates School: Mzazi wa IKRAM, deni la ada ni TSh 143,000. Tafadhali lipa kabla ya 10 Desemba 2026. Asante.');
+  assert.equal(core.countSmsParts(one).parts, 1);
+  const two = send([['AMINA JUMA', 120000], ['JUMA JUMA', 80000]]);
+  assert.equal(core.countSmsParts(two).parts, 1, `${two.length} chars: ${two}`);
+  const three = send([['AMINA JUMA', 120000], ['JUMA JUMA', 80000], ['NEEMA JUMA', 45000]]);
+  console.log(`# 3 children: ${three.length} chars, SMS ${core.countSmsParts(three).parts}`);
 });

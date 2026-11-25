@@ -20,11 +20,11 @@
   const SOURCE_SW = { all: 'Wazazi wote', class: 'Darasa', debtors: 'Wadaiwa', picked: 'Waliochaguliwa' };
   const BUILT_IN = [
     { id: 'builtin-general', builtIn: true, purpose: 'general', name: 'Taarifa ya kawaida', body: '{school}: Ndugu mzazi wa {studentName}, tunapenda kukujulisha kwamba ' },
-    { id: 'builtin-fee', builtIn: true, purpose: 'fee_reminder', name: 'Kikumbusho cha ada', body: '{school}: Mzazi, ada inayodaiwa: {children}. Jumla TSh {total}. Tafadhali lipa kabla ya {date}. Asante.' },
+    { id: 'builtin-fee', builtIn: true, purpose: 'fee_reminder', name: 'Kikumbusho cha ada', body: '{school}: Mzazi wa {studentName}, {feeDetails}. Tafadhali lipa kabla ya {date}. Asante.' },
     { id: 'builtin-invite', builtIn: true, purpose: 'invitation', name: 'Mwaliko wa kikao', body: '{school}: Mzazi wa {studentName}, unakaribishwa kwenye kikao cha wazazi tarehe {date} saa {time}, {venue}. Karibu.' },
   ];
   const PLACEHOLDER_HELP = {
-    parentName: 'jina la mzazi', studentName: 'jina la mwanafunzi (au "A na B")', class: 'darasa', children: 'watoto + deni la kila mmoja',
+    feeDetails: 'deni: mtoto 1 = "deni la ada ni TSh X"; watoto wengi = kila mmoja + jumla', parentName: 'jina la mzazi', studentName: 'jina la mwanafunzi (au "A na B")', class: 'darasa', children: 'watoto + deni la kila mmoja',
     debt: 'deni la sasa (jumla)', total: 'jumla ya deni', balance: 'salio la mwaka', date: 'tarehe', time: 'saa', venue: 'mahali', school: 'jina la shule',
   };
 
@@ -194,7 +194,7 @@
   }
 
   function messageFor(g) {
-    const values = { ...g.values, school: $('fSchool').value.trim(), date: $('fDate').value.trim(), time: $('fTime').value.trim(), venue: $('fVenue').value.trim() };
+    const values = { ...g.values, school: $('fSchool').value.trim(), date: core.formatDateSw($('fDate').value), time: $('fTime').value.trim(), venue: $('fVenue').value.trim() };
     const filled = core.fillTemplate($('message').value, values);
     const text = core.cleanText(filled.text);
     const ok = filled.missing.length === 0 && !core.hasUnfilledPlaceholder(text) && text.length > 0;

@@ -127,7 +127,7 @@
 
   // ------------------------------------------------------------- templates
   const PLACEHOLDER_RE = /\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}/g;
-  const PLACEHOLDERS = ['parentName', 'studentName', 'class', 'debt', 'balance', 'total', 'children', 'date', 'time', 'venue', 'school'];
+  const PLACEHOLDERS = ['parentName', 'studentName', 'class', 'feeDetails', 'debt', 'balance', 'total', 'children', 'date', 'time', 'venue', 'school'];
 
   function isEmptyValue(v) {
     if (v === null || v === undefined) return true;
@@ -164,6 +164,26 @@
     return sign + String(Math.abs(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }
   function formatTsh(n) { return 'TSh ' + formatNumber(n); }
+
+  // ------------------------------------------------------------------ dates
+  const MONTHS_SW = ['Januari', 'Februari', 'Machi', 'Aprili', 'Mei', 'Juni', 'Julai', 'Agosti', 'Septemba', 'Oktoba', 'Novemba', 'Desemba'];
+  /**
+   * Date in Swahili words: "2026-12-10" / "10/12/2026" / Date -> "10 Desemba 2026".
+   * Anything else (e.g. "Ijumaa hii") is returned unchanged.
+   */
+  function formatDateSw(value) {
+    if (value instanceof Date && !isNaN(value)) return `${value.getDate()} ${MONTHS_SW[value.getMonth()]} ${value.getFullYear()}`;
+    const s = String(value === null || value === undefined ? '' : value).trim();
+    let m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s);
+    let y; let mo; let d;
+    if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; } else {
+      m = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/.exec(s);
+      if (!m) return s;
+      d = +m[1]; mo = +m[2]; y = +m[3];
+    }
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return s;
+    return `${d} ${MONTHS_SW[mo - 1]} ${y}`;
+  }
 
   // --------------------------------------------------------------- grouping
   function joinNames(names) {
@@ -215,8 +235,15 @@
         debt: total > 0 ? formatNumber(total) : '',
         total: total > 0 ? formatNumber(total) : '',
         children: g.children.length > 1
-          ? g.children.map((c) => `${c.studentName}${c.className ? ' (' + c.className + ')' : ''} ${formatNumber(c.debt)}`).join(', ')
+          ? g.children.map((c) => `${c.studentName} ${formatNumber(c.debt)}`).join(', ')
           : (g.children[0] ? g.children[0].studentName : ''),
+        // Reads naturally for one or several children:
+        //   1 child : "deni la ada ni TSh 143,000"
+        //   several : "deni la ada: Amina 120,000, Juma 80,000. Jumla TSh 200,000"
+        feeDetails: total <= 0 ? ''
+          : (g.children.length > 1
+            ? `deni la ada: ${g.children.map((c) => `${c.studentName} ${formatNumber(c.debt)}`).join(', ')}. Jumla TSh ${formatNumber(total)}`
+            : `deni la ada ni TSh ${formatNumber(total)}`),
         count: g.children.length,
       };
     });
@@ -232,6 +259,7 @@
     hasUnfilledPlaceholder,
     formatNumber,
     formatTsh,
+    formatDateSw,
     groupByPhone,
     buildFeeReminderGroups,
     PLACEHOLDERS,
