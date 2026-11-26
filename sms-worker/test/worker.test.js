@@ -185,7 +185,7 @@ test('sandbox: test key, UUID idempotency key, per-recipient {msg}, failures ref
   const st = await start(w, ADMIN, SOC);
   assert.equal(st.data.senderId, 'SWALATECH');
   const r = await call(worker, w, 'POST', '/campaigns/chunk', { email: ADMIN, body: { schoolId: SOC, campaignId: st.data.campaignId, chunkIndex: 0, items: [
-    { phone: '0712345678', text: 'Habari Mama Amina' }, { phone: '0755000111', text: 'Habari Baba Neema' },
+    { phone: '0712345678', text: 'Socrates School: Habari Mama Amina' }, { phone: '0755000111', text: 'Socrates School: Habari Baba Neema' },
   ] } });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   assert.equal(seen.length, 1);
@@ -193,7 +193,7 @@ test('sandbox: test key, UUID idempotency key, per-recipient {msg}, failures ref
   assert.equal(seen[0].auth, 'Bearer swl_test_abc');
   assert.match(seen[0].key, UUID_RE);
   assert.equal(seen[0].body.message, '{msg}');
-  assert.deepEqual(seen[0].body.recipients, [{ to: '+255712345678', msg: 'Habari Mama Amina' }, { to: '+255755000111', msg: 'Habari Baba Neema' }]);
+  assert.deepEqual(seen[0].body.recipients, [{ to: '+255712345678', msg: 'Socrates School: Habari Mama Amina' }, { to: '+255755000111', msg: 'Socrates School: Habari Baba Neema' }]);
   assert.equal(seen[0].body.sender_id, 'SWALATECH');
   assert.equal(r.data.sent, 1);
   assert.equal(r.data.failed, 1);
@@ -211,10 +211,10 @@ test('sandbox: same text for everyone is sent as one plain message', async () =>
   w.swala = async (url, init, b) => { body = b; return { status: 202, json: { success: true, data: { messages: b.recipients.map((to, i) => ({ to, message_uid: `u${i}`, status: 'queued', units: 1 })) } } }; };
   const st = await start(w, ADMIN, SOC);
   await call(worker, w, 'POST', '/campaigns/chunk', { email: ADMIN, body: { schoolId: SOC, campaignId: st.data.campaignId, chunkIndex: 0, items: [
-    { phone: '0712345678', text: 'Shule itafungwa Ijumaa.' }, { phone: '0755000111', text: 'Shule itafungwa Ijumaa.' },
+    { phone: '0712345678', text: 'Socrates School: Shule itafungwa Ijumaa.' }, { phone: '0755000111', text: 'Socrates School: Shule itafungwa Ijumaa.' },
   ] } });
   assert.deepEqual(body.recipients, ['+255712345678', '+255755000111']);
-  assert.equal(body.message, 'Shule itafungwa Ijumaa.');
+  assert.equal(body.message, 'Socrates School: Shule itafungwa Ijumaa.');
 });
 
 test('sandbox: unknown gateway answer keeps the reservation; retry reuses the SAME key and never double-charges', async () => {
@@ -230,7 +230,7 @@ test('sandbox: unknown gateway answer keeps the reservation; retry reuses the SA
     return { status: 202, json: { success: true, data: { idempotent_replay: false, messages: [{ to: '+255712345678', message_uid: 'u1', status: 'queued', units: 1 }] } } };
   };
   const st = await start(w, ADMIN, SOC);
-  const body = { schoolId: SOC, campaignId: st.data.campaignId, chunkIndex: 0, items: [{ phone: '0712345678', text: 'Habari' }] };
+  const body = { schoolId: SOC, campaignId: st.data.campaignId, chunkIndex: 0, items: [{ phone: '0712345678', text: 'Socrates School: Habari' }] };
   const first = await call(worker, w, 'POST', '/campaigns/chunk', { email: ADMIN, body });
   assert.equal(first.status, 202);
   assert.equal(first.data.retry, true);
@@ -253,7 +253,7 @@ test('sandbox: gateway refusal (422) refunds everything', async () => {
   w.swala = async () => ({ status: 422, json: { success: false, error_code: 'INSUFFICIENT_BALANCE', message: 'Not enough units', acceptance_state: 'DEFINITELY_NOT_ACCEPTED' } });
   const st = await start(w, ADMIN, SOC);
   const r = await call(worker, w, 'POST', '/campaigns/chunk', { email: ADMIN, body: { schoolId: SOC, campaignId: st.data.campaignId, chunkIndex: 0, items: [
-    { phone: '0712345678', text: 'A' }, { phone: '0755000111', text: 'B' },
+    { phone: '0712345678', text: 'Socrates School: A' }, { phone: '0755000111', text: 'Socrates School: B' },
   ] } });
   assert.equal(r.data.status, 'failed');
   assert.equal(r.data.failed, 2);
@@ -271,8 +271,11 @@ test('mode switch mid-campaign stops it; live is locked in Phase 2', async () =>
   const live = await call(worker, w, 'POST', '/hq/config', { email: HQ, body: { mode: 'live' } });
   assert.equal(live.status, 403);
   assert.equal(live.data.code, 'LIVE_LOCKED');
-  const liveWallet = await call(worker, w, 'POST', '/hq/wallet/adjust', { email: HQ, body: { schoolId: SOC, bucket: 'live', units: 100 } });
-  assert.equal(liveWallet.data.code, 'TEST_WALLET_ONLY');
+  const noNote = await call(worker, w, 'POST', '/hq/wallet/adjust', { email: HQ, body: { schoolId: SOC, bucket: 'live', units: 100 } });
+  assert.equal(noNote.data.code, 'NOTE_REQUIRED', 'live credits need a note');
+  const liveWallet = await call(worker, w, 'POST', '/hq/wallet/adjust', { email: HQ, body: { schoolId: SOC, bucket: 'live', units: 100, note: 'M-Pesa QX12345' } });
+  assert.equal(liveWallet.data.balance, 100);
+  assert.equal(w.env.DB.one("SELECT kind FROM ledger WHERE bucket = 'live'").kind, 'topup');
 });
 
 test('no sender => clear refusal in sandbox', async () => {
@@ -334,7 +337,7 @@ test('webhook: signature required, status updated, replays ignored', async () =>
   await topUp(w, SOC, 5);
   w.swala = async () => ({ status: 202, json: { success: true, data: { messages: [{ to: '+255712345678', message_uid: 'gw-uid-1', status: 'queued', units: 1 }] } } });
   const st = await start(w, ADMIN, SOC);
-  await call(worker, w, 'POST', '/campaigns/chunk', { email: ADMIN, body: { schoolId: SOC, campaignId: st.data.campaignId, chunkIndex: 0, items: [{ phone: '0712345678', text: 'Habari' }] } });
+  await call(worker, w, 'POST', '/campaigns/chunk', { email: ADMIN, body: { schoolId: SOC, campaignId: st.data.campaignId, chunkIndex: 0, items: [{ phone: '0712345678', text: 'Socrates School: Habari' }] } });
 
   const payload = JSON.stringify({ event: 'sms.delivered', message_id: 'gw-uid-1', to: '0712345678', status: 'delivered', timestamp: 1 });
   const post = (sig) => worker.fetch(new Request('https://x/webhook/swalasms', { method: 'POST', headers: sig ? { 'X-SwalaSMS-Signature': sig } : {}, body: payload }), w.env);
@@ -398,4 +401,75 @@ test('head teachers can send in every school (headteacher / head_teacher / "Head
   }
   const teacher = await call(worker, w, 'GET', `/me?school=${MAP}`, { email: 'teacher@example.com' });
   assert.equal(teacher.data.canSend, false);
+});
+
+// ------------------------------------------------------------------ go-live rules (2026-11-26)
+import { _resetSenderCacheForTests } from '../src/send.js';
+
+async function goLive(w) {
+  w.env.LIVE_ENABLED = 'true';
+  const r = await call(worker, w, 'POST', '/hq/config', { email: HQ, body: { mode: 'live', fallbackSenderId: 'UPDATE' } });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+}
+
+test('live with UPDATE: every message must start with the school name (full name or code)', async () => {
+  const w = await makeWorld();
+  _resetSenderCacheForTests();
+  await goLive(w);
+  await call(worker, w, 'POST', '/hq/wallet/adjust', { email: HQ, body: { schoolId: MAP, bucket: 'live', units: 10, note: 'M-Pesa TEST1' } });
+  const sent = [];
+  w.swala = async (url, init, body) => {
+    if (url.endsWith('/v1/sender-ids')) return { status: 200, json: { success: true, data: [] } };
+    sent.push({ auth: init.headers.authorization, body });
+    return { status: 202, json: { success: true, data: { messages: (body.recipients || []).map((r) => ({ to: r.to || r, message_uid: 'u-' + (r.to || r), status: 'queued', units: 1 })) } } };
+  };
+  const me = await call(worker, w, 'GET', `/me?school=${MAP}`, { email: 'acct@example.com' });
+  assert.equal(me.data.sender.senderId, 'UPDATE');
+  assert.equal(me.data.sender.prefixRequired, true);
+  assert.deepEqual(me.data.sender.schoolPrefixes, ['Mnyore Academy Dampo', 'Mnyore Academy Dampo (MAP)', 'MAP']);
+  const st = await start(w, 'acct@example.com', MAP, { estimatedUnits: 2 });
+  assert.equal(st.data.mode, 'live');
+  const r = await call(worker, w, 'POST', '/campaigns/chunk', { email: 'acct@example.com', body: { schoolId: MAP, campaignId: st.data.campaignId, chunkIndex: 0, items: [
+    { phone: '0712345678', text: 'Habari mzazi', ref: 'no-name' },
+    { phone: '0755000111', text: 'MAP: Habari mzazi', ref: 'code' },
+    { phone: '0766000222', text: 'mnyore academy dampo - Habari', ref: 'name' },
+    { phone: '0777000333', text: 'MAPENZI ya shule', ref: 'lookalike' },
+  ] } });
+  assert.deepEqual(r.data.rejected.map((x) => [x.ref, x.reason]), [['no-name', 'SCHOOL_NAME_MISSING'], ['lookalike', 'SCHOOL_NAME_MISSING']]);
+  assert.equal(r.data.sent, 2);
+  assert.equal(sent[0].auth, 'Bearer swl_live_xyz', 'live mode uses the live key');
+  assert.equal(sent[0].body.sender_id, 'UPDATE');
+});
+
+test('automatic switch: school uses its own Sender ID once SwalaSMS approves it (no name rule then)', async () => {
+  const w = await makeWorld();
+  _resetSenderCacheForTests();
+  await goLive(w);
+  const link = await call(worker, w, 'POST', '/hq/school-sender', { email: HQ, body: { schoolId: SOC, senderId: 'socrates' } });
+  assert.equal(link.data.senderId, 'SOCRATES');
+  let status = 'processing';
+  w.swala = async (url) => {
+    if (url.endsWith('/v1/sender-ids')) return { status: 200, json: { success: true, data: [{ sender_id: 'SOCRATES', status, is_usable: status === 'approved' }, { sender_id: 'UPDATE', status: 'approved', is_usable: true }] } };
+    return { status: 202, json: { success: true, data: { messages: [] } } };
+  };
+  const pending = await call(worker, w, 'GET', `/me?school=${SOC}`, { email: ADMIN });
+  assert.equal(pending.data.sender.senderId, 'UPDATE', 'still pending -> UPDATE');
+  assert.equal(pending.data.sender.requested, 'SOCRATES');
+  status = 'approved';
+  _resetSenderCacheForTests();
+  const approved = await call(worker, w, 'GET', `/me?school=${SOC}`, { email: ADMIN });
+  assert.equal(approved.data.sender.senderId, 'SOCRATES');
+  assert.equal(approved.data.sender.source, 'school');
+  assert.equal(approved.data.sender.prefixRequired, false);
+  assert.equal(w.env.DB.one("SELECT status, is_usable FROM school_senders WHERE school_id = 'socrates-school'").is_usable, 1);
+});
+
+test('zero balance tells the school to contact SoMAp', async () => {
+  const w = await makeWorld();
+  _resetSenderCacheForTests();
+  await goLive(w);
+  w.swala = async () => ({ status: 200, json: { success: true, data: [] } });
+  const st = await start(w, ADMIN, SOC, { estimatedUnits: 1 });
+  assert.equal(st.status, 402);
+  assert.match(st.data.message, /Wasiliana na SoMAp kununua SMS\./);
 });

@@ -17,14 +17,15 @@
   const HANDOFF_MAX_AGE_MS = 30 * 60 * 1000;
 
   const PURPOSE_SW = { general: 'Ujumbe wa kawaida', fee_reminder: 'Kikumbusho cha ada', invitation: 'Mwaliko', other: 'Mengineyo' };
-  const SOURCE_SW = { all: 'Wazazi wote', class: 'Darasa', debtors: 'Wadaiwa', picked: 'Waliochaguliwa' };
+  const SOURCE_SW = { all: 'Wazazi wote', class: 'Darasa', debtors: 'Wadaiwa', picked: 'Waliochaguliwa', staff: 'Wafanyakazi' };
   const BUILT_IN = [
     { id: 'builtin-general', builtIn: true, purpose: 'general', name: 'Taarifa ya kawaida', body: '{school}: Ndugu mzazi wa {studentName}, tunapenda kukujulisha kwamba ' },
-    { id: 'builtin-fee', builtIn: true, purpose: 'fee_reminder', name: 'Kikumbusho cha ada', body: '{school}: Mzazi wa {studentName}, {feeDetails}. Tafadhali lipa kabla ya {date}. Asante.' },
+    { id: 'builtin-fee', builtIn: true, purpose: 'fee_reminder', name: 'Kikumbusho cha ada', body: '{school}: Mzazi wa {studentName}, {feeDetails}. Lipa kabla ya {date} kupitia akaunti rasmi za shule tu. Asante.' },
+    { id: 'builtin-staff', builtIn: true, purpose: 'general', name: 'Taarifa kwa wafanyakazi', body: '{school}: Ndugu {name}, ' },
     { id: 'builtin-invite', builtIn: true, purpose: 'invitation', name: 'Mwaliko wa kikao', body: '{school}: Mzazi wa {studentName}, unakaribishwa kwenye kikao cha wazazi tarehe {date} saa {time}, {venue}. Karibu.' },
   ];
   const PLACEHOLDER_HELP = {
-    feeDetails: 'deni: mtoto 1 = "deni la ada ni TSh X"; watoto wengi = kila mmoja + jumla', parentName: 'jina la mzazi', studentName: 'jina la mwanafunzi (au "A na B")', class: 'darasa', children: 'watoto + deni la kila mmoja',
+    name: 'jina (la mzazi, au la mfanyakazi)', feeDetails: 'deni: mtoto 1 = "deni la ada ni TSh X"; watoto wengi = kila mmoja + jumla', parentName: 'jina la mzazi', studentName: 'jina la mwanafunzi (au "A na B")', class: 'darasa', children: 'watoto + deni la kila mmoja',
     debt: 'deni la sasa (jumla)', total: 'jumla ya deni', balance: 'salio la mwaka', date: 'tarehe', time: 'saa', venue: 'mahali', school: 'jina la shule',
   };
 
@@ -83,6 +84,11 @@
     $('tabs').hidden = false;
     $('panel-send').hidden = false;
     $('fSchool').value = me.schoolName || '';
+    applySenderRules();
+    if (me.canSend && me.wallet && Number(me.wallet.balance) <= 0) {
+      $('cantSend').textContent = 'Salio la SMS la shule ni 0. Wasiliana na SoMAp kununua SMS.';
+      $('cantSend').hidden = false;
+    }
     if (!me.canSend) {
       $('cantSend').textContent = 'Shule bado haina jina la mtumaji (Sender ID) lililoidhinishwa, hivyo haiwezi kutuma kwa wazazi bado. Unaweza kuandaa ujumbe.';
       $('cantSend').hidden = false;
@@ -143,8 +149,30 @@
     return state.roster;
   }
 
+  // Staff of this school (same records as SoMAp workers/payroll): years/{year}/workers, else workers.
+  async function ensureStaff() {
+    if (state.staff && state.staffYear === state.year) return state.staff;
+    $('recipients').innerHTML = '<tr><td colspan="6" class="muted">Inapakia wafanyakazi…</td></tr>';
+    const db = firebase.database();
+    const read = async (path) => { try { return (await db.ref(path).once('value')).val() || {}; } catch (_) { return {}; } };
+    let list = await read(SOMAP.P(`years/${state.year}/workers`));
+    if (!Object.keys(list).length) list = await read(SOMAP.P('workers'));
+    const rows = [];
+    Object.entries(list).forEach(([id, w]) => {
+      const pr = (w && w.profile) || {};
+      if (pr.active === false || (w && w.active === false)) return;
+      if (pr.exitDate) { const t = Date.parse(pr.exitDate); if (!Number.isFinite(t) || t <= Date.now()) return; }
+      const name = [pr.firstName, pr.lastName].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim() || String(pr.fullNameUpper || id);
+      rows.push({ phone: pr.phone, parentName: name, studentName: name, className: String(pr.role || ''), admissionNumber: 'W-' + id });
+    });
+    state.staff = rows;
+    state.staffYear = state.year;
+    return rows;
+  }
+
   function sourceRows() {
     if (state.source === 'debtors') return state.debtors || [];
+    if (state.source === 'staff') return state.staff || [];
     const rows = state.roster || [];
     if (state.source === 'class') return rows.filter((r) => r.className === state.classFilter);
     return rows;
@@ -167,6 +195,7 @@
       result.groups.forEach((g) => {
         const bal = g.rows.reduce((s, r) => s + Math.max(0, Number(r.balance) || 0), 0);
         g.values.balance = bal > 0 ? core.formatNumber(bal) : '';
+        g.values.name = g.values.parentName;
       });
     } else {
       result = core.groupByPhone(rows);
@@ -180,6 +209,7 @@
           children: joinNames(names),
           count: g.rows.length,
         };
+        g.values.name = state.source === 'staff' ? joinNames(names) : g.values.parentName;
       });
     }
     result.groups.forEach((g) => {
@@ -196,9 +226,26 @@
   function messageFor(g) {
     const values = { ...g.values, school: $('fSchool').value.trim(), date: core.formatDateSw($('fDate').value), time: $('fTime').value.trim(), venue: $('fVenue').value.trim() };
     const filled = core.fillTemplate($('message').value, values);
-    const text = core.cleanText(filled.text);
+    let text = core.cleanText(filled.text);
+    if (state.prefixes && text && !startsWithSchoolName(text)) text = `${state.prefixes[0]}: ${text}`;
     const ok = filled.missing.length === 0 && !core.hasUnfilledPlaceholder(text) && text.length > 0;
     return { text, missing: filled.missing, ok, parts: core.countSmsParts(text).parts };
+  }
+
+  // When the school's own Sender ID is not in use (e.g. UPDATE), every SMS must start with the
+  // school's name. The Worker enforces it; here we lock {school} and add the name if missing.
+  function applySenderRules() {
+    const s = state.me && state.me.sender;
+    state.prefixes = s && s.prefixRequired && state.me.mode !== 'dryrun' && Array.isArray(s.schoolPrefixes) && s.schoolPrefixes.length ? s.schoolPrefixes : null;
+    if (state.prefixes) {
+      $('fSchool').value = state.prefixes[0];
+      $('fSchool').readOnly = true;
+      $('fSchool').title = `Mtumaji ni ${s.senderId}: kila SMS lazima ianze na jina la shule.`;
+    }
+  }
+  function startsWithSchoolName(text) {
+    const t = String(text || '').trim().toLowerCase();
+    return (state.prefixes || []).some((p) => { const pl = p.toLowerCase(); return t.startsWith(pl) && !/[a-z0-9]/.test(t.charAt(pl.length)); });
   }
 
   // ------------------------------------------------------------------ rendering
@@ -236,7 +283,7 @@
 
     const families = state.groups.length;
     const learners = state.groups.reduce((s, g) => s + g.rows.length, 0);
-    $('recipientCount').textContent = `${families} namba (familia) • ${learners} wanafunzi`;
+    $('recipientCount').textContent = state.source === 'staff' ? `${families} namba • ${learners} wafanyakazi` : `${families} namba (familia) • ${learners} wanafunzi`;
     if (state.unreachable.length) {
       $('unreachableBox').hidden = false;
       $('unreachableSummary').textContent = `Wanafunzi ${state.unreachable.length} hawatapata SMS (hakuna namba / namba si sahihi)`;
@@ -305,7 +352,7 @@
     } else $('blockedInfo').hidden = true;
     const can = state.me && state.me.canSend && s.ready.length > 0 && enough && !state.sending;
     $('sendBtn').disabled = !can;
-    $('sendHint').textContent = !state.me || !state.me.canSend ? 'Huna ruhusa ya kutuma.' : (!s.ready.length ? 'Hakuna ujumbe tayari.' : (!enough ? 'Salio halitoshi.' : `Utatuma ujumbe ${s.ready.length} (SMS ${s.units}).`));
+    $('sendHint').textContent = !state.me || !state.me.canSend ? 'Huna ruhusa ya kutuma.' : (!s.ready.length ? 'Hakuna ujumbe tayari.' : (!enough ? 'Salio halitoshi. Wasiliana na SoMAp kununua SMS.' : `Utatuma ujumbe ${s.ready.length} (SMS ${s.units}).`));
   }
 
   // ------------------------------------------------------------------ actions
@@ -338,7 +385,7 @@
       info.hidden = false;
     } else {
       info.hidden = true;
-      try { await ensureRoster(); } catch (err) { $('recipients').innerHTML = `<tr><td colspan="6" class="alert bad">Imeshindwa kupakia wanafunzi: ${esc(err.message || err)}</td></tr>`; return; }
+      try { if (src === 'staff') await ensureStaff(); else await ensureRoster(); } catch (err) { $('recipients').innerHTML = `<tr><td colspan="6" class="alert bad">Imeshindwa kupakia orodha: ${esc(err.message || err)}</td></tr>`; return; }
     }
     render();
   }

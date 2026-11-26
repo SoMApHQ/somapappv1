@@ -18,17 +18,18 @@
 //  POST /hq/wallet/adjust               { schoolId, bucket:'test', units, note }
 //  GET  /hq/gateway?key=test|live&what=balance|sender-ids|message&uid=
 //  POST /hq/pipe-test                   { to, senderId, text }   (LIVE key, HQ test numbers only)
+//  POST /hq/school-sender               { schoolId, senderId }   (own Sender ID; used once approved)
 import { bearerToken, resolveStaff, verifyIdToken } from './auth.js';
 import { bucketForMode, getBalance, getConfig, getSchoolSettings } from './db.js';
 import { createFirebaseReader } from './firebase.js';
 import { HttpError, corsHeaders, errorResponse, json, readJson } from './http.js';
-import { adjustWallet, assertHq, gatewayInfo, overview, pipeTest, updateConfig, updateSchoolSettings } from './hq.js';
-import { finishCampaign, getCampaign, listCampaigns, resolveSender, sendChunk, startCampaign } from './send.js';
+import { adjustWallet, assertHq, gatewayInfo, overview, pipeTest, setSchoolSender, updateConfig, updateSchoolSettings } from './hq.js';
+import { finishCampaign, getCampaign, listCampaigns, resolveSender, schoolPrefixes, sendChunk, startCampaign } from './send.js';
 import { handleWebhook } from './webhook.js';
 import { deleteTemplate, listTemplates, saveTemplate } from './templates.js';
 import { eatDayStart } from './util.js';
 
-export const VERSION = 'phase4-2026-11-25';
+export const VERSION = 'live-2026-11-26';
 
 async function me(env, staff) {
   const db = env.DB;
@@ -50,7 +51,9 @@ async function me(env, staff) {
   if (!staff.schoolId) return out;
   const settings = await getSchoolSettings(db, staff.schoolId);
   const bucket = bucketForMode(cfg.mode);
-  const sender = await resolveSender(db, cfg, staff.schoolId, cfg.mode);
+  const sender = await resolveSender(env, db, cfg, staff.schoolId, cfg.mode);
+  sender.prefixRequired = sender.source !== 'school';
+  sender.schoolPrefixes = schoolPrefixes(staff.schoolName);
   const used = await db.prepare(
     `SELECT COALESCE(SUM(COALESCE(units, units_est)), 0) AS used FROM messages WHERE school_id = ?1 AND bucket = ?2 AND created_at >= ?3 AND status NOT IN ('failed', 'rejected')`
   ).bind(staff.schoolId, bucket, eatDayStart()).first();
@@ -91,6 +94,7 @@ export async function handle(request, env) {
       return json(await gatewayInfo(env, url.searchParams.get('key'), url.searchParams.get('what'), url.searchParams.get('uid')));
     }
     if (method === 'POST' && path === '/hq/pipe-test') return json(await pipeTest(env, staff, body));
+    if (method === 'POST' && path === '/hq/school-sender') return json(await setSchoolSender(env, staff, body, fb));
     throw new HttpError(404, 'NOT_FOUND', 'Haipo.', 'Not found.');
   }
 

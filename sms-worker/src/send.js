@@ -13,7 +13,7 @@
 import core from '../../shared/sms_core.js';
 import { HttpError } from './http.js';
 import { bucketForMode, credit, debit, getBalance, getConfig, getSchoolSettings, getSender } from './db.js';
-import { gatewayForMode } from './gateway/index.js';
+import { gatewayForKey, gatewayForMode } from './gateway/index.js';
 import { eatDayStart, sha256Hex, uuidFromString } from './util.js';
 
 export const MAX_CHUNK = 200;
@@ -21,15 +21,74 @@ export const MAX_PARTS_PER_MESSAGE = 6;
 const PURPOSES = ['general', 'fee_reminder', 'invitation', 'other'];
 const DAY = 24 * 3600 * 1000;
 
-/** Which sender a school would use in a mode. */
-export async function resolveSender(db, cfg, schoolId, mode) {
-  const own = await getSender(db, schoolId);
-  if (own && own.sender_id && Number(own.is_usable) === 1 && own.status === 'approved') return { senderId: own.sender_id, source: 'school' };
-  if (cfg.fallback_sender_id) return { senderId: cfg.fallback_sender_id, source: 'fallback' };
-  if (mode === 'sandbox' && cfg.sandbox_sender_id) return { senderId: cfg.sandbox_sender_id, source: 'sandbox-test' };
-  if (mode === 'dryrun') return { senderId: cfg.sandbox_sender_id || 'DRYRUN', source: 'dryrun' };
-  return { senderId: '', source: 'none' };
+// SwalaSMS sender list, cached for 10 minutes per key kind (keeps sends fast).
+let senderCache = { at: 0, kind: '', list: null };
+async function gatewaySenders(env, mode) {
+  const kind = mode === 'live' ? 'live' : 'test';
+  if (senderCache.list && senderCache.kind === kind && Date.now() - senderCache.at < 10 * 60 * 1000) return senderCache.list;
+  try {
+    const r = await gatewayForKey(kind, env).senderIds();
+    if (r && r.ok && Array.isArray(r.data)) { senderCache = { at: Date.now(), kind, list: r.data }; return r.data; }
+  } catch (_) { /* fall back to the stored status */ }
+  return null;
 }
+export function _resetSenderCacheForTests() { senderCache = { at: 0, kind: '', list: null }; }
+
+/**
+ * Which sender a school uses. Automatic switch: the school's OWN sender (e.g. SOCRATES)
+ * as soon as SwalaSMS reports it approved + usable; otherwise the SoMAp fallback (UPDATE).
+ */
+export async function resolveSender(env, db, cfg, schoolId, mode) {
+  const own = await getSender(db, schoolId);
+  const requested = own && own.sender_id ? own.sender_id : null;
+  if (requested) {
+    let usable = Number(own.is_usable) === 1 && own.status === 'approved';
+    if (mode !== 'dryrun') {
+      const list = await gatewaySenders(env, mode);
+      const hit = list && list.find((s) => String(s.sender_id || '').toUpperCase() === String(requested).toUpperCase());
+      if (hit) {
+        const nowUsable = hit.is_usable === true && String(hit.status) === 'approved';
+        if (nowUsable !== usable || String(hit.status) !== String(own.status)) {
+          await db.prepare('UPDATE school_senders SET status = ?2, is_usable = ?3, updated_at = ?4 WHERE school_id = ?1')
+            .bind(schoolId, String(hit.status || ''), nowUsable ? 1 : 0, Date.now()).run();
+        }
+        usable = nowUsable;
+      }
+    }
+    if (usable) return { senderId: requested, source: 'school', requested };
+  }
+  if (cfg.fallback_sender_id) return { senderId: cfg.fallback_sender_id, source: 'fallback', requested };
+  if (mode === 'sandbox' && cfg.sandbox_sender_id) return { senderId: cfg.sandbox_sender_id, source: 'sandbox-test', requested };
+  if (mode === 'dryrun') return { senderId: cfg.sandbox_sender_id || 'DRYRUN', source: 'dryrun', requested };
+  return { senderId: '', source: 'none', requested };
+}
+
+/** Accepted school-name prefixes: "Mnyore Academy Dampo (MAP)" -> full name, "Mnyore Academy Dampo", "MAP". */
+export function schoolPrefixes(name) {
+  const full = String(name || '').replace(/\s+/g, ' ').trim();
+  const noParen = full.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  const codes = Array.from(full.matchAll(/\(([^)]+)\)/g)).map((m) => m[1].trim());
+  return Array.from(new Set([noParen, full, ...codes])).filter((s) => s.length >= 2);
+}
+
+/** Message starts with one of the school names (any case), followed by a non-letter. */
+export function startsWithSchoolName(text, prefixes) {
+  const t = String(text || '').trim().toLowerCase();
+  return prefixes.some((p) => {
+    const pl = p.toLowerCase();
+    return t.startsWith(pl) && !/[a-z0-9]/.test(t.charAt(pl.length));
+  });
+}
+
+/** When the school's own sender is not used (e.g. UPDATE), every message must start with the school name. */
+async function prefixRuleFor(db, schoolId, senderId, mode) {
+  if (mode === 'dryrun') return false; // nothing reaches parents in dry-run
+  const own = await getSender(db, schoolId);
+  const ownInUse = own && own.sender_id && own.sender_id === senderId && Number(own.is_usable) === 1;
+  return !ownInUse;
+}
+
+const TOPUP_HINT = ' Wasiliana na SoMAp kununua SMS.';
 
 export function assertCanSend(staff, settings) {
   if (!staff.belongs) {
@@ -60,7 +119,7 @@ export async function startCampaign(env, staff, body) {
   const purpose = PURPOSES.includes(body.purpose) ? body.purpose : 'other';
   const estRecipients = Math.max(0, Math.floor(Number(body.estimatedRecipients) || 0));
   const estUnits = Math.max(0, Math.floor(Number(body.estimatedUnits) || 0));
-  const sender = await resolveSender(db, cfg, staff.schoolId, mode);
+  const sender = await resolveSender(env, db, cfg, staff.schoolId, mode);
   if (!sender.senderId) {
     throw new HttpError(409, 'NO_SENDER', 'Jina la mtumaji (Sender ID) la shule bado halijaidhinishwa. Huwezi kutuma kwa wazazi bado.', 'This school has no approved, usable Sender ID and no fallback sender is set.');
   }
@@ -70,7 +129,7 @@ export async function startCampaign(env, staff, body) {
   const bucket = bucketForMode(mode);
   const balance = await getBalance(db, staff.schoolId, bucket);
   if (estUnits > balance) {
-    throw new HttpError(402, 'INSUFFICIENT_BALANCE', `Salio halitoshi: unahitaji SMS ${estUnits}, salio ni ${balance}.`, 'Not enough SMS credits.', { required: estUnits, balance });
+    throw new HttpError(402, 'INSUFFICIENT_BALANCE', `Salio halitoshi: unahitaji SMS ${estUnits}, salio ni ${balance}.${TOPUP_HINT}`, 'Not enough SMS credits.', { required: estUnits, balance });
   }
   const used = await unitsUsedToday(db, staff.schoolId, bucket);
   if (used + estUnits > settings.dailyLimit) {
@@ -83,10 +142,11 @@ export async function startCampaign(env, staff, body) {
     `INSERT INTO campaigns (id, school_id, bucket, mode, purpose, name, sender_id, created_by, created_role, status, est_recipients, est_units, created_at, updated_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'open', ?10, ?11, ?12, ?12)`
   ).bind(id, staff.schoolId, bucket, mode, purpose, name, sender.senderId, staff.email, staff.role, estRecipients, estUnits, t).run();
-  return { ok: true, campaignId: id, mode, bucket, senderId: sender.senderId, senderSource: sender.source, walletBalance: balance, dailyLimit: settings.dailyLimit, usedToday: used, maxChunk: MAX_CHUNK };
+  const prefixRequired = sender.source !== 'school';
+  return { ok: true, campaignId: id, mode, bucket, senderId: sender.senderId, senderSource: sender.source, prefixRequired, schoolPrefixes: prefixRequired ? schoolPrefixes(staff.schoolName) : [], walletBalance: balance, dailyLimit: settings.dailyLimit, usedToday: used, maxChunk: MAX_CHUNK };
 }
 
-function validateItems(items) {
+function validateItems(items, prefixes) {
   if (!Array.isArray(items) || items.length < 1 || items.length > MAX_CHUNK) {
     throw new HttpError(400, 'BAD_CHUNK', `Kila kifurushi kiwe na ujumbe 1 hadi ${MAX_CHUNK}.`, `items must have 1..${MAX_CHUNK} entries.`);
   }
@@ -101,6 +161,7 @@ function validateItems(items) {
     if (phone.status !== 'VALID') return reject(phone.status === 'MISSING' ? 'PHONE_MISSING' : 'PHONE_INVALID');
     if (!text) return reject('EMPTY_MESSAGE');
     if (core.hasUnfilledPlaceholder(text)) return reject('PLACEHOLDER_UNFILLED');
+    if (prefixes && !startsWithSchoolName(text, prefixes)) return reject('SCHOOL_NAME_MISSING');
     if (text.length > 1600) return reject('TOO_LONG');
     const parts = core.countSmsParts(text).parts;
     if (parts > MAX_PARTS_PER_MESSAGE) return reject('TOO_MANY_PARTS');
@@ -143,7 +204,8 @@ export async function sendChunk(env, staff, body) {
   let reserved = 0;
 
   if (!chunk) {
-    const v = validateItems(body.items);
+    const prefixes = (await prefixRuleFor(db, staff.schoolId, campaign.sender_id, campaign.mode)) ? schoolPrefixes(staff.schoolName) : null;
+    const v = validateItems(body.items, prefixes);
     rejected = v.rejected;
     let accepted = v.accepted;
     const t = Date.now();
@@ -179,7 +241,7 @@ export async function sendChunk(env, staff, body) {
       }
       const d = await debit(db, { schoolId: staff.schoolId, bucket, units: reserved, kind: 'reserve', ref: `${campaignId}#${chunkIndex}`, actor: staff.email });
       if (!d.ok) {
-        throw new HttpError(402, 'INSUFFICIENT_BALANCE', `Salio halitoshi: unahitaji SMS ${reserved}, salio ni ${d.balance}.`, 'Not enough SMS credits.', { required: reserved, balance: d.balance });
+        throw new HttpError(402, 'INSUFFICIENT_BALANCE', `Salio halitoshi: unahitaji SMS ${reserved}, salio ni ${d.balance}.${TOPUP_HINT}`, 'Not enough SMS credits.', { required: reserved, balance: d.balance });
       }
     }
 

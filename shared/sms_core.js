@@ -127,7 +127,7 @@
 
   // ------------------------------------------------------------- templates
   const PLACEHOLDER_RE = /\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}/g;
-  const PLACEHOLDERS = ['parentName', 'studentName', 'class', 'feeDetails', 'debt', 'balance', 'total', 'children', 'date', 'time', 'venue', 'school'];
+  const PLACEHOLDERS = ['name', 'parentName', 'studentName', 'class', 'feeDetails', 'debt', 'balance', 'total', 'children', 'date', 'time', 'venue', 'school'];
 
   function isEmptyValue(v) {
     if (v === null || v === undefined) return true;

@@ -85,20 +85,22 @@ export async function updateSchoolSettings(env, staff, body, fb) {
   return { ok: true, schoolId, settings: s };
 }
 
-/** Phase 2: only the TEST wallet can be adjusted (live wallets come with buying in Phase 5). */
+/** HQ wallet adjustment. LIVE credits need a note (e.g. the M-Pesa reference). */
 export async function adjustWallet(env, staff, body, fb) {
   const schoolId = String(body.schoolId || '');
   if (!isSafeKey(schoolId)) throw new HttpError(400, 'BAD_SCHOOL', 'Shule si sahihi.', 'Invalid schoolId.');
   if (schoolId !== 'socrates-school' && !(await fb.get(`schools/${schoolId}`, { shallow: true }))) throw new HttpError(404, 'UNKNOWN_SCHOOL', 'Shule haipo.', 'Unknown school.');
-  if (body.bucket !== 'test') throw new HttpError(403, 'TEST_WALLET_ONLY', 'Kwa sasa ni salio la majaribio tu linaloweza kubadilishwa.', 'Only the test wallet can be adjusted in this phase.');
+  const bucket = body.bucket === 'live' ? 'live' : (body.bucket === 'test' ? 'test' : '');
+  if (!bucket) throw new HttpError(400, 'BAD_BUCKET', 'Chagua salio: test au live.', 'bucket must be test or live.');
   const units = assertInt(body.units, 'units', -1000000, 1000000);
   if (units === 0) throw new HttpError(400, 'BAD_INPUT', 'Weka idadi isiyo sifuri.', 'units must not be 0.');
-  const note = String(body.note || '').slice(0, 200) || 'HQ adjustment';
+  const note = String(body.note || '').trim().slice(0, 200);
+  if (bucket === 'live' && note.length < 3) throw new HttpError(400, 'NOTE_REQUIRED', 'Andika maelezo (mf. kumbukumbu ya M-Pesa) kwa salio halisi.', 'A note (e.g. M-Pesa reference) is required for live credits.');
   const r = units > 0
-    ? await credit(env.DB, { schoolId, bucket: 'test', units, kind: 'adjust', note, actor: staff.email })
-    : await debit(env.DB, { schoolId, bucket: 'test', units: -units, kind: 'adjust', note, actor: staff.email });
+    ? await credit(env.DB, { schoolId, bucket, units, kind: bucket === 'live' ? 'topup' : 'adjust', note: note || 'HQ adjustment', actor: staff.email })
+    : await debit(env.DB, { schoolId, bucket, units: -units, kind: 'adjust', note: note || 'HQ adjustment', actor: staff.email });
   if (!r.ok) throw new HttpError(409, 'INSUFFICIENT_BALANCE', 'Salio halitoshi kupunguza kiasi hicho.', 'Balance too low for that reduction.');
-  return { ok: true, schoolId, bucket: 'test', balance: r.balance };
+  return { ok: true, schoolId, bucket, balance: r.balance };
 }
 
 export async function gatewayInfo(env, kind, what, uid) {
@@ -140,4 +142,22 @@ export async function pipeTest(env, staff, body) {
   await env.DB.prepare('UPDATE pipe_tests SET status = ?2, gateway_uid = ?3, response = ?4 WHERE id = ?1')
     .bind(id, res.accepted ? res.status : 'failed', res.uid || null, JSON.stringify(res).slice(0, 2000)).run();
   return { ok: Boolean(res.accepted), id, to: phone.local, senderId, text, parts: count.parts, gateway: res };
+}
+
+/** Link a school to its own Sender ID name (e.g. socrates-school -> SOCRATES). Used automatically once SwalaSMS approves it. */
+export async function setSchoolSender(env, staff, body, fb) {
+  const schoolId = String(body.schoolId || '');
+  if (!isSafeKey(schoolId)) throw new HttpError(400, 'BAD_SCHOOL', 'Shule si sahihi.', 'Invalid schoolId.');
+  if (schoolId !== 'socrates-school' && !(await fb.get(`schools/${schoolId}`, { shallow: true }))) throw new HttpError(404, 'UNKNOWN_SCHOOL', 'Shule haipo.', 'Unknown school.');
+  const senderId = String(body.senderId || '').trim().toUpperCase();
+  if (senderId && !/^[A-Z0-9 ]{3,11}$/.test(senderId)) throw new HttpError(400, 'BAD_SENDER', 'Jina la mtumaji liwe herufi/namba 3-11.', 'Sender ID must be 3-11 letters/digits.');
+  if (!senderId) {
+    await env.DB.prepare('DELETE FROM school_senders WHERE school_id = ?1').bind(schoolId).run();
+    return { ok: true, schoolId, senderId: null };
+  }
+  await env.DB.prepare(
+    `INSERT INTO school_senders (school_id, sender_id, status, is_usable, updated_at) VALUES (?1, ?2, 'requested', 0, ?3)
+     ON CONFLICT(school_id) DO UPDATE SET sender_id = excluded.sender_id, status = 'requested', is_usable = 0, updated_at = excluded.updated_at`
+  ).bind(schoolId, senderId, Date.now()).run();
+  return { ok: true, schoolId, senderId, note: 'Itatumika yenyewe SwalaSMS ikiidhinisha.' };
 }
