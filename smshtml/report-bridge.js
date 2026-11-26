@@ -158,12 +158,17 @@
     };
   }
 
+  // Photos are retried (slow networks), but once the photo server keeps refusing (e.g. the
+  // Cloudinary account is blocked), stop waiting: try each photo once, never hold up sending.
+  let photoFailuresInARow = 0;
   async function loadWithRetry(fn, tries) {
-    for (let i = 0; i < tries; i++) {
+    const attempts = photoFailuresInARow >= 3 ? 1 : tries;
+    for (let i = 0; i < attempts; i++) {
       const v = await fn();
-      if (v) return v;
-      await sleep(600 * (i + 1));
+      if (v) { photoFailuresInARow = 0; return v; }
+      if (i < attempts - 1) await sleep(600 * (i + 1));
     }
+    photoFailuresInARow += 1;
     return null;
   }
 
