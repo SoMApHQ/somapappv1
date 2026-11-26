@@ -3,7 +3,7 @@ import core from '../../shared/sms_core.js';
 import { HttpError } from './http.js';
 import { credit, debit, getConfig, getSchoolSettings, saveSchoolSettings, setConfig, assertInt } from './db.js';
 import { gatewayForKey, MODES } from './gateway/index.js';
-import { isSafeKey, normalizeRole, splitList } from './util.js';
+import { eatMonthStart, isSafeKey, normalizeRole, splitList } from './util.js';
 
 const DAY = 24 * 3600 * 1000;
 
@@ -17,7 +17,8 @@ export async function overview(env, fb) {
   const schoolsShallow = (await fb.get('schools', { shallow: true })) || {};
   const ids = Array.from(new Set(['socrates-school', ...Object.keys(schoolsShallow)]));
   const since30 = Date.now() - 30 * DAY;
-  const [wallets, senders, usage, settings] = await Promise.all([
+  const monthStart = eatMonthStart();
+  const [wallets, senders, usage, settings, month] = await Promise.all([
     db.prepare('SELECT school_id, bucket, balance FROM wallets').all(),
     db.prepare('SELECT * FROM school_senders').all(),
     db.prepare(
@@ -25,6 +26,10 @@ export async function overview(env, fb) {
        WHERE created_at >= ?1 AND status NOT IN ('failed', 'rejected', 'pending') GROUP BY school_id, bucket`
     ).bind(since30).all(),
     db.prepare('SELECT school_id FROM school_settings').all(),
+    db.prepare(
+      `SELECT school_id, bucket, COUNT(*) AS messages, COALESCE(SUM(units), 0) AS units FROM messages
+       WHERE created_at >= ?1 AND status NOT IN ('failed', 'rejected', 'pending') GROUP BY school_id, bucket`
+    ).bind(monthStart).all(),
   ]);
   const schools = [];
   for (const id of ids) {
@@ -38,13 +43,18 @@ export async function overview(env, fb) {
       name: meta.name || meta.schoolName || id,
       wallet: { test: w('test'), live: w('live') },
       last30Days: { liveUnits: live30, testUnits: Number(u('test').units || 0) },
+      thisMonth: (() => {
+        const m = (b) => (month.results || []).find((r) => r.school_id === id && r.bucket === b) || { messages: 0, units: 0 };
+        return { liveUnits: Number(m('live').units || 0), liveMessages: Number(m('live').messages || 0), testUnits: Number(m('test').units || 0) };
+      })(),
       sender,
       senderWarning: sender && sender.status === 'approved' && live30 < 100 ? 'Chini ya SMS 100 ndani ya siku 30: Sender ID inaweza kusimamishwa.' : null,
       settings: await getSchoolSettings(db, id),
       hasCustomSettings: (settings.results || []).some((r) => r.school_id === id),
     });
   }
-  return { ok: true, config: cfg, liveEnabled: String(env.LIVE_ENABLED) === 'true', schools };
+  const totalLiveWallets = schools.reduce((s, x) => s + x.wallet.live, 0);
+  return { ok: true, config: cfg, liveEnabled: String(env.LIVE_ENABLED) === 'true', monthStart, totalLiveWallets, schools };
 }
 
 export async function updateConfig(env, staff, body) {

@@ -200,6 +200,14 @@
       listTemplates: (schoolId) => api('GET', '/templates?' + q(schoolId)),
       saveTemplate: (schoolId, t) => api('POST', '/templates/save', { schoolId, id: t.id || undefined, name: t.name, purpose: t.purpose, body: t.body }),
       deleteTemplate: (schoolId, id) => api('POST', '/templates/delete', { schoolId, id }),
+      // HQ only (the Worker checks HQ_EMAILS on every call)
+      hq: {
+        overview: () => api('GET', '/hq/overview'),
+        gateway: (key, what, uid) => api('GET', '/hq/gateway?key=' + encodeURIComponent(key) + '&what=' + encodeURIComponent(what) + (uid ? '&uid=' + encodeURIComponent(uid) : '')),
+        config: (body) => api('POST', '/hq/config', body),
+        adjust: (body) => api('POST', '/hq/wallet/adjust', body),
+        schoolSender: (body) => api('POST', '/hq/school-sender', body),
+      },
       sendAll,
       retryable,
     };
