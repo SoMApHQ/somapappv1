@@ -56,6 +56,12 @@
       stat('Jumla ya salio la shule zote', fmt(owed), swala !== null && owed > swala ? 'bad' : ''),
       stat('Ziada (SwalaSMS - shule)', swala === null ? '—' : fmt(swala - owed), swala !== null && swala - owed < 0 ? 'bad' : 'ok'),
       stat('SMS halisi mwezi huu (shule zote)', fmt(monthLive)),
+      (() => {
+        const r = ov.reports || { bytes: 0, reports: 0, limitBytes: 0 };
+        const mb = (b) => (Number(b || 0) / 1048576).toFixed(1);
+        const share = r.limitBytes ? r.bytes / r.limitBytes : 0;
+        return stat(`Hifadhi ya ripoti (Matokeo): ripoti ${fmt(r.reports)}`, `${mb(r.bytes)} / ${mb(r.limitBytes)} MB`, share > 0.85 ? 'bad' : share > 0.6 ? 'warn' : '');
+      })(),
     ].join('');
     $('moneyWarn').innerHTML = swala !== null && owed > swala
       ? `<div class="alert bad"><b>Tahadhari:</b> umewapa shule SMS ${fmt(owed)} lakini SwalaSMS ina ${fmt(swala)} tu. Nunua SMS ${fmt(owed - swala)} au zaidi SwalaSMS kabla shule hazijaishiwa.</div>`

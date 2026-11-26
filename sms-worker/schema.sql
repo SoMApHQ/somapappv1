@@ -146,6 +146,35 @@ CREATE TABLE IF NOT EXISTS templates (
 );
 CREATE INDEX IF NOT EXISTS templates_school ON templates (school_id, updated_at);
 
+-- Matokeo report cards (2026-11-26). Private to the Worker.
+-- pdf = the EXACT A4 PDF generatereportform.html draws with drawReportCard().
+-- One row per school + student + exam; the random key is what the SMS link carries.
+CREATE TABLE IF NOT EXISTS reports (
+  key TEXT PRIMARY KEY,
+  school_id TEXT NOT NULL,
+  student_ref TEXT NOT NULL,
+  exam_id TEXT NOT NULL,
+  pdf BLOB NOT NULL,
+  pdf_size INTEGER NOT NULL,
+  filename TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER,
+  expires_at INTEGER NOT NULL,
+  views INTEGER NOT NULL DEFAULT 0,
+  last_view_at INTEGER,
+  UNIQUE (school_id, student_ref, exam_id)
+);
+CREATE INDEX IF NOT EXISTS reports_expiry ON reports (expires_at);
+
+-- Wrong-key rate limit for the public /r page (IP stored only as a hash).
+CREATE TABLE IF NOT EXISTS report_guard (
+  ip TEXT NOT NULL,
+  window_start INTEGER NOT NULL,
+  fails INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (ip, window_start)
+);
+
 INSERT OR IGNORE INTO config (key, value, updated_at, updated_by) VALUES
   ('mode', 'dryrun', 0, 'schema'),
   ('active_gateway', 'swalasms', 0, 'schema'),

@@ -11,6 +11,8 @@
 //  GET  /templates?school=ID            saved templates (Violezo)
 //  POST /templates/save                 { schoolId, id?, name, purpose, body }
 //  POST /templates/delete               { schoolId, id }
+//  POST /reports/create?school=&year=&exam=&month=&student=&filename=   body = the report card PDF (Matokeo)
+//  GET  /r?k=KEY                        public: that one report card PDF (no login; wrong keys rate-limited)
 //  HQ only:
 //  GET  /hq/overview
 //  POST /hq/config                      { mode, fallbackSenderId, sandboxSenderId, buyPricePerSms }
@@ -27,6 +29,7 @@ import { adjustWallet, assertHq, gatewayInfo, overview, pipeTest, setSchoolSende
 import { finishCampaign, getCampaign, listCampaigns, resolveSender, schoolPrefixes, sendChunk, startCampaign } from './send.js';
 import { handleWebhook } from './webhook.js';
 import { deleteTemplate, listTemplates, saveTemplate } from './templates.js';
+import { cleanupReports, createReport, getReport } from './reports.js';
 import { eatDayStart } from './util.js';
 
 export const VERSION = 'hq-2026-11-26';
@@ -77,10 +80,11 @@ export async function handle(request, env) {
     return json({ ok: true, service: 'somap-sms', version: VERSION, mode: cfg ? cfg.mode : 'unknown (database not ready)', liveEnabled: String(env.LIVE_ENABLED) === 'true' });
   }
   if (method === 'POST' && path === '/webhook/swalasms') return handleWebhook(request, env);
+  if (method === 'GET' && path === '/r') return getReport(request, env); // public: one report per key, no login
 
   const claims = await verifyIdToken(bearerToken(request), env);
   const fb = createFirebaseReader(env);
-  const body = method === 'POST' ? await readJson(request) : {};
+  const body = method === 'POST' && path !== '/reports/create' ? await readJson(request) : {}; // /reports/create carries raw PDF bytes
   const schoolId = String(body.schoolId || url.searchParams.get('school') || '').trim();
 
   if (path.startsWith('/hq/')) {
@@ -110,6 +114,7 @@ export async function handle(request, env) {
   if (method === 'GET' && path === '/templates') return json(await listTemplates(env, staff));
   if (method === 'POST' && path === '/templates/save') return json(await saveTemplate(env, staff, body));
   if (method === 'POST' && path === '/templates/delete') return json(await deleteTemplate(env, staff, body));
+  if (method === 'POST' && path === '/reports/create') return json(await createReport(env, staff, request));
   if (!staff.belongs) throw new HttpError(403, 'NOT_ALLOWED', 'Huna ruhusa kwa shule hii.', 'Not a member of this school.');
   if (method === 'GET' && path === '/campaigns') return json(await listCampaigns(env, staff));
   if (method === 'GET' && path === '/campaigns/get') return json(await getCampaign(env, staff, String(url.searchParams.get('id') || '')));
@@ -117,6 +122,10 @@ export async function handle(request, env) {
 }
 
 export default {
+  // Daily Cron Trigger (wrangler.toml [triggers]): delete expired report PDFs so storage never fills up.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(cleanupReports(env).then((r) => console.log('report cleanup', JSON.stringify(r))));
+  },
   async fetch(request, env) {
     const cors = corsHeaders(request, env);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });

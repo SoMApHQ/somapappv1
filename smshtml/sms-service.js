@@ -96,6 +96,17 @@
       return { ...data, _status: res.status };
     }
 
+    // Raw upload (Matokeo report card PDF bytes, sent as they are).
+    async function apiRaw(path, bytes, contentType) {
+      const headers = { 'content-type': contentType, authorization: 'Bearer ' + (await idToken()) };
+      let res;
+      try { res = await fetchImpl(workerUrl + path, { method: 'POST', headers, body: bytes }); }
+      catch (err) { throw new SmsError(0, 'NETWORK', 'Mtandao umekatika au ni wa polepole. Jaribu tena.', String(err && err.message || err)); }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new SmsError(res.status, data.code || 'HTTP_' + res.status, data.message, data.messageEn, data);
+      return data;
+    }
+
     const q = (schoolId) => 'school=' + encodeURIComponent(schoolId || '');
 
     /**
@@ -200,6 +211,10 @@
       listTemplates: (schoolId) => api('GET', '/templates?' + q(schoolId)),
       saveTemplate: (schoolId, t) => api('POST', '/templates/save', { schoolId, id: t.id || undefined, name: t.name, purpose: t.purpose, body: t.body }),
       deleteTemplate: (schoolId, id) => api('POST', '/templates/delete', { schoolId, id }),
+      // Matokeo: store one child's report card PDF (exact bytes) and get its secure link key.
+      createReport: (schoolId, exam, studentRef, filename, pdfBytes) => apiRaw('/reports/create?' + q(schoolId)
+        + '&year=' + encodeURIComponent(exam.year) + '&exam=' + encodeURIComponent(exam.key) + '&month=' + encodeURIComponent(exam.month || '')
+        + '&student=' + encodeURIComponent(studentRef) + '&filename=' + encodeURIComponent(filename || ''), pdfBytes, 'application/pdf'),
       // HQ only (the Worker checks HQ_EMAILS on every call)
       hq: {
         overview: () => api('GET', '/hq/overview'),

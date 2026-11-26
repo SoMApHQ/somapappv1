@@ -18,7 +18,7 @@ import { eatDayStart, sha256Hex, uuidFromString } from './util.js';
 
 export const MAX_CHUNK = 200;
 export const MAX_PARTS_PER_MESSAGE = 6;
-const PURPOSES = ['general', 'fee_reminder', 'invitation', 'other'];
+const PURPOSES = ['general', 'fee_reminder', 'invitation', 'results', 'other'];
 const DAY = 24 * 3600 * 1000;
 
 // SwalaSMS sender list, cached for 10 minutes per key kind (keeps sends fast).

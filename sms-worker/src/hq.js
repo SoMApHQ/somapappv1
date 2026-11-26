@@ -3,6 +3,7 @@ import core from '../../shared/sms_core.js';
 import { HttpError } from './http.js';
 import { credit, debit, getConfig, getSchoolSettings, saveSchoolSettings, setConfig, assertInt } from './db.js';
 import { gatewayForKey, MODES } from './gateway/index.js';
+import { reportStorage } from './reports.js';
 import { eatMonthStart, isSafeKey, normalizeRole, splitList } from './util.js';
 
 const DAY = 24 * 3600 * 1000;
@@ -54,7 +55,8 @@ export async function overview(env, fb) {
     });
   }
   const totalLiveWallets = schools.reduce((s, x) => s + x.wallet.live, 0);
-  return { ok: true, config: cfg, liveEnabled: String(env.LIVE_ENABLED) === 'true', monthStart, totalLiveWallets, schools };
+  const reports = await reportStorage(env);
+  return { ok: true, config: cfg, liveEnabled: String(env.LIVE_ENABLED) === 'true', monthStart, totalLiveWallets, reports, schools };
 }
 
 export async function updateConfig(env, staff, body) {
