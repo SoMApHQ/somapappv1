@@ -256,7 +256,10 @@
     if (!state.purpose || !state.source) return;
     buildGroups();
     const q = state.search.toLowerCase();
-    const visible = state.groups.filter((g) => !q || g.names.toLowerCase().includes(q) || g.local.includes(q.replace(/\D/g, '') || '§'));
+    const qd = q.replace(/\D/g, '');
+    // Search ALL loaded children (every class of the year for "Wazazi wote" / "Chagua mwenyewe"): name, admission no, class or phone.
+    const visible = state.groups.filter((g) => !q || g.names.toLowerCase().includes(q) || String(g.refs || '').toLowerCase().includes(q)
+      || String(g.values.class || '').toLowerCase().includes(q) || (qd.length >= 4 && g.local.includes(qd)));
     const showDebt = state.groups.some((g) => g.debtTotal > 0);
     $('debtHead').hidden = !showDebt;
     const rows = visible.map((g) => {
@@ -283,7 +286,8 @@
 
     const families = state.groups.length;
     const learners = state.groups.reduce((s, g) => s + g.rows.length, 0);
-    $('recipientCount').textContent = state.source === 'staff' ? `${families} namba • ${learners} wafanyakazi` : `${families} namba (familia) • ${learners} wanafunzi`;
+    $('recipientCount').textContent = (state.source === 'staff' ? `${families} namba • ${learners} wafanyakazi` : `${families} namba (familia) • ${learners} wanafunzi`)
+      + (q ? ` • utafutaji: ${visible.length} ${state.source === 'picked' || state.source === 'all' ? '(madarasa yote)' : ''}` : '');
     if (state.unreachable.length) {
       $('unreachableBox').hidden = false;
       $('unreachableSummary').textContent = `Wanafunzi ${state.unreachable.length} hawatapata SMS (hakuna namba / namba si sahihi)`;

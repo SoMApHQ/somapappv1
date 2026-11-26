@@ -32,6 +32,7 @@
     resolveStudentPhoto: () => typeof resolveStudentPhoto, transformToJpegIfCloudinary: () => typeof transformToJpegIfCloudinary,
     loadImageAsDataURL: () => typeof loadImageAsDataURL, getAssignmentForStudent: () => typeof getAssignmentForStudent,
     getTeacherPhotoData: () => typeof getTeacherPhotoData,
+    collectExamWindowRecords: () => typeof collectExamWindowRecords, mergeWindowRecords: () => typeof mergeWindowRecords,
   };
   function missingPieces() {
     const missing = [];
@@ -268,6 +269,32 @@
     return result;
   }
 
+  /**
+   * Which months / exams have scores for a class (read-only probe with the page's own score
+   * readers; no state is changed). Used to say "choose another month" helpfully.
+   */
+  async function availability(opts) {
+    await ready;
+    check();
+    const year = Number(opts.year);
+    const className = normalizeDisplayClass(opts.className);
+    const has = async (examKey, month) => {
+      try {
+        const records = await collectExamWindowRecords({ year, className, examKey, month, rawMonth: month ? preferredMonthStorage(month) : '' });
+        const merged = mergeWindowRecords(records) || {};
+        return Object.keys(merged.mergedScores || {}).length > 0;
+      } catch (_) { return false; }
+    };
+    const months = [];
+    for (const m of (typeof MONTHS !== 'undefined' ? MONTHS : [])) { if (await has('monthly', m)) months.push(m); }
+    const exams = [];
+    for (const e of getAllExamOptions()) {
+      if (e.key === 'monthly' || e.key === 'annual') continue;
+      if (await has(e.key, state.month && state.month !== 'All' ? state.month : 'Jan')) exams.push(e.label);
+    }
+    return { months, exams };
+  }
+
   let queue = Promise.resolve();
   const serial = (fn) => { const next = queue.then(fn); queue = next.catch(() => {}); return next; };
 
@@ -281,5 +308,6 @@
     compute: (opts) => serial(() => run(opts)),
     cardPdf: (opts, adm) => serial(() => cardPdf(opts, adm)),
     verify: (opts, adm) => serial(() => verify(opts, adm)),
+    availability: (opts) => serial(() => availability(opts)),
   };
 })();

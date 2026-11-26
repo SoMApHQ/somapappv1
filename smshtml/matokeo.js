@@ -121,19 +121,24 @@
     const map = new Map();
     rows.forEach((r) => { [r.id, r.studentId, r.admissionNumber].filter(Boolean).forEach((k) => map.set(String(k), r)); });
     state.roster = map;
+    state.rosterRows = rows;
     state.rosterYear = year;
     return map;
   }
 
   // ------------------------------------------------------------------ prepare
-  async function prepare() {
+  async function prepare(opts) {
+    const o = opts && opts.classes ? opts : {};
     const year = $('year').value;
     const opt = $('exam').selectedOptions[0];
     const examLabel = opt ? opt.dataset.label : 'Monthly';
     const month = $('exam').value === 'annual' ? '' : $('month').value;
     const scope = $('scope').value;
-    const classes = scope === 'all' ? state.engine.classes() : [$('classSel').value];
+    const classes = o.classes || (scope === 'all' ? state.engine.classes() : [$('classSel').value]);
+    const only = o.onlyAdms ? new Set(o.onlyAdms.map(String)) : null;
     state.results = []; state.noResults = []; state.classErrors = []; state.checked = new Map(); state.exam = null;
+    $('noResultsMsg').hidden = true;
+    $('listSearch').value = '';
     $('prepare').disabled = true;
     $('progressBox').hidden = false;
     $('resultCard').hidden = true; $('sendCard').hidden = true; $('sendResult').innerHTML = '';
@@ -147,6 +152,7 @@
         try { out = await state.engine.compute(req); } catch (err) { state.classErrors.push(`${classes[i]}: ${err.message || err}`); continue; }
         if (!state.exam) state.exam = { key: out.examKey, label: out.examLabel, month: out.examKey === 'annual' ? '' : out.month, year: out.year };
         out.students.forEach((s) => {
+          if (only && !only.has(String(s.adm)) && !only.has(String(s.admissionNo))) return;
           const r = roster.get(String(s.adm)) || roster.get(String(s.admissionNo));
           const primary = core.normalizeTzPhone(r ? r.parentContact : s.parentContact);
           const all = Array.from(new Set([primary.msisdn, ...(r && r.rawStudent ? snap.allParentPhones(r.rawStudent) : [])].filter(Boolean)));
@@ -156,17 +162,77 @@
       }
       $('progressBar').style.width = '100%';
       $('progressText').textContent = `Imekamilika: wanafunzi ${state.results.length} wana matokeo.`;
-      if (scope === 'one') {
-        $('oneBox').hidden = false;
-        $('oneSel').innerHTML = state.results.slice().sort((a, b) => String(a.s.name).localeCompare(String(b.s.name)))
-          .map((e) => `<option value="${esc(e.s.adm)}">${esc(e.s.name)} (${esc(e.className)})</option>`).join('');
-      } else $('oneBox').hidden = true;
+      if (!state.results.length) await explainNoResults(classes, { year, examLabel, month, examKey: $('exam').value });
       render();
     } catch (err) {
       $('progressText').textContent = 'Hitilafu: ' + (err.message || err);
     } finally {
       $('prepare').disabled = false;
     }
+  }
+
+  const monthSw = (m) => snap.MONTHS_SW[snap.MONTHS.indexOf(m)] || m;
+
+  /** "Hakuna matokeo ya Monthly Novemba kwa Class 4. Chagua mwezi mwingine." + months/exams that DO have results. */
+  async function explainNoResults(classes, x) {
+    const what = x.examKey === 'monthly' ? `${x.examLabel} ${monthSw(x.month)}` : `${x.examLabel} ${x.year}`;
+    const box = $('noResultsMsg');
+    box.hidden = false;
+    if (classes.length !== 1) {
+      box.innerHTML = `<b>Hakuna matokeo ya ${esc(what)}</b> kwa madarasa uliyochagua. Chagua mwezi au mtihani mwingine.`;
+      return;
+    }
+    const cls = classes[0];
+    box.innerHTML = `<b>Hakuna matokeo ya ${esc(what)} kwa ${esc(cls)}.</b> ${x.examKey === 'monthly' ? 'Chagua mwezi mwingine.' : 'Chagua mtihani mwingine.'}<div class="small" id="availText">Inatafuta miezi na mitihani yenye matokeo…</div>`;
+    let av = { months: [], exams: [] };
+    try { av = await state.engine.availability({ year: x.year, className: cls }); } catch (_) { /* keep empty */ }
+    const chips = [
+      ...av.months.map((m) => `<button type="button" class="chip" data-exam="monthly" data-month="${esc(m)}">Monthly ${esc(monthSw(m))}</button>`),
+      ...av.exams.map((l) => `<button type="button" class="chip" data-label="${esc(l)}">${esc(l)}</button>`),
+      ...((av.months.length || av.exams.length) ? ['<button type="button" class="chip" data-exam="annual">Annual</button>'] : []),
+    ];
+    $('availText').innerHTML = chips.length
+      ? `Yenye matokeo kwa ${esc(cls)} (${esc(x.year)}): ${chips.join('')}`
+      : `Bado hakuna matokeo yoyote ya ${esc(x.year)} kwa ${esc(cls)}.`;
+    $('availText').querySelectorAll('.chip').forEach((b) => {
+      b.onclick = () => {
+        const sel = $('exam');
+        if (b.dataset.label) { const o = Array.from(sel.options).find((op) => op.dataset.label === b.dataset.label); if (o) sel.value = o.value; }
+        else sel.value = b.dataset.exam;
+        if (b.dataset.month) $('month').value = b.dataset.month;
+        toggleMonth();
+        prepare(state.lastPrepareOpts || undefined);
+      };
+    });
+  }
+
+  // "Mzazi mmoja": search ALL classes of the year; picking loads that child + siblings only.
+  let searchTimer = null;
+  async function searchOne() {
+    const q = $('oneSearch').value.trim().toLowerCase();
+    const digits = q.replace(/\D/g, '');
+    if (q.length < 2) { $('oneResults').innerHTML = '<div class="small muted">Andika angalau herufi 2…</div>'; return; }
+    await ensureRoster($('year').value);
+    const rows = (state.rosterRows || []).filter((r) => {
+      const phone = core.normalizeTzPhone(r.parentContact).local || '';
+      return String(r.fullName || '').toLowerCase().includes(q) || String(r.admissionNumber || '').toLowerCase().includes(q)
+        || (digits.length >= 4 && phone.replace(/\D/g, '').includes(digits.replace(/^255/, '0')));
+    }).sort((a, b) => String(a.fullName).localeCompare(String(b.fullName))).slice(0, 40);
+    $('oneResults').innerHTML = rows.length ? rows.map((r, i) => `<button type="button" class="pick" data-i="${i}"><b>${esc(r.fullName)}</b> <span>(${esc(r.classLevel || r.className || '')} • ${esc(r.admissionNumber || '')} • ${esc(core.normalizeTzPhone(r.parentContact).local || 'hakuna namba')})</span></button>`).join('')
+      : '<div class="small muted">Hakuna mtoto anayelingana.</div>';
+    $('oneResults').querySelectorAll('.pick').forEach((b) => { b.onclick = () => pickChild(rows[Number(b.dataset.i)]); });
+  }
+
+  async function pickChild(row) {
+    const p = core.normalizeTzPhone(row.parentContact).msisdn;
+    const family = p ? (state.rosterRows || []).filter((r) => core.normalizeTzPhone(r.parentContact).msisdn === p) : [row];
+    const order = state.engine.classes();
+    const classes = Array.from(new Set(family.map((r) => r.classLevel || r.className).filter(Boolean)))
+      .sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
+    const onlyAdms = family.flatMap((r) => [r.id, r.studentId, r.admissionNumber]).filter(Boolean);
+    $('oneResults').innerHTML = `<div class="alert ok">Umechagua: <b>${esc(row.fullName)}</b> (${esc(row.classLevel || '')})${family.length > 1 ? ` + ndugu ${family.length - 1}: ${family.filter((r) => r !== row).map((r) => esc(r.fullName) + ' (' + esc(r.classLevel || '') + ')').join(', ')}` : ''}</div>`;
+    state.lastPrepareOpts = { classes, onlyAdms };
+    await prepare(state.lastPrepareOpts);
   }
 
   // ------------------------------------------------------------------ families + messages
@@ -177,8 +243,7 @@
   const childForSms = (c, key, card) => ({ name: c.s.name, avgText: (card || c.s.card).avgText, posLabel: (card || c.s.card).posLabel, key });
 
   function buildFamilies() {
-    let list = state.results;
-    if ($('scope').value === 'one') list = list.filter((e) => e.s.adm === $('oneSel').value);
+    const list = state.results;
     const byPhone = new Map();
     state.unreachable = [];
     list.forEach((e) => {
@@ -206,14 +271,20 @@
     buildFamilies();
     $('resultCard').hidden = false;
     $('sendCard').hidden = false;
-    $('families').innerHTML = state.families.length ? state.families.map((f) => {
+    const q = $('listSearch').value.trim().toLowerCase();
+    const qd = q.replace(/\D/g, '');
+    const visible = state.families.filter((f) => !q || f.children.some((c) => String(c.s.name || '').toLowerCase().includes(q)
+      || String(c.s.adm || '').toLowerCase().includes(q) || String(c.s.admissionNo || '').toLowerCase().includes(q) || String(c.className || '').toLowerCase().includes(q))
+      || (qd.length >= 4 && f.phonesToSend.some((p) => (core.normalizeTzPhone(p).local || '').includes(qd))));
+    $('listCount').textContent = q ? `Inaonyesha ${visible.length} kati ya familia ${state.families.length}` : `Familia ${state.families.length}`;
+    $('families').innerHTML = visible.length ? visible.map((f) => {
       const on = state.checked.get(f.key);
       const kids = f.children.map((c) => `${esc(c.s.name)} <span class="muted small">(${esc(c.className)}) ${esc(c.s.card.avgText)} • ${esc(c.s.card.posLabel)}</span>`).join('<br>');
       const phones = f.phonesToSend.map((p) => `<span class="mono">${esc(local(p))}</span>`).join('<br>')
         + (!$('allNumbers').checked && f.extraPhones > 0 ? `<div class="small muted">+${f.extraPhones} namba nyingine</div>` : '');
       return `<tr class="${on ? '' : 'off'}"><td><input type="checkbox" data-key="${esc(f.key)}" ${on ? 'checked' : ''} style="width:auto"></td>
         <td>${kids}</td><td>${phones}</td><td><span class="badge ${f.parts > 2 ? 'bad' : f.parts > 1 ? 'warn' : 'ok'}">SMS ${f.parts}${f.phonesToSend.length > 1 ? ' × ' + f.phonesToSend.length : ''}</span></td></tr>`;
-    }).join('') : '<tr><td colspan="4" class="muted">Hakuna mzazi wa kutumiwa.</td></tr>';
+    }).join('') : `<tr><td colspan="4" class="muted">${q && state.families.length ? 'Hakuna anayelingana na utafutaji.' : 'Hakuna mzazi wa kutumiwa.'}</td></tr>`;
     $('families').querySelectorAll('input[type=checkbox]').forEach((cb) => { cb.onchange = () => { state.checked.set(cb.dataset.key, cb.checked); render(); }; });
 
     const extraPhonesTotal = state.families.reduce((s, f) => s + Math.max(0, f.extraPhones), 0);
@@ -372,9 +443,18 @@
   // ------------------------------------------------------------------ wiring
   function wire() {
     $('exam').onchange = toggleMonth;
-    $('scope').onchange = () => { $('classBox').hidden = $('scope').value === 'all'; $('oneBox').hidden = true; };
-    $('prepare').onclick = prepare;
-    $('oneSel').onchange = () => { state.checked = new Map(); render(); };
+    const scopeUi = () => {
+      const sc = $('scope').value;
+      $('classBox').hidden = sc !== 'class';
+      $('oneBox').hidden = sc !== 'one';
+      $('prepare').hidden = sc === 'one';
+      if (sc === 'one') { $('oneSearch').value = ''; $('oneResults').innerHTML = '<div class="small muted">Andika jina, namba ya usajili au simu…</div>'; $('oneSearch').focus(); }
+    };
+    $('scope').onchange = scopeUi;
+    $('prepare').onclick = () => { state.lastPrepareOpts = null; prepare(); };
+    $('oneSearch').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(searchOne, 200); };
+    $('listSearch').oninput = () => render();
+    $('year').addEventListener('change', () => { state.roster = null; if ($('scope').value === 'one') searchOne(); });
     $('shortNames').onchange = render;
     $('allNumbers').onchange = render;
     $('sendBtn').onclick = () => send();

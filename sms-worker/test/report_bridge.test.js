@@ -47,6 +47,12 @@ const PAGE = `
   function applyFinanceEntryToStudent(adm, entry) { const s = state.students.find((x) => x.adm === adm); s.feePlanName = entry.planName; s.feeSchedule = entry.schedule; return true; }
   async function preloadLogo() { state.logoDataUrl = 'data:image/png;base64,LOGO'; }
   function setSelectedStudent(adm) { state.selectedAdm = adm; }
+  // Scores exist for Monthly Sep + Oct and Midterm 1 only (Class 4).
+  async function collectExamWindowRecords({ className, examKey, month }) {
+    const has = className === 'Class 4' && ((examKey === 'monthly' && (month === 'Sep' || month === 'Oct')) || examKey === 'midterm1');
+    return has ? [{ data: { S1: { Math: 80 } } }] : [];
+  }
+  function mergeWindowRecords(records) { return { mergedScores: records.length ? { S1: {} } : {}, detailsByAdm: {} }; }
   async function ensurePdfLibsLoaded() {
     if (window.jspdf) return;
     function jsPDF(opts) { this.opts = opts; this.parts = []; }
@@ -176,6 +182,16 @@ test('check REFUSES when a photo is missing from one of the two PDFs', async () 
   assert.equal(v.same, false);
   assert.match(v.reason, /picha/);
 }, { timeout: 20000 });
+
+test('availability lists the months and exams that HAVE results for a class (read-only probe)', async () => {
+  const page = makePage();
+  const b = page.SomapReportBridge;
+  await b.ready();
+  const av = plain(await b.availability({ year: 2026, className: 'Class 4' }));
+  assert.deepEqual(av, { months: ['Sep', 'Oct'], exams: ['Midterm 1'] });
+  assert.deepEqual(plain(await b.availability({ year: 2026, className: 'Class 1' })), { months: [], exams: [] });
+  assert.equal(vm.runInContext('seen.length', page), 0, 'probing never runs a full class load');
+}, { timeout: 15000 });
 
 test('page errors are reported, not hidden; unknown child refused', async () => {
   const page = makePage();
