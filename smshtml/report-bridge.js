@@ -202,22 +202,36 @@
     return { s, warnings };
   }
 
-  /** The page's own "Download PDF" (generateSinglePdf), with the file captured instead of saved. */
+  /**
+   * The page's own "Download PDF" (generateSinglePdf), with the file captured instead of saved.
+   * In jsPDF 2.x, save() is created inside EACH new document (jsPDF.API is only the plugin store),
+   * so we briefly wrap the constructor the button calls: every document it creates gets a save()
+   * that hands us the bytes. The real jsPDF (with all plugins) does all the drawing; it is put
+   * back right after.
+   */
   async function buttonPdf(adm) {
     await ensurePdfLibsLoaded();
-    const api = window.jspdf && window.jspdf.jsPDF && window.jspdf.jsPDF.API;
-    if (!api || typeof api.save !== 'function') throw new Error('PDF ya ukurasa wa ripoti haipatikani.');
-    const originalSave = api.save;
+    const lib = window.jspdf;
+    const Original = lib && lib.jsPDF;
+    if (typeof Original !== 'function') throw new Error('PDF ya ukurasa wa ripoti haipatikani (jsPDF).');
     let captured = null;
-    api.save = function (filename) {
-      captured = { filename: String(filename || 'report.pdf'), bytes: new Uint8Array(this.output('arraybuffer')) };
-      return this;
-    };
+    function CapturingJsPDF() {
+      const doc = new Original(...arguments);
+      doc.save = function (filename) {
+        captured = { filename: String(filename || 'report.pdf'), bytes: new Uint8Array(doc.output('arraybuffer')) };
+        return doc;
+      };
+      return doc;
+    }
+    CapturingJsPDF.prototype = Original.prototype;
+    Object.keys(Original).forEach((k) => { CapturingJsPDF[k] = Original[k]; }); // API (plugins), version, ...
+    CapturingJsPDF.API = Original.API;
+    lib.jsPDF = CapturingJsPDF;
     try {
       lastError = null;
       await generateSinglePdf(adm);
     } finally {
-      api.save = originalSave;
+      lib.jsPDF = Original;
     }
     if (lastError) throw new Error(lastError);
     if (!captured) throw new Error('Ukurasa wa ripoti haukutoa PDF ya mwanafunzi huyu.');

@@ -53,20 +53,38 @@ const PAGE = `
     return has ? [{ data: { S1: { Math: 80 } } }] : [];
   }
   function mergeWindowRecords(records) { return { mergedScores: records.length ? { S1: {} } : {}, detailsByAdm: {} }; }
-  async function ensurePdfLibsLoaded() {
-    if (window.jspdf) return;
-    function jsPDF(opts) { this.opts = opts; this.parts = []; }
-    jsPDF.API = jsPDF.prototype;
-    jsPDF.API.output = function () {
-      const stamp = '/CreationDate (D:' + Date.now() + Math.random() + ') /ID [ <' + Math.random().toString(16).slice(2) + '> <ab12> ]';
-      return new TextEncoder().encode('%PDF-1.3 ' + stamp + ' ' + JSON.stringify(this.opts) + ' ' + this.parts.join(' ')).buffer;
-    };
-    jsPDF.API.save = function () { throw new Error('must not really save'); };
+  // Faithful to jsPDF 2.5.1 (checked against its source): jsPDF.API is ONLY the plugin store
+  // ({ events: [] } + plugins like autoTable); save()/output() are created inside EACH document,
+  // then plugins are copied onto it. A real save() must never run inside the hidden frame.
+  var realSaves = 0;
+  var libLoads = 0;
+  function loadJsPdfLibrary() {
+    libLoads++;
+    function jsPDF(opts) {
+      const API = this;
+      API.opts = opts; API.parts = [];
+      API.output = function () {
+        const stamp = '/CreationDate (D:' + Date.now() + Math.random() + ') /ID [ <' + Math.random().toString(16).slice(2) + '> <ab12> ]';
+        return new TextEncoder().encode('%PDF-1.3 ' + stamp + ' ' + JSON.stringify(API.opts) + ' ' + API.parts.join(' ')).buffer;
+      };
+      API.save = function () { realSaves++; throw new Error('a real save() ran inside the hidden frame'); };
+      for (const plugin in jsPDF.API) { if (plugin !== 'events') API[plugin] = jsPDF.API[plugin]; }
+      return API;
+    }
+    jsPDF.API = { events: [] };
+    jsPDF.API.autoTable = function (o) { this.parts.push('TABLE ' + o); };
+    jsPDF.version = '2.5.1';
     window.jspdf = { jsPDF };
+  }
+  // Same check as the real page: reloads the library if jsPDF or its autoTable plugin is missing.
+  async function ensurePdfLibsLoaded() {
+    if (!(window.jspdf && window.jspdf.jsPDF)) loadJsPdfLibrary();
+    if (!(window.jspdf && window.jspdf.jsPDF && typeof window.jspdf.jsPDF.API?.autoTable === 'function')) loadJsPdfLibrary();
   }
   async function drawReportCard(doc, s) {
     const monthLabel = state.month === 'All' ? 'All Months' : state.month;
     doc.parts.push('/Type /Page CARD ' + s.name + ' Month: ' + monthLabel + ' Plan: ' + (s.feePlanName || 'Not set'));
+    doc.autoTable('subjects');
     if (state.logoDataUrl) doc.parts.push('/Subtype /Image LOGO');
     const p = resolveStudentPhoto(s);
     if (p) { const d = failNextDrawPhoto ? (failNextDrawPhoto = false, null) : await loadImageAsDataURL(transformToJpegIfCloudinary(p)); if (d) doc.parts.push('/Subtype /Image ' + d); }
@@ -111,6 +129,22 @@ function makePage(source = PAGE) {
 }
 const plain = (v) => JSON.parse(JSON.stringify(v));
 const text = (bytes) => new TextDecoder().decode(bytes);
+
+test('REPRO: with the real jsPDF shape (save() per document, jsPDF.API = plugin store) the Download PDF is captured, never saved', async () => {
+  const page = makePage();
+  const b = page.SomapReportBridge;
+  await b.ready();
+  vm.runInContext('loadJsPdfLibrary()', page);
+  assert.equal(vm.runInContext('typeof window.jspdf.jsPDF.API.save', page), 'undefined', 'like jsPDF 2.5.1: no save() on jsPDF.API');
+  const pdf = await b.cardPdf({ year: 2026, className: 'Class 4', examLabel: 'Annual', month: 'Sep' }, 'S1');
+  assert.match(text(pdf.bytes), /TABLE subjects/, 'plugins (autoTable) still work through the wrapper');
+  assert.equal(pdf.filename, 'report_S1_Class 4_2026_annual_Annual.pdf');
+  assert.equal(vm.runInContext('realSaves', page), 0, 'nothing was really saved');
+  assert.equal(vm.runInContext('libLoads', page), 1, 'the library was not reloaded behind our back');
+  assert.equal(vm.runInContext('window.jspdf.jsPDF.name', page), 'jsPDF', 'the original jsPDF is put back');
+  const v = await b.verify({ year: 2026, className: 'Class 4', examLabel: 'Annual', month: 'Sep' }, 'S1');
+  assert.equal(v.same, true, JSON.stringify(v));
+}, { timeout: 20000 });
 
 test('Annual: month set exactly like the page dropdown (All) -> "All Months" and file name _annual_Annual.pdf', async () => {
   const page = makePage();
