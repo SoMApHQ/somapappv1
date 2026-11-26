@@ -90,3 +90,10 @@ export function safeEqual(a, b) {
   for (let i = 0; i < n; i++) diff |= (x.charCodeAt(i) || 0) ^ (y.charCodeAt(i) || 0);
   return diff === 0;
 }
+
+/** Start of the current calendar month in East Africa Time (UTC+3), as epoch ms. */
+export function eatMonthStart(ms = Date.now()) {
+  const offset = 3 * 3600 * 1000;
+  const d = new Date(ms + offset);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) - offset;
+}

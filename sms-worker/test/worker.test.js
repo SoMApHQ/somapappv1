@@ -473,3 +473,31 @@ test('zero balance tells the school to contact SoMAp', async () => {
   assert.equal(st.status, 402);
   assert.match(st.data.message, /Wasiliana na SoMAp kununua SMS\./);
 });
+
+test('HQ overview: live/test balances, SMS this month, total school balances', async () => {
+  const w = await makeWorld();
+  _resetSenderCacheForTests();
+  await goLive(w);
+  await call(worker, w, 'POST', '/hq/wallet/adjust', { email: HQ, body: { schoolId: SOC, bucket: 'live', units: 30, note: 'M-Pesa A1' } });
+  await call(worker, w, 'POST', '/hq/wallet/adjust', { email: HQ, body: { schoolId: MAP, bucket: 'live', units: 12, note: 'M-Pesa B2' } });
+  w.swala = async (url, init, body) => {
+    if (url.endsWith('/v1/sender-ids')) return { status: 200, json: { success: true, data: [] } };
+    return { status: 202, json: { success: true, data: { messages: body.recipients.map((r) => ({ to: r.to || r, message_uid: 'm-' + (r.to || r), status: 'queued', units: 1 })) } } };
+  };
+  const st = await start(w, ADMIN, SOC, { estimatedUnits: 2 });
+  await call(worker, w, 'POST', '/campaigns/chunk', { email: ADMIN, body: { schoolId: SOC, campaignId: st.data.campaignId, chunkIndex: 0, items: [
+    { phone: '0712345678', text: 'Socrates School: Habari' }, { phone: '0755000111', text: 'Socrates School: Habari' },
+  ] } });
+  const r = await call(worker, w, 'GET', '/hq/overview', { email: HQ });
+  const soc = r.data.schools.find((s) => s.schoolId === SOC);
+  assert.equal(soc.wallet.live, 28);
+  assert.equal(soc.thisMonth.liveUnits, 2);
+  assert.equal(soc.thisMonth.liveMessages, 2);
+  assert.equal(r.data.totalLiveWallets, 40);
+  assert.equal(r.data.config.mode, 'live');
+  const removal = await call(worker, w, 'POST', '/hq/wallet/adjust', { email: HQ, body: { schoolId: MAP, bucket: 'live', units: -2, note: 'correction' } });
+  assert.equal(removal.data.balance, 10);
+  const tooMuch = await call(worker, w, 'POST', '/hq/wallet/adjust', { email: HQ, body: { schoolId: MAP, bucket: 'live', units: -50, note: 'x123' } });
+  assert.equal(tooMuch.data.code, 'INSUFFICIENT_BALANCE', 'cannot go below zero');
+  assert.equal((await call(worker, w, 'GET', '/hq/overview', { email: ADMIN })).status, 403, 'non-HQ refused');
+});

@@ -29,7 +29,7 @@ import { handleWebhook } from './webhook.js';
 import { deleteTemplate, listTemplates, saveTemplate } from './templates.js';
 import { eatDayStart } from './util.js';
 
-export const VERSION = 'live-2026-11-26';
+export const VERSION = 'hq-2026-11-26';
 
 async function me(env, staff) {
   const db = env.DB;
