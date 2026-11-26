@@ -174,7 +174,7 @@
     const s = state.me && state.me.sender;
     return (s && Array.isArray(s.schoolPrefixes) && s.schoolPrefixes[0]) || state.me.schoolName || '';
   }
-  const childForSms = (c, key) => ({ name: c.s.name, avgText: c.s.card.avgText, posLabel: c.s.card.posLabel, key });
+  const childForSms = (c, key, card) => ({ name: c.s.name, avgText: (card || c.s.card).avgText, posLabel: (card || c.s.card).posLabel, key });
 
   function buildFamilies() {
     let list = state.results;
@@ -250,11 +250,73 @@
     $('sendHint').textContent = !state.me.canSend ? 'Shule haina jina la mtumaji linalotumika.' : 'Kila mtoto: ripoti ileile ya Report Form (PDF), siku 60.';
   }
 
-  /** The exact report card PDF (drawReportCard) -> stored by the Worker -> its link key. */
+  /** The report page's own Download PDF for this child -> stored by the Worker -> its link key. */
   async function storeCard(c) {
     const pdf = await state.engine.cardPdf(c.req, c.s.adm);
     const r = await svc.createReport(state.schoolId, state.exam, c.s.adm, pdf.filename, pdf.bytes);
-    return { key: r.key, bytes: pdf.bytes.length };
+    return { key: r.key, bytes: pdf.bytes.length, card: pdf.card, warnings: pdf.warnings || [] };
+  }
+
+  /**
+   * Check before sending: for ONE child per class, the link PDF must equal a fresh press of the
+   * report page's own Download PDF (same pages, text, images, file name). Throws if any class differs.
+   */
+  async function checkIdentical(kids, onStep) {
+    const firstPerClass = [];
+    const seen = new Set();
+    kids.forEach((c) => { if (!seen.has(c.req.className)) { seen.add(c.req.className); firstPerClass.push(c); } });
+    const lines = [];
+    for (let i = 0; i < firstPerClass.length; i++) {
+      const c = firstPerClass[i];
+      if (onStep) onStep(i, firstPerClass.length, c);
+      const v = await state.engine.verify(c.req, c.s.adm);
+      if (!v.same) throw new Error(`Ukaguzi umeshindwa (${c.req.className}, ${c.s.name}): ${v.reason}. Hakuna kilichotumwa.`);
+      lines.push(`${c.req.className}: sawa kabisa (kurasa ${v.pages}, picha ${v.images}, ${v.filename})${v.warnings.length ? ' • ' + v.warnings.join(', ') : ''}`);
+    }
+    return lines;
+  }
+
+  async function storeAll(kids, barShare) {
+    const keys = {};
+    const cards = {};
+    const warnings = [];
+    let bytes = 0;
+    for (let i = 0; i < kids.length; i++) {
+      $('sendText').textContent = `Inaandaa ripoti ${i + 1}/${kids.length} (${(bytes / 1048576).toFixed(1)} MB)…`;
+      $('sendBar').style.width = `${Math.round((i / kids.length) * barShare)}%`;
+      const st = await storeCard(kids[i]);
+      keys[kids[i].s.adm] = st.key;
+      cards[kids[i].s.adm] = st.card;
+      st.warnings.forEach((w) => warnings.push(`${kids[i].s.name}: ${w}`));
+      bytes += st.bytes;
+    }
+    if (warnings.length) $('sendResult').innerHTML += `<div class="alert warn">Picha ambazo hazikupakia hata baada ya kujaribu mara 3 (ripoti ni sawa na Download PDF ya Report Form):<br>${warnings.map(esc).join('<br>')}</div>`;
+    return { keys, cards, bytes };
+  }
+
+  /** Re-store the exact PDFs behind links already sent (same child + exam = same link). No SMS. */
+  async function updateOnly() {
+    const chosen = state.families.filter((f) => state.checked.get(f.key));
+    const kids = chosen.flatMap((f) => f.children).sort((a, b) => String(a.req.className).localeCompare(String(b.req.className)));
+    if (!kids.length) return;
+    if (!confirm(`Sasisha ripoti ${kids.length} nyuma ya viungo vilivyokwisha kutumwa?\nHakuna SMS itakayotumwa.`)) return;
+    state.sending = true;
+    $('sendBtn').disabled = true; $('updateOnly').disabled = true;
+    $('sendProgress').hidden = false;
+    $('sendResult').innerHTML = '';
+    try {
+      const checked = await checkIdentical(kids, (i, n, c) => { $('sendText').textContent = `Ukaguzi: ${c.req.className} (${i + 1}/${n})…`; });
+      $('sendResult').innerHTML = `<div class="alert ok">Ukaguzi umepita:<br>${checked.map(esc).join('<br>')}</div>`;
+      const stored = await storeAll(kids, 100);
+      $('sendBar').style.width = '100%';
+      $('sendResult').innerHTML += `<div class="alert ok">Ripoti ${kids.length} zimesasishwa (${(stored.bytes / 1048576).toFixed(1)} MB). Viungo vilevile sasa vinaonyesha ripoti mpya. Hakuna SMS iliyotumwa.</div>`;
+    } catch (err) {
+      $('sendResult').innerHTML += `<div class="alert bad">${esc(err.message || err)}</div>`;
+    } finally {
+      state.sending = false;
+      $('updateOnly').disabled = false;
+      render();
+    }
   }
 
   // ------------------------------------------------------------------ send
@@ -274,20 +336,16 @@
       if (!messages) {
         // 1) Each child's exact report card PDF, stored once; same child + exam keeps its link.
         const kids = chosen.flatMap((f) => f.children).sort((a, b) => String(a.req.className).localeCompare(String(b.req.className)));
-        const keys = {};
-        let bytes = 0;
-        for (let i = 0; i < kids.length; i++) {
-          $('sendText').textContent = `Inaandaa ripoti ${i + 1}/${kids.length} (${(bytes / 1048576).toFixed(1)} MB)…`;
-          $('sendBar').style.width = `${Math.round((i / kids.length) * 60)}%`;
-          const stored = await storeCard(kids[i]);
-          keys[kids[i].s.adm] = stored.key;
-          bytes += stored.bytes;
-        }
+        const checked = await checkIdentical(kids, (i, n, c) => { $('sendText').textContent = `Ukaguzi: PDF ya kiungo = Download PDF ya Report Form? ${c.req.className} (${i + 1}/${n})…`; });
+        $('sendResult').innerHTML = `<div class="alert ok">Ukaguzi umepita:<br>${checked.map(esc).join('<br>')}</div>`;
+        const stored = await storeAll(kids, 60);
+        const keys = stored.keys;
+        const cards = stored.cards;
         // 2) One SMS per parent (siblings together), to every chosen number, same links.
         messages = [];
         const school = schoolForSms();
         chosen.forEach((f) => {
-          const text = core.cleanText(snap.resultsSms({ school, examTitle: title, shortNames: $('shortNames').checked, children: f.children.map((c) => childForSms(c, keys[c.s.adm])) }));
+          const text = core.cleanText(snap.resultsSms({ school, examTitle: title, shortNames: $('shortNames').checked, children: f.children.map((c) => childForSms(c, keys[c.s.adm], cards[c.s.adm])) }));
           f.phonesToSend.forEach((p) => messages.push({ phone: '+' + p, text, ref: f.children.map((c) => c.s.adm).join(',').slice(0, 120) }));
         });
       }
@@ -299,7 +357,7 @@
         },
       });
       state.lastReport = report;
-      $('sendResult').innerHTML = `<div class="alert ${report.stoppedBy ? 'bad' : 'ok'}">${report.stoppedBy ? 'Ilisimama: ' + esc(report.stoppedBy.message || report.stoppedBy.code) + '<br>' : ''}Zimetumwa ${report.sent}, zimeshindwa ${report.failed}, zimekataliwa ${report.rejected}, hazikutumwa ${report.notSent}. SMS ${report.unitsUsed}.</div>`;
+      $('sendResult').innerHTML += `<div class="alert ${report.stoppedBy ? 'bad' : 'ok'}">${report.stoppedBy ? 'Ilisimama: ' + esc(report.stoppedBy.message || report.stoppedBy.code) + '<br>' : ''}Zimetumwa ${report.sent}, zimeshindwa ${report.failed}, zimekataliwa ${report.rejected}, hazikutumwa ${report.notSent}. SMS ${report.unitsUsed}.</div>`;
       $('retryBtn').hidden = !svc.retryable(report).length;
       $('csvBtn').hidden = false;
     } catch (err) {
@@ -320,12 +378,15 @@
     $('shortNames').onchange = render;
     $('allNumbers').onchange = render;
     $('sendBtn').onclick = () => send();
+    $('updateOnly').onclick = updateOnly;
     // Test without SMS: store the FIRST chosen child's exact report card and open its public link.
     $('samplePreview').onclick = async () => {
       const f = state.families.find((x) => state.checked.get(x.key));
       if (!f) return;
       const win = window.open('about:blank', '_blank');
       try {
+        const v = await state.engine.verify(f.children[0].req, f.children[0].s.adm);
+        if (!v.same) throw new Error(`Ukaguzi umeshindwa: ${v.reason}`);
         const stored = await storeCard(f.children[0]);
         if (win) win.location.href = '../r/?k=' + encodeURIComponent(stored.key);
       } catch (err) { if (win) win.close(); alert(err.message || err); }

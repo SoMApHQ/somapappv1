@@ -6,40 +6,87 @@ import { fileURLToPath } from 'node:url';
 
 const BRIDGE = readFileSync(fileURLToPath(new URL('../../smshtml/report-bridge.js', import.meta.url)), 'utf8');
 
-// A stand-in for generatereportform.html's globals (same names, same roles).
+// A stand-in for generatereportform.html: same global names, same roles, and the same
+// behaviours that caused the two bugs (Annual month via populateMonthOptions; photos and
+// fees arriving only in the page's follow-up loading; no photo cache; failed teacher
+// photos cached as null; a creation date + random ID stamped into every PDF).
 const PAGE = `
-  const state = { year: 2025, className: '', classKey: '', stream: 'B', month: 'Sep', monthRaw: 'Sep', examType: 'Monthly', examKey: 'monthly', students: [], filtered: [], parentMode: true, parentAdm: 'X1' };
-  const RUNTIME = { loadSeq: 0 };
+  const state = { year: 2025, className: '', classKey: '', stream: 'B', month: 'Sep', monthRaw: 'Sep', examType: 'Monthly', examKey: 'monthly',
+    students: [], filtered: [], rawStudents: {}, parentMode: true, parentAdm: 'X1', selectedAdm: null, logoDataUrl: null, classTeacherPhotoCache: new Map() };
+  const RUNTIME = { loadSeq: 0, studentDetailsMap: null };
   let reportBooted = true;
-  const CLASS_ORDER = ['Class 1', 'Class 2'];
+  const CLASS_ORDER = ['Class 1', 'Class 5'];
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const EXAM_KEYS = { 'Monthly': 'monthly', 'Midterm 1': 'midterm1', 'Annual': 'annual' };
+  var failPhotoCalls = new Set();   // which loadImageAsDataURL calls fail (1-based), to simulate a slow network
+  var photoCalls = 0;
+  var financeLoads = 0;
+  var failNextDrawPhoto = false; // the passport photo fails inside the next drawing only
   function getAllExamOptions() { return Object.keys(EXAM_KEYS).map((label) => ({ label, key: EXAM_KEYS[label], builtIn: true })); }
   function getExamKeyFromLabel(l) { return EXAM_KEYS[l] || String(l).toLowerCase(); }
   function normalizeDisplayClass(c) { return String(c || '').trim(); }
   function preferredMonthStorage(m) { return m + '-stored'; }
+  function populateMonthOptions() { if (state.examType === 'Annual') { state.month = 'All'; state.monthRaw = 'All'; } else { state.monthRaw = preferredMonthStorage(state.month); } }
   function subjectListForClass() { return ['Math', 'English']; }
   function gradeFromPercent(p) { return p >= 80.5 ? 'A' : p >= 60.5 ? 'B' : 'C'; }
-  function classAveragePct() { return 50; }
   function isNumber(n) { return Number.isFinite(n); }
   function toNormalizedRows(subjects) { return subjects.map((x) => ({ attempted: !!x.attempted, dispScore: x.score || 0, dispMax: x.max || 0 })); }
   function studentPercentFrom() { return { pct: 0 }; }
-  async function ensurePdfLibsLoaded() {
-    window.jspdf = { jsPDF: class { constructor(opts) { this.opts = opts; this.text = ''; } output(kind) { return new TextEncoder().encode('%PDF-1.3 ' + JSON.stringify(this.opts) + ' ' + this.text).buffer; } } };
+  function resolveStudentPhoto(s) { return s.photoUrl || ''; }
+  function transformToJpegIfCloudinary(url) { return url + '?jpg'; }
+  async function loadImageAsDataURL(url) { photoCalls++; if (failPhotoCalls.has(photoCalls)) return null; return 'data:image/jpeg;base64,' + url; }
+  async function getTeacherPhotoData(person) {
+    if (!person || !person.photoUrl) return null;
+    if (state.classTeacherPhotoCache.has(person.photoUrl)) return state.classTeacherPhotoCache.get(person.photoUrl);
+    const d = await loadImageAsDataURL(person.photoUrl); state.classTeacherPhotoCache.set(person.photoUrl, d || null); return d || null;
   }
-  async function drawReportCard(doc, s) { doc.text = 'CARD ' + s.name + ' ' + state.className + ' ' + state.examType; }
+  function getAssignmentForStudent() { return { classTeacher: { name: 'Mr A', photoUrl: 'teacherA' }, assistantTeacher: null }; }
+  async function fetchStudentDetailsMapCached() { return { S1: { passportPhotoUrl: 'photoS1' } }; }
+  function applyStudentDetailsToState(map) { state.students.forEach((s) => { if (map[s.adm]) s.photoUrl = map[s.adm].passportPhotoUrl; }); return true; }
+  async function loadFinanceSummaryForStudent(s) { financeLoads++; return { planName: 'Plan A', schedule: [{ due: 1 }] }; }
+  function applyFinanceEntryToStudent(adm, entry) { const s = state.students.find((x) => x.adm === adm); s.feePlanName = entry.planName; s.feeSchedule = entry.schedule; return true; }
+  async function preloadLogo() { state.logoDataUrl = 'data:image/png;base64,LOGO'; }
+  function setSelectedStudent(adm) { state.selectedAdm = adm; }
+  async function ensurePdfLibsLoaded() {
+    if (window.jspdf) return;
+    function jsPDF(opts) { this.opts = opts; this.parts = []; }
+    jsPDF.API = jsPDF.prototype;
+    jsPDF.API.output = function () {
+      const stamp = '/CreationDate (D:' + Date.now() + Math.random() + ') /ID [ <' + Math.random().toString(16).slice(2) + '> <ab12> ]';
+      return new TextEncoder().encode('%PDF-1.3 ' + stamp + ' ' + JSON.stringify(this.opts) + ' ' + this.parts.join(' ')).buffer;
+    };
+    jsPDF.API.save = function () { throw new Error('must not really save'); };
+    window.jspdf = { jsPDF };
+  }
+  async function drawReportCard(doc, s) {
+    const monthLabel = state.month === 'All' ? 'All Months' : state.month;
+    doc.parts.push('/Type /Page CARD ' + s.name + ' Month: ' + monthLabel + ' Plan: ' + (s.feePlanName || 'Not set'));
+    if (state.logoDataUrl) doc.parts.push('/Subtype /Image LOGO');
+    const p = resolveStudentPhoto(s);
+    if (p) { const d = failNextDrawPhoto ? (failNextDrawPhoto = false, null) : await loadImageAsDataURL(transformToJpegIfCloudinary(p)); if (d) doc.parts.push('/Subtype /Image ' + d); }
+    const t = await getTeacherPhotoData(getAssignmentForStudent(s).classTeacher);
+    if (t) doc.parts.push('/Subtype /Image ' + t);
+  }
+  async function generateSinglePdf(adm) {
+    await ensurePdfLibsLoaded();
+    const s = state.students.find((x) => x.adm === adm);
+    if (!s) return Swal.fire('Not found', 'Student not found.', 'info');
+    const doc = new window.jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    await drawReportCard(doc, s);
+    const monthSlug = (state.month === 'All' ? 'Annual' : state.month);
+    doc.save('report_' + s.adm + '_' + state.className + '_' + state.year + '_' + state.examKey + '_' + monthSlug + '.pdf');
+  }
   var seen = [];
   async function loadAllData() {
     const token = ++RUNTIME.loadSeq;
-    seen.push({ year: state.year, className: state.className, stream: state.stream, examType: state.examType, examKey: state.examKey, month: state.month, monthRaw: state.monthRaw, parentMode: state.parentMode });
+    seen.push({ year: state.year, className: state.className, examType: state.examType, examKey: state.examKey, month: state.month, monthRaw: state.monthRaw, parentMode: state.parentMode, stream: state.stream });
     await new Promise((r) => setTimeout(r, 5));
     if (token !== RUNTIME.loadSeq) return;
     if (state.className === 'Broken') { Swal.fire('Load error', 'Could not load class data. boom', 'error'); return; }
     state.students = [
-      { adm: 'S1', admissionNo: 'A-1', name: 'AMINA', class: state.className, avg: 81, overallPosition: 1, attemptedCount: 2, parentContact: '0712345678', balance: 999,
+      { adm: 'S1', name: 'AMINA', class: state.className, overallPosition: 1, attemptedCount: 2, parentContact: '0712345678',
         subjectStats: { attemptedCount: 2, subjects: [{ subject: 'Math', score: 90, max: 100, attempted: true }, { subject: 'English', score: 67, max: 100, attempted: true }] } },
-      { adm: 'S2', name: 'JUMA', class: state.className, avg: 0, overallPosition: '-', attemptedCount: 0, subjectStats: { attemptedCount: 0, subjects: [] } },
-      { adm: 'S3', name: 'NEEMA', class: state.className, avg: 50, overallPosition: 2, attemptedCount: 1, subjectStats: { attemptedCount: 1, subjects: [{ subject: 'Math', score: 50, max: 100, attempted: true }] } },
+      { adm: 'S2', name: 'JUMA', class: state.className, overallPosition: '-', attemptedCount: 0, subjectStats: { attemptedCount: 0, subjects: [] } },
     ];
     state.filtered = state.students.slice();
   }
@@ -48,72 +95,98 @@ const PAGE = `
 `;
 
 function makePage(source = PAGE) {
-  const ctx = { setTimeout, clearTimeout, console, Promise, Date, Number, String, Array, Object, Math, JSON, TextEncoder, Uint8Array };
+  const ctx = { setTimeout, clearTimeout, console, Promise, Date, Number, String, Array, Object, Math, JSON, TextEncoder, Uint8Array, Map, Set };
   ctx.window = ctx;
+  ctx.document = { getElementById: () => null };
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   vm.runInContext(BRIDGE, ctx);
   return ctx;
 }
 const plain = (v) => JSON.parse(JSON.stringify(v));
+const text = (bytes) => new TextDecoder().decode(bytes);
 
-test('bridge sets the page exactly like its dropdowns and reads the PRINTED figures (avg + position/N)', async () => {
+test('Annual: month set exactly like the page dropdown (All) -> "All Months" and file name _annual_Annual.pdf', async () => {
   const page = makePage();
-  const bridge = page.SomapReportBridge;
-  await bridge.ready();
-  assert.deepEqual(plain(bridge.exams()).map((e) => e.key), ['monthly', 'midterm1', 'annual']);
-  const out = await bridge.compute({ year: '2026', className: 'Class 2', examLabel: 'Midterm 1', month: 'Mar' });
-  assert.deepEqual(plain(vm.runInContext('seen[seen.length - 1]', page)), { year: 2026, className: 'Class 2', stream: '', examType: 'Midterm 1', examKey: 'midterm1', month: 'Mar', monthRaw: 'Mar-stored', parentMode: false });
-  assert.equal(out.cohortSize, 3, 'N = all learners on the page, as drawReportCard prints');
-  assert.deepEqual(plain(out.students.map((s) => [s.adm, s.hasResults, s.card.avgText, s.card.posLabel])), [
-    ['S1', true, '78.5%', '1/3'], ['S2', false, '0.0%', '-/3'], ['S3', true, '50.0%', '2/3'],
-  ]);
-  assert.equal(out.students[0].balance, undefined, 'only what the SMS needs leaves the frame');
+  const b = page.SomapReportBridge;
+  await b.ready();
+  const req = { year: 2026, className: 'Class 5', examLabel: 'Annual', month: 'Sep' };
+  const out = await b.compute(req);
+  assert.deepEqual(plain(vm.runInContext('seen[0]', page)).month, 'All');
+  assert.equal(plain(vm.runInContext('seen[0]', page)).monthRaw, 'All');
+  assert.equal(out.month, 'All');
+  const pdf = await b.cardPdf(req, 'S1');
+  assert.match(text(pdf.bytes), /Month: All Months/);
+  assert.equal(pdf.filename, 'report_S1_Class 5_2026_annual_Annual.pdf');
+  assert.deepEqual(plain(pdf.card), { avgText: '78.5%', posLabel: '1/2', cohortSize: 2 });
 }, { timeout: 15000 });
 
-test("cardPdf = the page's own drawReportCard on its A4 jsPDF document, bytes returned (not saved)", async () => {
+test('Monthly keeps the chosen month, like the month dropdown', async () => {
   const page = makePage();
-  const bridge = page.SomapReportBridge;
-  await bridge.ready();
-  const req = { year: 2026, className: 'Class 1', examLabel: 'Monthly', month: 'Oct' };
-  await bridge.compute(req);
-  const pdf = await bridge.cardPdf(req, 'S1');
-  const text = new TextDecoder().decode(pdf.bytes);
-  assert.ok(text.startsWith('%PDF-'));
-  assert.match(text, /"orientation":"portrait","unit":"mm","format":"a4"/);
-  assert.match(text, /CARD AMINA Class 1 Monthly/);
-  assert.equal(pdf.filename, 'report_S1_Class 1_2026_monthly_Oct.pdf', 'same file name as "Download PDF"');
-  assert.equal(vm.runInContext('seen.length', page), 1, 'no reload needed for the class already computed');
-
-  const other = await bridge.cardPdf({ year: 2026, className: 'Class 2', examLabel: 'Monthly', month: 'Oct' }, 'S3');
-  assert.match(new TextDecoder().decode(other.bytes), /CARD NEEMA Class 2 Monthly/);
-  assert.equal(vm.runInContext('seen.length', page), 2, 'another class is computed first, like choosing it in the page');
-  await assert.rejects(bridge.cardPdf(req, 'NOPE'), /hayupo/);
+  const b = page.SomapReportBridge;
+  await b.ready();
+  const pdf = await b.cardPdf({ year: 2026, className: 'Class 1', examLabel: 'Monthly', month: 'Oct' }, 'S1');
+  assert.match(text(pdf.bytes), /Month: Oct/);
+  assert.equal(pdf.filename, 'report_S1_Class 1_2026_monthly_Oct.pdf');
+  assert.equal(plain(vm.runInContext('seen[0]', page)).monthRaw, 'Oct-stored');
 }, { timeout: 15000 });
 
-test('Annual uses all months; work runs one step at a time', async () => {
+test("the link PDF is the page's own Download PDF: photos + logo + teacher photo + fee plan from the follow-up loading", async () => {
   const page = makePage();
-  const bridge = page.SomapReportBridge;
-  await bridge.ready();
-  const [a, b] = await Promise.all([
-    bridge.compute({ year: 2026, className: 'Class 1', examLabel: 'Annual' }),
-    bridge.compute({ year: 2026, className: 'Class 2', examLabel: 'Monthly', month: 'Oct' }),
-  ]);
-  assert.equal(a.className, 'Class 1');
-  assert.equal(b.className, 'Class 2');
-  const seen = plain(vm.runInContext('seen', page));
-  assert.equal(seen[0].monthRaw, 'All');
-  assert.equal(seen[1].monthRaw, 'Oct-stored');
+  const b = page.SomapReportBridge;
+  await b.ready();
+  const pdf = await b.cardPdf({ year: 2026, className: 'Class 1', examLabel: 'Monthly', month: 'Oct' }, 'S1');
+  const t = text(pdf.bytes);
+  assert.match(t, /"orientation":"portrait","unit":"mm","format":"a4"/);
+  assert.match(t, /\/Subtype \/Image LOGO/);
+  assert.match(t, /photoS1\?jpg/, 'passport photo that only arrives with the student details');
+  assert.match(t, /teacherA/, 'class teacher photo');
+  assert.match(t, /Plan: Plan A/, "selected child's fee details loaded first");
+  assert.deepEqual(pdf.warnings.length, 0);
 }, { timeout: 15000 });
 
-test('page errors are reported, not hidden', async () => {
+test('a failed photo try is retried before drawing; a cached failed teacher photo is forgotten', async () => {
   const page = makePage();
-  await page.SomapReportBridge.ready();
-  await assert.rejects(page.SomapReportBridge.compute({ year: 2026, className: 'Broken', examLabel: 'Monthly', month: 'Sep' }), /boom/);
+  const b = page.SomapReportBridge;
+  await b.ready();
+  vm.runInContext('state.classTeacherPhotoCache.set("teacherA", null); failPhotoCalls = new Set([1]);', page);
+  const pdf = await b.cardPdf({ year: 2026, className: 'Class 1', examLabel: 'Monthly', month: 'Oct' }, 'S1');
+  const t = text(pdf.bytes);
+  assert.match(t, /photoS1\?jpg/);
+  assert.match(t, /teacherA/);
+}, { timeout: 15000 });
+
+test('check passes when the link PDF equals a fresh Download PDF (creation date + random ID ignored)', async () => {
+  const page = makePage();
+  const b = page.SomapReportBridge;
+  await b.ready();
+  const v = await b.verify({ year: 2026, className: 'Class 1', examLabel: 'Monthly', month: 'Oct' }, 'S1');
+  assert.equal(v.same, true, JSON.stringify(v));
+  assert.equal(v.filename, v.buttonFilename);
+  assert.equal(v.pages, 1);
+  assert.equal(v.images, 3);
+}, { timeout: 20000 });
+
+test('check REFUSES when a photo is missing from one of the two PDFs', async () => {
+  const page = makePage();
+  const b = page.SomapReportBridge;
+  await b.ready();
+  vm.runInContext('failNextDrawPhoto = true;', page);
+  const v = await b.verify({ year: 2026, className: 'Class 1', examLabel: 'Monthly', month: 'Oct' }, 'S1');
+  assert.equal(v.same, false);
+  assert.match(v.reason, /picha/);
+}, { timeout: 20000 });
+
+test('page errors are reported, not hidden; unknown child refused', async () => {
+  const page = makePage();
+  const b = page.SomapReportBridge;
+  await b.ready();
+  await assert.rejects(b.compute({ year: 2026, className: 'Broken', examLabel: 'Monthly', month: 'Sep' }), /boom/);
+  await assert.rejects(b.cardPdf({ year: 2026, className: 'Class 1', examLabel: 'Monthly', month: 'Sep' }, 'NOPE'), /hayupo/);
 }, { timeout: 15000 });
 
 test('if the report page changes (a piece is missing), the bridge refuses instead of guessing', async () => {
-  const changed = PAGE.replace('async function drawReportCard(doc, s)', 'async function drawCardV2(doc, s)');
+  const changed = PAGE.replace('async function generateSinglePdf(adm)', 'async function makePdfV2(adm)');
   const page = makePage(changed);
-  await assert.rejects(page.SomapReportBridge.ready(), /Ukurasa wa ripoti umebadilika \(haupo: drawReportCard\)/);
+  await assert.rejects(page.SomapReportBridge.ready(), /Ukurasa wa ripoti umebadilika \(haupo: generateSinglePdf\)/);
 }, { timeout: 15000 });
